@@ -1,0 +1,25 @@
+version: 1
+
+# How to run the SlopControl stack (server + coding engine).
+# Per-target-project settings stay in <project>/.slopcontrol/config.json
+# LLM endpoints stay in ~/.slopcontrol/endpoints.json
+
+server:
+  port: 3020
+  command: ["pnpm", "--filter", "@slopcontrol/server", "dev"]
+  health: { http: "http://127.0.0.1:3020/health" }
+
+web:
+  enabled: false
+  port: 3021
+  command: ["pnpm", "--filter", "@slopcontrol/web", "dev"]
+  health: { http: "http://127.0.0.1:3021" }
+
+coding:
+  engine: opencode
+  mode: per_project
+  opencode:
+    port: 4096
+    hostname: "127.0.0.1"
+    enableExa: true
+    health: { http: "http://127.0.0.1:4096/global/health" }

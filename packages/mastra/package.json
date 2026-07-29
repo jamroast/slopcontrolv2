@@ -1,0 +1,32 @@
+{
+  "name": "@slopcontrol/mastra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@mastra/core": "^1.51.0",
+    "@mastra/libsql": "^1.0.0",
+    "@mastra/memory": "^1.0.0",
+    "@slopcontrol/artifacts": "workspace:*",
+    "@slopcontrol/coding-tools": "workspace:*",
+    "@slopcontrol/llm": "workspace:*",
+    "@slopcontrol/types": "workspace:*",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4.19.0",
+    "typescript": "^5"
+  }
+}

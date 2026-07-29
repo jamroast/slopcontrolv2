@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+allowBuilds:
+  esbuild: true
+  sharp: true
+
+# pnpm 11 defaults to 1440 (1 day). Fresh AI SDK / Next transitive deps
+# often land inside that window and block local install/dev. Opt out for
+# this greenfield workspace; re-enable later if you want the cooldown.
+minimumReleaseAge: 0

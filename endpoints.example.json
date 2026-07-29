@@ -1,0 +1,64 @@
+{
+  "endpoints": [
+    {
+      "id": "ollama-cloud-kimi",
+      "label": "Ollama Cloud Kimi K3 (multimodal; Extra Usage — use sparingly)",
+      "baseUrl": "https://ollama.com/v1",
+      "apiKey": "${OLLAMA_API_KEY}",
+      "apiType": "openai-chat",
+      "modelId": "kimi-k3:cloud",
+      "capabilities": { "chat": true, "vision": true, "imageGen": false }
+    },
+    {
+      "id": "ollama-cloud-glm",
+      "label": "Ollama Cloud GLM 5.2 (text only — no vision)",
+      "baseUrl": "https://ollama.com/v1",
+      "apiKey": "${OLLAMA_API_KEY}",
+      "apiType": "openai-chat",
+      "modelId": "glm-5.2:cloud",
+      "capabilities": { "chat": true, "vision": false, "imageGen": false }
+    },
+    {
+      "id": "ollama-kimi-vision",
+      "label": "Ollama kimi-k2.7-code (vision chat)",
+      "baseUrl": "https://ollama.com/v1",
+      "apiKey": "${OLLAMA_API_KEY}",
+      "apiType": "openai-chat",
+      "modelId": "kimi-k2.7-code:cloud",
+      "capabilities": { "chat": true, "vision": true, "imageGen": false }
+    },
+    {
+      "id": "ollama-image",
+      "label": "Ollama image generation (Z-Image / Flux)",
+      "baseUrl": "http://localhost:11434/v1",
+      "apiType": "openai-images",
+      "modelId": "x/z-image-turbo",
+      "capabilities": { "chat": false, "vision": false, "imageGen": true }
+    },
+    {
+      "id": "local-ollama-cloud",
+      "label": "Local Ollama daemon routing to cloud (ollama signin; no API key)",
+      "baseUrl": "http://localhost:11434/v1",
+      "apiType": "openai-chat",
+      "modelId": "glm-5.2:cloud",
+      "capabilities": { "chat": true, "vision": false, "imageGen": false }
+    },
+    {
+      "id": "local-coder",
+      "label": "Local Qwen Coder",
+      "baseUrl": "http://localhost:11434/v1",
+      "apiType": "openai-chat",
+      "modelId": "qwen2.5-coder",
+      "capabilities": { "chat": true, "vision": false, "imageGen": false }
+    }
+  ],
+  "roles": {
+    "research": { "endpointId": "ollama-cloud-kimi" },
+    "planning": { "endpointId": "ollama-cloud-kimi" },
+    "supervisor": { "endpointId": "ollama-cloud-kimi" },
+    "coding": { "endpointId": "ollama-cloud-glm" },
+    "design": { "endpointId": "ollama-cloud-glm" },
+    "designVision": { "endpointId": "ollama-kimi-vision" },
+    "designImage": { "endpointId": "ollama-image" }
+  }
+}

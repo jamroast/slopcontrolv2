@@ -1,0 +1,12 @@
+---
+description: Never edit node_modules; read-only inspection only when needed
+alwaysApply: true
+---
+
+# Do not modify node_modules
+
+- **Never** create, edit, delete, or patch files under any `node_modules/` directory (root or package-local).
+- **Never** hand-edit `.pnpm` store paths or nested dependency trees.
+- Dependency changes must go through package managers only (`pnpm add` / `pnpm update` / `package.json` + install).
+- Reading type definitions or docs inside `node_modules` for API discovery is allowed when needed; treat that as **read-only**.
+- If a dependency needs a fix, prefer: upgrade/downgrade the package, wrap it in our own package code, or contribute upstream — do not patch `node_modules` in place.

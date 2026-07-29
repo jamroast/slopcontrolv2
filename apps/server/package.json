@@ -1,0 +1,35 @@
+{
+  "name": "@slopcontrol/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter @slopcontrol/types --filter @slopcontrol/llm --filter @slopcontrol/artifacts --filter @slopcontrol/coding-tools --filter @slopcontrol/obsidian --filter @slopcontrol/mastra run build && tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "mcp:stdio": "tsx src/mcp-stdio.ts",
+    "test": "node --import tsx --test src/**/*.test.ts"
+  },
+  "dependencies": {
+    "@mastra/core": "^1.51.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@slopcontrol/artifacts": "workspace:*",
+    "@slopcontrol/coding-tools": "workspace:*",
+    "@slopcontrol/llm": "workspace:*",
+    "@slopcontrol/mastra": "workspace:*",
+    "@slopcontrol/obsidian": "workspace:*",
+    "@slopcontrol/types": "workspace:*",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^20",
+    "tsx": "^4.19.0",
+    "typescript": "^5"
+  }
+}
