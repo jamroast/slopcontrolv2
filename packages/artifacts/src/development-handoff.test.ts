@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   buildDevelopmentHandoff,
+  buildRequirementsFromPhase,
   extractSuccessCriteriaBullets,
   formatHandoffMarkdown,
   handoffSummary,
@@ -176,5 +177,38 @@ true
 \`\`\`
 `);
     assert.deepEqual(bullets, ["One", "Two"]);
+  });
+
+  it("extracts numbered Success Criteria with bold titles", () => {
+    const bullets = extractSuccessCriteriaBullets(`# Phase
+
+## Success Criteria
+
+These are the acceptance criteria:
+
+1. **Fresh-volume bootstrap works**
+   \`docker compose down -v\` succeeds, then migrate exits 0.
+2. **All Phase-02 tables present**
+   \`pnpm manage db tables\` lists the 16 expected tables.
+3. **Journal is seeded**
+   Exactly 2 applied migrations.
+
+## Automated Checks
+\`\`\`bash
+true
+\`\`\`
+`);
+    assert.deepEqual(bullets, [
+      "Fresh-volume bootstrap works",
+      "All Phase-02 tables present",
+      "Journal is seeded",
+    ]);
+    const reqs = buildRequirementsFromPhase(
+      `# Phase\n\n## Success Criteria\n\n1. **Fresh-volume bootstrap works**\n\n`,
+      true,
+    );
+    assert.equal(reqs[0]?.text, "Fresh-volume bootstrap works");
+    assert.equal(reqs[0]?.status, "met");
+    assert.doesNotMatch(reqs[0]?.text ?? "", /none listed/i);
   });
 });

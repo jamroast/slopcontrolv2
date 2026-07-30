@@ -29,10 +29,10 @@
     },
     {
       "id": "ollama-image",
-      "label": "Ollama image generation (Z-Image / Flux)",
+      "label": "Ollama image generation (Flux Klein — recommended on 16GB; alt: x/z-image-turbo)",
       "baseUrl": "http://localhost:11434/v1",
       "apiType": "openai-images",
-      "modelId": "x/z-image-turbo",
+      "modelId": "x/flux2-klein",
       "capabilities": { "chat": false, "vision": false, "imageGen": true }
     },
     {
@@ -57,7 +57,7 @@
     "planning": { "endpointId": "ollama-cloud-kimi" },
     "supervisor": { "endpointId": "ollama-cloud-kimi" },
     "coding": { "endpointId": "ollama-cloud-glm" },
-    "design": { "endpointId": "ollama-cloud-glm" },
+    "design": { "endpointId": "ollama-cloud-kimi" },
     "designVision": { "endpointId": "ollama-kimi-vision" },
     "designImage": { "endpointId": "ollama-image" }
   }

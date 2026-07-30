@@ -95,8 +95,8 @@ export function readAskMeta(
 
 /**
  * Build a phase description for promote_ask.
- * Prefers an explicit override, then the last assistant "## Task brief" section,
- * else first user message + recent turn summary.
+ * Prefers an explicit override, then **operator (user) messages first**,
+ * with the ask agent's Task brief as a non-binding proposed approach.
  */
 export function buildAskTaskDescription(
   ask: AskSession,
@@ -106,7 +106,32 @@ export function buildAskTaskDescription(
   if (override) return override.slice(0, opts?.maxChars ?? 8_000);
 
   const maxChars = opts?.maxChars ?? 8_000;
+  const userMessages = ask.messages.filter((m) => m.role === "user");
+  const operatorBlock =
+    userMessages.length > 0
+      ? [
+          "## Operator request",
+          "",
+          ...userMessages.map((m) => m.content.trim()).filter(Boolean),
+        ].join("\n\n")
+      : null;
+
   const brief = extractLastTaskBrief(ask.messages);
+  const proposed = brief
+    ? [
+        "### Proposed approach (non-binding — from ask agent; prefer Operator request for placement/UI mount)",
+        "",
+        brief,
+      ].join("\n")
+    : null;
+
+  if (operatorBlock) {
+    return [operatorBlock, proposed, "", "### Ask conversation context", "", formatTranscriptExcerpt(ask.messages, 2_000)]
+      .filter(Boolean)
+      .join("\n\n")
+      .slice(0, maxChars);
+  }
+
   if (brief) {
     return [
       brief,

@@ -107,6 +107,45 @@ pnpm mcp:stdio
 - `list_conflicts` — unmerged paths in the project root (`projectId`)
 - `resolve_conflicts` — resolve conflicts (`projectId`, optional `strategy`=`auto|phase|ours|theirs`, optional `phaseId` / `paths`)
 - `get_health`
+- `preview_change_intent` — dry-run Change Intent (`uiMount`, `changeKind`, engagement, interaction contract); optional PHASE alignment; set `heuristicOnly: true` to skip the planning LLM
+- `reconcile_blueprint` — rebuild Live decisions (verified vs claimed via repo probes); **defaults to `dryRun: true`**
+- `audit_ui_gates` — Intent preview + PHASE align + dry-run reconcile pass/fail (read-only); optional `heuristicOnly`
+
+```bash
+# after server restart (default :3020)
+curl -s localhost:3020/runs -H 'content-type: application/json' -d '{
+  "action":"audit_ui_gates","projectId":"<fixture-or-real>",
+  "description":"Unable to submit form — superseded by a newer form"
+}'
+```
+
+Real projects may be audited read-only; writing `BLUEPRINT.md` only via `reconcile_blueprint` with `dryRun: false` after operator approval. Fixture smoke: `packages/artifacts/fixtures/ui-gate-project/`.
+
+**Engagement / form Intent hardening (runs 54–56 lessons):**
+- Change Intent is **LLM-classified** via the `planning` role (`changeKind`: engagement | chrome-hide | backend | other), then finalized deterministically; regex heuristics are the sync fallback when the LLM fails or `heuristicOnly` is set. Align / live `tool-*` / overclaim gates stay deterministic and still key off `interaction`.
+- Draft LLM timeout with an engagement Change Intent **fails closed** (retry draft) — does not write a generic scaffold that fails Intent align.
+- RESEARCH that overclaims “~90% already works” without residual risks is retried once when `interaction` is set (skipped for `chrome-hide` / `backend`).
+- Weak on-disk `INTENT.json` (`uiMount: n/a` / missing interaction / missing `changeKind`) is refreshed on research, draft, and approve.
+- Engagement PHASE Automated Checks must prove live AI SDK `type: tool-<name>` name resolution (not only `tool-invocation` fixtures).
+- Design vision skips SVG-only assets (providers return 400 for `image/svg+xml`).
+- Design pass is **skipped** for `changeKind: chrome-hide` / `backend` unless PHASE forces visuals (`Requires design pass: yes`, or `## Brand` / `## Assets`). Leftover UI-SPEC alone does not block develop. Behaviour gates stay Intent/PHASE-driven; call `start_design` manually when you want pixels.
+- **Brand / theming / logo** asks classify as `changeKind: other` (never `backend`) and **always need a design pass**. Research prefers sibling **consumed** logos (`public/images/logo.svg` from Header), not `*-reuse.svg` fallbacks. Logo asset generation **fails closed** without a bound `designImage` role — bind local Flux (`x/flux2-klein`) via `openai-images` (see `endpoints.example.json`); do not accept tile+circle `svg_fallback` as a logo.
+- Chrome-only UX asks (hide empty form / tab strip when nothing to gather) lock `uiMount: composer` but **do not** invent a fill/submit `interaction` contract; status questions like “What phases are complete?” are stripped from the Intent title.
+
+**Brand theming re-run (after Intent/designImage fixes):**
+
+1. Rebuild/restart SlopControl (`pnpm build` then `pnpm slopcontrol -- up`).
+2. Ensure `~/.slopcontrol/endpoints.json` has `designImage` → local `openai-images` model (`ollama pull x/flux2-klein`). Prefer `design` → `kimi-k3:cloud` for UI-SPEC fidelity.
+3. Delete weak `INTENT.json` on the brand phase (or rely on weak refresh when `changeKind` was `backend` but the ask is theming).
+4. Re-run research → draft → design → develop. Confirm RESEARCH cites sibling `images/logo.svg` (and family siblings like burntjam when relevant), not `*-reuse.svg`. Design must not complete on logo `svg_fallback`.
+5. If full look-and-feel is required, approve a PHASE that includes shell/theme machinery — not palette-only hex remaps.
+
+**Re-run research after Intent/heuristic fixes** (e.g. JamPress phase 56 form engagement):
+
+1. Rebuild and restart the stack so the server loads the new `@slopcontrol/artifacts` / `@slopcontrol/mastra` code (`pnpm build` then `pnpm slopcontrol -- up`, or your usual restart).
+2. Optionally delete `.slopcontrol/phases/<phaseId>/INTENT.json` — or rely on `ensureChangeIntent`, which refreshes weak `n/a` / missing-interaction Intents when the description needs fill/submit.
+3. Re-run research: MCP/REST `start_research` with that `projectId` + `phaseId` (or promote again only if you need a new phase).
+4. Confirm Intent: `uiMount: composer` (for form populate/submit asks), non-empty `interaction` / `mustNot`, title not starting with “I want a task to promote…”. RESEARCH should use today’s date and must not claim fill+submit is proven solely because prior form phases are `complete`.
 
 ### REST highlights
 

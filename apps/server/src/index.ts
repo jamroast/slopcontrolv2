@@ -22,6 +22,12 @@ import {
   buildAskTaskDescription,
   writeAskArtifacts,
   writeAgentArtifacts,
+  formatChangeIntentPromptBlock,
+  phaseDocAlignsWithChangeIntent,
+  readChangeIntent,
+  reconcileProjectBlueprint,
+  clipBlueprintForPrompt,
+  isEngagementSymptom,
 } from "@slopcontrol/artifacts";
 import {
   checkoutProjectBranch,
@@ -33,7 +39,7 @@ import {
   resolveConflicts,
 } from "@slopcontrol/coding-tools";
 import { loadEndpointsConfig } from "@slopcontrol/llm";
-import { getSlopcontrolRuntime } from "@slopcontrol/mastra";
+import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync } from "@slopcontrol/mastra";
 import { ObsidianSync } from "@slopcontrol/obsidian";
 import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
@@ -158,6 +164,52 @@ function updatePhaseStatus(phaseId: string, status: string): void {
   store.updatePhase(phase);
 }
 
+function formatBgErrorDetail(error: unknown, maxChars = 2_000): string {
+  const chunks: string[] = [];
+  const push = (label: string, value: unknown) => {
+    if (value == null) return;
+    const text =
+      typeof value === "string"
+        ? value
+        : (() => {
+            try {
+              return JSON.stringify(value);
+            } catch {
+              return String(value);
+            }
+          })();
+    if (!text.trim()) return;
+    chunks.push(label ? `${label}=${text.slice(0, maxChars)}` : text.slice(0, maxChars));
+  };
+  const walk = (err: unknown, depth: number) => {
+    if (err == null || depth > 4) return;
+    if (typeof err === "string") {
+      push("", err);
+      return;
+    }
+    if (err instanceof Error) {
+      push("", err.message);
+      const any = err as Error & Record<string, unknown>;
+      for (const key of [
+        "statusCode",
+        "status",
+        "code",
+        "url",
+        "responseBody",
+        "data",
+        "body",
+      ]) {
+        push(key, any[key]);
+      }
+      if (any.cause != null) walk(any.cause, depth + 1);
+      return;
+    }
+    if (typeof err === "object") push("detail", err);
+  };
+  walk(error, 0);
+  return (chunks.filter(Boolean).join(" | ") || "unknown error").slice(0, maxChars + 400);
+}
+
 /**
  * Fire-and-forget background job. HTTP returns immediately so SSE can stream.
  * Pass developProjectId when this job holds the per-project develop lock.
@@ -189,7 +241,7 @@ function runInBackground(
         duration: formatDurationMs(Date.now() - started),
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = formatBgErrorDetail(error);
       const aborted = controller.signal.aborted;
       log.error("bg", "job failed", {
         runId,
@@ -628,6 +680,11 @@ app.post("/projects/:id/asks", async (req, res) => {
     typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
   let askId =
     typeof req.body?.askId === "string" ? req.body.askId.trim() : "";
+  const forceNew =
+    req.body?.newAsk === true ||
+    req.body?.forceNew === true ||
+    req.body?.newAsk === "true" ||
+    req.body?.forceNew === "true";
 
   const now = new Date().toISOString();
   const userMsg = { role: "user" as const, content: message, at: now };
@@ -637,10 +694,27 @@ app.post("/projects/:id/asks", async (req, res) => {
     res.status(404).json({ error: "Ask not found" });
     return;
   }
+  // Sticky resume: omit askId → continue latest open ask (unless newAsk)
+  if (!ask && !forceNew) {
+    ask = store.latestOpenAsk(project.id);
+    if (ask) askId = ask.id;
+  }
   if (ask && ask.status === "promoted") {
     res.status(409).json({
-      error: "Ask already promoted; start a new ask or use the promoted phase",
+      error:
+        "Ask already promoted; call fork_ask to continue chatting, or pass newAsk=true for a fresh session",
       promotedPhaseId: ask.promotedPhaseId,
+      askId: ask.id,
+      hint: "fork_ask",
+    });
+    return;
+  }
+  if (ask && ask.status === "archived") {
+    res.status(409).json({
+      error:
+        "Ask is archived; call fork_ask to continue from its transcript, or pass newAsk=true",
+      askId: ask.id,
+      hint: "fork_ask",
     });
     return;
   }
@@ -648,7 +722,7 @@ app.post("/projects/:id/asks", async (req, res) => {
   if (!ask) {
     ask = store.createAsk({
       projectId: project.id,
-      title: title || message.slice(0, 80),
+      title: title || message,
       firstMessage: userMsg,
     });
     askId = ask.id;
@@ -679,7 +753,7 @@ app.post("/projects/:id/asks", async (req, res) => {
     };
     ask = store.appendAskMessage(ask.id, assistantMsg) ?? ask;
     writeAskArtifacts(project.rootPath, ask);
-    res.json({ ask, reply });
+    res.json({ ask, reply, askId: ask.id });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error("ask", "ask turn failed", {
@@ -687,8 +761,31 @@ app.post("/projects/:id/asks", async (req, res) => {
       askId: ask.id,
       error: errMsg,
     });
-    res.status(500).json({ error: errMsg, ask });
+    writeAskArtifacts(project.rootPath, ask);
+    res.status(500).json({ error: errMsg, ask, askId: ask.id });
   }
+});
+
+app.post("/projects/:id/asks/:askId/fork", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const source = store.getAsk(req.params.askId);
+  if (!source || source.projectId !== project.id) {
+    res.status(404).json({ error: "Ask not found" });
+    return;
+  }
+  const title =
+    typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
+  const forked = store.forkAsk(source.id, { title });
+  if (!forked) {
+    res.status(500).json({ error: "Failed to fork ask" });
+    return;
+  }
+  writeAskArtifacts(project.rootPath, forked);
+  res.status(201).json({ ask: forked, askId: forked.id, forkedFrom: source.id });
 });
 
 app.post("/projects/:id/asks/:askId/promote", async (req, res) => {
@@ -740,6 +837,15 @@ app.post("/projects/:id/asks/:askId/promote", async (req, res) => {
   store.markAskPromoted(ask.id, phase.id);
   const promoted = store.getAsk(ask.id) ?? ask;
   writeAskArtifacts(project.rootPath, promoted);
+  {
+    const { registry } = getRuntime(project.rootPath);
+    await ensureChangeIntentAsync(
+      project.rootPath,
+      phase.id,
+      description,
+      { registry },
+    );
+  }
 
   void import("@slopcontrol/artifacts").then(({ upsertRoadmapEntry }) => {
     upsertRoadmapEntry(
@@ -753,21 +859,19 @@ app.post("/projects/:id/asks/:askId/promote", async (req, res) => {
 
   runInBackground(run.id, async () => {
     const { orchestrator } = getRuntime(project.rootPath);
-    touchRunStage(run.id, "drafting");
     const stage = await orchestrator.startResearch({
       project,
       phase: store.getPhase(phase.id) ?? phase,
       run: store.getRun(run.id) ?? run,
       description,
+      onStage: (s) => touchRunStage(run.id, s),
     });
     touchRunStage(run.id, stage);
     updatePhaseStatus(
       phase.id,
       stage === "in_review"
         ? "in_review"
-        : stage === "failed"
-          ? "blocked"
-          : "draft",
+        : "draft",
     );
   });
 
@@ -793,8 +897,11 @@ app.post("/projects/:id/asks/:askId/sub-research", async (req, res) => {
   }
   if (ask.status === "promoted") {
     res.status(409).json({
-      error: "Ask already promoted; start a new ask for more sub-research",
+      error:
+        "Ask already promoted; call fork_ask to continue chatting, then ask_sub_research on the forked session",
       promotedPhaseId: ask.promotedPhaseId,
+      askId: ask.id,
+      hint: "fork_ask",
     });
     return;
   }
@@ -1674,6 +1781,15 @@ app.post("/runs", async (req, res) => {
       const run = store.createRun({ phaseId: phase.id, projectId: project.id });
       touchRunStage(run.id, "researching");
       updatePhaseStatus(phase.id, "draft");
+      {
+        const { registry } = getRuntime(project.rootPath);
+        await ensureChangeIntentAsync(
+          project.rootPath,
+          phase.id,
+          action.description,
+          { registry },
+        );
+      }
 
       void import("@slopcontrol/artifacts").then(({ upsertRoadmapEntry }) => {
         upsertRoadmapEntry(
@@ -1687,15 +1803,15 @@ app.post("/runs", async (req, res) => {
 
       runInBackground(run.id, async () => {
         const { orchestrator } = getRuntime(project.rootPath);
-        touchRunStage(run.id, "drafting");
         const stage = await orchestrator.startResearch({
           project,
           phase: store.getPhase(phase.id) ?? phase,
           run: store.getRun(run.id) ?? run,
           description: action.description,
+          onStage: (s) => touchRunStage(run.id, s),
         });
         touchRunStage(run.id, stage);
-        updatePhaseStatus(phase.id, stage === "in_review" ? "in_review" : stage === "failed" ? "blocked" : "draft");
+        updatePhaseStatus(phase.id, stage === "in_review" ? "in_review" : "draft");
       });
 
       res.status(202).json({
@@ -2137,15 +2253,15 @@ app.post("/runs", async (req, res) => {
 
       runInBackground(run.id, async () => {
         const { orchestrator } = getRuntime(project.rootPath);
-        touchRunStage(run.id, "drafting");
         const stage = await orchestrator.startResearch({
           project,
           phase,
           run,
           description: phase.description,
+          onStage: (s) => touchRunStage(run.id, s),
         });
         touchRunStage(run.id, stage);
-        updatePhaseStatus(phase.id, stage === "in_review" ? "in_review" : stage === "failed" ? "blocked" : "draft");
+        updatePhaseStatus(phase.id, stage === "in_review" ? "in_review" : "draft");
       });
 
       res.status(202).json({
@@ -2312,6 +2428,150 @@ app.post("/runs", async (req, res) => {
           error: error instanceof Error ? error.message : String(error),
         });
       }
+      return;
+    }
+
+    if (action.action === "preview_change_intent") {
+      const project = store.getProject(action.projectId);
+      if (!project) {
+        res.status(404).json({ error: "Project not found" });
+        return;
+      }
+      const { registry } = getRuntime(project.rootPath);
+      const { intent, source } = await previewChangeIntentAsync(
+        action.description,
+        {
+          projectRoot: project.rootPath,
+          phaseId: action.phaseId,
+          registry,
+          heuristicOnly: action.heuristicOnly === true,
+        },
+      );
+      let phaseAlign: { ok: boolean; issues: string[] } | null = null;
+      if (action.checkPhaseDoc && action.phaseId) {
+        const phaseDoc = readPhaseDoc(project.rootPath, action.phaseId);
+        if (phaseDoc.trim()) {
+          phaseAlign = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
+        } else {
+          phaseAlign = { ok: false, issues: ["PHASE.md missing or empty"] };
+        }
+      }
+      res.json({
+        projectId: project.id,
+        engagementSymptom: isEngagementSymptom(action.description),
+        intent,
+        source,
+        promptBlock: formatChangeIntentPromptBlock(intent),
+        phaseAlign,
+      });
+      return;
+    }
+
+    if (action.action === "reconcile_blueprint") {
+      const project = store.getProject(action.projectId);
+      if (!project) {
+        res.status(404).json({ error: "Project not found" });
+        return;
+      }
+      const dryRun = action.dryRun !== false;
+      const result = reconcileProjectBlueprint(
+        project.rootPath,
+        action.phaseId,
+        { dryRun },
+      );
+      res.json({
+        projectId: project.id,
+        phaseId: action.phaseId ?? null,
+        ...result,
+        liveDecisionsPreview: result.liveDecisions.slice(0, 4_000),
+      });
+      return;
+    }
+
+    if (action.action === "audit_ui_gates") {
+      const project = store.getProject(action.projectId);
+      if (!project) {
+        res.status(404).json({ error: "Project not found" });
+        return;
+      }
+      const description =
+        action.description?.trim() ||
+        (action.phaseId
+          ? store.getPhase(action.phaseId)?.description ?? ""
+          : "");
+      const stored = action.phaseId
+        ? readChangeIntent(project.rootPath, action.phaseId)
+        : null;
+      let preview = stored;
+      let source: "llm" | "heuristic" | "stored" = stored ? "stored" : "heuristic";
+      if (description) {
+        const { registry } = getRuntime(project.rootPath);
+        const previewed = await previewChangeIntentAsync(description, {
+          projectRoot: project.rootPath,
+          phaseId: action.phaseId,
+          registry,
+          heuristicOnly: action.heuristicOnly === true,
+        });
+        preview = previewed.intent;
+        source = previewed.source;
+      }
+      if (!preview) {
+        res.status(400).json({
+          error:
+            "Provide description and/or phaseId with existing INTENT.json",
+        });
+        return;
+      }
+      let phaseAlign: { ok: boolean; issues: string[] } | null = null;
+      if (action.phaseId) {
+        const phaseDoc = readPhaseDoc(project.rootPath, action.phaseId);
+        phaseAlign = phaseDoc.trim()
+          ? phaseDocAlignsWithChangeIntent(phaseDoc, preview)
+          : { ok: false, issues: ["PHASE.md missing or empty"] };
+      }
+      const dry = reconcileProjectBlueprint(project.rootPath, action.phaseId, {
+        dryRun: true,
+      });
+      const checks = {
+        engagementDetected: description
+          ? isEngagementSymptom(description)
+          : false,
+        uiMountLocked: preview.uiMount !== "n/a",
+        hasInteractionContract: Boolean(preview.interaction),
+        changeKind: preview.changeKind ?? null,
+        phaseAlignOk: phaseAlign ? phaseAlign.ok : null,
+        liveHasComposer: /BD-COMPOSER-FORM/i.test(dry.liveDecisions),
+        liveHasInBubbleUnstruck: /^\s*-\s+BD-IN-BUBBLE-FORMS\b/m.test(
+          dry.liveDecisions,
+        ),
+      };
+      res.json({
+        projectId: project.id,
+        phaseId: action.phaseId ?? null,
+        storedIntent: stored,
+        previewIntent: preview,
+        source,
+        promptBlock: formatChangeIntentPromptBlock(preview),
+        phaseAlign,
+        reconcileDryRun: {
+          report: dry.report,
+          wouldChange: dry.changed,
+          liveDecisionsPreview: dry.liveDecisions.slice(0, 4_000),
+        },
+        blueprintClipPreview: clipBlueprintForPrompt(
+          // read via reconcile dry — clip from live only
+          dry.liveDecisions
+            ? `## Live decisions\n\n${dry.liveDecisions}\n`
+            : "",
+          2_000,
+        ),
+        checks,
+        ok:
+          checks.uiMountLocked &&
+          checks.hasInteractionContract &&
+          (phaseAlign ? phaseAlign.ok : true) &&
+          !checks.liveHasInBubbleUnstruck,
+      });
       return;
     }
   } catch (error) {

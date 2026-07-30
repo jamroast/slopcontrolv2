@@ -32,7 +32,13 @@ Rules:
 - A 403 "requires a subscription" on \`:cloud\` models often means the key is paid and free-tier routing is wrong — recommend OLLAMA_TIER=paid + bare model names, not the reverse.
 - OpenAI-compatible hosts differ: \`https://ollama.com/v1\` + paid → bare model IDs; \`https://api.ollama.cloud/v1\` often needs \`:cloud\` suffixes. Do not reverse a working \`OLLAMA_BASE_URL\` without operator-explicit intent.
 - Chat hanging after \`[chat] Stream started\` (especially with tools) is usually stream+tools / host+ID mismatch — not free-tier. Catalogue-only or \`npm test\` alone does not prove chat works.
-- Prefer repo tools (read_file / grep_files) first. Use \`web_search\` / \`fetch_url\` for vendor docs, model catalogs, and API differences (OpenAI-compat vs native). Cite URLs in RESEARCH.md. Never paste secrets; never curl product Ollama with API keys.`,
+- Prefer repo tools (read_file / grep_files) first. Use \`web_search\` / \`fetch_url\` for vendor docs, model catalogs, and API differences (OpenAI-compat vs native). Cite URLs in RESEARCH.md. Never paste secrets; never curl product Ollama with API keys.
+- When the user prompt includes a Change Intent **interaction** contract (form fill/submit):
+  - Use the authoritative Research date from the prompt in RESEARCH.md (do not invent another date).
+  - Do NOT claim fill/submit already works solely because prior form phases are \`complete\`.
+  - Verify engagement in code; call out open risks (tool part \`toolName\` vs \`type: tool-*\`, superseded classification, wrong mount) when evidence supports them.
+  - Prefer residual gaps that still prove fill+submit at the locked mount — chip/taxonomy-only is not enough.
+- Obey Change Intent uiMount over older contradictory Blueprint Deltas; prefer Live decisions (verified then claimed) from the blueprint excerpt.`,
     model: registry.resolve("research"),
     memory,
     tools: {

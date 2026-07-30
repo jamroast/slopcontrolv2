@@ -31,18 +31,21 @@ import {
   writeRoadmap,
   isProjectEmpty,
   isThinResearch,
+  extractChangeIntent,
   phaseDocWatchPaths,
   resolvePhaseDocFromAgentTurn,
   scaffoldPhaseDoc,
   snapshotFileStats,
   isSoftFailEchoCheck,
   automatedCheckReportedFailure,
+  isPhaseDocPreamble,
   writeCheckReport,
   writeDiagnosis,
   phaseNeedsDesign,
   isDesignComplete,
   markDesignComplete,
   writeUiSpec,
+  writeChangeIntent,
   parseDesignAssetBriefs,
   isDatabasePhase,
 } from "./index.js";
@@ -285,6 +288,56 @@ curl -H "Authorization: Bearer $OLLAMA_API_KEY" https://api.ollama.cloud/v1/mode
     const gate = validatePhaseDocForDev(preamble);
     assert.equal(gate.ok, false);
     assert.ok(gate.issues.some((i) => /preamble|Forbidden secret/i.test(i)));
+  });
+
+  it("does not treat Here's quotes inside Scope as planner preamble", () => {
+    const doc = `# Phase 51-single-field: Switch to validated single-field form
+
+## Scope
+
+When the assistant asks for a CSV URL, show a form. Transcript quote:
+
+Here's what it needs:
+| Parameter | Required |
+| fileUrl | yes |
+
+Do not treat that quote as chat preamble.
+
+## File Changes
+
+- src/components/chat/form-bubble.tsx
+
+## Success Criteria
+
+- Single-field form appears for one missing param
+
+## Automated Checks
+
+\`\`\`bash
+npm test
+\`\`\`
+`;
+    const gate = validatePhaseDocForDev(doc);
+    assert.equal(gate.ok, true, gate.issues.join("; "));
+    assert.equal(isPhaseDocPreamble(doc), false);
+  });
+
+  it("clips long chat-dump descriptions in scaffold Scope", () => {
+    const chatDump = [
+      '## Want me to promote this?',
+      "",
+      "I'd love to help you build a workflow!",
+      "Here's what it needs:",
+      "x".repeat(800),
+    ].join("\n");
+    const doc = scaffoldPhaseDoc({
+      phaseId: "51-flow",
+      description: chatDump,
+      testCommand: "npm test",
+    });
+    assert.equal(validatePhaseDocForDev(doc).ok, true, validatePhaseDocForDev(doc).issues.join("; "));
+    assert.match(doc, /clipped for scaffold/);
+    assert.ok(doc.length < chatDump.length + 800);
   });
 
   it("rejects Automated Checks that force OLLAMA_TIER=free", () => {
@@ -766,6 +819,20 @@ None.
     );
   });
 
+  it("engagement scaffold includes live tool-part proof language", () => {
+    const intent = extractChangeIntent(
+      "Unable to submit the form in the composer.",
+    );
+    const doc = scaffoldPhaseDoc({
+      phaseId: "56-forms",
+      description: "fix forms",
+      testCommand: "npm test",
+      intent,
+    });
+    assert.match(doc, /parseToolResult|tool-/i);
+    assert.match(doc, /composer|fill|submit/i);
+  });
+
   it("verifyOllamaCloudModelIds flags bare model names", () => {
     const projectRoot = mkdtempSync(join(tmpdir(), "slop-ollama-"));
     try {
@@ -1041,6 +1108,193 @@ true
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("phaseNeedsDesign routes by changeKind (chrome-hide/backend skip unless forced)", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-design-kind-"));
+    try {
+      ensureSlopcontrolDir(root);
+      const phaseId = "57-chrome";
+      const plainPhase = `# Phase ${phaseId}
+
+Requires design pass: no
+
+## Scope
+Hide empty form chrome
+
+## File Changes
+- src/lib/active-form.ts
+
+## Success Criteria
+Empty form shows chat only
+
+## Automated Checks
+\`\`\`bash
+npx vitest run tests/active-form.test.ts
+\`\`\`
+`;
+      writePhaseDoc(root, phaseId, plainPhase);
+      writeChangeIntent(root, phaseId, {
+        title: "Hide empty form tabs",
+        goal: "Hide tab strip when nothing to gather",
+        uiMount: "composer",
+        changeKind: "chrome-hide",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: "Hide blank form tabs",
+      });
+      assert.equal(phaseNeedsDesign(root, phaseId), false);
+
+      // Leftover UI-SPEC alone must not force design for chrome-hide
+      writeUiSpec(root, phaseId, "# UI-SPEC\n\n## Palette\n#111\n");
+      assert.equal(phaseNeedsDesign(root, phaseId), false);
+
+      writePhaseDoc(
+        root,
+        phaseId,
+        `# Phase ${phaseId}
+
+Requires design pass: yes
+
+## Scope
+Forced visual
+
+## File Changes
+- x
+
+## Success Criteria
+ok
+
+## Automated Checks
+\`\`\`bash
+true
+\`\`\`
+`,
+      );
+      assert.equal(phaseNeedsDesign(root, phaseId), true);
+
+      const backendId = "12-backend";
+      writePhaseDoc(
+        root,
+        backendId,
+        `# Phase ${backendId}
+
+## Scope
+DB pool
+
+## File Changes
+- src/db.ts
+
+## Success Criteria
+ok
+
+## Automated Checks
+\`\`\`bash
+true
+\`\`\`
+`,
+      );
+      writeChangeIntent(root, backendId, {
+        title: "Fix DB pool",
+        goal: "Tune connection pool",
+        uiMount: "n/a",
+        changeKind: "backend",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: "Fix database pool",
+      });
+      assert.equal(phaseNeedsDesign(root, backendId), false);
+
+      const engId = "56-engagement";
+      writePhaseDoc(
+        root,
+        engId,
+        `# Phase ${engId}
+
+## Scope
+Forms
+
+## Assets
+| Name | Filename | Prompt |
+| logo | logo.png | mark |
+
+## File Changes
+- x
+
+## Success Criteria
+ok
+
+## Automated Checks
+\`\`\`bash
+true
+\`\`\`
+`,
+      );
+      writeChangeIntent(root, engId, {
+        title: "Populate and submit forms",
+        goal: "Fill and submit in composer",
+        uiMount: "composer",
+        changeKind: "engagement",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: "Populate and submit",
+        interaction: {
+          mount: "composer",
+          primaryAction: "submit form",
+          proof: ["composer-form"],
+          forbiddenSubstitutes: ["chips"],
+        },
+      });
+      assert.equal(phaseNeedsDesign(root, engId), true);
+
+      // Brand theming even if mislabeled backend still needs design
+      const brandId = "12-brand";
+      writePhaseDoc(
+        root,
+        brandId,
+        `# Phase ${brandId}
+
+## Scope
+Apply theming
+
+## File Changes
+- globals.css
+
+## Success Criteria
+ok
+
+## Automated Checks
+\`\`\`bash
+true
+\`\`\`
+`,
+      );
+      writeChangeIntent(root, brandId, {
+        title: "for me to promote to research.",
+        goal: "apply the theming from basic-web-agent and a new logo",
+        uiMount: "n/a",
+        changeKind: "backend",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription:
+          "Please apply the theming from JamPress and a cleaner logo",
+      });
+      assert.equal(phaseNeedsDesign(root, brandId), true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("brand theming Intent classifies as other not backend", () => {
+    const intent = extractChangeIntent(
+      "Please apply the theming from /Users/brettchaldecott/Projects/basic-web-agent and a new logo based on jampress concepts",
+    );
+    assert.equal(intent.changeKind, "other");
+    assert.equal(intent.interaction, undefined);
   });
 
   it("parseDesignAssetBriefs uses ## Assets only (ignores Palette tables)", () => {

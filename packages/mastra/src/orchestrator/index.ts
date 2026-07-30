@@ -63,6 +63,14 @@ import {
   snapshotFileStats,
   phaseDocAlignsWithResearch,
   clearMisalignedPhaseDoc,
+  formatChangeIntentPromptBlock,
+  buildAdjacentPhaseContextPack,
+  buildSiblingBrandRefPack,
+  isBrandThemingAsk,
+  phaseDocAlignsWithChangeIntent,
+  researchEngagementQuality,
+  clipBlueprintForPrompt,
+  isUxPlacementKnowledge,
   upsertRoadmapEntry,
   validateBlueprintDocument,
   validatePhaseDocForDev,
@@ -76,8 +84,20 @@ import {
   writeDiagnosis,
   readDiagnosis,
   readLatestDiagnosisForPhase,
+  clearPhaseDiagnosis,
+  clearRunDiagnosis,
   writeBlueprint,
   writeCheckReport,
+  tearDownComposeInDir,
+  tearDownAllProjectWorktreeCompose,
+  freePublishedHostPorts,
+  applyWorktreeComposeIsolation,
+  snapshotCanonicalRuntimeEnv,
+  restoreCanonicalRuntimeEnv,
+  loadCanonicalRuntimeEnv,
+  stopComposeContainersUnderWorktrees,
+  scrubIsolationKeysFromProcessEnv,
+  scrubIsolationKeysFromEnvRecord,
   writePhaseDoc,
   writePhaseStatus,
   writeResearch,
@@ -93,6 +113,7 @@ import {
   ensurePhaseWorktree,
   getCodingToolForProject,
   getDesignTool,
+  isLogoAssetBrief,
   isStallAbortReason,
   listWorktreeChangedFiles,
   mergePhaseWorktree,
@@ -105,7 +126,11 @@ import {
   syncPhaseArtifactsToWorktree,
   syncIgnoredArtifactsFromWorktree,
 } from "@slopcontrol/coding-tools";
-import { chatWithImages, type LlmRegistry } from "@slopcontrol/llm";
+import { chatWithImages, filterRasterVisionPaths, type LlmRegistry } from "@slopcontrol/llm";
+import {
+  ensureChangeIntentAsync,
+  previewChangeIntentAsync,
+} from "./change-intent-async.js";
 import { dirname, join } from "node:path";
 import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import {
@@ -173,6 +198,8 @@ export interface StartResearchInput {
   phase: Phase;
   run: Run;
   description: string;
+  /** Advance run stage (e.g. researching → drafting) without guessing wall-clock in the HTTP layer. */
+  onStage?: (stage: RunStage) => void;
 }
 
 export interface AskTurnInput {
@@ -298,6 +325,77 @@ function clipPromptSection(label: string, text: string, maxChars: number): strin
   return `${body.slice(0, maxChars)}\n\n…[truncated ${label}: ${body.length} chars total; read_file \`.slopcontrol/${label}\` if you need more]`;
 }
 
+/** Persist truncated provider/API detail — bare "Bad Request" is not actionable. */
+function formatLlmErrorForLog(error: unknown, maxChars = 2_000): string {
+  const chunks: string[] = [];
+  const push = (label: string, value: unknown) => {
+    if (value == null) return;
+    const text =
+      typeof value === "string"
+        ? value
+        : (() => {
+            try {
+              return JSON.stringify(value);
+            } catch {
+              return String(value);
+            }
+          })();
+    if (!text.trim()) return;
+    chunks.push(label ? `${label}=${text.slice(0, maxChars)}` : text.slice(0, maxChars));
+  };
+
+  const walk = (err: unknown, depth: number) => {
+    if (err == null || depth > 4) return;
+    if (typeof err === "string") {
+      push("", err);
+      return;
+    }
+    if (err instanceof Error) {
+      push("", err.message);
+      const any = err as Error & Record<string, unknown>;
+      for (const key of [
+        "statusCode",
+        "status",
+        "code",
+        "url",
+        "responseBody",
+        "data",
+        "body",
+        "response",
+      ]) {
+        push(key, any[key]);
+      }
+      if (any.cause != null) walk(any.cause, depth + 1);
+      return;
+    }
+    if (typeof err === "object") {
+      push("detail", err);
+    }
+  };
+
+  walk(error, 0);
+  const out = chunks.filter(Boolean).join(" | ");
+  return (out || "unknown error").slice(0, maxChars + 400);
+}
+
+function isProviderBadRequest(error: unknown): boolean {
+  if (error == null) return false;
+  const msg = error instanceof Error ? error.message : String(error);
+  if (/bad\s*request/i.test(msg)) return true;
+  const any = error as { statusCode?: number; status?: number; cause?: unknown };
+  if (any.statusCode === 400 || any.status === 400) return true;
+  if (any.cause != null) return isProviderBadRequest(any.cause);
+  return false;
+}
+
+function researchLooksSolid(research: string): boolean {
+  const body = (research ?? "").trim();
+  return (
+    body.length >= 400 &&
+    (/RESEARCH_COMPLETE/i.test(body) || /^#\s+/m.test(body))
+  );
+}
+
 async function runAgent(
   agent: Agent,
   prompt: string,
@@ -355,17 +453,14 @@ async function runAgent(
     });
     return text;
   } catch (error) {
+    const detail = formatLlmErrorForLog(error);
     slog.error("agent", `failed ${name}`, {
       resourceId,
       threadId,
       durationMs: Date.now() - started,
-      error: error instanceof Error ? error.message : String(error),
+      error: detail,
     });
-    if (
-      /memory|storage|libsql|observational/i.test(
-        error instanceof Error ? error.message : String(error),
-      )
-    ) {
+    if (/memory|storage|libsql|observational/i.test(detail)) {
       slog.error(
         "agent",
         "Mastra Memory/storage failure — check ~/.slopcontrol/mastra.db is writable and the supervisor LLM endpoint resolves for observationalMemory",
@@ -374,7 +469,13 @@ async function runAgent(
         },
       );
     }
-    throw error;
+    if (error instanceof Error) {
+      if (detail !== error.message) {
+        throw new Error(detail, { cause: error });
+      }
+      throw error;
+    }
+    throw new Error(detail, { cause: error });
   }
 }
 
@@ -456,6 +557,11 @@ export {
   needsDepsInstall,
 } from "./deps-install.js";
 export type { PackageManager } from "./deps-install.js";
+export {
+  ensureChangeIntentAsync,
+  previewChangeIntentAsync,
+} from "./change-intent-async.js";
+export type { EnsureChangeIntentAsyncOptions } from "./change-intent-async.js";
 
 export type SuccessCheckStep = {
   name: string;
@@ -558,6 +664,10 @@ export async function runSuccessChecks(
     const projectEnv = resolveProjectEnv({
       projectRoot: project.rootPath,
       config,
+      processEnv:
+        mode === "verify"
+          ? scrubIsolationKeysFromProcessEnv(process.env)
+          : process.env,
     });
     const llm = await resolveLlmTestEnvWithProbe({
       projectRoot: project.rootPath,
@@ -565,6 +675,9 @@ export async function runSuccessChecks(
     });
     // LLM profile overlay wins for its keys; project env provides everything else
     llmOverlay = { ...projectEnv.env, ...llm.env };
+    if (mode === "verify") {
+      llmOverlay = scrubIsolationKeysFromEnvRecord(llmOverlay);
+    }
     runner = withEnvOverlay(baseRunner, llmOverlay);
     parts.push(
       [
@@ -1400,8 +1513,9 @@ ${message.trim()}`;
   }
 
   async startResearch(input: StartResearchInput): Promise<RunStage> {
-    const { project, phase, run, description } = input;
+    const { project, phase, run, description, onStage } = input;
     ensureSlopcontrolDir(project.rootPath);
+    onStage?.("researching");
     slog.info("research", "start", {
       projectId: project.id,
       phaseId: phase.id,
@@ -1445,19 +1559,56 @@ ${message.trim()}`;
 
     log(project, run, `--- Starting research for phase ${phase.id} ---`);
 
+    const intent = await ensureChangeIntentAsync(
+      project.rootPath,
+      phase.id,
+      description,
+      { registry: this.ctx.registry },
+    );
+    const intentBlock = formatChangeIntentPromptBlock(intent);
+    const adjacentPack = buildAdjacentPhaseContextPack(project.rootPath, 5);
+    const siblingBrandPack = buildSiblingBrandRefPack({
+      projectRoot: project.rootPath,
+      description,
+    });
     const blueprint = readBlueprint(project.rootPath);
     const roadmap = readRoadmap(project.rootPath);
     const learningsBlock = loadLearningsPromptBlock(project.rootPath, {
       phaseDescription: description,
     });
     const researchPath = `.slopcontrol/phases/${phase.id}/RESEARCH.md`;
+    const researchDate = new Date().toISOString().slice(0, 10);
+    const engagementHonesty = intent.interaction
+      ? `
+Form / engagement honesty (Change Intent has an interaction contract — mandatory):
+- Put \`Date: ${researchDate}\` near the top of RESEARCH.md (authoritative; do not invent another date).
+- Do NOT claim fill/submit "already works" (~90% done) solely because prior form phases are \`complete\`.
+- Treat prior complete form/engagement phases as hypotheses; verify in code whether the actionable mount still fill+submits.
+- Call out open engagement risks when code evidence supports them (e.g. AI SDK tool parts using \`type: "tool-<name>"\` without \`toolName\`, superseded classification, composer vs bubble mount).
+- Residual gaps must still prove fill+submit at the locked mount; chip/taxonomy-only is insufficient.
+`
+      : `
+Research date (authoritative): ${researchDate} — put \`Date: ${researchDate}\` near the top of RESEARCH.md.
+`;
+    const brandResearchNote = isBrandThemingAsk(
+      `${intent.title}\n${intent.goal}\n${description}`,
+    )
+      ? `
+Brand / theming research (mandatory when Change Intent is brand/theming):
+- Prefer sibling **consumed** logo paths (Header / shell \`img\` / \`next/image\` → usually \`public/images/logo.svg\`).
+- Do NOT treat \`public/brand/*-reuse.svg\` or other tiny tile+circle stubs as the sibling's real mark.
+- Probe family siblings when relevant (e.g. burntjam alongside JamPress).
+- Explicitly decide: palette-only vs palette+shell/theme machinery vs full layout parity — do not silently freeze shells if the operator asked to apply theming.
+`
+      : "";
     const prompt = `Change request:
 ${clipPromptSection("change-request", description, 4_000)}
 
-Phase id: ${phase.id}
-
-Existing blueprint (excerpt — full file at .slopcontrol/BLUEPRINT.md):
-${clipPromptSection("BLUEPRINT.md", blueprint || "", 6_000)}
+${intentBlock}
+${adjacentPack ? `${adjacentPack}\n` : ""}${siblingBrandPack ? `${siblingBrandPack}\n` : ""}Phase id: ${phase.id}
+${engagementHonesty}${brandResearchNote}
+Existing blueprint (excerpt — full file at .slopcontrol/BLUEPRINT.md; prefer Live decisions):
+${clipBlueprintForPrompt(blueprint || "", 6_000)}
 
 Roadmap (excerpt — full file at .slopcontrol/ROADMAP.md):
 ${clipPromptSection("ROADMAP.md", roadmap || "", 2_000)}
@@ -1467,6 +1618,7 @@ Use tools sparingly, then write RESEARCH.md via write_file to ${researchPath} AN
 End with RESEARCH_COMPLETE.
 If the blueprint is still thin, include ## Proposed Blueprint and ## Proposed Roadmap.
 Do NOT only chat about investigating — the response body / written file must be the RESEARCH.md document.
+Obey Change Intent uiMount over older contradictory Blueprint Deltas.
 Obey prior learnings (especially infra blockers): do not propose coding-agent work to bring up missing local services.`;
 
     const researchWatch = researchDocWatchPaths(project.rootPath, phase.id);
@@ -1501,11 +1653,14 @@ Do NOT continue investigating with tools. Immediately write the FULL RESEARCH.md
 write_file path: ${researchPath}
 Also return the same markdown in your final response starting with #.
 Cover: problem summary, relevant files/modules, root-cause hypotheses, risks.
+Use Date: ${researchDate} near the top (authoritative).
+${intent.interaction ? "If this is a form/engagement change: do not claim fill/submit already works just because prior phases are complete; note open mount/engagement risks from code." : ""}
 End with RESEARCH_COMPLETE.
 
 Change request:
 ${clipPromptSection("change-request", description, 4_000)}
-Phase id: ${phase.id}`;
+Phase id: ${phase.id}
+${intentBlock}`;
       beforeStats = snapshotFileStats(researchWatch);
       output = await runAgent(
         this.ctx.agents.researchAgent,
@@ -1521,6 +1676,57 @@ Phase id: ${phase.id}`;
         agentOutput: output,
         beforeStats,
       });
+    }
+
+    const engagementQuality = researchEngagementQuality(resolved.doc, intent);
+    if (!resolved.thin && !engagementQuality.ok) {
+      slog.warn("research", "engagement overclaim; retrying once", {
+        projectId: project.id,
+        phaseId: phase.id,
+        issues: engagementQuality.issues,
+      });
+      log(
+        project,
+        run,
+        `--- Research overclaim for engagement Intent; retrying once ---\n${engagementQuality.issues.map((i) => `- ${i}`).join("\n")}`,
+      );
+      const honestyRetry = `Your previous RESEARCH.md overclaimed that fill/submit / dynamic forms already work without residual engagement risks.
+Rewrite the FULL RESEARCH.md. Rules:
+- Use Date: ${researchDate} near the top (authoritative).
+- Do NOT claim ~90% / "already exists" / "already works" unless you also document residual risks with code evidence (e.g. live AI SDK type: tool-<name> without toolName, parseToolResult, blocking gaps).
+- Prefer open engagement risks over "prior phases are complete ⇒ proven".
+write_file path: ${researchPath}
+Also return the same markdown starting with #.
+End with RESEARCH_COMPLETE.
+
+${intentBlock}
+
+Change request:
+${clipPromptSection("change-request", description, 4_000)}
+Phase id: ${phase.id}`;
+      beforeStats = snapshotFileStats(researchWatch);
+      output = await runAgent(
+        this.ctx.agents.researchAgent,
+        honestyRetry,
+        project.id,
+        `${phase.id}-research-honesty-retry`,
+        { maxSteps: 12 },
+      );
+      log(project, run, output);
+      resolved = resolveResearchFromAgentTurn({
+        projectRoot: project.rootPath,
+        phaseId: phase.id,
+        agentOutput: output,
+        beforeStats,
+      });
+      const again = researchEngagementQuality(resolved.doc, intent);
+      if (!again.ok) {
+        log(
+          project,
+          run,
+          `--- Research still overclaims after honesty retry; proceeding with caveats ---\n${again.issues.map((i) => `- ${i}`).join("\n")}`,
+        );
+      }
     }
 
     if (resolved.thin) {
@@ -1563,15 +1769,18 @@ Phase id: ${phase.id}`;
       return "failed";
     }
 
-    return this.draftPhase({ project, phase, run });
+    onStage?.("drafting");
+    return this.draftPhase({ project, phase, run, onStage });
   }
 
   async draftPhase(input: {
     project: Project;
     phase: Phase;
     run: Run;
+    onStage?: (stage: RunStage) => void;
   }): Promise<RunStage> {
-    const { project, phase, run } = input;
+    const { project, phase, run, onStage } = input;
+    onStage?.("drafting");
     log(project, run, "--- Drafting PHASE.md ---");
 
     const research = readResearch(project.rootPath, phase.id);
@@ -1595,14 +1804,55 @@ Phase id: ${phase.id}`;
       phaseDescription: phase.description,
       phaseDoc: research,
     });
-    const prompt = `Draft PHASE.md for phase ${phase.id} only (single phase).
+    const intent = await ensureChangeIntentAsync(
+      project.rootPath,
+      phase.id,
+      phase.description,
+      { registry: this.ctx.registry },
+    );
+    const intentBlock = formatChangeIntentPromptBlock(intent);
+    const adjacentPack = buildAdjacentPhaseContextPack(project.rootPath, 5);
+    const designRoutingNote =
+      intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
+        ? isBrandThemingAsk(`${intent.title}\n${intent.goal}\n${phase.description}`)
+          ? `
+Design routing (brand/theming ask — override backend mislabel):
+- Near the top of PHASE.md include \`Requires design pass: yes\`.
+- Include ## Brand and ## Assets (logo / wordmark / favicon briefs).
+- Decide shell scope explicitly (palette-only vs shell/theme machinery vs full layout parity).
+- Automated Checks must reject \`Status:** draft\` / tile+circle fallback SVGs under public/brand/.
+`
+          : `
+Design routing (Change Intent changeKind=${intent.changeKind}):
+- Near the top of PHASE.md include \`Requires design pass: no\`.
+- Do NOT add ## Brand or ## Assets unless the operator explicitly asked for a visual/brand change.
+- Put behaviour/state tables under Scope / Success Criteria — not as design-asset briefs.
+`
+        : isBrandThemingAsk(`${intent.title}\n${intent.goal}\n${phase.description}`)
+          ? `
+Design routing (brand/theming):
+- Near the top of PHASE.md include \`Requires design pass: yes\`.
+- Include ## Brand and ## Assets with concrete logo/wordmark/favicon briefs (not empty tables).
+- Decide shell scope explicitly; do not freeze marketing/portal shells without stating palette-only.
+- Automated Checks: no design-fallback SVGs in public/brand/; wordmarks must not glue words (e.g. JamLight); shells must reference the new lockup.
+`
+          : "";
+
+    const buildDraftPrompt = (slim: boolean) => {
+      const pack = slim ? "" : adjacentPack ? `${adjacentPack}\n` : "";
+      const blueprintClip = slim ? 2_500 : 6_000;
+      const researchClip = slim ? 4_000 : 8_000;
+      return `Draft PHASE.md for phase ${phase.id} only (single phase).
 Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 
-CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
+${intentBlock}
+${designRoutingNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
 Do NOT reuse or retitle a prior phase plan (e.g. host.docker.internal / extra_hosts)
 unless RESEARCH explicitly asks for that work. If RESEARCH is about model naming /
 :cloud passthrough / model-resolver, the PHASE must plan that — not networking.
+If Change Intent uiMount is set, Scope/File Changes/Blueprint Deltas MUST honour that mount
+(composer vs bubble vs modal vs page). Do not supersede a mount BD against Change Intent.
 
 Return the full PHASE.md content starting with # in your response.
 If you use write_file, write ONLY to ${canonicalPath} (never project-root PHASE.md).
@@ -1612,114 +1862,216 @@ MUST include ## Automated Checks with at least one runnable command in a \`\`\`b
 When finished, include PHASE_COMPLETE on its own line.
 Do NOT narrate that you wrote the file — output the document itself.
 ${learningsBlock ? `\n${learningsBlock}\n` : ""}
-Blueprint (excerpt — full at .slopcontrol/BLUEPRINT.md):
-${clipPromptSection("BLUEPRINT.md", blueprint, 6_000)}
+Blueprint (excerpt — full at .slopcontrol/BLUEPRINT.md; prefer Live decisions):
+${clipPromptSection("BLUEPRINT.md", clipBlueprintForPrompt(blueprint, blueprintClip), blueprintClip)}
 
 Research:
-${clipPromptSection("RESEARCH.md", research, 8_000)}`;
+${clipPromptSection("RESEARCH.md", research, researchClip)}`;
+    };
 
     const watch = phaseDocWatchPaths(project.rootPath, phase.id);
     let beforeStats = snapshotFileStats(watch);
-    const output = await runAgent(
-      this.ctx.agents.phasePlannerAgent,
-      prompt,
-      project.id,
-      `${phase.id}-planning`,
-      { maxSteps: 20 },
-    );
 
-    log(project, run, output);
-
-    let resolved = resolvePhaseDocFromAgentTurn({
-      projectRoot: project.rootPath,
-      phaseId: phase.id,
-      agentOutput: output,
-      beforeStats,
-      description: phase.description,
-      research,
-    });
-
-    const needsRepair =
-      !resolved.gate.ok ||
-      resolved.source === "none" ||
-      (resolved.alignIssues?.length ?? 0) > 0;
-
-    if (needsRepair) {
-      const alignBlock =
-        resolved.alignIssues && resolved.alignIssues.length > 0
-          ? `Research alignment issues:\n${resolved.alignIssues.map((i) => `- ${i}`).join("\n")}\n`
-          : "";
-      slog.warn("planning", "PHASE.md failed structure/alignment gate; retrying once", {
-        projectId: project.id,
+    const finishWithScaffold = (reason: string): RunStage | void => {
+      if (intent.interaction && intent.interaction.mount !== "n/a") {
+        log(
+          project,
+          run,
+          `${reason}\n--- Engagement Change Intent: refusing Intent-breaking scaffold; fail closed (retry draft) ---`,
+        );
+        writePhaseStatus(project.rootPath, phase.id, "draft");
+        return "failed";
+      }
+      const scaffolded = scaffoldPhaseDoc({
         phaseId: phase.id,
-        issues: resolved.gate.issues,
-        alignIssues: resolved.alignIssues,
-        source: resolved.source,
-        path: resolved.path,
+        description: phase.description,
+        research,
+        testCommand: config.testCommand,
+        intent,
       });
-      const repairPrompt = `Your previous PHASE.md was invalid (chat preamble, missing sections, or wrong-phase content).
+      log(project, run, reason);
+      writePhaseDoc(project.rootPath, phase.id, scaffolded);
+    };
+
+    const recoverableDraftFail = (detail: string): RunStage => {
+      log(
+        project,
+        run,
+        `ERROR drafting PHASE.md (research intact). Handoff: retry draft.\n${detail}`,
+      );
+      writePhaseStatus(project.rootPath, phase.id, "draft");
+      return "failed";
+    };
+
+    let output: string | null = null;
+    let phaseDocWritten = false;
+    try {
+      output = await runAgent(
+        this.ctx.agents.phasePlannerAgent,
+        buildDraftPrompt(false),
+        project.id,
+        `${phase.id}-planning`,
+        { maxSteps: 20 },
+      );
+    } catch (error) {
+      const detail = formatLlmErrorForLog(error);
+      log(project, run, `ERROR: draft generate failed — ${detail}`);
+      if (isProviderBadRequest(error)) {
+        log(
+          project,
+          run,
+          "--- Retrying draft once with slimmed prompt (no adjacent pack, smaller clips) ---",
+        );
+        try {
+          beforeStats = snapshotFileStats(watch);
+          output = await runAgent(
+            this.ctx.agents.phasePlannerAgent,
+            buildDraftPrompt(true),
+            project.id,
+            `${phase.id}-planning-slim`,
+            { maxSteps: 16 },
+          );
+        } catch (retryError) {
+          const retryDetail = formatLlmErrorForLog(retryError);
+          log(project, run, `ERROR: slim draft retry failed — ${retryDetail}`);
+          if (researchLooksSolid(research)) {
+            const scaffolded = finishWithScaffold(
+              `Draft LLM threw after solid RESEARCH.md (${retryDetail}). Using scaffold so review can proceed. Handoff: retry draft if scaffold is insufficient.`,
+            );
+            if (scaffolded === "failed") return scaffolded;
+            phaseDocWritten = true;
+          } else {
+            return recoverableDraftFail(retryDetail);
+          }
+        }
+      } else if (researchLooksSolid(research)) {
+        const scaffolded = finishWithScaffold(
+          `Draft LLM threw after solid RESEARCH.md (${detail}). Using scaffold so review can proceed. Handoff: retry draft if scaffold is insufficient.`,
+        );
+        if (scaffolded === "failed") return scaffolded;
+        phaseDocWritten = true;
+      } else {
+        return recoverableDraftFail(detail);
+      }
+    }
+
+    if (output != null && !phaseDocWritten) {
+      log(project, run, output);
+
+      let resolved = resolvePhaseDocFromAgentTurn({
+        projectRoot: project.rootPath,
+        phaseId: phase.id,
+        agentOutput: output,
+        beforeStats,
+        description: phase.description,
+        research,
+      });
+
+      const needsRepair =
+        !resolved.gate.ok ||
+        resolved.source === "none" ||
+        (resolved.alignIssues?.length ?? 0) > 0;
+
+      if (needsRepair) {
+        const alignBlock =
+          resolved.alignIssues && resolved.alignIssues.length > 0
+            ? `Research alignment issues:\n${resolved.alignIssues.map((i) => `- ${i}`).join("\n")}\n`
+            : "";
+        slog.warn("planning", "PHASE.md failed structure/alignment gate; retrying once", {
+          projectId: project.id,
+          phaseId: phase.id,
+          issues: resolved.gate.issues,
+          alignIssues: resolved.alignIssues,
+          source: resolved.source,
+          path: resolved.path,
+        });
+        const repairPrompt = `Your previous PHASE.md was invalid (chat preamble, missing sections, or wrong-phase content).
 Issues:
 ${resolved.gate.issues.map((i) => `- ${i}`).join("\n")}
 ${alignBlock}
+${formatChangeIntentPromptBlock(intent)}
 Rewrite the FULL PHASE.md starting with # Title — output ONLY the markdown document (no "here is what changed").
 If you use write_file, path must be exactly: ${canonicalPath}
 Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence, no curl with API keys), ## Blueprint Deltas.
 Base Scope/File Changes ONLY on the RESEARCH below — do not copy a prior phase's host-routing plan.
+Obey Change Intent uiMount / interaction contract — do not substitute chips for a fillable mount.
 End with PHASE_COMPLETE.
 
 Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 Research:
 ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
-      beforeStats = snapshotFileStats(watch);
-      const repaired = await runAgent(
-        this.ctx.agents.phasePlannerAgent,
-        repairPrompt,
-        project.id,
-        `${phase.id}-planning-repair`,
-        { maxSteps: 16 },
-      );
-      log(project, run, repaired);
-      resolved = resolvePhaseDocFromAgentTurn({
-        projectRoot: project.rootPath,
-        phaseId: phase.id,
-        agentOutput: repaired,
-        beforeStats,
-        description: phase.description,
-        research,
-      });
-    }
+        let repairThrew = false;
+        try {
+          beforeStats = snapshotFileStats(watch);
+          const repaired = await runAgent(
+            this.ctx.agents.phasePlannerAgent,
+            repairPrompt,
+            project.id,
+            `${phase.id}-planning-repair`,
+            { maxSteps: 16 },
+          );
+          log(project, run, repaired);
+          resolved = resolvePhaseDocFromAgentTurn({
+            projectRoot: project.rootPath,
+            phaseId: phase.id,
+            agentOutput: repaired,
+            beforeStats,
+            description: phase.description,
+            research,
+          });
+        } catch (repairError) {
+          repairThrew = true;
+          const repairDetail = formatLlmErrorForLog(repairError);
+          log(project, run, `ERROR: draft repair failed — ${repairDetail}`);
+          if (researchLooksSolid(research)) {
+            const scaffolded = finishWithScaffold(
+              `Draft repair threw after solid RESEARCH.md (${repairDetail}). Using scaffold so review can proceed.`,
+            );
+            if (scaffolded === "failed") return scaffolded;
+            phaseDocWritten = true;
+          } else {
+            return recoverableDraftFail(repairDetail);
+          }
+        }
 
-    const stillBad =
-      !resolved.gate.ok ||
-      resolved.source === "none" ||
-      (resolved.alignIssues?.length ?? 0) > 0;
+        if (!repairThrew) {
+          const stillBad =
+            !resolved.gate.ok ||
+            resolved.source === "none" ||
+            (resolved.alignIssues?.length ?? 0) > 0;
 
-    if (stillBad) {
-      const scaffolded = scaffoldPhaseDoc({
-        phaseId: phase.id,
-        description: phase.description,
-        research,
-        testCommand: config.testCommand,
-      });
-      log(
-        project,
-        run,
-        `PHASE.md still invalid after repair (${[
-          ...resolved.gate.issues,
-          ...(resolved.alignIssues ?? []),
-        ].join("; ")}). Using scaffold so review can proceed.`,
-      );
-      writePhaseDoc(project.rootPath, phase.id, scaffolded);
-    } else {
-      if (resolved.source === "tool_write" && resolved.path) {
-        log(
-          project,
-          run,
-          `--- Harvested PHASE.md from ${resolved.path} (source=${resolved.source}) ---`,
-        );
+          if (stillBad) {
+            const scaffolded = finishWithScaffold(
+              `PHASE.md still invalid after repair (${[
+                ...resolved.gate.issues,
+                ...(resolved.alignIssues ?? []),
+              ].join("; ")}). Using scaffold so review can proceed.`,
+            );
+            if (scaffolded === "failed") return scaffolded;
+          } else {
+            if (resolved.source === "tool_write" && resolved.path) {
+              log(
+                project,
+                run,
+                `--- Harvested PHASE.md from ${resolved.path} (source=${resolved.source}) ---`,
+              );
+            }
+            writePhaseDoc(project.rootPath, phase.id, resolved.doc);
+          }
+          phaseDocWritten = true;
+        }
+      } else {
+        if (resolved.source === "tool_write" && resolved.path) {
+          log(
+            project,
+            run,
+            `--- Harvested PHASE.md from ${resolved.path} (source=${resolved.source}) ---`,
+          );
+        }
+        writePhaseDoc(project.rootPath, phase.id, resolved.doc);
+        phaseDocWritten = true;
       }
-      writePhaseDoc(project.rootPath, phase.id, resolved.doc);
     }
 
     const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
@@ -1735,6 +2087,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         run,
         `PHASE.md still invalid after scaffold:\n${gate.issues.join("\n")}`,
       );
+      if (researchLooksSolid(research)) {
+        return recoverableDraftFail(gate.issues.join("; "));
+      }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
       return "failed";
     }
@@ -1744,6 +2099,22 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         run,
         `PHASE.md still misaligned with RESEARCH after scaffold:\n${align.issues.join("\n")}`,
       );
+      if (researchLooksSolid(research)) {
+        return recoverableDraftFail(align.issues.join("; "));
+      }
+      writePhaseStatus(project.rootPath, phase.id, "blocked");
+      return "failed";
+    }
+    const intentAlign = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
+    if (!intentAlign.ok) {
+      log(
+        project,
+        run,
+        `PHASE.md misaligned with Change Intent uiMount=${intent.uiMount}:\n${intentAlign.issues.join("\n")}`,
+      );
+      if (researchLooksSolid(research)) {
+        return recoverableDraftFail(intentAlign.issues.join("; "));
+      }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
       return "failed";
     }
@@ -1775,6 +2146,22 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         writePhaseStatus(project.rootPath, phase.id, "in_review");
         return "in_review";
       }
+      const intent = await ensureChangeIntentAsync(
+        project.rootPath,
+        phase.id,
+        phase.description,
+        { registry: this.ctx.registry },
+      );
+      const intentAlign = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
+      if (!intentAlign.ok) {
+        log(
+          project,
+          run,
+          `--- Cannot approve: PHASE.md misaligned with Change Intent ---\n${intentAlign.issues.map((i) => `- ${i}`).join("\n")}`,
+        );
+        writePhaseStatus(project.rootPath, phase.id, "in_review");
+        return "in_review";
+      }
       writePhaseStatus(project.rootPath, phase.id, "accepted");
       mergePhaseIntoBlueprint(
         project.rootPath,
@@ -1796,13 +2183,46 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     log(project, run, `--- Review feedback ---\n${feedback ?? ""}`);
     const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
     const research = readResearch(project.rootPath, phase.id);
+    const intent = await ensureChangeIntentAsync(
+      project.rootPath,
+      phase.id,
+      phase.description,
+      { registry: this.ctx.registry },
+    );
+    const intentBlock = formatChangeIntentPromptBlock(intent);
+    const brandAsk = isBrandThemingAsk(
+      `${intent.title}\n${intent.goal}\n${phase.description}`,
+    );
+    const designRoutingNote =
+      intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
+        ? brandAsk
+          ? `
+Design routing (brand/theming ask — override backend mislabel):
+- Keep or add \`Requires design pass: yes\` near the top of PHASE.md.
+- Include ## Brand and ## Assets; do not drop them on revise.
+`
+          : `
+Design routing (Change Intent changeKind=${intent.changeKind}):
+- Keep or add \`Requires design pass: no\` near the top of PHASE.md.
+- Do NOT add ## Brand or ## Assets unless the operator feedback explicitly asks for a visual/brand change.
+- Behaviour/state tables belong under Scope / Success Criteria — not as design-asset briefs.
+`
+        : brandAsk
+          ? `
+Design routing (brand/theming):
+- Keep \`Requires design pass: yes\` and ## Brand / ## Assets.
+- Automated Checks must reject design-fallback SVGs under public/brand/.
+`
+          : "";
     const prompt = `Revise PHASE.md based on this feedback:\n${feedback ?? ""}
 
-Return the full revised PHASE.md content starting with # (document only, no chat).
+${intentBlock}
+${designRoutingNote}Return the full revised PHASE.md content starting with # (document only, no chat).
 If you use write_file, write ONLY to ${canonicalPath}.
 Include "## Blueprint Deltas" for durable design changes.
 Keep ## Automated Checks with a \`\`\`bash fence.
 Keep Scope/File Changes aligned with RESEARCH for this phase — do not substitute a prior phase's plan.
+Obey Change Intent uiMount / interaction — do not replace fillable mounts with chips only.
 When finished, include PHASE_COMPLETE on its own line.
 
 Current phase doc:
@@ -2018,6 +2438,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       project.name;
 
     const generatedPaths: string[] = [];
+    const logoBlockers: string[] = [];
     for (const brief of briefs) {
       if (signal?.aborted) break;
       const phaseOut = join(
@@ -2027,6 +2448,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       const wtOut = join(worktree.path, assetDirRel, brief.filename);
       mkdirSync(dirname(wtOut), { recursive: true });
 
+      const logoFailClosed = isLogoAssetBrief(brief);
       const result = await designTool.generateImage({
         prompt: brief.prompt,
         outPath: phaseOut,
@@ -2034,7 +2456,19 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         modelId: imageBinding?.modelId,
         brandName,
         palette,
+        logoFailClosed,
       });
+
+      if (result.reason === "logo_requires_designImage") {
+        logoBlockers.push(brief.name);
+        log(
+          project,
+          run,
+          `--- Asset ${brief.name}: BLOCKED (logo requires designImage — bind openai-images endpoint, e.g. pull x/flux2-klein; do not accept svg_fallback) ---`,
+        );
+        continue;
+      }
+
       generatedPaths.push(result.path);
       const wtTarget =
         result.format === "svg"
@@ -2057,27 +2491,52 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       );
     }
 
+    if (logoBlockers.length > 0) {
+      const msg = `Design cannot complete: logo/mark asset(s) [${logoBlockers.join(", ")}] require a bound designImage role (openai-images). Pull e.g. x/flux2-klein, add ollama-image endpoint, bind roles.designImage. svg_fallback is not accepted for logos.`;
+      log(project, run, `ERROR: ${msg}`);
+      appendAppendix(
+        project.rootPath,
+        phase.id,
+        `## Design blocked — designImage required\n\n${msg}\n`,
+      );
+      writePhaseStatus(project.rootPath, phase.id, "accepted");
+      return {
+        stage: "failed",
+        worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+      };
+    }
+
     const vision = this.ctx.registry.tryResolveDesignVision(config.roleBindings);
     if (vision && generatedPaths.length > 0 && !signal?.aborted) {
-      try {
-        const critique = await chatWithImages({
-          endpoint: vision.endpoint,
-          modelId: vision.modelId,
-          imagePaths: generatedPaths.slice(0, 3),
-          prompt: `Critique these design assets against the brief. Be concise (bullet points).\n\nBrief:\n${clipPromptSection("UI-SPEC", uiSpec, 2_000)}`,
-        });
-        appendAppendix(
-          project.rootPath,
-          phase.id,
-          `## Design vision review\n\n${critique.text}\n`,
-        );
-        log(project, run, "--- Design vision review appended to APPENDIX ---");
-      } catch (error) {
+      const rasterPaths = filterRasterVisionPaths(generatedPaths.slice(0, 3));
+      if (rasterPaths.length === 0) {
         log(
           project,
           run,
-          `--- Design vision review skipped: ${error instanceof Error ? error.message : String(error)} ---`,
+          "--- Design vision review skipped (SVG-only assets; providers reject image/svg+xml) ---",
         );
+      } else {
+        try {
+          const critique = await chatWithImages({
+            endpoint: vision.endpoint,
+            modelId: vision.modelId,
+            imagePaths: rasterPaths,
+            prompt: `Critique these design assets against the brief. Be concise (bullet points).\n\nBrief:\n${clipPromptSection("UI-SPEC", uiSpec, 2_000)}`,
+          });
+          appendAppendix(
+            project.rootPath,
+            phase.id,
+            `## Design vision review\n\n${critique.text}\n`,
+          );
+          log(project, run, "--- Design vision review appended to APPENDIX ---");
+        } catch (error) {
+          log(
+            project,
+            run,
+            `--- Design vision review skipped: ${error instanceof Error ? error.message : String(error)} ---`,
+          );
+        }
       }
     } else if (!vision) {
       log(
@@ -2167,10 +2626,25 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         worktreePath: worktree.path,
         env: { ...projectEnv.env, ...llm.env },
       });
+      const snap = snapshotCanonicalRuntimeEnv(project.rootPath);
+      log(
+        project,
+        run,
+        `--- Canonical runtime snapshot: DB_PORT=${snap.dbPort} ports=[${snap.publishedPorts.join(",")}] ---`,
+      );
+      const isolation = applyWorktreeComposeIsolation({
+        worktreePath: worktree.path,
+        phaseId: phase.id,
+      });
       log(
         project,
         run,
         `--- Wrote ${written} (${Object.keys(projectEnv.env).length}+ LLM keys) for worktree/CI parity ---`,
+      );
+      log(
+        project,
+        run,
+        `--- Worktree compose isolation: COMPOSE_PROJECT_NAME=${isolation.projectName} DB_PORT=${isolation.dbPort} ---`,
       );
     }
     const codingTool = getCodingToolForProject({
@@ -2210,9 +2684,16 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
 
     const blueprint = readBlueprint(project.rootPath);
     let phaseDoc = readPhaseDoc(project.rootPath, phase.id);
-    // Prefer PHASE.md; keep blueprint excerpt small to reduce tool-wander.
+    const intent = await ensureChangeIntentAsync(
+      project.rootPath,
+      phase.id,
+      phase.description,
+      { registry: this.ctx.registry },
+    );
+    const intentBlock = formatChangeIntentPromptBlock(intent);
+    // Prefer Live decisions; keep blueprint excerpt small to reduce tool-wander.
     const blueprintExcerpt = blueprint.trim()
-      ? blueprint.trim().slice(0, 4000)
+      ? clipBlueprintForPrompt(blueprint, 4_000)
       : "";
     const learningsBlock = loadLearningsPromptBlock(project.rootPath, {
       phaseDescription: phase.description,
@@ -2237,13 +2718,15 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     const contextSystem = [
       `You are editing a git worktree at ${worktree.path} on branch ${worktree.branch}.`,
       `Project artifacts live in the main tree at ${project.rootPath}/.slopcontrol — follow them.`,
+      intentBlock,
       phaseDoc.trim() ? `PHASE.md\n\n${phaseDoc}` : null,
       designContext.trim() ? designContext : null,
       blueprintExcerpt
-        ? `BLUEPRINT.md (excerpt)\n\n${blueprintExcerpt}`
+        ? `BLUEPRINT.md (excerpt — prefer Live decisions)\n\n${blueprintExcerpt}`
         : null,
       learningsBlock.trim() ? learningsBlock : null,
       "Infra failures (ECONNREFUSED / unreachable runtime services) are NOT app bugs — do not invent bring-up scripts; stop and report.",
+      "Obey Change Intent uiMount: do not move interactive forms away from the locked mount; do not replace fillable UI with chips only.",
     ]
       .filter(Boolean)
       .join("\n\n---\n\n");
@@ -2298,6 +2781,19 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
           runId: run.id,
           handoff,
         });
+        // Promote UX/placement knowledge into durable learnings for next research
+        for (const k of handoff.knowledge ?? []) {
+          if (!isUxPlacementKnowledge(k)) continue;
+          promoteLearning(project.rootPath, {
+            kind: "process",
+            tags: ["ux-placement", "ui-mount"],
+            title: k.slice(0, 120),
+            lesson: k,
+            severity: "warning",
+            sourcePhaseId: phase.id,
+            sourceRunId: run.id,
+          });
+        }
         log(
           project,
           run,
@@ -2382,6 +2878,23 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
             `--- Re-synced into worktree: ${[...resynced, written, ...phaseResynced].filter(Boolean).join(", ")} (${Object.keys(resolvedEnv).length} keys) ---`,
           );
         }
+        const isolation = applyWorktreeComposeIsolation({
+          worktreePath: worktree.path,
+          phaseId: phase.id,
+        });
+        if (!loadCanonicalRuntimeEnv(project.rootPath)) {
+          const snap = snapshotCanonicalRuntimeEnv(project.rootPath);
+          log(
+            project,
+            run,
+            `--- Canonical runtime snapshot (late): DB_PORT=${snap.dbPort} ---`,
+          );
+        }
+        log(
+          project,
+          run,
+          `--- Worktree compose isolation: COMPOSE_PROJECT_NAME=${isolation.projectName} DB_PORT=${isolation.dbPort} ---`,
+        );
 
         if (needsFreshSession) {
           log(project, run, "--- Recreating OpenCode session after abort/fetch failure ---");
@@ -2777,6 +3290,14 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
                 summary: buildCheckSummary(false, [...(checks.steps ?? []), mergeFail], mergeFail),
               };
             } else {
+              const healed = restoreCanonicalRuntimeEnv(project.rootPath);
+              if (healed.restored.length > 0 || healed.created) {
+                log(
+                  project,
+                  run,
+                  `--- Restored canonical runtime env (DB_PORT=${healed.dbPort}): ${healed.restored.join(", ") || "(snapshot refreshed)"} ---`,
+                );
+              }
               pushedEnv = syncLocalFilesFromWorktree({
                 projectRoot: project.rootPath,
                 worktreePath: worktree.path,
@@ -2787,6 +3308,17 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
                   project,
                   run,
                   `--- Pushed worktree env to project root: ${pushedEnv.join(", ")} ---`,
+                );
+              }
+              // Sync may re-touch env files — force canonical ports again before verify
+              const healedAfterSync = restoreCanonicalRuntimeEnv(
+                project.rootPath,
+              );
+              if (healedAfterSync.restored.length > 0) {
+                log(
+                  project,
+                  run,
+                  `--- Re-applied canonical runtime env after sync: ${healedAfterSync.restored.join(", ")} ---`,
                 );
               }
               const ignoredSync = syncIgnoredArtifactsFromWorktree({
@@ -2809,6 +3341,53 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
                   project,
                   run,
                   `--- Synced gitignored worktree artifacts to root: ${bits.join("; ")} ---`,
+                );
+              }
+              log(
+                project,
+                run,
+                `--- Freeing worktree compose ports before root verify ---`,
+              );
+              const allWtDown = tearDownAllProjectWorktreeCompose({
+                dataDir: this.ctx.dataDir,
+                projectId: project.id,
+              });
+              if (allWtDown.attempted) {
+                log(
+                  project,
+                  run,
+                  `--- All project worktree compose down (${allWtDown.ok ? "ok" : "warn"}) ---\n${allWtDown.output.slice(0, 1200)}`,
+                );
+              } else {
+                const single = tearDownComposeInDir(worktree.path);
+                if (single.attempted) {
+                  log(
+                    project,
+                    run,
+                    `--- Worktree compose down (${single.ok ? "ok" : "warn"}) ---\n${single.output.slice(0, 800)}`,
+                  );
+                }
+              }
+              const stoppedOrphans = stopComposeContainersUnderWorktrees({
+                dataDir: this.ctx.dataDir,
+                projectId: project.id,
+              });
+              if (stoppedOrphans.attempted) {
+                log(
+                  project,
+                  run,
+                  `--- Stopped worktree-path compose containers (${stoppedOrphans.ok ? "ok" : "warn"}) ---\n${stoppedOrphans.output.slice(0, 800)}`,
+                );
+              }
+              const freed = freePublishedHostPorts(project.rootPath, {
+                dataDir: this.ctx.dataDir,
+                projectId: project.id,
+              });
+              if (freed.attempted) {
+                log(
+                  project,
+                  run,
+                  `--- Freed published DB host ports (${freed.ok ? "ok" : "warn"}) ---\n${freed.output.slice(0, 800)}`,
                 );
               }
               log(
@@ -2992,6 +3571,7 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
           }
           log(project, run, COMPLETION_TOKENS.DEV_COMPLETE);
           writePhaseStatus(project.rootPath, phase.id, "complete");
+          clearRunDiagnosis(project.rootPath, run.id, phase.id);
           upsertRoadmapEntry(
             project.rootPath,
             phase.id,

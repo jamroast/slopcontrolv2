@@ -76,18 +76,71 @@ export type HarvestedOperatorHandoff = {
   found: boolean;
 };
 
-/** Extract bullet lines from a markdown subsection body. */
+/** Extract bullet / numbered-list lines from a markdown subsection body. */
 export function extractBulletLines(sectionBody: string | null): string[] {
   if (!sectionBody?.trim()) return [];
   const out: string[] = [];
   for (const line of sectionBody.split("\n")) {
-    const m = /^\s*[-*+]\s+(.+)$/.exec(line);
+    const m =
+      /^\s*[-*+]\s+(.+)$/.exec(line) ??
+      /^\s*\d+[.)]\s+(.+)$/.exec(line);
     if (!m?.[1]) continue;
     const text = m[1].trim();
     if (!text || /^none\.?$/i.test(text)) continue;
     out.push(text);
   }
   return out;
+}
+
+/**
+ * Parse PHASE ## Success Criteria items (bullets or numbered lists).
+ * Prefers the bold title on a numbered criterion when present.
+ */
+export function extractSuccessCriteriaBullets(phaseDoc: string): string[] {
+  const body = extractSection(phaseDoc, "Success Criteria");
+  if (!body?.trim()) return [];
+
+  const items: string[] = [];
+  const lines = body.split("\n");
+  let current: string[] = [];
+
+  const flush = () => {
+    if (current.length === 0) return;
+    const joined = current.join(" ").replace(/\s+/g, " ").trim();
+    current = [];
+    if (!joined || /^none\.?$/i.test(joined)) return;
+    // Prefer "**Title**" lead-in when authors use numbered bold headings
+    const bold = /^\*\*(.+?)\*\*/.exec(joined);
+    if (bold?.[1] && bold[1].length >= 8) {
+      items.push(bold[1].trim());
+      return;
+    }
+    items.push(joined.slice(0, 240));
+  };
+
+  for (const line of lines) {
+    const bullet =
+      /^\s*[-*+]\s+(.+)$/.exec(line) ?? /^\s*\d+[.)]\s+(.+)$/.exec(line);
+    if (bullet?.[1]) {
+      flush();
+      current = [bullet[1].trim()];
+      continue;
+    }
+    // Continuation under a numbered/bulleted item (indented or bare prose)
+    if (current.length > 0 && line.trim() && !/^#{1,3}\s/.test(line)) {
+      // Skip fenced code / pure command-only continuations for the handoff title
+      if (/^```/.test(line.trim())) continue;
+      if (/^`[^`]+`$/.test(line.trim())) continue;
+      continue;
+    }
+  }
+  flush();
+
+  // Fallback: flat bullet extract if block parser found nothing
+  if (items.length === 0) {
+    return extractBulletLines(body);
+  }
+  return items;
 }
 
 /**
@@ -147,12 +200,6 @@ function extractSubsection(
   }
   const body = lines.slice(start, end).join("\n").trim();
   return body || null;
-}
-
-/** Parse PHASE ## Success Criteria bullets. */
-export function extractSuccessCriteriaBullets(phaseDoc: string): string[] {
-  const body = extractSection(phaseDoc, "Success Criteria");
-  return extractBulletLines(body);
 }
 
 export function buildRequirementsFromPhase(
@@ -317,7 +364,7 @@ export function buildDevelopmentHandoff(
   if (input.outcome === "complete") {
     summary = `Phase ${input.phaseId} development completed successfully.`;
     if (operatorRequirements.length > 0) {
-      summary += ` ${operatorRequirements.length} operator requirement(s) need attention.`;
+      summary += ` ${operatorRequirements.length} follow-up note(s) recorded for the operator.`;
     }
   } else if (input.outcome === "blocked") {
     summary = `Phase ${input.phaseId} development blocked${

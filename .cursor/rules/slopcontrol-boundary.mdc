@@ -1,0 +1,19 @@
+---
+description: When developing SlopControl, do not edit managed project trees
+alwaysApply: true
+---
+
+# SlopControl development boundary
+
+When the task is **developing or fixing SlopControl** (this repo: `slopconrolV2`):
+
+- **Only edit** paths under `slopconrolV2/` (and SlopControl Cursor rules/skills).
+- **Do not** create, edit, or delete files in managed project trees such as:
+  - `basic-web-agent/` (JamPress)
+  - `light-weight-crm-and-invoicing/`
+  - any other app registered as a SlopControl project
+- That ban includes managed projects' `.slopcontrol/` artifacts, `src/`, tests, env, and Docker files.
+- Fixes for managed projects must go through **SlopControl runs** (`ask` → promote → research → develop → verify), not hand patches.
+- Use **fixtures** under `slopconrolV2/packages/artifacts/fixtures/` for Intent / Blueprint reconcile / UI-gate smoke tests.
+- Read-only inspection of a managed project is allowed when diagnosing SlopControl behaviour.
+- **Exception:** the operator explicitly asks to edit a named managed project directly (e.g. “hotfix JamPress”).

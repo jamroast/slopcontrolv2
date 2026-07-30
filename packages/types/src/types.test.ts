@@ -66,6 +66,29 @@ describe("@slopcontrol/types", () => {
     });
     assert.equal(develop.action, "start_development");
     assert.equal(develop.autoDesign, true);
+
+    const preview = RunActionSchema.parse({
+      action: "preview_change_intent",
+      projectId: "proj-1",
+      description: 'Unable to submit — stuck at "Superseded by a newer form"',
+      checkPhaseDoc: true,
+      phaseId: "55-phase",
+    });
+    assert.equal(preview.action, "preview_change_intent");
+
+    const reconcile = RunActionSchema.parse({
+      action: "reconcile_blueprint",
+      projectId: "proj-1",
+      dryRun: true,
+    });
+    assert.equal(reconcile.action, "reconcile_blueprint");
+
+    const audit = RunActionSchema.parse({
+      action: "audit_ui_gates",
+      projectId: "proj-1",
+      phaseId: "55-phase",
+    });
+    assert.equal(audit.action, "audit_ui_gates");
   });
 
   it("validates AskSession schema", async () => {

@@ -1,0 +1,17 @@
+{
+  "title": "Make composer form fillable",
+  "goal": "Unable to submit the form — fix fill and submit at the composer",
+  "uiMount": "composer",
+  "refinementOf": [],
+  "supersedes": ["BD-IN-BUBBLE-FORMS"],
+  "mustNot": [
+    "do not move the interactive form back into the assistant speech bubble only"
+  ],
+  "rawDescription": "Unable to submit the form — stuck at superseded. Fix so I can fill and submit in the composer.",
+  "interaction": {
+    "mount": "composer",
+    "primaryAction": "submit form",
+    "proof": ["data-testid=composer-form", "enabled input", "submit control"],
+    "forbiddenSubstitutes": ["summary-chip-only"]
+  }
+}

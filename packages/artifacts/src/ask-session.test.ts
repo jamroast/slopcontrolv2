@@ -58,17 +58,22 @@ More chatter.`,
     assert.match(brief!, /Persist tokens/);
   });
 
-  it("buildAskTaskDescription prefers override then Task brief", () => {
+  it("buildAskTaskDescription prefers override then operator request over Task brief", () => {
     const now = "2026-01-01T00:00:00.000Z";
     const ask: AskSession = {
       id: "ask-1",
       projectId: "proj-1",
       status: "open",
       messages: [
-        { role: "user", content: "Add dark mode", at: now },
+        {
+          role: "user",
+          content: "Move the form into the chat prompt / composer",
+          at: now,
+        },
         {
           role: "assistant",
-          content: "## Task brief\n- Title: Dark mode toggle\n- Goal: Theme switch\n",
+          content:
+            "## Task brief\n- Title: Dark mode toggle\n- Goal: Theme switch\n- Likely areas: form-bubble.tsx\n",
           at: now,
         },
       ],
@@ -79,9 +84,11 @@ More chatter.`,
       buildAskTaskDescription(ask, { descriptionOverride: "Custom brief" }),
       "Custom brief",
     );
-    const fromBrief = buildAskTaskDescription(ask);
-    assert.match(fromBrief, /Dark mode toggle/);
-    assert.match(fromBrief, /Ask conversation context/);
+    const fromAsk = buildAskTaskDescription(ask);
+    assert.match(fromAsk, /Operator request/);
+    assert.match(fromAsk, /chat prompt \/ composer/);
+    assert.match(fromAsk, /Proposed approach \(non-binding/);
+    assert.match(fromAsk, /Dark mode toggle/);
   });
 
   it("falls back to first user message when no Task brief", () => {

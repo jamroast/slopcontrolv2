@@ -26,6 +26,19 @@ function mimeForPath(path: string): string {
   return "image/jpeg";
 }
 
+/** Raster formats providers typically accept as vision image_url inputs. */
+export function isRasterVisionPath(path: string): boolean {
+  return /\.(png|jpe?g|webp|gif)$/i.test(path);
+}
+
+/**
+ * Drop SVG (and other non-raster) paths — many OpenAI-compat hosts return
+ * 400 invalid image input for image/svg+xml.
+ */
+export function filterRasterVisionPaths(paths: string[]): string[] {
+  return paths.filter(isRasterVisionPath);
+}
+
 /**
  * OpenAI-compatible chat with image attachments.
  * Hard-fails unless `endpoint.capabilities.vision` is true.
@@ -45,7 +58,14 @@ export async function chatWithImages(
     | { type: "image_url"; image_url: { url: string } }
   > = [{ type: "text", text: opts.prompt }];
 
-  for (const imagePath of opts.imagePaths) {
+  const rasterPaths = filterRasterVisionPaths(opts.imagePaths);
+  if (rasterPaths.length === 0) {
+    throw new Error(
+      "No raster vision images (png/jpeg/webp/gif); SVG-only inputs are skipped",
+    );
+  }
+
+  for (const imagePath of rasterPaths) {
     const bytes = readFileSync(imagePath);
     const b64 = bytes.toString("base64");
     const mime = mimeForPath(imagePath);

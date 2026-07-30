@@ -237,4 +237,6 @@ export class LlmRegistry {
 }
 
 export * from "./vision-chat.js";
+export * from "./json-chat.js";
+export * from "./intent-extract.js";
 export * from "@slopcontrol/types";

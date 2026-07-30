@@ -14,6 +14,17 @@ import type {
   Run,
 } from "@slopcontrol/types";
 
+/** Single-line title for asks (pasted errors often contain newlines). */
+export function sanitizeAskTitle(
+  raw: string | undefined,
+  maxLen = 80,
+): string | undefined {
+  if (!raw) return undefined;
+  const one = raw.replace(/\s+/g, " ").trim();
+  if (!one) return undefined;
+  return one.length <= maxLen ? one : one.slice(0, maxLen).trim();
+}
+
 export interface SlopStoreData {
   projects: Project[];
   phases: Phase[];
@@ -178,7 +189,18 @@ export class SlopStore {
   listAsks(projectId: string): AskSession[] {
     return this.data.asks
       .filter((ask) => ask.projectId === projectId)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      .sort((a, b) => {
+        const byUpdated = b.updatedAt.localeCompare(a.updatedAt);
+        if (byUpdated !== 0) return byUpdated;
+        return b.createdAt.localeCompare(a.createdAt);
+      });
+  }
+
+  /** Most recently created open ask for a project (sticky resume target). */
+  latestOpenAsk(projectId: string): AskSession | undefined {
+    return this.data.asks
+      .filter((ask) => ask.projectId === projectId && ask.status === "open")
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   }
 
   getAsk(id: string): AskSession | undefined {
@@ -192,10 +214,14 @@ export class SlopStore {
   }): AskSession {
     const now = new Date().toISOString();
     const messages = input.firstMessage ? [input.firstMessage] : [];
+    const fromMsg =
+      input.firstMessage?.role === "user"
+        ? sanitizeAskTitle(input.firstMessage.content)
+        : undefined;
     const ask: AskSession = {
       id: randomUUID(),
       projectId: input.projectId,
-      title: input.title?.trim() || undefined,
+      title: sanitizeAskTitle(input.title) || fromMsg,
       status: "open",
       messages,
       createdAt: now,
@@ -212,7 +238,7 @@ export class SlopStore {
     ask.messages = [...ask.messages, message];
     ask.updatedAt = new Date().toISOString();
     if (!ask.title && message.role === "user") {
-      ask.title = message.content.trim().slice(0, 80);
+      ask.title = sanitizeAskTitle(message.content);
     }
     this.updateAsk(ask);
     return ask;
@@ -235,6 +261,50 @@ export class SlopStore {
     ask.updatedAt = new Date().toISOString();
     this.updateAsk(ask);
     return ask;
+  }
+
+  /**
+   * Clone an ask into a new open session so chat can continue after promote
+   * without losing transcript context.
+   */
+  forkAsk(
+    askId: string,
+    opts?: { title?: string },
+  ): AskSession | undefined {
+    const source = this.getAsk(askId);
+    if (!source) return undefined;
+    const now = new Date().toISOString();
+    const forked: AskSession = {
+      id: randomUUID(),
+      projectId: source.projectId,
+      title:
+        sanitizeAskTitle(opts?.title) ||
+        sanitizeAskTitle(
+          source.title ? `${source.title} (continued)` : undefined,
+        ) ||
+        sanitizeAskTitle("Continued ask"),
+      status: "open",
+      messages: source.messages.map((m) => ({ ...m })),
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.data.asks.push(forked);
+    this.save();
+    return forked;
+  }
+
+  /** Mark project asks archived instead of deleting (reinit / phase-zero). */
+  archiveProjectAsks(projectId: string): number {
+    let n = 0;
+    for (const ask of this.data.asks) {
+      if (ask.projectId !== projectId) continue;
+      if (ask.status === "archived") continue;
+      ask.status = "archived" satisfies AskStatus;
+      ask.updatedAt = new Date().toISOString();
+      n += 1;
+    }
+    if (n > 0) this.save();
+    return n;
   }
 
   listAgents(projectId: string): AgentSession[] {
@@ -292,26 +362,27 @@ export class SlopStore {
     }
   }
 
-  /** Remove all phases, runs, asks, and agents for a project (phase-zero store reset). */
+  /** Remove phases/runs/agents; archive asks (keep history for list_asks / fork). */
   clearProjectWork(projectId: string): {
     phasesRemoved: number;
     runsRemoved: number;
     asksRemoved: number;
+    asksArchived: number;
     agentsRemoved: number;
   } {
     const phasesBefore = this.data.phases.length;
     const runsBefore = this.data.runs.length;
-    const asksBefore = this.data.asks.length;
     const agentsBefore = this.data.agents.length;
     this.data.phases = this.data.phases.filter((p) => p.projectId !== projectId);
     this.data.runs = this.data.runs.filter((r) => r.projectId !== projectId);
-    this.data.asks = this.data.asks.filter((a) => a.projectId !== projectId);
     this.data.agents = this.data.agents.filter((a) => a.projectId !== projectId);
+    const asksArchived = this.archiveProjectAsks(projectId);
     this.save();
     return {
       phasesRemoved: phasesBefore - this.data.phases.length,
       runsRemoved: runsBefore - this.data.runs.length,
-      asksRemoved: asksBefore - this.data.asks.length,
+      asksRemoved: 0,
+      asksArchived,
       agentsRemoved: agentsBefore - this.data.agents.length,
     };
   }
@@ -339,6 +410,10 @@ export class SlopStore {
       };
     }
     const cleared = this.clearProjectWork(projectId);
+    // Full unregister: drop archived asks for this project too
+    const asksBefore = this.data.asks.length;
+    this.data.asks = this.data.asks.filter((a) => a.projectId !== projectId);
+    const asksRemoved = asksBefore - this.data.asks.length;
     this.data.projects = this.data.projects.filter((p) => p.id !== projectId);
     this.save();
     return {
@@ -346,7 +421,7 @@ export class SlopStore {
       project,
       phasesRemoved: cleared.phasesRemoved,
       runsRemoved: cleared.runsRemoved,
-      asksRemoved: cleared.asksRemoved,
+      asksRemoved,
       agentsRemoved: cleared.agentsRemoved,
     };
   }

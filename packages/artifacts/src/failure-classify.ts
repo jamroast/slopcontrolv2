@@ -351,6 +351,88 @@ export function classifyVerifyFailure(
     );
   }
 
+  // Worktree isolation port leaked into root verify (expected product port vs 55xx)
+  {
+    const expectedMatch = stepCtx.match(
+      /(?:Expected|to be|toEqual)[:\s]*["'`]?[^"'`\n]*:(\d{2,5})\b/i,
+    );
+    const receivedMatch = stepCtx.match(
+      /(?:Received|got)[:\s]*["'`]?[^"'`\n]*:(\d{2,5})\b/i,
+    );
+    const expectedPort = expectedMatch ? Number(expectedMatch[1]) : NaN;
+    const receivedPort = receivedMatch ? Number(receivedMatch[1]) : NaN;
+    const isolationSkew =
+      Number.isFinite(expectedPort) &&
+      Number.isFinite(receivedPort) &&
+      expectedPort > 0 &&
+      receivedPort >= 5500 &&
+      receivedPort <= 5599 &&
+      expectedPort !== receivedPort &&
+      /localhost|postgres|database_url|db_port|jamlite/i.test(stepCtx);
+    const isolationHint =
+      /DB_PORT=55\d{2}|localhost:55\d{2}|COMPOSE_PROJECT_NAME=slopwt-/i.test(
+        stepCtx,
+      ) &&
+      /AssertionError|expected .* to (?:be|equal|match)|localhost:54\d{2}/i.test(
+        stepCtx,
+      );
+    if (isolationSkew || isolationHint) {
+      return build(
+        "process",
+        "high",
+        "Worktree DB port isolation leaked into root verify",
+        ["process", "env-isolation", "db-port", "slopcontrol"],
+        {
+          codingAgentShouldFix: false,
+          lesson:
+            "Root verify saw a worktree isolation host port (5500–5599) while product tests assert the canonical published port. This is a SlopControl env-isolation leak — restore canonical runtime env / scrub isolation keys and retry_development. Do not hardcode the isolation port into product code or weaken port contract tests.",
+          evidence: stepCtx.slice(-800),
+          opts,
+          severity: "blocker",
+          operatorActions: [
+            "Retry development after SlopControl restores canonical DB_PORT from `.slopcontrol/canonical-runtime-env.json` (or restart the SlopControl server with the isolation-heal build).",
+            "Do not change product tests to expect ports in 5500–5599.",
+          ],
+        },
+      );
+    }
+  }
+
+  // Host port already bound (often leftover worktree compose) — operator infra, not app code
+  if (
+    /port is already allocated|bind for 0\.0\.0\.0:\d+ failed|address already in use|eaddrinuse/i.test(
+      stepCtx,
+    )
+  ) {
+    const portMatch = stepCtx.match(
+      /(?:0\.0\.0\.0:|bind.*?:|port\s+)(\d{2,5})/i,
+    );
+    const port = portMatch?.[1];
+    return build(
+      "infra",
+      "high",
+      port
+        ? `Host port ${port} already allocated (Docker/bind conflict)`
+        : "Host port already allocated (Docker/bind conflict)",
+      ["infra", "docker", "port-conflict", ...inferServiceTags(lower)],
+      {
+        codingAgentShouldFix: false,
+        lesson:
+          "docker compose (or another process) could not bind a published host port because it is already allocated — often a leftover phase worktree compose stack. Free the port (docker compose down in the worktree / stop the holding container), then retry_development. Do not change the product DB port or rewrite Automated Checks to paper over the conflict.",
+        evidence: stepCtx.slice(-800),
+        opts,
+        severity: "blocker",
+        operatorActions: [
+          port
+            ? `Identify what holds host port ${port} (\`lsof -nP -iTCP:${port} -sTCP:LISTEN\` or \`docker ps\`).`
+            : "Identify the process/container holding the published host port (`lsof` / `docker ps`).",
+          "Tear down leftover phase worktree compose (`docker compose down` in that worktree) or stop the conflicting container.",
+          "Confirm the port is free, then call retry_development (do not change the app's published port).",
+        ],
+      },
+    );
+  }
+
   // Generic infra
   const infraHit =
     /econnrefused|enotfound|ehostunreach|etimedout|connection refused|could not connect|connect econnrefused|no such host|docker.*(?:daemon|not running|cannot connect)|compose.*(?:not running|exited)|waiting for .*?(?:ready|healthy)|port \d+.*(refused|unreachable)/i.test(

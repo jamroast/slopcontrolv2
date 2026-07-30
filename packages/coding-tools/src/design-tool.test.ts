@@ -43,6 +43,26 @@ describe("DesignTool", () => {
     }
   });
 
+  it("logoFailClosed does not write svg_fallback without designImage", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-logo-fail-"));
+    try {
+      const tool = new OllamaImagesDesignTool();
+      const outPath = join(dir, "logo.png");
+      const result = await tool.generateImage({
+        prompt: "Jam Light wordmark logo",
+        outPath,
+        brandName: "Jam Light",
+        logoFailClosed: true,
+      });
+      assert.equal(result.reason, "logo_requires_designImage");
+      assert.equal(result.bytes, 0);
+      assert.equal(existsSync(outPath), false);
+      assert.equal(existsSync(outPath.replace(/\.png$/, ".svg")), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("getDesignTool returns ollama-images by default", () => {
     assert.equal(getDesignTool().id, "ollama-images");
     assert.equal(getDesignTool("ollama-images").id, "ollama-images");

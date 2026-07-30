@@ -14,6 +14,58 @@ export function defaultSlopcontrolServerUrl(): string {
   return `http://127.0.0.1:${process.env.SLOPCONTROL_PORT ?? 3020}`;
 }
 
+/**
+ * Put askId first in MCP text so clients reliably reuse it on the next turn.
+ */
+export function formatAskMcpEnvelope(body: string, ok: boolean): string {
+  try {
+    const parsed = JSON.parse(body) as {
+      ask?: { id?: string; status?: string; messages?: unknown[] };
+      askId?: string;
+      reply?: string;
+      error?: string;
+      hint?: string;
+      promotedPhaseId?: string;
+      forkedFrom?: string;
+    };
+    const askId = parsed.askId || parsed.ask?.id || "";
+    if (!ok) {
+      return [
+        askId ? `askId: ${askId}` : null,
+        parsed.error ? `error: ${parsed.error}` : `error: ${body.slice(0, 500)}`,
+        parsed.hint ? `hint: ${parsed.hint}` : null,
+        parsed.promotedPhaseId
+          ? `promotedPhaseId: ${parsed.promotedPhaseId}`
+          : null,
+        "---",
+        body,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    const status = parsed.ask?.status ?? "open";
+    const messageCount = Array.isArray(parsed.ask?.messages)
+      ? parsed.ask.messages.length
+      : undefined;
+    const reply =
+      typeof parsed.reply === "string"
+        ? parsed.reply
+        : body;
+    return [
+      `askId: ${askId}`,
+      `status: ${status}`,
+      messageCount !== undefined ? `messageCount: ${messageCount}` : null,
+      parsed.forkedFrom ? `forkedFrom: ${parsed.forkedFrom}` : null,
+      "---",
+      reply,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  } catch {
+    return body;
+  }
+}
+
 export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "open_project",
@@ -365,7 +417,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "ask",
       description:
-        "Project-scoped AI conversation (exploratory, read-only). Does not create a phase. Pass askId to continue an existing session. For several investigations use ask_sub_research. When the change is clear, call promote_ask to start research → design → develop. For shell inspect/verify without develop, use agent. For a direct new phase without chat, use start_change.",
+        "Project-scoped AI conversation (exploratory, read-only). Does not create a phase. Omitting askId continues the project's latest open ask (sticky resume). Pass askId to target a specific session. Pass newAsk=true to force a fresh conversation. Always reuse askId from the previous ask response. For several investigations use ask_sub_research. When the change is clear, call promote_ask. After promote, use fork_ask to keep chatting. For shell inspect/verify without develop, use agent.",
       inputSchema: {
         type: "object",
         properties: {
@@ -373,7 +425,13 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           message: { type: "string", description: "Operator question or follow-up" },
           askId: {
             type: "string",
-            description: "Existing ask session id (omit to start a new conversation)",
+            description:
+              "Existing ask session id. Prefer reusing the askId from the last ask response. If omitted, resumes the latest open ask for the project.",
+          },
+          newAsk: {
+            type: "boolean",
+            description:
+              "If true, always start a new open ask (ignore sticky resume). Default false.",
           },
           title: {
             type: "string",
@@ -385,7 +443,8 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     },
     {
       name: "list_asks",
-      description: "List ask conversations for a project (id, title, status, messageCount).",
+      description:
+        "List ask conversations for a project (id, title, status, messageCount). Prefer open asks for continue; promoted/archived are history — fork_ask to continue them.",
       inputSchema: {
         type: "object",
         properties: {
@@ -407,9 +466,26 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "fork_ask",
+      description:
+        "Clone an ask (usually promoted or archived) into a new open session with the same transcript so chat can continue after promote_ask.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          askId: { type: "string", description: "Source ask to fork" },
+          title: {
+            type: "string",
+            description: "Optional title for the forked open ask",
+          },
+        },
+        required: ["projectId", "askId"],
+      },
+    },
+    {
       name: "promote_ask",
       description:
-        "Turn an ask conversation into a phase and start research (same pipeline as start_change). Uses ## Task brief from the transcript when present, or an optional description override. After research completes, approve review then start_design / start_development as usual.",
+        "Turn an ask conversation into a phase and start research (same pipeline as start_change). Uses ## Task brief from the transcript when present, or an optional description override. After research completes, approve review then start_design / start_development as usual. The original ask becomes promoted (read-only); use fork_ask to keep chatting.",
       inputSchema: {
         type: "object",
         properties: {
@@ -488,6 +564,67 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           agentId: { type: "string" },
         },
         required: ["projectId", "agentId"],
+      },
+    },
+    {
+      name: "preview_change_intent",
+      description:
+        "Dry-run Change Intent extraction (uiMount, engagement inheritance, interaction contract). Optionally align against a phase PHASE.md. Does not write files.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          description: {
+            type: "string",
+            description: "Operator request text to score",
+          },
+          phaseId: {
+            type: "string",
+            description: "Optional phase for refinementOf exclude + PHASE align",
+          },
+          checkPhaseDoc: {
+            type: "boolean",
+            description: "When true, run phaseDocAlignsWithChangeIntent on PHASE.md",
+          },
+        },
+        required: ["projectId", "description"],
+      },
+    },
+    {
+      name: "reconcile_blueprint",
+      description:
+        "Reconcile BLUEPRINT.md (dedupe BDs, intent-aware mount GC, rebuild Live decisions). Defaults to dryRun=true (no write).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          phaseId: {
+            type: "string",
+            description: "Optional phase INTENT for mount preference",
+          },
+          dryRun: {
+            type: "boolean",
+            description: "Default true — set false to write BLUEPRINT.md",
+          },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "audit_ui_gates",
+      description:
+        "Operator smoke for UI engagement gates: Intent preview, PHASE alignment, dry-run Blueprint reconcile, pass/fail checks. Does not write files.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          description: {
+            type: "string",
+            description: "Optional operator text (else uses phase description)",
+          },
+          phaseId: { type: "string" },
+        },
+        required: ["projectId"],
       },
     },
   ];
@@ -951,12 +1088,13 @@ export function createSlopcontrolMcpServer(
               message: args.message,
               askId: args.askId,
               title: args.title,
+              newAsk: args.newAsk === true || args.newAsk === "true",
             }),
           },
         );
         const body = await res.text();
         return {
-          content: [{ type: "text", text: body }],
+          content: [{ type: "text", text: formatAskMcpEnvelope(body, res.ok) }],
           isError: !res.ok,
         };
       });
@@ -986,6 +1124,26 @@ export function createSlopcontrolMcpServer(
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "fork_ask") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const askId = String(args.askId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/asks/${encodeURIComponent(askId)}/fork`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: args.title }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: formatAskMcpEnvelope(body, res.ok) }],
           isError: !res.ok,
         };
       });
@@ -1080,6 +1238,42 @@ export function createSlopcontrolMcpServer(
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(agentId)}`,
         );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (
+      name === "preview_change_intent" ||
+      name === "reconcile_blueprint" ||
+      name === "audit_ui_gates"
+    ) {
+      return wrap(async () => {
+        const payload: Record<string, unknown> = {
+          action: name,
+          projectId: args.projectId,
+        };
+        if (typeof args.description === "string") {
+          payload.description = args.description;
+        }
+        if (typeof args.phaseId === "string") {
+          payload.phaseId = args.phaseId;
+        }
+        if (name === "preview_change_intent") {
+          payload.checkPhaseDoc = Boolean(args.checkPhaseDoc);
+        }
+        if (name === "reconcile_blueprint") {
+          payload.dryRun =
+            args.dryRun === undefined ? true : Boolean(args.dryRun);
+        }
+        const res = await fetch(`${SERVER_URL}/runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

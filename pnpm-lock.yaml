@@ -168,6 +168,9 @@ importers:
       '@ai-sdk/openai':
         specifier: ^4.0.16
         version: 4.0.16(zod@4.4.3)
+      '@slopcontrol/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
       '@slopcontrol/types':
         specifier: workspace:*
         version: link:../types

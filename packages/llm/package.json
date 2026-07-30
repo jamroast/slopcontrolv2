@@ -17,6 +17,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.16",
     "@ai-sdk/openai": "^4.0.16",
+    "@slopcontrol/artifacts": "workspace:*",
     "@slopcontrol/types": "workspace:*",
     "ai": "^7.0.29",
     "zod": "^4.4.3"

@@ -12,7 +12,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/**/*.test.ts"
+    "test": "node --import tsx --test src/**/*.test.ts",
+    "test:ui-gates": "node --import tsx --test src/change-intent.test.ts src/ui-gates.fixture.test.ts"
   },
   "dependencies": {
     "@slopcontrol/types": "workspace:*",

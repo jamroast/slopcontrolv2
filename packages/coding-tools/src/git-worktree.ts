@@ -234,6 +234,131 @@ export function isPaidToFreeEnvRegression(
   return rootPaid && wtFree;
 }
 
+function readEnvAssignment(body: string, key: string): string | undefined {
+  const m = body.match(new RegExp(`^${key}=(.*)$`, "m"));
+  return m?.[1]?.trim();
+}
+
+function upsertEnvAssignmentLocal(
+  body: string,
+  key: string,
+  value: string,
+): string {
+  const re = new RegExp(`^${key}=.*$`, "m");
+  const line = `${key}=${value}`;
+  if (re.test(body)) return body.replace(re, line);
+  const trimmed = body.replace(/\s*$/, "");
+  return trimmed ? `${trimmed}\n${line}\n` : `${line}\n`;
+}
+
+function stripEnvAssignmentLocal(body: string, key: string): string {
+  return body
+    .replace(new RegExp(`^${key}=.*\\r?\\n?`, "gm"), "")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+const WORKTREE_DB_PORT_MIN = 5500;
+const WORKTREE_DB_PORT_MAX = 5599;
+const DEFAULT_CANONICAL_DB_PORT = 5433;
+
+function isWorktreeIsolationPort(port: number): boolean {
+  return (
+    Number.isFinite(port) &&
+    port >= WORKTREE_DB_PORT_MIN &&
+    port <= WORKTREE_DB_PORT_MAX
+  );
+}
+
+function loadCanonicalDbPortFromSnapshot(
+  projectRoot: string,
+): number | undefined {
+  const path = join(projectRoot, ".slopcontrol", "canonical-runtime-env.json");
+  if (!existsSync(path)) return undefined;
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as { dbPort?: number };
+    if (
+      typeof raw.dbPort === "number" &&
+      Number.isFinite(raw.dbPort) &&
+      raw.dbPort > 0 &&
+      !isWorktreeIsolationPort(raw.dbPort)
+    ) {
+      return raw.dbPort;
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
+/**
+ * Strip worktree compose isolation keys before pushing env files to project root.
+ * Never trusts an isolation-range DB_PORT from live root (may already be poisoned).
+ */
+export function sanitizeWorktreeEnvForRootSync(
+  worktreeBody: string,
+  rootBody: string | null,
+  opts?: { canonicalDbPort?: number },
+): string {
+  let next = stripEnvAssignmentLocal(worktreeBody, "COMPOSE_PROJECT_NAME");
+  const rootPort = rootBody ? readEnvAssignment(rootBody, "DB_PORT") : undefined;
+  const rootPortNum = rootPort !== undefined ? Number(rootPort) : NaN;
+
+  let canonical =
+    opts?.canonicalDbPort !== undefined &&
+    Number.isFinite(opts.canonicalDbPort) &&
+    !isWorktreeIsolationPort(opts.canonicalDbPort)
+      ? opts.canonicalDbPort
+      : undefined;
+
+  if (
+    canonical === undefined &&
+    Number.isFinite(rootPortNum) &&
+    rootPortNum > 0 &&
+    !isWorktreeIsolationPort(rootPortNum)
+  ) {
+    canonical = rootPortNum;
+  }
+
+  if (canonical !== undefined) {
+    next = upsertEnvAssignmentLocal(next, "DB_PORT", String(canonical));
+    for (const key of [
+      "DATABASE_URL",
+      "LOCAL_DB_URL",
+      "POSTGRES_URL",
+      "DB_URL",
+    ]) {
+      const cur = readEnvAssignment(next, key);
+      if (!cur) continue;
+      const rewritten = cur.replace(
+        /(postgres(?:ql)?:\/\/[^/\s"']+?):(\d+)\b/i,
+        `$1:${canonical}`,
+      );
+      if (rewritten !== cur) {
+        next = upsertEnvAssignmentLocal(next, key, rewritten);
+      }
+    }
+  } else {
+    next = stripEnvAssignmentLocal(next, "DB_PORT");
+    for (const key of [
+      "DATABASE_URL",
+      "LOCAL_DB_URL",
+      "POSTGRES_URL",
+      "DB_URL",
+    ]) {
+      const cur = readEnvAssignment(next, key);
+      if (!cur) continue;
+      const rewritten = cur.replace(
+        /(postgres(?:ql)?:\/\/[^/\s"']+?):(\d+)\b/i,
+        `$1:${DEFAULT_CANONICAL_DB_PORT}`,
+      );
+      if (rewritten !== cur) {
+        next = upsertEnvAssignmentLocal(next, key, rewritten);
+      }
+    }
+  }
+  return next;
+}
+
 /**
  * Copy worktree env/secret overrides back onto the project root.
  * Gitignored files are not included in merge; root verify needs these updates
@@ -242,6 +367,7 @@ export function isPaidToFreeEnvRegression(
  * Only copies when the worktree file exists and differs from root (or root is missing).
  * Does not touch `.env.slopcontrol` — callers should pass `worktreeSyncPaths` / defaults only.
  * Refuses to push `OLLAMA_TIER=free` over a root that has `OLLAMA_TIER=paid`.
+ * Strips worktree `COMPOSE_PROJECT_NAME` / isolated `DB_PORT` so root ports stay product-owned.
  */
 export function syncLocalFilesFromWorktree(opts: {
   projectRoot: string;
@@ -275,25 +401,38 @@ export function syncLocalFilesFromWorktree(opts: {
     } catch {
       continue;
     }
+    let srcText = srcBody.toString("utf-8");
+    let destText: string | null = null;
     if (existsSync(dest)) {
       try {
         if (!statSync(dest).isFile()) continue;
-        const destBody = readFileSync(dest);
-        if (srcBody.equals(destBody)) {
-          continue;
-        }
-        if (
-          isPaidToFreeEnvRegression(destBody.toString("utf-8"), srcBody.toString("utf-8"))
-        ) {
-          // Keep root paid-tier config; do not let coding agent push free-tier regression
-          continue;
-        }
+        destText = readFileSync(dest, "utf-8");
       } catch {
         continue;
       }
     }
+    if (
+      rel === ".env" ||
+      rel === ".env.local" ||
+      rel.endsWith("/.env") ||
+      rel.endsWith("/.env.local")
+    ) {
+      srcText = sanitizeWorktreeEnvForRootSync(srcText, destText, {
+        canonicalDbPort: loadCanonicalDbPortFromSnapshot(opts.projectRoot),
+      });
+      srcBody = Buffer.from(srcText, "utf-8");
+    }
+    if (destText !== null) {
+      if (srcBody.equals(Buffer.from(destText, "utf-8"))) {
+        continue;
+      }
+      if (isPaidToFreeEnvRegression(destText, srcText)) {
+        // Keep root paid-tier config; do not let coding agent push free-tier regression
+        continue;
+      }
+    }
     mkdirSync(dirname(dest), { recursive: true });
-    copyFileSync(src, dest);
+    writeFileSync(dest, srcBody);
     synced.push(rel);
   }
 

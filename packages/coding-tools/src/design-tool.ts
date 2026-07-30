@@ -16,6 +16,23 @@ export interface GenerateImageOptions {
   /** Brand / palette hint for SVG fallback. */
   brandName?: string;
   palette?: string[];
+  /**
+   * When true, logo/mark briefs must not silently fall back to tile+circle SVG.
+   * Returns skipped with reason `logo_requires_designImage` (no file written).
+   */
+  logoFailClosed?: boolean;
+}
+
+/** True when an asset brief is a logo / wordmark / mark / favicon. */
+export function isLogoAssetBrief(brief: {
+  name: string;
+  filename: string;
+  prompt: string;
+}): boolean {
+  const blob = `${brief.name} ${brief.filename} ${brief.prompt}`;
+  return /\b(logo|wordmark|mark|favicon|app.?icon|brand\s*mark|lockup)\b/i.test(
+    blob,
+  );
 }
 
 export interface GenerateImageResult {
@@ -92,13 +109,23 @@ export class OllamaImagesDesignTool implements DesignTool {
   id = "ollama-images";
 
   async generateImage(opts: GenerateImageOptions): Promise<GenerateImageResult> {
-    const fallback = () =>
-      writeSvgFallback({
+    const logoBlocked = (): GenerateImageResult => ({
+      path: opts.outPath,
+      bytes: 0,
+      skipped: true,
+      reason: "logo_requires_designImage",
+      format: "png",
+    });
+
+    const fallback = () => {
+      if (opts.logoFailClosed) return logoBlocked();
+      return writeSvgFallback({
         outPath: opts.outPath,
         prompt: opts.prompt,
         brandName: opts.brandName,
         palette: opts.palette,
       });
+    };
 
     if (!opts.endpoint) {
       return fallback();
@@ -108,7 +135,9 @@ export class OllamaImagesDesignTool implements DesignTool {
     if (!endpointSupportsImageGen(endpoint)) {
       return {
         ...fallback(),
-        reason: "endpoint_lacks_imageGen",
+        reason: opts.logoFailClosed
+          ? "logo_requires_designImage"
+          : "endpoint_lacks_imageGen",
       };
     }
 
@@ -139,7 +168,9 @@ export class OllamaImagesDesignTool implements DesignTool {
         const body = await res.text().catch(() => "");
         return {
           ...fallback(),
-          reason: `image_gen_http_${res.status}:${body.slice(0, 120)}`,
+          reason: opts.logoFailClosed
+            ? "logo_requires_designImage"
+            : `image_gen_http_${res.status}:${body.slice(0, 120)}`,
         };
       }
 
@@ -149,12 +180,22 @@ export class OllamaImagesDesignTool implements DesignTool {
       const first = json.data?.[0];
       const payload = first?.b64_json ?? first?.url;
       if (!payload) {
-        return { ...fallback(), reason: "image_gen_empty_response" };
+        return {
+          ...fallback(),
+          reason: opts.logoFailClosed
+            ? "logo_requires_designImage"
+            : "image_gen_empty_response",
+        };
       }
 
       // Remote URL without b64 — fall back to SVG (avoid downloading arbitrary hosts blindly).
       if (payload.startsWith("http")) {
-        return { ...fallback(), reason: "image_gen_url_only" };
+        return {
+          ...fallback(),
+          reason: opts.logoFailClosed
+            ? "logo_requires_designImage"
+            : "image_gen_url_only",
+        };
       }
 
       const decoded = decodeImagePayload(payload);
@@ -168,7 +209,9 @@ export class OllamaImagesDesignTool implements DesignTool {
     } catch (error) {
       return {
         ...fallback(),
-        reason: `image_gen_error:${error instanceof Error ? error.message : String(error)}`,
+        reason: opts.logoFailClosed
+          ? "logo_requires_designImage"
+          : `image_gen_error:${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }

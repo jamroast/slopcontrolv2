@@ -32,6 +32,38 @@ describe("classifyVerifyFailure", () => {
     assert.ok(c.tags.includes("infra"));
   });
 
+  it("classifies Docker port-already-allocated as infra (not coding)", () => {
+    const c = classifyVerifyFailure(
+      [
+        "FAIL: docker compose up -d db",
+        "Error response from daemon: failed to set up container networking:",
+        "Bind for 0.0.0.0:5433 failed: port is already allocated",
+      ].join("\n"),
+      { stepName: "post-merge-root-verify:automatedCheck", exitCode: 1 },
+    );
+    assert.equal(c.class, "infra");
+    assert.equal(c.codingAgentShouldFix, false);
+    assert.equal(c.audience, "operator");
+    assert.match(c.summary, /5433|port/i);
+    assert.ok(c.operatorActions.some((a) => /5433|port|compose down/i.test(a)));
+  });
+
+  it("classifies isolation port skew (5433 vs 5580) as process, not product hardcode", () => {
+    const c = classifyVerifyFailure(
+      [
+        "FAIL  tests/scripts/env.test.ts > LOCAL_DB_URL",
+        "AssertionError: expected 'postgres://app:app@localhost:5580/jamlite' to be 'postgres://app:app@localhost:5433/jamlite'",
+        "Expected: \"postgres://app:app@localhost:5433/jamlite\"",
+        "Received: \"postgres://app:app@localhost:5580/jamlite\"",
+      ].join("\n"),
+      { stepName: "post-merge-root-verify:testCommand", command: "npm test", exitCode: 1 },
+    );
+    assert.equal(c.class, "process");
+    assert.equal(c.codingAgentShouldFix, false);
+    assert.match(c.summary, /isolation/i);
+    assert.ok(c.tags.includes("env-isolation"));
+  });
+
   it("classifies redis-style refused the same way", () => {
     const c = classifyVerifyFailure(
       "Redis connection to 127.0.0.1:6379 failed - connect ECONNREFUSED",

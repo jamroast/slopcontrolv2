@@ -1151,6 +1151,73 @@ None.
     }
   });
 
+  it("does not push worktree COMPOSE_PROJECT_NAME / isolated DB_PORT onto root", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-env-root-"));
+    const wt = mkdtempSync(join(tmpdir(), "slop-env-wt-"));
+    try {
+      writeFileSync(
+        join(root, ".env"),
+        "DB_PORT=5433\nDATABASE_URL=postgresql://app:app@localhost:5433/db\n",
+      );
+      writeFileSync(
+        join(wt, ".env"),
+        "COMPOSE_PROJECT_NAME=slopwt-08-foo\nDB_PORT=5542\nDATABASE_URL=postgresql://app:app@localhost:5542/db\nOTHER=1\n",
+      );
+      const pushed = syncLocalFilesFromWorktree({
+        projectRoot: root,
+        worktreePath: wt,
+        relativePaths: [".env"],
+      });
+      assert.deepEqual(pushed, [".env"]);
+      const body = readFileSync(join(root, ".env"), "utf-8");
+      assert.doesNotMatch(body, /COMPOSE_PROJECT_NAME/);
+      assert.match(body, /DB_PORT=5433/);
+      assert.match(body, /:5433\/db/);
+      assert.match(body, /OTHER=1/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  it("does not re-apply poisoned root DB_PORT=5580 when syncing from worktree", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-env-poison-"));
+    const wt = mkdtempSync(join(tmpdir(), "slop-env-wt2-"));
+    try {
+      mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+      writeFileSync(
+        join(root, ".slopcontrol", "canonical-runtime-env.json"),
+        JSON.stringify({
+          dbPort: 5433,
+          publishedPorts: [5433],
+          files: {},
+          capturedAt: new Date().toISOString(),
+        }),
+      );
+      writeFileSync(
+        join(root, ".env"),
+        "DB_PORT=5580\nDATABASE_URL=postgresql://app:app@localhost:5580/db\n",
+      );
+      writeFileSync(
+        join(wt, ".env"),
+        "COMPOSE_PROJECT_NAME=slopwt-x\nDB_PORT=5580\nDATABASE_URL=postgresql://app:app@localhost:5580/db\nKEEP=yes\n",
+      );
+      syncLocalFilesFromWorktree({
+        projectRoot: root,
+        worktreePath: wt,
+        relativePaths: [".env"],
+      });
+      const body = readFileSync(join(root, ".env"), "utf-8");
+      assert.match(body, /DB_PORT=5433/);
+      assert.match(body, /:5433\/db/);
+      assert.match(body, /KEEP=yes/);
+      assert.doesNotMatch(body, /5580/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
   it("checks out a branch in the project folder", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-co-"));
     try {

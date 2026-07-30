@@ -23,6 +23,14 @@ import {
 } from "./markdown.js";
 import { loadDotEnvFile } from "./dotenv.js";
 import { redactSecrets } from "./redact-secrets.js";
+import {
+  readChangeIntent,
+  reconcileBlueprintDecisions,
+  extractLiveDecisions,
+  isBrandThemingAsk,
+} from "./change-intent.js";
+import type { ChangeIntent } from "./change-intent.js";
+import { probeProjectForDecisions } from "./blueprint-probes.js";
 
 export const SLOP_DIR = ".slopcontrol";
 
@@ -33,11 +41,15 @@ export * from "./project-inventory.js";
 export * from "./blueprint-fallback.js";
 export * from "./learnings.js";
 export * from "./failure-classify.js";
+export * from "./compose-teardown.js";
+export * from "./change-intent.js";
+export * from "./blueprint-probes.js";
 export * from "./redact-secrets.js";
 export * from "./plan-progress.js";
 export * from "./verify-preflight.js";
 export * from "./llm-test-env.js";
 export * from "./project-env.js";
+export * from "./sibling-brand-refs.js";
 export * from "./shell-checks.js";
 export * from "./check-runners.js";
 export * from "./phase-complete-gate.js";
@@ -355,6 +367,7 @@ export function upsertRoadmapEntry(
  * Merge an accepted phase into the living BLUEPRINT.md.
  * Prefers "## Blueprint Update" full replacement body, else "## Blueprint Deltas"
  * appended under ## Decisions, else a short pointer.
+ * Always runs intent-aware reconcile (dedupe + Live decisions).
  */
 export function mergePhaseIntoBlueprint(
   projectRoot: string,
@@ -364,6 +377,8 @@ export function mergePhaseIntoBlueprint(
 ): void {
   const trimmed = extractMarkdownDocument(phaseDoc);
   if (!trimmed) return;
+
+  const intent = readChangeIntent(projectRoot, phaseId);
 
   const update = extractSection(trimmed, /Blueprint\s+Update/i);
   if (update) {
@@ -378,22 +393,103 @@ export function mergePhaseIntoBlueprint(
         `## Decisions — ${phaseId} (${date})\n\n${update}\n`,
       );
     }
-    return;
+  } else {
+    const deltaMatch = trimmed.match(
+      /##\s*(Blueprint\s*Deltas?|Key\s*Decisions?|Architecture\s*Changes?)\s*\n([\s\S]*?)(?=\n##\s|$)/i,
+    );
+
+    const body = deltaMatch
+      ? deltaMatch[2]?.trim()
+      : `_Accepted phase_\n\n${description}\n\nSee \`.slopcontrol/phases/${phaseId}/PHASE.md\` for full detail.`;
+
+    const date = new Date().toISOString().split("T")[0];
+    appendBlueprint(
+      projectRoot,
+      `## Decisions — ${phaseId} (${date})\n\n${body ?? ""}\n`,
+    );
   }
 
-  const deltaMatch = trimmed.match(
-    /##\s*(Blueprint\s*Deltas?|Key\s*Decisions?|Architecture\s*Changes?)\s*\n([\s\S]*?)(?=\n##\s|$)/i,
+  const current = readBlueprint(projectRoot);
+  const probes = probeProjectForDecisions(projectRoot);
+  const { blueprint: cleaned } = reconcileBlueprintDecisions(
+    current,
+    intent,
+    probes,
   );
+  if (cleaned !== current) {
+    writeBlueprint(projectRoot, cleaned);
+  }
+}
 
-  const body = deltaMatch
-    ? deltaMatch[2]?.trim()
-    : `_Accepted phase_\n\n${description}\n\nSee \`.slopcontrol/phases/${phaseId}/PHASE.md\` for full detail.`;
-
-  const date = new Date().toISOString().split("T")[0];
-  appendBlueprint(
-    projectRoot,
-    `## Decisions — ${phaseId} (${date})\n\n${body ?? ""}\n`,
+/**
+ * Run Blueprint reconcile on an existing project without merging a phase
+ * (e.g. one-time JamPress cleanup). Uses INTENT for phaseId when provided,
+ * else defaults to prefer composer when live mount conflict exists.
+ */
+export function reconcileProjectBlueprint(
+  projectRoot: string,
+  phaseId?: string,
+  opts?: { dryRun?: boolean },
+): {
+  changed: boolean;
+  report: string[];
+  liveDecisions: string;
+  dryRun: boolean;
+  blueprintPreviewChars: number;
+} {
+  const intent: ChangeIntent | null = phaseId
+    ? readChangeIntent(projectRoot, phaseId)
+    : {
+        title: "reconcile",
+        goal: "reconcile",
+        uiMount: "composer",
+        refinementOf: [],
+        supersedes: ["BD-IN-BUBBLE-FORMS"],
+        mustNot: [],
+        rawDescription: "",
+      };
+  const current = readBlueprint(projectRoot);
+  if (!current.trim()) {
+    return {
+      changed: false,
+      report: ["empty blueprint"],
+      liveDecisions: "",
+      dryRun: Boolean(opts?.dryRun),
+      blueprintPreviewChars: 0,
+    };
+  }
+  const probes = probeProjectForDecisions(projectRoot);
+  const { blueprint, report } = reconcileBlueprintDecisions(
+    current,
+    intent,
+    probes,
   );
+  const verified =
+    extractSection(blueprint, /Live decisions\s*[—-]\s*verified/i)?.trim() ??
+    "";
+  const claimed =
+    extractSection(
+      blueprint,
+      /Live decisions\s*[—-]\s*claimed unverified/i,
+    )?.trim() ?? "";
+  const liveDecisions = [verified, claimed]
+    .filter(Boolean)
+    .join("\n\n")
+    .trim() || extractLiveDecisions(blueprint);
+  const changed = blueprint !== current;
+  if (changed && !opts?.dryRun) {
+    writeBlueprint(projectRoot, blueprint);
+  }
+  return {
+    changed,
+    report: [
+      ...report,
+      `probes: mount=${probes.mount}; evidence=${probes.evidence.slice(0, 3).join("; ") || "none"}`,
+    ],
+    liveDecisions,
+    dryRun: Boolean(opts?.dryRun),
+    blueprintPreviewChars: blueprint.length,
+  };
 }
 
 /**
@@ -635,9 +731,19 @@ export function isDesignComplete(projectRoot: string, phaseId: string): boolean 
   return /DESIGN_COMPLETE/m.test(readFileSync(path, "utf-8"));
 }
 
+/** PHASE explicitly asks for a visual design pass (Brand / Assets / Requires yes). */
+export function phaseForcesVisualDesign(phaseDoc: string): boolean {
+  if (!phaseDoc.trim()) return false;
+  if (/Requires\s+design\s+pass\s*:\s*yes/i.test(phaseDoc)) return true;
+  if (/^##\s+Brand\b/im.test(phaseDoc)) return true;
+  if (/^##\s+Assets\b/im.test(phaseDoc)) return true;
+  return false;
+}
+
 /**
  * True when this phase should run the design stage before coding.
- * Requires enableDesignPass (default true) and UI-SPEC / Brand / Assets signals.
+ * Brand/theming Intents always need design. chrome-hide / backend skip unless
+ * PHASE forces visuals. Other kinds keep UI-SPEC / Brand / Assets signals.
  */
 export function phaseNeedsDesign(
   projectRoot: string,
@@ -647,15 +753,27 @@ export function phaseNeedsDesign(
   const cfg = config ?? readProjectConfig(projectRoot);
   if (cfg.enableDesignPass === false) return false;
 
-  if (existsSync(uiSpecPath(projectRoot, phaseId))) return true;
-
   const phaseDoc = readPhaseDoc(projectRoot, phaseId);
-  if (!phaseDoc.trim()) return false;
+  const forcedVisual = phaseForcesVisualDesign(phaseDoc);
+  const intent = readChangeIntent(projectRoot, phaseId);
+  const kind = intent?.changeKind;
+  const brandAsk = isBrandThemingAsk(
+    [intent?.title, intent?.goal, intent?.rawDescription]
+      .filter(Boolean)
+      .join("\n"),
+  );
 
-  if (/Requires\s+design\s+pass\s*:\s*yes/i.test(phaseDoc)) return true;
-  if (/^##\s+Brand\b/im.test(phaseDoc)) return true;
-  if (/^##\s+Assets\b/im.test(phaseDoc)) return true;
-  return false;
+  // Brand/theming always needs a design pass (even if mislabeled backend).
+  if (brandAsk) return true;
+
+  if (kind === "chrome-hide" || kind === "backend") {
+    // Do not treat leftover UI-SPEC as requiring design for structural/non-UI work.
+    return forcedVisual;
+  }
+
+  if (existsSync(uiSpecPath(projectRoot, phaseId))) return true;
+  if (!phaseDoc.trim()) return false;
+  return forcedVisual;
 }
 
 export interface DesignAssetBrief {
@@ -855,7 +973,37 @@ export function clearPhaseDiagnosis(
   phaseId: string,
 ): void {
   ensurePhaseDir(projectRoot, phaseId);
-  const payload: PersistedDiagnosis = {
+  const payload = completeDiagnosisStub(phaseId);
+  writeFileSync(
+    phaseDiagnosisPath(projectRoot, phaseId),
+    `${JSON.stringify(payload, null, 2)}\n`,
+    "utf-8",
+  );
+}
+
+/** Clear a run's diagnosis.json so a prior blocked iteration does not linger. */
+export function clearRunDiagnosis(
+  projectRoot: string,
+  runId: string,
+  phaseId?: string,
+): void {
+  ensureRunDir(projectRoot, runId);
+  const payload = completeDiagnosisStub(phaseId, runId);
+  writeFileSync(
+    diagnosisPath(projectRoot, runId),
+    `${JSON.stringify(payload, null, 2)}\n`,
+    "utf-8",
+  );
+  if (phaseId) {
+    clearPhaseDiagnosis(projectRoot, phaseId);
+  }
+}
+
+function completeDiagnosisStub(
+  phaseId?: string,
+  runId?: string,
+): PersistedDiagnosis {
+  return {
     audience: "coding",
     operatorActions: [],
     class: "product",
@@ -867,13 +1015,9 @@ export function clearPhaseDiagnosis(
     fingerprint: "complete",
     codingAgentShouldFix: false,
     phaseId,
+    runId,
     updatedAt: new Date().toISOString(),
   };
-  writeFileSync(
-    phaseDiagnosisPath(projectRoot, phaseId),
-    `${JSON.stringify(payload, null, 2)}\n`,
-    "utf-8",
-  );
 }
 
 export function readPhaseStatus(
@@ -1093,14 +1237,18 @@ export function automatedCheckReportedFailure(output: string): boolean {
 
 /**
  * True when PHASE.md looks like planner chat preamble rather than a real phase doc.
+ * Chatty-phrase sniff applies only to the **first non-empty line** (document start).
+ * Scope may quote transcripts (`Here's what it needs:`) without failing the gate.
  */
 export function isPhaseDocPreamble(phaseDoc: string): boolean {
   const trimmed = phaseDoc.trim();
   if (!trimmed) return true;
   if (!/^#\s+/m.test(trimmed)) return true;
+  const firstLine =
+    trimmed.split(/\r?\n/).find((l) => l.trim().length > 0)?.trim() ?? "";
   if (
-    /^(Let me |I'll |I will |Here(?:'s| is) |Now I |PHASE\.md has been written)/im.test(
-      trimmed,
+    /^(Let me |I'll |I will |Here(?:'s| is) |Now I |PHASE\.md has been written)/i.test(
+      firstLine,
     )
   ) {
     return true;
@@ -1283,6 +1431,39 @@ export function isThinResearch(doc: string): boolean {
   if (trimmed.length < 400) return true;
   if (!/^#\s+/m.test(trimmed)) return true;
   return false;
+}
+
+const RESEARCH_OVERCLAIM_RE =
+  /(?:~?\s*90\s*%|already\s+(?:substantially\s+)?(?:exists|implemented|works)|already\s+implements\s+~?\s*\d+|~?\s*\d+\s*%\s+of\s+(?:this|it|the\s+request))/i;
+
+const RESEARCH_RESIDUAL_RISK_RE =
+  /\b(?:residual|blocking|release[- ]gate|does\s+not\s+survive|open\s+engagement|toolName|type\s*[:=]\s*["'`]?tool-|live\s+static|parseToolResult|not\s+proof|hypothesis|unverified|confirmed\s+(?:break|gap|risk))\b/i;
+
+/**
+ * When Change Intent has an interaction contract, reject RESEARCH that
+ * overclaims fill/submit already works without residual engagement risks.
+ * Chrome-hide / backend Intents skip this detector (no fill/submit contract).
+ */
+export function researchEngagementQuality(
+  doc: string,
+  intent: ChangeIntent | null | undefined,
+): { ok: boolean; issues: string[] } {
+  if (
+    !intent?.interaction ||
+    intent.interaction.mount === "n/a" ||
+    intent.changeKind === "chrome-hide" ||
+    intent.changeKind === "backend"
+  ) {
+    return { ok: true, issues: [] };
+  }
+  const body = extractMarkdownDocument(doc);
+  const issues: string[] = [];
+  if (RESEARCH_OVERCLAIM_RE.test(body) && !RESEARCH_RESIDUAL_RISK_RE.test(body)) {
+    issues.push(
+      "Engagement RESEARCH overclaims prior form work as already done without residual engagement risks (toolName / live tool-part / blocking / hypothesis)",
+    );
+  }
+  return { ok: issues.length === 0, issues };
 }
 
 /**
@@ -1628,6 +1809,27 @@ export function resolveResearchFromAgentTurn(opts: {
   return { doc: "", source: "none", thin: true };
 }
 
+/** Clip long / chat-dump phase descriptions for scaffold Scope (keep schema-valid). */
+export function clipPhaseDescriptionForScaffold(
+  description: string,
+  maxChars = 500,
+): string {
+  const t = description.trim();
+  if (!t) return "";
+  if (t.length <= maxChars) return t;
+  const cut = t.slice(0, maxChars);
+  const breakAt = Math.max(
+    cut.lastIndexOf("\n\n"),
+    cut.lastIndexOf(". "),
+    cut.lastIndexOf(".\n"),
+  );
+  const body =
+    breakAt > maxChars * 0.35
+      ? cut.slice(0, breakAt + (cut[breakAt] === "." ? 1 : 0)).trimEnd()
+      : cut.trimEnd();
+  return `${body}\n\n_(description clipped for scaffold)_`;
+}
+
 /**
  * Last-resort PHASE.md so drafting can reach in_review when the LLM only
  * narrates / writes to the wrong path and repair still fails.
@@ -1637,17 +1839,73 @@ export function scaffoldPhaseDoc(opts: {
   description: string;
   research?: string;
   testCommand?: string;
+  /** When set with interaction, prefer failing closed in the orchestrator instead. */
+  intent?: ChangeIntent | null;
 }): string {
-  const title = opts.description.trim().slice(0, 80) || opts.phaseId;
-  const researchExcerpt = (opts.research ?? "")
-    .trim()
-    .slice(0, 1200);
+  const clipped = clipPhaseDescriptionForScaffold(opts.description);
+  const title =
+    clipped.split(/\r?\n/).find((l) => l.trim().length > 0)?.trim().slice(0, 80) ||
+    opts.phaseId;
+  const researchExcerpt = (opts.research ?? "").trim().slice(0, 1200);
   const testCmd = opts.testCommand?.trim() || "npm test";
+  const engagement = Boolean(
+    opts.intent?.interaction && opts.intent.interaction.mount !== "n/a",
+  );
+  const brand = Boolean(
+    opts.intent &&
+      (opts.intent.changeKind === "other" || !opts.intent.changeKind) &&
+      isBrandThemingAsk(
+        `${opts.intent.title}\n${opts.intent.goal}\n${opts.description}`,
+      ),
+  );
+  const mount = opts.intent?.interaction?.mount ?? opts.intent?.uiMount ?? "n/a";
+  const successBlock = engagement
+    ? `- Fillable UI at locked mount (${mount}) with enabled input and submit
+- Automated Checks prove fill+submit (incl. live AI SDK \`type: tool-<name>\` name resolution via parseToolResult / extractActiveForm)
+- Manual smoke of the reported failure path succeeds when applicable`
+    : brand
+      ? `- Brand tokens / logos applied; no SlopControl tile+circle fallback SVGs under public/brand/
+- Shells reference the new lockup (not unused orphan files only)
+- Token names match family or PHASE documents intentional remaps
+- Manual visual smoke vs sibling brand (JamPress / family) when applicable`
+      : `- Change is implemented and builds
+- Automated Checks pass
+- Manual smoke of the reported failure path succeeds when applicable`;
+  const checksBlock = engagement
+    ? `\`\`\`bash
+${testCmd}
+\`\`\`
+
+Structural (engagement — live tool-part shape, not chip-only):
+
+\`\`\`bash
+grep -qE 'parseToolResult|extractActiveForm|tool-' . || exit 1
+\`\`\``
+    : brand
+      ? `\`\`\`bash
+${testCmd}
+\`\`\`
+
+Structural (brand — reject design fallbacks + glued wordmarks):
+
+\`\`\`bash
+! grep -Rql 'Status:\\*\\* draft' public/brand 2>/dev/null || exit 1
+! grep -RqlE '<circle[^>]+r="72".*<text' public/brand 2>/dev/null || exit 1
+! grep -RqlE '>JamLight<|>JamPress<' public/brand 2>/dev/null || exit 1
+\`\`\``
+      : `\`\`\`bash
+${testCmd}
+\`\`\``;
+
+  const requiresDesign = brand
+    ? "Requires design pass: yes\n\n"
+    : "";
+
   return `# Phase ${opts.phaseId}: ${title}
 
-## Scope
+${requiresDesign}## Scope
 
-${opts.description.trim()}
+${clipped || "Investigate and fix per the phase description."}
 
 ${
   researchExcerpt
@@ -1655,21 +1913,29 @@ ${
     : "Investigate and fix per the phase description. Research was thin; re-check the codebase during implementation.\n"
 }
 
-## File Changes
+${
+  brand
+    ? `## Brand
+
+Port sibling theming; produce cleaner logo/wordmark set.
+
+## Assets
+| Name | Filename | Prompt |
+| --- | --- | --- |
+| logo | logo.png | Cleaner jam-family brand mark aligned with sibling craft |
+`
+    : ""
+}## File Changes
 
 - TBD during development (derive from Scope and Research)
 
 ## Success Criteria
 
-- Change is implemented and builds
-- Automated Checks pass
-- Manual smoke of the reported failure path succeeds when applicable
+${successBlock}
 
 ## Automated Checks
 
-\`\`\`bash
-${testCmd}
-\`\`\`
+${checksBlock}
 
 ## Blueprint Deltas
 
@@ -2043,7 +2309,8 @@ export function detectCodingProbeAbuse(text: string): string | null {
 }
 
 /**
- * Verify DB phase artifacts: init-db.sql (or drizzle) must contain CREATE TABLE.
+ * Verify DB phase artifacts: init-db.sql and/or drizzle must contain CREATE TABLE.
+ * Extension-only init-db.sql (vector bootstrap) is allowed when drizzle has DDL.
  */
 export function verifyDatabaseArtifacts(projectRoot: string): {
   ok: boolean;
@@ -2054,6 +2321,7 @@ export function verifyDatabaseArtifacts(projectRoot: string): {
     join(projectRoot, "init-db.sql"),
   ];
 
+  const initNotes: string[] = [];
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     const sql = readFileSync(path, "utf-8");
@@ -2063,13 +2331,11 @@ export function verifyDatabaseArtifacts(projectRoot: string): {
         output: `Database DDL present in ${path} (CREATE TABLE found).`,
       };
     }
-    return {
-      ok: false,
-      output: `${path} exists but has no CREATE TABLE statements.`,
-    };
+    initNotes.push(
+      `${path} is present without CREATE TABLE (extension-only bootstrap OK if drizzle has DDL).`,
+    );
   }
 
-  // Check for any drizzle SQL under drizzle/
   const drizzleDir = join(projectRoot, "drizzle");
   if (existsSync(drizzleDir)) {
     for (const name of readdirSync(drizzleDir)) {
@@ -2078,7 +2344,12 @@ export function verifyDatabaseArtifacts(projectRoot: string): {
       if (/CREATE\s+TABLE/i.test(sql)) {
         return {
           ok: true,
-          output: `Database DDL present in drizzle/${name}.`,
+          output: [
+            ...initNotes,
+            `Database DDL present in drizzle/${name}.`,
+          ]
+            .filter(Boolean)
+            .join(" "),
         };
       }
     }
@@ -2086,7 +2357,11 @@ export function verifyDatabaseArtifacts(projectRoot: string): {
 
   return {
     ok: false,
-    output:
-      "No CREATE TABLE found in docker/init-db.sql or drizzle/*.sql — DB phase incomplete.",
+    output: [
+      ...initNotes,
+      "No CREATE TABLE found in docker/init-db.sql, init-db.sql, or drizzle/*.sql — DB phase incomplete.",
+    ]
+      .filter(Boolean)
+      .join(" "),
   };
 }

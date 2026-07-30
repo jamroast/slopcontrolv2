@@ -636,6 +636,35 @@ export const RunActionSchema = z.discriminatedUnion("action", [
     /** Also delete the local slop/<phaseId> branch (default false) */
     deleteBranch: z.boolean().optional(),
   }),
+  z.object({
+    action: z.literal("preview_change_intent"),
+    projectId: z.string(),
+    /** Operator description to score (engagement / mount heuristics). */
+    description: z.string().min(1),
+    /** Optional phase id for refinementOf lookup exclude + PHASE alignment. */
+    phaseId: z.string().optional(),
+    /** When true, also align against that phase's PHASE.md if present. */
+    checkPhaseDoc: z.boolean().optional(),
+    /** Skip planning LLM; use heuristic extract only (offline tests). */
+    heuristicOnly: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("reconcile_blueprint"),
+    projectId: z.string(),
+    /** Prefer INTENT from this phase when resolving mount conflicts. */
+    phaseId: z.string().optional(),
+    /** When true (default), do not write BLUEPRINT.md — return the report + live slice only. */
+    dryRun: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("audit_ui_gates"),
+    projectId: z.string(),
+    /** Description that should trigger engagement Intent (optional if phaseId has INTENT). */
+    description: z.string().optional(),
+    phaseId: z.string().optional(),
+    /** Skip planning LLM; use heuristic extract only (offline tests). */
+    heuristicOnly: z.boolean().optional(),
+  }),
 ]);
 
 export type RunAction = z.infer<typeof RunActionSchema>;
