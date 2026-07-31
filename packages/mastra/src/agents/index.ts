@@ -3,6 +3,7 @@ import { Memory } from "@mastra/memory";
 import { blueprintContractPromptBlock } from "@slopcontrol/artifacts";
 import type { LlmRegistry } from "@slopcontrol/llm";
 import { createProjectTools } from "../tools/project-tools.js";
+import { createDesignLoopMediaTools } from "../tools/design-loop-tools.js";
 
 export function createResearchAgent(
   registry: LlmRegistry,
@@ -319,6 +320,54 @@ Rules:
       grep_files: tools.grepFiles,
       fetch_url: tools.fetchUrl,
       web_search: tools.webSearch,
+    },
+  });
+}
+
+/**
+ * Chat-driven look-and-feel exploration: mock HTML + optional media tools.
+ * Never writes product source — only .slopcontrol design-loop assets via tools.
+ */
+export function createDesignLoopAgent(
+  registry: LlmRegistry,
+  projectDir: string,
+  memory: Memory,
+): Agent {
+  const tools = createProjectTools(projectDir);
+  const media = createDesignLoopMediaTools(projectDir, registry);
+
+  return new Agent({
+    id: "design-loop-agent",
+    name: "Design Loop Agent",
+    description:
+      "Produces self-contained mock HTML; can search Openverse, generate images, and vision-review look-and-feel",
+    instructions: `You are the SlopControl design-loop agent.
+Produce ONE self-contained HTML mock (wireframe or mid-fi) for look-and-feel discussion.
+
+Rules:
+- Output a single HTML document in a \`\`\`html fence (or raw <!DOCTYPE html>…). Inline CSS only — no external stylesheets/fonts CDNs.
+- Use :root CSS variables for palette/typography. Prefer sibling brand cues / CSS excerpts already in the prompt.
+- Show labeled states when relevant. Keep it one page, not a full SPA.
+- The prompt always states the current loopId — pass that loopId to media tools.
+- Media tools (use when the operator asks; do not claim they ran without a tool result):
+  - find/search/stock/reference images → search_images (Openverse), then import_image for a chosen id
+  - generate/invent logo/mark/icon → generate_image (designImage / Flux)
+  - how does it look / review / critique → review_look (designVision screenshot critique)
+- Prefer search for photographic filler; generate for unique brand marks.
+- After import/gen, embed local relative paths in the mock (<img src=".slopcontrol/...">). Cite attribution in your short notes.
+- Cap thrash: ≤1 search and ≤1 generate per turn unless asked for more. Prefer writing the mock when media is not needed.
+- If generation falls back to a scaffold / times out, tell the operator to call MCP \`design_loop_retry\` for this loopId (regenerates the same version in place).
+- Do NOT write product source files. Do NOT produce UI-SPEC.md as a file.
+- After a short note (1–3 sentences), end with the HTML document and MOCK_HTML_COMPLETE on its own line.
+- Avoid purple-on-white defaults unless the brief asks for them.`,
+    model: registry.resolve("design"),
+    memory,
+    tools: {
+      read_file: tools.readFile,
+      generate_image: media.generate_image,
+      search_images: media.search_images,
+      import_image: media.import_image,
+      review_look: media.review_look,
     },
   });
 }

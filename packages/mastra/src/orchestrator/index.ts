@@ -107,6 +107,8 @@ import {
   writeUiSpec,
   runVerifyPreflight,
   promotePhaseDocFromWorktree,
+  extractHtmlDocument,
+  scaffoldDesignLoopMock,
 } from "@slopcontrol/artifacts";
 import {
   ensureGitInitialized,
@@ -132,7 +134,13 @@ import {
   previewChangeIntentAsync,
 } from "./change-intent-async.js";
 import { dirname, join } from "node:path";
-import { copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import {
   depsInstallCommand,
   needsDepsInstall,
@@ -180,6 +188,7 @@ export interface OrchestratorAgents {
   phasePlannerAgent: Agent;
   reviewAgent: Agent;
   designAgent: Agent;
+  designLoopAgent: Agent;
   devSupervisorAgent: Agent;
   blueprintAgent: Agent;
   askAgent: Agent;
@@ -215,6 +224,17 @@ export interface AskSubResearchInput {
   askId: string;
   topics: string[];
   history: Array<{ role: "user" | "assistant"; content: string }>;
+}
+
+export interface DesignLoopGenerateInput {
+  project: Project;
+  loopId: string;
+  brief: string;
+  /** Operator feedback for continue turns (omit on start). */
+  message?: string;
+  /** Prior mock HTML to revise (continue). */
+  previousHtml?: string;
+  version: number;
 }
 
 export interface AgentTurnInput {
@@ -1407,6 +1427,86 @@ ${message.trim()}`;
   }
 
   /**
+   * Generate or revise a self-contained design-loop mock HTML (no product writes).
+   */
+  async designLoopGenerate(input: DesignLoopGenerateInput): Promise<{
+    html: string;
+    notes: string;
+    usedScaffold: boolean;
+  }> {
+    const { project, loopId, brief, message, previousHtml, version } = input;
+    ensureSlopcontrolDir(project.rootPath);
+    const siblingPack = buildSiblingBrandRefPack({
+      projectRoot: project.rootPath,
+      description: [brief, message ?? ""].filter(Boolean).join("\n"),
+      includeTokenExcerpts: true,
+    });
+    const blueprint = readBlueprint(project.rootPath);
+    const reviseBlock = previousHtml?.trim()
+      ? `Previous mock (revise this — do not start from scratch unless asked):\n\`\`\`html\n${previousHtml.trim().slice(0, 24_000)}\n\`\`\`\n`
+      : "(no previous mock — create v1)";
+
+    const prompt = `Design loop ${loopId} — produce version v${version} mock HTML.
+
+CRITICAL: Sibling CSS excerpts are already below. Do not spend the turn investigating sibling repos with read_file.
+Current loopId (required for media tools): ${loopId}
+When the operator asks to search/generate/import/review images, call search_images / generate_image / import_image / review_look with this loopId.
+Otherwise prefer writing the mock with few or zero tool calls.
+
+Brief:
+${clipPromptSection("brief", brief, 3_000)}
+
+${message?.trim() ? `Operator feedback:\n${clipPromptSection("feedback", message, 3_000)}\n` : ""}
+${reviseBlock}
+
+${siblingPack ? `${siblingPack}\n` : ""}
+BLUEPRINT (excerpt):
+${clipPromptSection("BLUEPRINT.md", blueprint, 3_000)}
+
+Return a short rationale (1–3 sentences) then a complete self-contained HTML document in a \`\`\`html fence.
+Inline CSS with :root tokens drawn from the sibling excerpts when present. Prefer local .slopcontrol asset paths over remote hotlinks. End with MOCK_HTML_COMPLETE on its own line.`;
+
+    let usedScaffold = false;
+    let raw = "";
+    try {
+      raw = await runAgent(
+        this.ctx.agents.designLoopAgent,
+        prompt,
+        project.id,
+        `design-loop-${loopId}`,
+        // Media tools (gen/search/review) need headroom beyond plain HTML turns.
+        { maxSteps: 12, timeoutMs: 300_000 },
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      slog.warn("design-loop", `generate failed; using scaffold`, {
+        loopId,
+        error: detail,
+      });
+      usedScaffold = true;
+      return {
+        html: scaffoldDesignLoopMock(brief),
+        notes: `Scaffold fallback (agent error): ${detail}`,
+        usedScaffold: true,
+      };
+    }
+
+    const html = extractHtmlDocument(raw) ?? scaffoldDesignLoopMock(brief);
+    if (!extractHtmlDocument(raw)) usedScaffold = true;
+    const notes = raw
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/<!DOCTYPE[\s\S]*/i, "")
+      .replace(/MOCK_HTML_COMPLETE/gi, "")
+      .trim()
+      .slice(0, 1_500);
+    return {
+      html,
+      notes: notes || (usedScaffold ? "Scaffold mock (no HTML in agent output)" : `v${version}`),
+      usedScaffold,
+    };
+  }
+
+  /**
    * Run up to ASK_SUB_RESEARCH_MAX_TOPICS ephemeral investigations in parallel.
    * Findings are returned for the caller to append to the ask transcript.
    * Does not create phases or write RESEARCH.md.
@@ -2340,9 +2440,23 @@ ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
     const assetDirRel = config.designAssetDir || "public/brand";
     const canonicalUiSpecPath = `.slopcontrol/phases/${phase.id}/UI-SPEC.md`;
     const canonicalTokensPath = `.slopcontrol/phases/${phase.id}/design/tokens.css`;
+    const existingMockPath = join(
+      project.rootPath,
+      ".slopcontrol",
+      "phases",
+      phase.id,
+      "design",
+      "mock.html",
+    );
+    const existingMock = existsSync(existingMockPath)
+      ? readFileSync(existingMockPath, "utf-8")
+      : "";
+    const mockContractBlock = existingMock.trim()
+      ? `\nAccepted design-loop mock (honor this visual contract — do not invent a competing shell):\n\`\`\`html\n${existingMock.trim().slice(0, 12_000)}\n\`\`\`\n`
+      : "";
 
     const prompt = `Produce UI-SPEC.md and tokens.css for this phase.
-
+${mockContractBlock}
 Write UI-SPEC to ${canonicalUiSpecPath} (start with # UI-SPEC).
 Write tokens.css to ${canonicalTokensPath}.
 Include ## Assets table (Name | Filename | Prompt), max 3 assets.
@@ -2702,12 +2816,26 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     const uiSpecDoc = readUiSpec(project.rootPath, phase.id);
     const tokensCss = readTokensCss(project.rootPath, phase.id);
     const designAssetPaths = listDesignAssetPaths(project.rootPath, phase.id);
+    const designMockPath = join(
+      project.rootPath,
+      ".slopcontrol",
+      "phases",
+      phase.id,
+      "design",
+      "mock.html",
+    );
+    const designMockHtml = existsSync(designMockPath)
+      ? readFileSync(designMockPath, "utf-8")
+      : "";
     const designContext = [
       uiSpecDoc.trim()
         ? clipPromptSection("UI-SPEC.md", uiSpecDoc, 6_000)
         : null,
       tokensCss.trim()
         ? `tokens.css (from design pass)\n\n\`\`\`css\n${tokensCss.trim().slice(0, 3_000)}\n\`\`\``
+        : null,
+      designMockHtml.trim()
+        ? `Accepted design-loop mock (visual source of truth — match structure/palette; do not invent a competing shell):\n\`\`\`html\n${designMockHtml.trim().slice(0, 12_000)}\n\`\`\``
         : null,
       designAssetPaths.length
         ? `Design assets (use these paths; do not reinvent logos from scratch):\n${designAssetPaths.map((p) => `- ${p}`).join("\n")}\nPrefer project \`public/brand/\` copies when present.`

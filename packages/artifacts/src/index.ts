@@ -56,6 +56,7 @@ export * from "./phase-complete-gate.js";
 export * from "./development-handoff.js";
 export * from "./ask-session.js";
 export * from "./agent-session.js";
+export * from "./design-loop.js";
 export { loadDotEnvFile } from "./dotenv.js";
 
 export function slopcontrolRoot(projectRoot: string): string {

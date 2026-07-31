@@ -17,6 +17,77 @@ export function defaultSlopcontrolServerUrl(): string {
 /**
  * Put askId first in MCP text so clients reliably reuse it on the next turn.
  */
+/**
+ * Put loopId first so clients reuse it; include mock HTML for display.
+ */
+export function formatDesignLoopMcpEnvelope(body: string, ok: boolean): string {
+  try {
+    const parsed = JSON.parse(body) as {
+      loop?: { id?: string; status?: string; currentVersion?: number };
+      loopId?: string;
+      version?: number;
+      html?: string;
+      notes?: string;
+      transcript?: string;
+      error?: string;
+      hint?: string;
+      next?: string;
+      phaseId?: string;
+      usedScaffold?: boolean;
+    };
+    const loopId = parsed.loopId || parsed.loop?.id || "";
+    if (!ok) {
+      return [
+        loopId ? `loopId: ${loopId}` : null,
+        parsed.error ? `error: ${parsed.error}` : `error: ${body.slice(0, 500)}`,
+        parsed.hint ? `hint: ${parsed.hint}` : null,
+        "---",
+        body,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    const status = parsed.loop?.status ?? "open";
+    const version = parsed.version ?? parsed.loop?.currentVersion;
+    const html =
+      typeof parsed.html === "string" && parsed.html.trim()
+        ? parsed.html
+        : null;
+    const transcript =
+      typeof parsed.transcript === "string" && parsed.transcript.trim()
+        ? parsed.transcript
+        : null;
+    const transcriptBlock = transcript
+      ? transcript.length > 12_000
+        ? `${transcript.slice(0, 12_000)}\n…(truncated; full TRANSCRIPT.md on disk)`
+        : transcript
+      : null;
+    return [
+      `loopId: ${loopId}`,
+      `status: ${status}`,
+      version !== undefined ? `version: ${version}` : null,
+      parsed.phaseId ? `phaseId: ${parsed.phaseId}` : null,
+      parsed.usedScaffold ? "usedScaffold: true" : null,
+      parsed.usedScaffold ? "hint: design_loop_retry" : null,
+      parsed.hint && !parsed.usedScaffold ? `hint: ${parsed.hint}` : null,
+      parsed.next ? `next: ${parsed.next}` : null,
+      parsed.notes ? `notes: ${parsed.notes}` : null,
+      "---",
+      transcriptBlock ? `transcript:\n${transcriptBlock}` : null,
+      transcriptBlock && html ? "---" : null,
+      html
+        ? `\`\`\`html\n${html}\n\`\`\``
+        : !transcriptBlock
+          ? body
+          : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  } catch {
+    return body;
+  }
+}
+
 export function formatAskMcpEnvelope(body: string, ok: boolean): string {
   try {
     const parsed = JSON.parse(body) as {
@@ -415,9 +486,211 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "design_loop_start",
+      description:
+        "Start a chat-driven look-and-feel loop: generates self-contained mock HTML (no product edits). Returns loopId + html + transcript. If usedScaffold/timeout, call design_loop_retry to regenerate that version in place. Iterate with design_loop_continue, freeze with design_loop_accept, then implement_design.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          brief: {
+            type: "string",
+            description: "Look-and-feel brief (e.g. match JamPress header / dark chrome)",
+          },
+          phaseId: {
+            type: "string",
+            description: "Optional phase to attach when implementing later",
+          },
+          askId: {
+            type: "string",
+            description: "Optional related ask session id",
+          },
+        },
+        required: ["projectId", "brief"],
+      },
+    },
+    {
+      name: "design_loop_continue",
+      description:
+        "Revise an open design-loop mock from operator feedback. Returns new version HTML + transcript. On usedScaffold/timeout, call design_loop_retry (same version) instead of inventing a new continue. Does not edit product code.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          message: {
+            type: "string",
+            description: "Feedback for the next mock revision",
+          },
+        },
+        required: ["projectId", "loopId", "message"],
+      },
+    },
+    {
+      name: "design_loop_get",
+      description:
+        "Fetch a design loop meta, chat transcript (TRANSCRIPT.md), mock HTML, notes, and usedScaffold for a version. Pass includeHtml=false when you only need chat.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: {
+            type: "number",
+            description: "Optional version number (default: accepted or current)",
+          },
+          includeHtml: {
+            type: "boolean",
+            description: "Include mock HTML (default true). Set false for transcript-only.",
+          },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_retry",
+      description:
+        "Regenerate a design-loop version in place (overwrite mock/NOTES) after timeout/scaffold failure. Uses stored REQUEST.md or optional message override. Does not bump version. Loop must be open.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: {
+            type: "number",
+            description: "Version to regenerate (default: currentVersion)",
+          },
+          message: {
+            type: "string",
+            description: "Optional prompt override instead of stored REQUEST.md",
+          },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_accept",
+      description:
+        "Freeze a design-loop version as the visual contract. Then call implement_design.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: {
+            type: "number",
+            description: "Version to accept (default: current)",
+          },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "implement_design",
+      description:
+        "Bind an accepted design-loop mock to a phase: writes UI-SPEC, tokens.css, design/mock.html, DESIGN_COMPLETE. Creates a phase + starts research when phaseId is omitted. Product code still only changes in start_development.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          phaseId: {
+            type: "string",
+            description: "Existing phase to bind (omit to create a new phase from the brief)",
+          },
+          startResearch: {
+            type: "boolean",
+            description:
+              "When creating a new phase, start research (default true). Set false to only bind design artifacts.",
+          },
+          dependsOn: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional phase ids when creating a new phase",
+          },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "list_design_loops",
+      description: "List design-loop sessions for a project.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "generate_design_image",
+      description:
+        "Generate a raster (logo/icon/hero) via roles.designImage (openai-images / Flux). Prefer attaching loopId for design-loop assets. Hard-fails if designImage is unbound.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          prompt: { type: "string" },
+          loopId: { type: "string" },
+          filename: { type: "string" },
+          width: { type: "number" },
+          height: { type: "number" },
+        },
+        required: ["projectId", "prompt"],
+      },
+    },
+    {
+      name: "search_design_images",
+      description:
+        "Search Openverse (open-licensed Wikimedia / Flickr CC / museums) for reference or stock images. Returns ids — use import_design_image to materialize into a design loop.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          query: { type: "string" },
+          source: {
+            type: "string",
+            description: "Optional Openverse source filter (e.g. wikimedia)",
+          },
+          pageSize: { type: "number" },
+        },
+        required: ["projectId", "query"],
+      },
+    },
+    {
+      name: "import_design_image",
+      description:
+        "Import an Openverse image id into a design-loop assets folder (with attribution sidecar).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          openverseId: { type: "string" },
+          filename: { type: "string" },
+        },
+        required: ["projectId", "loopId", "openverseId"],
+      },
+    },
+    {
+      name: "review_design_loop",
+      description:
+        "Screenshot the design-loop mock.html and critique look-and-feel via roles.designVision. Writes vN/REVIEW.md.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: { type: "number" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
       name: "ask",
       description:
-        "Project-scoped AI conversation (exploratory, read-only). Does not create a phase. Omitting askId continues the project's latest open ask (sticky resume). Pass askId to target a specific session. Pass newAsk=true to force a fresh conversation. Always reuse askId from the previous ask response. For several investigations use ask_sub_research. When the change is clear, call promote_ask. After promote, use fork_ask to keep chatting. For shell inspect/verify without develop, use agent.",
+        "Project-scoped AI conversation (exploratory, read-only). Does not create a phase. Omitting askId continues the project's latest open ask (sticky resume). Pass askId to target a specific session. Pass newAsk=true to force a fresh conversation. Always reuse askId from the previous ask response. For several investigations use ask_sub_research. When the change is clear, call promote_ask. After promote, use fork_ask to keep chatting. For shell inspect/verify without develop, use agent. For look-and-feel mocks use design_loop_start.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1066,6 +1339,256 @@ export function createSlopcontrolMcpServer(
               paths: args.paths,
               continueMerge: args.continueMerge,
             }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_start") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              brief: args.brief,
+              phaseId: args.phaseId,
+              askId: args.askId,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_continue") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/continue`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message: args.message }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_get") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const params = new URLSearchParams();
+        if (args.version !== undefined && args.version !== null) {
+          params.set("version", String(args.version));
+        }
+        if (args.includeHtml === false || args.includeHtml === "false") {
+          params.set("includeHtml", "false");
+        }
+        const qs = params.toString() ? `?${params}` : "";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}${qs}`,
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_retry") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/retry`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              version: args.version,
+              message: args.message,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_accept") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/accept`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ version: args.version }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "implement_design") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/implement`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              phaseId: args.phaseId,
+              startResearch: args.startResearch,
+              dependsOn: args.dependsOn,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "list_design_loops") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops`,
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "generate_design_image") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-images`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              prompt: args.prompt,
+              loopId: args.loopId,
+              filename: args.filename,
+              width: args.width,
+              height: args.height,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "search_design_images") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-images/search`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query: args.query,
+              source: args.source,
+              pageSize: args.pageSize,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "import_design_image") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-images/import`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              loopId: args.loopId,
+              openverseId: args.openverseId,
+              filename: args.filename,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "review_design_loop") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/review`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ version: args.version }),
           },
         );
         const body = await res.text();

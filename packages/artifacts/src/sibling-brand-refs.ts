@@ -128,6 +128,13 @@ export function buildSiblingBrandRefPack(opts: {
   description: string;
   /** Extra sibling directory names under the same parent as projectRoot. */
   familySiblingNames?: string[];
+  /**
+   * Inline CSS token excerpts so callers (design-loop) need not tool-walk siblings.
+   * Default false for research prompts; design-loop should pass true.
+   */
+  includeTokenExcerpts?: boolean;
+  /** Max chars per token file excerpt (default 1_800). */
+  maxExcerptChars?: number;
 }): string {
   const family = opts.familySiblingNames ?? ["burntjam", "basic-web-agent"];
   const roots = new Set<string>(extractSiblingProjectPaths(opts.description));
@@ -150,6 +157,7 @@ export function buildSiblingBrandRefPack(opts: {
 
   if (roots.size === 0) return "";
 
+  const maxExcerpt = opts.maxExcerptChars ?? 1_800;
   const blocks: string[] = [
     "## Sibling brand references (authoritative — prefer consumed assets)",
     "",
@@ -190,9 +198,36 @@ export function buildSiblingBrandRefPack(opts: {
     if (tokensCandidates.length) {
       blocks.push("Token / theme sources:");
       for (const p of tokensCandidates) blocks.push(`- \`${p}\``);
+      if (opts.includeTokenExcerpts) {
+        for (const p of tokensCandidates.slice(0, 2)) {
+          try {
+            const raw = readFileSync(p, "utf-8");
+            const excerpt = excerptCssTokens(raw, maxExcerpt);
+            if (excerpt) {
+              blocks.push(`Excerpt from \`${basename(p)}\`:`);
+              blocks.push("```css");
+              blocks.push(excerpt);
+              blocks.push("```");
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+      }
     }
     blocks.push("");
   }
 
   return blocks.join("\n");
+}
+
+/** Prefer :root / @theme blocks; otherwise head of the file. */
+export function excerptCssTokens(css: string, maxChars: number): string {
+  const trimmed = (css ?? "").trim();
+  if (!trimmed) return "";
+  const root = trimmed.match(/:root\s*\{[\s\S]*?\n\}/);
+  const theme = trimmed.match(/@theme\b[\s\S]*?\{[\s\S]*?\n\}/);
+  const chunk = [root?.[0], theme?.[0]].filter(Boolean).join("\n\n") || trimmed;
+  if (chunk.length <= maxChars) return chunk;
+  return `${chunk.slice(0, maxChars)}\n/* …truncated… */`;
 }

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   buildSiblingBrandRefPack,
+  excerptCssTokens,
   extractSiblingProjectPaths,
   isDesignFallbackBrandPath,
 } from "./sibling-brand-refs.js";
@@ -54,8 +55,31 @@ describe("sibling brand refs", () => {
       assert.match(pack, /images\/logo\.svg/);
       assert.match(pack, /Non-authoritative fallbacks/);
       assert.match(pack, /palette-only/);
+
+      mkdirSync(join(jam, "src", "app"), { recursive: true });
+      writeFileSync(
+        join(jam, "src", "app", "globals.css"),
+        `:root { --accent: #E8430A; --bg: #0A0A0A; }\nbody { margin: 0; }\n`,
+      );
+      const withExcerpts = buildSiblingBrandRefPack({
+        projectRoot: crm,
+        description: `Apply theming from ${jam}`,
+        familySiblingNames: ["basic-web-agent"],
+        includeTokenExcerpts: true,
+      });
+      assert.match(withExcerpts, /--accent:\s*#E8430A/);
+      assert.match(withExcerpts, /```css/);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
+  });
+
+  it("excerptCssTokens prefers :root", () => {
+    const out = excerptCssTokens(
+      "body{}\n:root { --x: 1; }\n.footer{}",
+      200,
+    );
+    assert.match(out, /:root/);
+    assert.match(out, /--x/);
   });
 });

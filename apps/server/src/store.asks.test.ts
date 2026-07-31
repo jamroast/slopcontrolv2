@@ -3,7 +3,10 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { formatAskMcpEnvelope } from "./mcp-tools.js";
+import {
+  formatAskMcpEnvelope,
+  formatDesignLoopMcpEnvelope,
+} from "./mcp-tools.js";
 import { sanitizeAskTitle, SlopStore } from "./store.js";
 
 describe("sanitizeAskTitle", () => {
@@ -223,5 +226,43 @@ describe("formatAskMcpEnvelope", () => {
     );
     assert.match(text, /askId: old-1/);
     assert.match(text, /hint: fork_ask/);
+  });
+});
+
+describe("formatDesignLoopMcpEnvelope", () => {
+  it("puts loopId first and includes html fence", () => {
+    const text = formatDesignLoopMcpEnvelope(
+      JSON.stringify({
+        loop: { id: "loop-1", status: "open", currentVersion: 1 },
+        loopId: "loop-1",
+        version: 1,
+        notes: "Dark chrome",
+        html: "<!DOCTYPE html><html><body>Hi</body></html>",
+      }),
+      true,
+    );
+    assert.match(text, /^loopId: loop-1\n/);
+    assert.match(text, /version: 1/);
+    assert.match(text, /```html/);
+    assert.match(text, /<!DOCTYPE html>/);
+  });
+
+  it("surfaces usedScaffold hint and transcript", () => {
+    const text = formatDesignLoopMcpEnvelope(
+      JSON.stringify({
+        loopId: "loop-2",
+        loop: { id: "loop-2", status: "open", currentVersion: 1 },
+        version: 1,
+        usedScaffold: true,
+        hint: "design_loop_retry",
+        transcript: "# Design loop\n\n### User\n\nhello\n",
+        html: "<html></html>",
+      }),
+      true,
+    );
+    assert.match(text, /usedScaffold: true/);
+    assert.match(text, /hint: design_loop_retry/);
+    assert.match(text, /transcript:/);
+    assert.match(text, /hello/);
   });
 });

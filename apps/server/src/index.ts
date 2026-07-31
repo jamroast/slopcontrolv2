@@ -28,6 +28,22 @@ import {
   reconcileProjectBlueprint,
   clipBlueprintForPrompt,
   isEngagementSymptom,
+  createDesignLoopMeta,
+  writeDesignLoopMeta,
+  readDesignLoopMeta,
+  appendDesignLoopTranscript,
+  writeDesignLoopVersion,
+  readDesignLoopMockHtml,
+  readDesignLoopNotes,
+  readDesignLoopTranscript,
+  readDesignLoopRequest,
+  readDesignLoopVersionMeta,
+  setDesignLoopLastError,
+  designLoopVersionExists,
+  acceptDesignLoop,
+  listDesignLoops,
+  bindAcceptedDesignLoopToPhase,
+  writePhaseStatus,
 } from "@slopcontrol/artifacts";
 import {
   checkoutProjectBranch,
@@ -37,6 +53,11 @@ import {
   mergePhaseWorktree,
   removePhaseWorktree,
   resolveConflicts,
+  generateDesignImage,
+  searchDesignImages,
+  importDesignImageById,
+  resolveServableDesignAsset,
+  reviewDesignLoopLook,
 } from "@slopcontrol/coding-tools";
 import { loadEndpointsConfig } from "@slopcontrol/llm";
 import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync } from "@slopcontrol/mastra";
@@ -1070,6 +1091,802 @@ app.post("/projects/:id/agents", async (req, res) => {
     });
     res.status(500).json({ error: errMsg, agent });
   }
+});
+
+app.get("/projects/:id/design-loops", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const loops = listDesignLoops(project.rootPath);
+  res.json({ projectId: project.id, loops });
+});
+
+app.get("/projects/:id/design-loops/:loopId", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  const version =
+    typeof req.query.version === "string" && req.query.version.trim()
+      ? Number(req.query.version)
+      : meta.acceptedVersion ?? meta.currentVersion;
+  const includeHtml = req.query.includeHtml !== "false";
+  const html =
+    includeHtml && Number.isFinite(version) && version > 0
+      ? readDesignLoopMockHtml(project.rootPath, meta.id, version)
+      : null;
+  const notes =
+    Number.isFinite(version) && version > 0
+      ? readDesignLoopNotes(project.rootPath, meta.id, version)
+      : null;
+  const versionMeta =
+    Number.isFinite(version) && version > 0
+      ? readDesignLoopVersionMeta(project.rootPath, meta.id, version)
+      : null;
+  const transcript = readDesignLoopTranscript(project.rootPath, meta.id);
+  res.json({
+    loop: meta,
+    loopId: meta.id,
+    version: Number.isFinite(version) ? version : null,
+    html,
+    notes,
+    transcript,
+    versionMeta,
+    usedScaffold: versionMeta?.usedScaffold ?? false,
+  });
+});
+
+app.post("/projects/:id/design-loops", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const brief = String(req.body?.brief ?? req.body?.message ?? "").trim();
+  if (!brief) {
+    res.status(400).json({ error: "brief is required" });
+    return;
+  }
+  const phaseId =
+    typeof req.body?.phaseId === "string" ? req.body.phaseId.trim() : undefined;
+  const askId =
+    typeof req.body?.askId === "string" ? req.body.askId.trim() : undefined;
+
+  const meta = createDesignLoopMeta({
+    projectId: project.id,
+    brief,
+    phaseId: phaseId || undefined,
+    askId: askId || undefined,
+  });
+  writeDesignLoopMeta(project.rootPath, meta);
+  appendDesignLoopTranscript(project.rootPath, meta.id, "user", brief);
+
+  try {
+    const { orchestrator } = getRuntime(project.rootPath);
+    const version = 1;
+    const { html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
+      project,
+      loopId: meta.id,
+      brief,
+      version,
+    });
+    writeDesignLoopVersion({
+      projectRoot: project.rootPath,
+      loopId: meta.id,
+      version,
+      html,
+      notes,
+      request: brief,
+      usedScaffold,
+      error: usedScaffold ? notes : undefined,
+    });
+    let next = {
+      ...meta,
+      currentVersion: version,
+      updatedAt: new Date().toISOString(),
+    };
+    writeDesignLoopMeta(project.rootPath, next);
+    if (usedScaffold) {
+      next =
+        setDesignLoopLastError(project.rootPath, meta.id, {
+          version,
+          reason: notes,
+          at: new Date().toISOString(),
+        }) ?? next;
+    } else {
+      next = setDesignLoopLastError(project.rootPath, meta.id, null) ?? next;
+    }
+    appendDesignLoopTranscript(
+      project.rootPath,
+      meta.id,
+      "assistant",
+      `${notes}\n\n\`\`\`html\n${html.slice(0, 4_000)}${html.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
+    );
+    res.status(201).json({
+      loop: next,
+      loopId: next.id,
+      version,
+      html,
+      notes,
+      usedScaffold,
+      hint: usedScaffold ? "design_loop_retry" : undefined,
+      transcript: readDesignLoopTranscript(project.rootPath, meta.id),
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    log.error("design-loop", "start failed", {
+      projectId: project.id,
+      loopId: meta.id,
+      error: errMsg,
+    });
+    res.status(500).json({ error: errMsg, loop: meta, loopId: meta.id });
+  }
+});
+
+app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  if (meta.status !== "open") {
+    res.status(409).json({
+      error: `Design loop is ${meta.status}; start a new loop to explore further`,
+      loop: meta,
+      loopId: meta.id,
+    });
+    return;
+  }
+  const message = String(req.body?.message ?? "").trim();
+  if (!message) {
+    res.status(400).json({ error: "message is required" });
+    return;
+  }
+
+  const previousHtml =
+    meta.currentVersion > 0
+      ? readDesignLoopMockHtml(
+          project.rootPath,
+          meta.id,
+          meta.currentVersion,
+        )
+      : null;
+  appendDesignLoopTranscript(project.rootPath, meta.id, "user", message);
+
+  try {
+    const { orchestrator } = getRuntime(project.rootPath);
+    const version = meta.currentVersion + 1;
+    const { html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
+      project,
+      loopId: meta.id,
+      brief: meta.brief,
+      message,
+      previousHtml: previousHtml ?? undefined,
+      version,
+    });
+    writeDesignLoopVersion({
+      projectRoot: project.rootPath,
+      loopId: meta.id,
+      version,
+      html,
+      notes,
+      request: message,
+      usedScaffold,
+      error: usedScaffold ? notes : undefined,
+    });
+    let next = {
+      ...meta,
+      currentVersion: version,
+      updatedAt: new Date().toISOString(),
+    };
+    writeDesignLoopMeta(project.rootPath, next);
+    if (usedScaffold) {
+      next =
+        setDesignLoopLastError(project.rootPath, meta.id, {
+          version,
+          reason: notes,
+          at: new Date().toISOString(),
+        }) ?? next;
+    } else {
+      next = setDesignLoopLastError(project.rootPath, meta.id, null) ?? next;
+    }
+    appendDesignLoopTranscript(
+      project.rootPath,
+      meta.id,
+      "assistant",
+      `${notes}\n\n\`\`\`html\n${html.slice(0, 4_000)}${html.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
+    );
+    res.json({
+      loop: next,
+      loopId: next.id,
+      version,
+      html,
+      notes,
+      usedScaffold,
+      hint: usedScaffold ? "design_loop_retry" : undefined,
+      transcript: readDesignLoopTranscript(project.rootPath, meta.id),
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    log.error("design-loop", "continue failed", {
+      projectId: project.id,
+      loopId: meta.id,
+      error: errMsg,
+    });
+    res.status(500).json({ error: errMsg, loop: meta, loopId: meta.id });
+  }
+});
+
+app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  if (meta.status !== "open") {
+    res.status(409).json({
+      error: `Design loop is ${meta.status}; cannot retry a closed loop`,
+      loop: meta,
+      loopId: meta.id,
+    });
+    return;
+  }
+  const versionRaw = req.body?.version;
+  const version =
+    typeof versionRaw === "number"
+      ? versionRaw
+      : typeof versionRaw === "string" && versionRaw.trim()
+        ? Number(versionRaw)
+        : meta.currentVersion;
+  if (!Number.isFinite(version) || version < 1) {
+    res.status(400).json({ error: "Invalid version" });
+    return;
+  }
+  if (!designLoopVersionExists(project.rootPath, meta.id, version)) {
+    res.status(404).json({
+      error: `Design loop version v${version} not found`,
+      loopId: meta.id,
+    });
+    return;
+  }
+
+  const override =
+    typeof req.body?.message === "string" ? req.body.message.trim() : "";
+  const storedRequest = readDesignLoopRequest(
+    project.rootPath,
+    meta.id,
+    version,
+  );
+  const requestText =
+    override ||
+    storedRequest?.trim() ||
+    (version === 1 ? meta.brief : "");
+  if (!requestText.trim()) {
+    res.status(400).json({
+      error:
+        "No REQUEST.md for this version and no message override; cannot retry",
+      loopId: meta.id,
+      version,
+      hint: "Pass message to retry with an explicit prompt",
+    });
+    return;
+  }
+
+  const previousHtml =
+    version > 1
+      ? readDesignLoopMockHtml(project.rootPath, meta.id, version - 1)
+      : null;
+
+  appendDesignLoopTranscript(
+    project.rootPath,
+    meta.id,
+    "user",
+    `Retry v${version}${override ? ` (override): ${override}` : ""}`,
+  );
+
+  try {
+    const { orchestrator } = getRuntime(project.rootPath);
+    const isFirst = version === 1;
+    const { html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
+      project,
+      loopId: meta.id,
+      brief: isFirst ? requestText : meta.brief,
+      message: isFirst ? undefined : requestText,
+      previousHtml: previousHtml ?? undefined,
+      version,
+    });
+
+    writeDesignLoopVersion({
+      projectRoot: project.rootPath,
+      loopId: meta.id,
+      version,
+      html,
+      notes,
+      request: requestText,
+      usedScaffold,
+      error: usedScaffold ? notes : undefined,
+    });
+    let next = {
+      ...meta,
+      currentVersion: Math.max(meta.currentVersion, version),
+      updatedAt: new Date().toISOString(),
+    };
+    writeDesignLoopMeta(project.rootPath, next);
+    if (usedScaffold) {
+      next =
+        setDesignLoopLastError(project.rootPath, meta.id, {
+          version,
+          reason: notes,
+          at: new Date().toISOString(),
+        }) ?? next;
+    } else {
+      next = setDesignLoopLastError(project.rootPath, meta.id, null) ?? next;
+    }
+    appendDesignLoopTranscript(
+      project.rootPath,
+      meta.id,
+      "assistant",
+      `Retry v${version} result:\n${notes}\n\n\`\`\`html\n${html.slice(0, 4_000)}${html.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
+    );
+    res.json({
+      loop: next,
+      loopId: next.id,
+      version,
+      html,
+      notes,
+      usedScaffold,
+      hint: usedScaffold ? "design_loop_retry" : undefined,
+      transcript: readDesignLoopTranscript(project.rootPath, meta.id),
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    log.error("design-loop", "retry failed", {
+      projectId: project.id,
+      loopId: meta.id,
+      version,
+      error: errMsg,
+    });
+    res.status(500).json({ error: errMsg, loop: meta, loopId: meta.id });
+  }
+});
+
+app.post("/projects/:id/design-loops/:loopId/accept", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  const versionRaw = req.body?.version;
+  const version =
+    typeof versionRaw === "number"
+      ? versionRaw
+      : typeof versionRaw === "string" && versionRaw.trim()
+        ? Number(versionRaw)
+        : undefined;
+  try {
+    const accepted = acceptDesignLoop(
+      project.rootPath,
+      meta.id,
+      Number.isFinite(version) ? version : undefined,
+    );
+    const html = readDesignLoopMockHtml(
+      project.rootPath,
+      accepted.id,
+      accepted.acceptedVersion ?? accepted.currentVersion,
+    );
+    appendDesignLoopTranscript(
+      project.rootPath,
+      accepted.id,
+      "user",
+      `Accepted v${accepted.acceptedVersion}`,
+    );
+    res.json({
+      loop: accepted,
+      loopId: accepted.id,
+      version: accepted.acceptedVersion,
+      html,
+      next: "Call implement_design to bind this mock to a phase (UI-SPEC + DESIGN_COMPLETE), then start_development.",
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: errMsg, loop: meta, loopId: meta.id });
+  }
+});
+
+app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  if (meta.status === "open") {
+    res.status(409).json({
+      error: "Accept the design loop before implement_design",
+      loop: meta,
+      loopId: meta.id,
+      hint: "design_loop_accept",
+    });
+    return;
+  }
+
+  const phaseIdOverride =
+    typeof req.body?.phaseId === "string" ? req.body.phaseId.trim() : "";
+  const startResearch = req.body?.startResearch !== false;
+  const dependsOn = Array.isArray(req.body?.dependsOn)
+    ? req.body.dependsOn.map(String).filter(Boolean)
+    : undefined;
+
+  let phase = phaseIdOverride
+    ? store.getPhase(phaseIdOverride)
+    : meta.phaseId
+      ? store.getPhase(meta.phaseId)
+      : undefined;
+
+  if (phaseIdOverride && (!phase || phase.projectId !== project.id)) {
+    res.status(404).json({ error: "Phase not found" });
+    return;
+  }
+
+  const createdPhase = !phase;
+  if (!phase) {
+    phase = store.createPhase({
+      projectId: project.id,
+      description: meta.brief,
+      rootPath: project.rootPath,
+      dependsOn,
+    });
+  }
+
+  try {
+    const bound = bindAcceptedDesignLoopToPhase({
+      projectRoot: project.rootPath,
+      loopId: meta.id,
+      phaseId: phase.id,
+    });
+    // DESIGN_COMPLETE is in design/STATUS.md from bind. Only stamp phase status
+    // when we are not about to run research (which owns draft → review → accepted).
+    if (!(createdPhase && startResearch)) {
+      writePhaseStatus(project.rootPath, phase.id, "design_complete");
+    }
+
+    let run = null as ReturnType<typeof store.createRun> | null;
+    if (createdPhase && startResearch) {
+      run = store.createRun({ phaseId: phase.id, projectId: project.id });
+      touchRunStage(run.id, "researching");
+      activeRuns.add(run.id);
+      const ac = new AbortController();
+      abortControllers.set(run.id, ac);
+      const { orchestrator } = getRuntime(project.rootPath);
+      void (async () => {
+        try {
+          await orchestrator.startResearch({
+            project,
+            phase: phase!,
+            run: run!,
+            description: meta.brief,
+            onStage: (stage) => touchRunStage(run!.id, stage),
+          });
+        } catch (error) {
+          const errMsg =
+            error instanceof Error ? error.message : String(error);
+          log.error("design-loop", "implement research failed", {
+            projectId: project.id,
+            loopId: meta.id,
+            runId: run!.id,
+            error: errMsg,
+          });
+          appendRunLog(
+            project.rootPath,
+            run!.id,
+            `implement_design research failed: ${errMsg}`,
+          );
+          touchRunStage(run!.id, "failed");
+        } finally {
+          activeRuns.delete(run!.id);
+          abortControllers.delete(run!.id);
+        }
+      })();
+    }
+
+    res.status(createdPhase ? 201 : 200).json({
+      loop: bound.meta,
+      loopId: bound.meta.id,
+      phase,
+      phaseId: phase.id,
+      version: bound.version,
+      mockPath: bound.mockPath,
+      uiSpecPath: bound.uiSpecPath,
+      run,
+      runId: run?.id ?? null,
+      createdPhase,
+      next: createdPhase && startResearch
+        ? "Research started. After review approval, call start_development (design already bound from accepted mock)."
+        : "Design contract bound (UI-SPEC + mock + DESIGN_COMPLETE). Call start_development when the phase is accepted/ready.",
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: errMsg, loop: meta, loopId: meta.id });
+  }
+});
+
+app.post("/projects/:id/design-loops/:loopId/review", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  const versionRaw = req.body?.version;
+  const version =
+    typeof versionRaw === "number"
+      ? versionRaw
+      : typeof versionRaw === "string" && versionRaw.trim()
+        ? Number(versionRaw)
+        : meta.currentVersion;
+  if (!Number.isFinite(version) || version < 1) {
+    res.status(400).json({ error: "No mock version to review" });
+    return;
+  }
+  try {
+    const { registry } = getRuntime(project.rootPath);
+    const vision = registry.tryResolveDesignVision();
+    if (!vision) {
+      res.status(400).json({
+        error:
+          "designVision unbound — bind roles.designVision to a vision-capable model (kimi-k2.7-code or kimi-k3)",
+      });
+      return;
+    }
+    const result = await reviewDesignLoopLook({
+      projectRoot: project.rootPath,
+      loopId: meta.id,
+      version,
+      brief: meta.brief,
+      visionEndpoint: vision.endpoint,
+      visionModelId: vision.modelId,
+      reusePreview: req.body?.reusePreview !== false,
+    });
+    appendDesignLoopTranscript(
+      project.rootPath,
+      meta.id,
+      "assistant",
+      `## Vision review (v${version})\n\n${result.critique}`,
+    );
+    res.json({
+      loopId: meta.id,
+      version,
+      critique: result.critique,
+      previewPath: result.previewPath,
+      reviewPath: result.reviewPath,
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: errMsg, loopId: meta.id });
+  }
+});
+
+app.post("/projects/:id/design-images", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const prompt = String(req.body?.prompt ?? "").trim();
+  if (!prompt) {
+    res.status(400).json({ error: "prompt is required" });
+    return;
+  }
+  const loopId =
+    typeof req.body?.loopId === "string" ? req.body.loopId.trim() : undefined;
+  if (loopId) {
+    const meta = readDesignLoopMeta(project.rootPath, loopId);
+    if (!meta || meta.projectId !== project.id) {
+      res.status(404).json({ error: "Design loop not found" });
+      return;
+    }
+  }
+  try {
+    const { registry } = getRuntime(project.rootPath);
+    const binding = registry.tryResolveDesignImage();
+    if (!binding) {
+      res.status(400).json({
+        error:
+          "designImage unbound — bind roles.designImage to openai-images (e.g. x/flux2-klein)",
+      });
+      return;
+    }
+    const result = await generateDesignImage({
+      projectRoot: project.rootPath,
+      prompt,
+      endpoint: binding.endpoint,
+      modelId: binding.modelId,
+      loopId,
+      filename:
+        typeof req.body?.filename === "string"
+          ? req.body.filename.trim()
+          : undefined,
+      width:
+        typeof req.body?.width === "number" ? req.body.width : undefined,
+      height:
+        typeof req.body?.height === "number" ? req.body.height : undefined,
+    });
+    if (loopId) {
+      appendDesignLoopTranscript(
+        project.rootPath,
+        loopId,
+        "assistant",
+        `Generated image: ${result.relativePath}`,
+      );
+    }
+    res.status(201).json({
+      path: result.path,
+      relativePath: result.relativePath,
+      bytes: result.bytes,
+      format: result.format,
+      loopId: loopId ?? null,
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: errMsg });
+  }
+});
+
+app.get("/projects/:id/design-images/search", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const q = String(req.query.q ?? req.query.query ?? "").trim();
+  if (!q) {
+    res.status(400).json({ error: "q is required" });
+    return;
+  }
+  try {
+    const hits = await searchDesignImages({
+      query: q,
+      source:
+        typeof req.query.source === "string" ? req.query.source : undefined,
+      page:
+        typeof req.query.page === "string"
+          ? Number(req.query.page)
+          : undefined,
+      pageSize:
+        typeof req.query.pageSize === "string"
+          ? Number(req.query.pageSize)
+          : undefined,
+    });
+    res.json({ projectId: project.id, query: q, hits });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: errMsg });
+  }
+});
+
+app.post("/projects/:id/design-images/search", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const q = String(req.body?.query ?? req.body?.q ?? "").trim();
+  if (!q) {
+    res.status(400).json({ error: "query is required" });
+    return;
+  }
+  try {
+    const hits = await searchDesignImages({
+      query: q,
+      source:
+        typeof req.body?.source === "string" ? req.body.source : undefined,
+      page: typeof req.body?.page === "number" ? req.body.page : undefined,
+      pageSize:
+        typeof req.body?.pageSize === "number" ? req.body.pageSize : undefined,
+      licenseType:
+        typeof req.body?.licenseType === "string"
+          ? req.body.licenseType
+          : undefined,
+    });
+    res.json({ projectId: project.id, query: q, hits });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: errMsg });
+  }
+});
+
+app.post("/projects/:id/design-images/import", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const loopId = String(req.body?.loopId ?? "").trim();
+  const openverseId = String(req.body?.openverseId ?? "").trim();
+  if (!loopId || !openverseId) {
+    res.status(400).json({ error: "loopId and openverseId are required" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  try {
+    const result = await importDesignImageById({
+      projectRoot: project.rootPath,
+      loopId,
+      openverseId,
+      filename:
+        typeof req.body?.filename === "string"
+          ? req.body.filename.trim()
+          : undefined,
+    });
+    appendDesignLoopTranscript(
+      project.rootPath,
+      loopId,
+      "assistant",
+      `Imported Openverse ${openverseId} → ${result.relativePath}\nAttribution: ${result.hit.attribution}`,
+    );
+    res.status(201).json({
+      loopId,
+      relativePath: result.relativePath,
+      absolutePath: result.absolutePath,
+      attributionPath: result.attributionPath,
+      hit: result.hit,
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    res.status(400).json({ error: errMsg });
+  }
+});
+
+app.get("/projects/:id/design-images/:name", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const path = resolveServableDesignAsset(
+    project.rootPath,
+    String(req.params.name ?? ""),
+  );
+  if (!path) {
+    res.status(404).json({ error: "Asset not found" });
+    return;
+  }
+  res.sendFile(path);
 });
 
 app.get("/projects/:id/worktrees", (req, res) => {

@@ -96,8 +96,14 @@ pnpm mcp:stdio
 - `agent` — project-scoped inspect/verify chat with **`run_command` in the project root** (`projectId`, `message`; optional `agentId` / `title`). Not development — no worktrees, design, or merge. For implementation use `ask` → `promote_ask` or `start_change`.
 - `list_agents` / `get_agent` — list or fetch agent chat sessions for a project
 - `start_change` — new ordered phase directly (`projectId`, `description`) without an ask conversation
+- `design_loop_start` / `design_loop_continue` / `design_loop_accept` / `implement_design` — chat-driven look-and-feel mocks (HTML under `.slopcontrol/design-loops/`). The design-loop agent can call image tools in-turn when asked.
+- `design_loop_get` — meta + **transcript** (`TRANSCRIPT.md`) + mock HTML/notes + `usedScaffold` (pass `includeHtml=false` for chat-only)
+- `design_loop_retry` — regenerate a failed/scaffold version **in place** (timeout recovery; does not bump version)
+- `generate_design_image` — raster via `roles.designImage` (local Flux / `openai-images`); hard-fails if unbound
+- `search_design_images` / `import_design_image` — Openverse (open-licensed Wikimedia / Flickr CC / museums); import writes loop `assets/` + attribution sidecar
+- `review_design_loop` — screenshot mock → `roles.designVision` critique (`vN/REVIEW.md`). Needs Playwright Chromium: `pnpm --filter @slopcontrol/coding-tools exec playwright install chromium`
 
-**Ask vs agent vs develop:** `ask` shapes a change (read-only + optional `ask_sub_research`); `agent` runs shell commands to diagnose/verify without starting phases; `start_development` / coding tools own real implementation in a phase worktree.
+**Ask vs agent vs develop:** `ask` shapes a change (read-only + optional `ask_sub_research`); `agent` runs shell commands to diagnose/verify without starting phases; `start_development` / coding tools own real implementation in a phase worktree. Use `design_loop_*` (not plain ask) for look-and-feel + image search/gen.
 - `list_runs` / `list_phases` — **require** `projectId`
 - `list_worktrees` — phase worktrees under `~/.slopcontrol/worktrees` (`projectId`)
 - `get_git_status` — which branch is checked out in the project folder (`projectId`)
@@ -156,6 +162,14 @@ Real projects may be audited read-only; writing `BLUEPRINT.md` only via `reconci
 - `GET /projects/:id/asks/:askId` — full ask transcript
 - `POST /projects/:id/asks/:askId/sub-research` — run up to 4 ephemeral sub-researches (`topics[]`); sync response with findings in transcript
 - `POST /projects/:id/asks/:askId/promote` — promote ask → phase + start research
+- `POST /projects/:id/design-loops` — start design loop (brief → mock HTML)
+- `POST /projects/:id/design-loops/:loopId/continue` — revise mock
+- `POST /projects/:id/design-loops/:loopId/retry` — regenerate a version in place after scaffold/timeout
+- `GET /projects/:id/design-loops/:loopId` — meta + transcript + html (`?includeHtml=false` to skip html)
+- `POST /projects/:id/design-loops/:loopId/accept` / `implement` / `review`
+- `POST /projects/:id/design-images` — generate raster (`designImage`)
+- `POST /projects/:id/design-images/search` — Openverse search
+- `POST /projects/:id/design-images/import` — import Openverse id into loop assets
 - `GET /projects/:id/agents` — list agent chat sessions
 - `POST /projects/:id/agents` — start/continue agent chat (`message`, optional `agentId` / `title`)
 - `GET /projects/:id/agents/:agentId` — full agent transcript
@@ -180,6 +194,8 @@ Real projects may be audited read-only; writing `BLUEPRINT.md` only via `reconci
   archive/BLUEPRINT-…   # superseded blueprints
   asks/<askId>/         # exploratory conversations (TRANSCRIPT.md, meta.json)
   agents/<agentId>/     # inspect/verify chats with run_command (TRANSCRIPT.md, meta.json)
+  design-loops/<id>/    # look-and-feel mocks (META, TRANSCRIPT, vN/mock.html, assets/)
+  generated-images/     # rasters generated without a loopId
   phases/01-slug/       # RESEARCH.md, PHASE.md, APPENDIX.md, status.json
   runs/<uuid>/log.txt
   runs/<uuid>/checks/   # full verify dumps + plan-progress

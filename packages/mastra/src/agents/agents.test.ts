@@ -11,6 +11,7 @@ import {
   createAgentChatAgent,
   createAskAgent,
   createAskSubResearchAgent,
+  createDesignLoopAgent,
 } from "./index.js";
 
 function testRegistry(dir: string): LlmRegistry {
@@ -30,6 +31,7 @@ function testRegistry(dir: string): LlmRegistry {
       roles: {
         research: { endpointId: "local" },
         planning: { endpointId: "local" },
+        design: { endpointId: "local" },
         supervisor: { endpointId: "local" },
         coding: { endpointId: "local" },
       },
@@ -61,10 +63,12 @@ describe("ask / agent chat tool split", () => {
       const ask = createAskAgent(registry, projectDir, memory);
       const sub = createAskSubResearchAgent(registry, projectDir, memory);
       const agent = createAgentChatAgent(registry, projectDir, memory);
+      const designLoop = createDesignLoopAgent(registry, projectDir, memory);
 
       const askTools = await ask.listTools();
       const subTools = await sub.listTools();
       const agentTools = await agent.listTools();
+      const loopTools = await designLoop.listTools();
 
       assert.equal("run_command" in askTools, false);
       assert.equal("write_file" in askTools, false);
@@ -72,8 +76,17 @@ describe("ask / agent chat tool split", () => {
       assert.equal("write_file" in subTools, false);
       assert.equal("run_command" in agentTools, true);
       assert.equal("write_file" in agentTools, false);
+      assert.equal("write_file" in loopTools, false);
+      assert.equal("run_command" in loopTools, false);
+      assert.equal("grep_files" in loopTools, false);
+      assert.equal("list_files" in loopTools, false);
       assert.ok("read_file" in askTools);
       assert.ok("grep_files" in subTools);
+      assert.ok("read_file" in loopTools);
+      assert.ok("generate_image" in loopTools);
+      assert.ok("search_images" in loopTools);
+      assert.ok("import_image" in loopTools);
+      assert.ok("review_look" in loopTools);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
