@@ -512,7 +512,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_continue",
       description:
-        "Revise an open design-loop mock from operator feedback. Returns new version HTML + transcript. On usedScaffold/timeout, call design_loop_retry (same version) instead of inventing a new continue. Does not edit product code.",
+        "Revise a design-loop mock from operator feedback (new version). Works on open loops, and also reopens accepted/implemented loops so you can iterate (e.g. v2) without starting a new loop. On usedScaffold/timeout, call design_loop_retry. Does not edit product code — accept + implement_design to re-bind.",
       inputSchema: {
         type: "object",
         properties: {
@@ -529,7 +529,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_get",
       description:
-        "Fetch a design loop meta, chat transcript (TRANSCRIPT.md), mock HTML, notes, and usedScaffold for a version. Pass includeHtml=false when you only need chat.",
+        "Fetch a design loop meta, chat transcript (TRANSCRIPT.md), mock HTML, notes, ACCEPTANCE feature checklist, and usedScaffold for a version. Pass includeHtml=false when you only need chat.",
       inputSchema: {
         type: "object",
         properties: {
@@ -542,6 +542,36 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           includeHtml: {
             type: "boolean",
             description: "Include mock HTML (default true). Set false for transcript-only.",
+          },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_acceptance",
+      description:
+        "Save accept-time feature checklist ticks (before or after drafting ticks; does not freeze the loop). Pass features[] with {id,label,accepted} or acceptedFeatureIds[].",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          features: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                label: { type: "string" },
+                accepted: { type: "boolean" },
+              },
+            },
+            description: "Full feature list with accepted flags",
+          },
+          acceptedFeatureIds: {
+            type: "array",
+            items: { type: "string" },
+            description: "Ids to mark accepted (others become unchecked)",
           },
         },
         required: ["projectId", "loopId"],
@@ -571,7 +601,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_accept",
       description:
-        "Freeze a design-loop version as the visual contract. Then call implement_design.",
+        "Freeze a design-loop version + feature checklist as the visual contract (requires ≥1 ticked feature). Then call implement_design. Pass features or acceptedFeatureIds. If status is implemented, call design_loop_continue first to reopen.",
       inputSchema: {
         type: "object",
         properties: {
@@ -581,6 +611,22 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             type: "number",
             description: "Version to accept (default: current)",
           },
+          features: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                label: { type: "string" },
+                accepted: { type: "boolean" },
+              },
+            },
+          },
+          acceptedFeatureIds: {
+            type: "array",
+            items: { type: "string" },
+            description: "Feature ids to accept (e.g. palette, logo, applied_shell)",
+          },
         },
         required: ["projectId", "loopId"],
       },
@@ -588,7 +634,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "implement_design",
       description:
-        "Bind an accepted design-loop mock to a phase: writes UI-SPEC, tokens.css, design/mock.html, DESIGN_COMPLETE. Creates a phase + starts research when phaseId is omitted. Product code still only changes in start_development.",
+        "Bind an accepted design-loop mock + ACCEPTANCE checklist to a phase: writes UI-SPEC, tokens.css, design/mock.html, design/ACCEPTANCE.json, DESIGN_COMPLETE. Creates a new phase and starts research when phaseId is omitted or the linked phase is complete. Product code still only changes in start_development.",
       inputSchema: {
         type: "object",
         properties: {
@@ -596,7 +642,8 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           loopId: { type: "string" },
           phaseId: {
             type: "string",
-            description: "Existing phase to bind (omit to create a new phase from the brief)",
+            description:
+              "Existing incomplete phase to bind. Omit (recommended) so a complete linked phase triggers a new phase + research.",
           },
           startResearch: {
             type: "boolean",
@@ -1446,6 +1493,31 @@ export function createSlopcontrolMcpServer(
       });
     }
 
+    if (name === "design_loop_acceptance") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/acceptance`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              features: args.features,
+              acceptedFeatureIds: args.acceptedFeatureIds,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
     if (name === "design_loop_accept") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -1455,7 +1527,11 @@ export function createSlopcontrolMcpServer(
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ version: args.version }),
+            body: JSON.stringify({
+              version: args.version,
+              features: args.features,
+              acceptedFeatureIds: args.acceptedFeatureIds,
+            }),
           },
         );
         const body = await res.text();
@@ -1472,16 +1548,17 @@ export function createSlopcontrolMcpServer(
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
         const loopId = String(args.loopId ?? "");
+        const payload: Record<string, unknown> = {
+          startResearch: args.startResearch,
+          dependsOn: args.dependsOn,
+        };
+        if (args.phaseId) payload.phaseId = args.phaseId;
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/implement`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              phaseId: args.phaseId,
-              startResearch: args.startResearch,
-              dependsOn: args.dependsOn,
-            }),
+            body: JSON.stringify(payload),
           },
         );
         const body = await res.text();

@@ -96,8 +96,9 @@ pnpm mcp:stdio
 - `agent` — project-scoped inspect/verify chat with **`run_command` in the project root** (`projectId`, `message`; optional `agentId` / `title`). Not development — no worktrees, design, or merge. For implementation use `ask` → `promote_ask` or `start_change`.
 - `list_agents` / `get_agent` — list or fetch agent chat sessions for a project
 - `start_change` — new ordered phase directly (`projectId`, `description`) without an ask conversation
-- `design_loop_start` / `design_loop_continue` / `design_loop_accept` / `implement_design` — chat-driven look-and-feel mocks (HTML under `.slopcontrol/design-loops/`). The design-loop agent can call image tools in-turn when asked.
-- `design_loop_get` — meta + **transcript** (`TRANSCRIPT.md`) + mock HTML/notes + `usedScaffold` (pass `includeHtml=false` for chat-only)
+- `design_loop_start` / `design_loop_continue` / `design_loop_accept` / `implement_design` — chat-driven look-and-feel mocks (HTML under `.slopcontrol/design-loops/`). **Accept freezes a feature checklist** (`ACCEPTANCE.json`: palette, logo, type, applied_shell, …) that research/draft must plan; unticked items are out of scope. After implement, `design_loop_continue` reopens the same loop for v2+; accept again, then `implement_design` (omit `phaseId` if the prior phase is complete so a new research pass starts).
+- `design_loop_acceptance` — save checklist ticks without freezing the loop
+- `design_loop_get` — meta + **transcript** + mock HTML/notes + **acceptance** checklist + `usedScaffold` (pass `includeHtml=false` for chat-only)
 - `design_loop_retry` — regenerate a failed/scaffold version **in place** (timeout recovery; does not bump version)
 - `generate_design_image` — raster via `roles.designImage` (local Flux / `openai-images`); hard-fails if unbound
 - `search_design_images` / `import_design_image` — Openverse (open-licensed Wikimedia / Flickr CC / museums); import writes loop `assets/` + attribution sidecar

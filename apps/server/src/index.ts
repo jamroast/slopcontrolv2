@@ -41,8 +41,13 @@ import {
   setDesignLoopLastError,
   designLoopVersionExists,
   acceptDesignLoop,
+  reopenDesignLoopForIterate,
   listDesignLoops,
   bindAcceptedDesignLoopToPhase,
+  seedDesignLoopAcceptanceFromHtml,
+  readDesignLoopAcceptance,
+  writeDesignLoopAcceptance,
+  applyAcceptanceFeatureTicks,
   writePhaseStatus,
 } from "@slopcontrol/artifacts";
 import {
@@ -1132,6 +1137,16 @@ app.get("/projects/:id/design-loops/:loopId", (req, res) => {
       ? readDesignLoopVersionMeta(project.rootPath, meta.id, version)
       : null;
   const transcript = readDesignLoopTranscript(project.rootPath, meta.id);
+  let acceptance = readDesignLoopAcceptance(project.rootPath, meta.id);
+  // Seed checklist for loops created before ACCEPTANCE.json existed
+  if (!acceptance && html?.trim() && Number.isFinite(version) && version > 0) {
+    acceptance = seedDesignLoopAcceptanceFromHtml({
+      projectRoot: project.rootPath,
+      loopId: meta.id,
+      version: version as number,
+      html,
+    });
+  }
   res.json({
     loop: meta,
     loopId: meta.id,
@@ -1141,6 +1156,71 @@ app.get("/projects/:id/design-loops/:loopId", (req, res) => {
     transcript,
     versionMeta,
     usedScaffold: versionMeta?.usedScaffold ?? false,
+    acceptance,
+  });
+});
+
+app.put("/projects/:id/design-loops/:loopId/acceptance", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  if (meta.status === "implemented") {
+    res.status(409).json({
+      error:
+        "Design loop is implemented; call design_loop_continue to reopen before editing acceptance",
+      loop: meta,
+      loopId: meta.id,
+    });
+    return;
+  }
+  const prior = readDesignLoopAcceptance(project.rootPath, meta.id);
+  const bodyFeatures = Array.isArray(req.body?.features)
+    ? req.body.features
+    : undefined;
+  const acceptedFeatureIds = Array.isArray(req.body?.acceptedFeatureIds)
+    ? req.body.acceptedFeatureIds.map(String)
+    : undefined;
+
+  let baseFeatures = prior?.features ?? [];
+  if (!baseFeatures.length && meta.currentVersion > 0) {
+    const html = readDesignLoopMockHtml(
+      project.rootPath,
+      meta.id,
+      meta.currentVersion,
+    );
+    if (html) {
+      baseFeatures = seedDesignLoopAcceptanceFromHtml({
+        projectRoot: project.rootPath,
+        loopId: meta.id,
+        version: meta.currentVersion,
+        html,
+      }).features;
+    }
+  }
+
+  const features = applyAcceptanceFeatureTicks({
+    features: baseFeatures,
+    nextFeatures: bodyFeatures,
+    acceptedFeatureIds,
+  });
+  const acceptance = {
+    version: meta.currentVersion || prior?.version || 1,
+    features,
+    acceptedAt: meta.status === "accepted" ? prior?.acceptedAt : undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  writeDesignLoopAcceptance(project.rootPath, meta.id, acceptance);
+  res.json({
+    loop: meta,
+    loopId: meta.id,
+    acceptance,
   });
 });
 
@@ -1188,6 +1268,12 @@ app.post("/projects/:id/design-loops", async (req, res) => {
       usedScaffold,
       error: usedScaffold ? notes : undefined,
     });
+    const acceptance = seedDesignLoopAcceptanceFromHtml({
+      projectRoot: project.rootPath,
+      loopId: meta.id,
+      version,
+      html,
+    });
     let next = {
       ...meta,
       currentVersion: version,
@@ -1217,6 +1303,7 @@ app.post("/projects/:id/design-loops", async (req, res) => {
       html,
       notes,
       usedScaffold,
+      acceptance,
       hint: usedScaffold ? "design_loop_retry" : undefined,
       transcript: readDesignLoopTranscript(project.rootPath, meta.id),
     });
@@ -1242,14 +1329,13 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
     res.status(404).json({ error: "Design loop not found" });
     return;
   }
-  if (meta.status !== "open") {
-    res.status(409).json({
-      error: `Design loop is ${meta.status}; start a new loop to explore further`,
-      loop: meta,
-      loopId: meta.id,
-    });
-    return;
-  }
+  // Accepted/implemented loops may continue to vN+1 (reopens to open).
+  // Prior acceptedVersion + phaseId stay as history until accept + implement again.
+  let working =
+    meta.status === "open"
+      ? meta
+      : reopenDesignLoopForIterate(project.rootPath, meta.id);
+  const reopenedFrom = meta.status !== "open" ? meta.status : undefined;
   const message = String(req.body?.message ?? "").trim();
   if (!message) {
     res.status(400).json({ error: "message is required" });
@@ -1257,29 +1343,29 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
   }
 
   const previousHtml =
-    meta.currentVersion > 0
+    working.currentVersion > 0
       ? readDesignLoopMockHtml(
           project.rootPath,
-          meta.id,
-          meta.currentVersion,
+          working.id,
+          working.currentVersion,
         )
       : null;
-  appendDesignLoopTranscript(project.rootPath, meta.id, "user", message);
+  appendDesignLoopTranscript(project.rootPath, working.id, "user", message);
 
   try {
     const { orchestrator } = getRuntime(project.rootPath);
-    const version = meta.currentVersion + 1;
+    const version = working.currentVersion + 1;
     const { html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
       project,
-      loopId: meta.id,
-      brief: meta.brief,
+      loopId: working.id,
+      brief: working.brief,
       message,
       previousHtml: previousHtml ?? undefined,
       version,
     });
     writeDesignLoopVersion({
       projectRoot: project.rootPath,
-      loopId: meta.id,
+      loopId: working.id,
       version,
       html,
       notes,
@@ -1287,25 +1373,31 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
       usedScaffold,
       error: usedScaffold ? notes : undefined,
     });
+    const acceptance = seedDesignLoopAcceptanceFromHtml({
+      projectRoot: project.rootPath,
+      loopId: working.id,
+      version,
+      html,
+    });
     let next = {
-      ...meta,
+      ...working,
       currentVersion: version,
       updatedAt: new Date().toISOString(),
     };
     writeDesignLoopMeta(project.rootPath, next);
     if (usedScaffold) {
       next =
-        setDesignLoopLastError(project.rootPath, meta.id, {
+        setDesignLoopLastError(project.rootPath, working.id, {
           version,
           reason: notes,
           at: new Date().toISOString(),
         }) ?? next;
     } else {
-      next = setDesignLoopLastError(project.rootPath, meta.id, null) ?? next;
+      next = setDesignLoopLastError(project.rootPath, working.id, null) ?? next;
     }
     appendDesignLoopTranscript(
       project.rootPath,
-      meta.id,
+      working.id,
       "assistant",
       `${notes}\n\n\`\`\`html\n${html.slice(0, 4_000)}${html.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
     );
@@ -1316,17 +1408,20 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
       html,
       notes,
       usedScaffold,
+      acceptance,
+      reopenedFrom,
       hint: usedScaffold ? "design_loop_retry" : undefined,
-      transcript: readDesignLoopTranscript(project.rootPath, meta.id),
+      next: "Tick features (PUT .../acceptance), design_loop_accept, then implement_design.",
+      transcript: readDesignLoopTranscript(project.rootPath, working.id),
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error("design-loop", "continue failed", {
       projectId: project.id,
-      loopId: meta.id,
+      loopId: working.id,
       error: errMsg,
     });
-    res.status(500).json({ error: errMsg, loop: meta, loopId: meta.id });
+    res.status(500).json({ error: errMsg, loop: working, loopId: working.id });
   }
 });
 
@@ -1424,6 +1519,12 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
       usedScaffold,
       error: usedScaffold ? notes : undefined,
     });
+    const acceptance = seedDesignLoopAcceptanceFromHtml({
+      projectRoot: project.rootPath,
+      loopId: meta.id,
+      version,
+      html,
+    });
     let next = {
       ...meta,
       currentVersion: Math.max(meta.currentVersion, version),
@@ -1453,6 +1554,7 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
       html,
       notes,
       usedScaffold,
+      acceptance,
       hint: usedScaffold ? "design_loop_retry" : undefined,
       transcript: readDesignLoopTranscript(project.rootPath, meta.id),
     });
@@ -1486,29 +1588,44 @@ app.post("/projects/:id/design-loops/:loopId/accept", (req, res) => {
       : typeof versionRaw === "string" && versionRaw.trim()
         ? Number(versionRaw)
         : undefined;
+  const bodyFeatures = Array.isArray(req.body?.features)
+    ? req.body.features
+    : undefined;
+  const acceptedFeatureIds = Array.isArray(req.body?.acceptedFeatureIds)
+    ? req.body.acceptedFeatureIds.map(String)
+    : undefined;
   try {
     const accepted = acceptDesignLoop(
       project.rootPath,
       meta.id,
       Number.isFinite(version) ? version : undefined,
+      {
+        features: bodyFeatures,
+        acceptedFeatureIds,
+      },
     );
+    const acceptance = readDesignLoopAcceptance(project.rootPath, accepted.id);
     const html = readDesignLoopMockHtml(
       project.rootPath,
       accepted.id,
       accepted.acceptedVersion ?? accepted.currentVersion,
     );
+    const ticked =
+      acceptance?.features.filter((f) => f.accepted).map((f) => f.id).join(", ") ??
+      "";
     appendDesignLoopTranscript(
       project.rootPath,
       accepted.id,
       "user",
-      `Accepted v${accepted.acceptedVersion}`,
+      `Accepted v${accepted.acceptedVersion}${ticked ? ` — features: ${ticked}` : ""}`,
     );
     res.json({
       loop: accepted,
       loopId: accepted.id,
       version: accepted.acceptedVersion,
       html,
-      next: "Call implement_design to bind this mock to a phase (UI-SPEC + DESIGN_COMPLETE), then start_development.",
+      acceptance,
+      next: "Call implement_design to bind this mock + acceptance checklist to a phase, then research plans those features.",
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
@@ -1555,6 +1672,12 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
     return;
   }
 
+  // When linked phase is complete (or missing), create a new phase so research
+  // can replan from the acceptance checklist. Explicit phaseId forces rebind.
+  if (!phaseIdOverride && phase && phase.status === "complete") {
+    phase = undefined;
+  }
+
   const createdPhase = !phase;
   if (!phase) {
     phase = store.createPhase({
@@ -1573,12 +1696,14 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
     });
     // DESIGN_COMPLETE is in design/STATUS.md from bind. Only stamp phase status
     // when we are not about to run research (which owns draft → review → accepted).
-    if (!(createdPhase && startResearch)) {
+    const willResearch = startResearch && createdPhase;
+    if (!willResearch) {
       writePhaseStatus(project.rootPath, phase.id, "design_complete");
+      updatePhaseStatus(phase.id, "design_complete");
     }
 
     let run = null as ReturnType<typeof store.createRun> | null;
-    if (createdPhase && startResearch) {
+    if (willResearch) {
       run = store.createRun({ phaseId: phase.id, projectId: project.id });
       touchRunStage(run.id, "researching");
       activeRuns.add(run.id);
@@ -1587,13 +1712,19 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
       const { orchestrator } = getRuntime(project.rootPath);
       void (async () => {
         try {
-          await orchestrator.startResearch({
+          const stage = await orchestrator.startResearch({
             project,
             phase: phase!,
             run: run!,
             description: meta.brief,
-            onStage: (stage) => touchRunStage(run!.id, stage),
+            onStage: (s) => touchRunStage(run!.id, s),
           });
+          // Final stage (in_review / failed) is returned, not always pushed via onStage.
+          touchRunStage(run!.id, stage);
+          updatePhaseStatus(
+            phase!.id,
+            stage === "in_review" ? "in_review" : "draft",
+          );
         } catch (error) {
           const errMsg =
             error instanceof Error ? error.message : String(error);
@@ -1609,6 +1740,7 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
             `implement_design research failed: ${errMsg}`,
           );
           touchRunStage(run!.id, "failed");
+          updatePhaseStatus(phase!.id, "draft");
         } finally {
           activeRuns.delete(run!.id);
           abortControllers.delete(run!.id);
@@ -1627,9 +1759,10 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
       run,
       runId: run?.id ?? null,
       createdPhase,
-      next: createdPhase && startResearch
-        ? "Research started. After review approval, call start_development (design already bound from accepted mock)."
-        : "Design contract bound (UI-SPEC + mock + DESIGN_COMPLETE). Call start_development when the phase is accepted/ready.",
+      acceptance: readDesignLoopAcceptance(project.rootPath, meta.id),
+      next: willResearch
+        ? "Research started from acceptance checklist. After review approval, call start_development."
+        : "Design contract bound (UI-SPEC + mock + ACCEPTANCE + DESIGN_COMPLETE). Call start_development when the phase is accepted/ready.",
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);

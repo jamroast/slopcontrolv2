@@ -109,6 +109,8 @@ import {
   promotePhaseDocFromWorktree,
   extractHtmlDocument,
   scaffoldDesignLoopMock,
+  readPhaseDesignAcceptance,
+  formatAcceptancePromptBlock,
 } from "@slopcontrol/artifacts";
 import {
   ensureGitInitialized,
@@ -1701,11 +1703,25 @@ Brand / theming research (mandatory when Change Intent is brand/theming):
 - Explicitly decide: palette-only vs palette+shell/theme machinery vs full layout parity — do not silently freeze shells if the operator asked to apply theming.
 `
       : "";
+    const designAcceptance = readPhaseDesignAcceptance(
+      project.rootPath,
+      phase.id,
+    );
+    const acceptanceBlock = formatAcceptancePromptBlock(designAcceptance);
+    const acceptanceResearchNote = designAcceptance?.features?.some((f) => f.accepted)
+      ? `
+Design-loop acceptance (authoritative scope for this phase):
+${acceptanceBlock}
+- RESEARCH must figure out HOW to implement every IN SCOPE feature (concrete files, mounts, token paths).
+- Do NOT expand into OUT OF SCOPE features; treat them as mustNot.
+- If applied_shell is in scope, plan portal/dashboard UI fidelity to the accepted mock frames — not palette-only.
+`
+      : "";
     const prompt = `Change request:
 ${clipPromptSection("change-request", description, 4_000)}
 
 ${intentBlock}
-${adjacentPack ? `${adjacentPack}\n` : ""}${siblingBrandPack ? `${siblingBrandPack}\n` : ""}Phase id: ${phase.id}
+${acceptanceResearchNote}${adjacentPack ? `${adjacentPack}\n` : ""}${siblingBrandPack ? `${siblingBrandPack}\n` : ""}Phase id: ${phase.id}
 ${engagementHonesty}${brandResearchNote}
 Existing blueprint (excerpt — full file at .slopcontrol/BLUEPRINT.md; prefer Live decisions):
 ${clipBlueprintForPrompt(blueprint || "", 6_000)}
@@ -1938,6 +1954,19 @@ Design routing (brand/theming):
 `
           : "";
 
+    const draftAcceptance = readPhaseDesignAcceptance(
+      project.rootPath,
+      phase.id,
+    );
+    const draftAcceptanceBlock = formatAcceptancePromptBlock(draftAcceptance);
+    const draftAcceptanceNote = draftAcceptance?.features?.some((f) => f.accepted)
+      ? `
+${draftAcceptanceBlock}
+CRITICAL: Scope, File Changes, Success Criteria, and Automated Checks MUST cover every IN SCOPE feature above.
+Do NOT plan OUT OF SCOPE features. Unticked items are mustNot for this phase.
+`
+      : "";
+
     const buildDraftPrompt = (slim: boolean) => {
       const pack = slim ? "" : adjacentPack ? `${adjacentPack}\n` : "";
       const blueprintClip = slim ? 2_500 : 6_000;
@@ -1947,7 +1976,7 @@ Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 
 ${intentBlock}
-${designRoutingNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
+${draftAcceptanceNote}${designRoutingNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
 Do NOT reuse or retitle a prior phase plan (e.g. host.docker.internal / extra_hosts)
 unless RESEARCH explicitly asks for that work. If RESEARCH is about model naming /
 :cloud passthrough / model-resolver, the PHASE must plan that — not networking.
@@ -2827,7 +2856,14 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     const designMockHtml = existsSync(designMockPath)
       ? readFileSync(designMockPath, "utf-8")
       : "";
+    const developAcceptance = readPhaseDesignAcceptance(
+      project.rootPath,
+      phase.id,
+    );
+    const developAcceptanceBlock =
+      formatAcceptancePromptBlock(developAcceptance);
     const designContext = [
+      developAcceptance?.features?.length ? developAcceptanceBlock : null,
       uiSpecDoc.trim()
         ? clipPromptSection("UI-SPEC.md", uiSpecDoc, 6_000)
         : null,
@@ -2835,7 +2871,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         ? `tokens.css (from design pass)\n\n\`\`\`css\n${tokensCss.trim().slice(0, 3_000)}\n\`\`\``
         : null,
       designMockHtml.trim()
-        ? `Accepted design-loop mock (visual source of truth — match structure/palette; do not invent a competing shell):\n\`\`\`html\n${designMockHtml.trim().slice(0, 12_000)}\n\`\`\``
+        ? `Accepted design-loop mock (visual source of truth for **accepted features only** — do not invent a competing shell):\n\`\`\`html\n${designMockHtml.trim().slice(0, 12_000)}\n\`\`\``
         : null,
       designAssetPaths.length
         ? `Design assets (use these paths; do not reinvent logos from scratch):\n${designAssetPaths.map((p) => `- ${p}`).join("\n")}\nPrefer project \`public/brand/\` copies when present.`

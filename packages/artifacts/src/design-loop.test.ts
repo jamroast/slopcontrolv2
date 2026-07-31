@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, after } from "node:test";
@@ -8,14 +8,21 @@ import {
   appendDesignLoopTranscript,
   bindAcceptedDesignLoopToPhase,
   createDesignLoopMeta,
+  extractFeaturesFromMockHtml,
   extractHtmlDocument,
   extractTokensCssFromHtml,
+  formatAcceptancePromptBlock,
+  readDesignLoopAcceptance,
   readDesignLoopMeta,
   readDesignLoopRequest,
   readDesignLoopTranscript,
   readDesignLoopVersionMeta,
+  readPhaseDesignAcceptance,
+  reopenDesignLoopForIterate,
   scaffoldDesignLoopMock,
+  seedDesignLoopAcceptanceFromHtml,
   setDesignLoopLastError,
+  uiSpecFromDesignLoopMock,
   writeDesignLoopMeta,
   writeDesignLoopVersion,
 } from "./design-loop.js";
@@ -54,7 +61,18 @@ describe("design-loop", () => {
     assert.ok(css.includes("--accent"));
   });
 
-  it("accept + bind writes phase design artifacts", () => {
+  it("extractFeaturesFromMockHtml maps section labels to stable ids", () => {
+    const html = `<div class="section-label"><b>1</b> Palette — locked</div>
+<div class="section-label"><b>2</b> Logo — glowing jam-lid</div>
+<div class="section-label"><b>4</b> Applied — final frames</div>`;
+    const features = extractFeaturesFromMockHtml(html);
+    assert.ok(features.some((f) => f.id === "palette"));
+    assert.ok(features.some((f) => f.id === "logo"));
+    assert.ok(features.some((f) => f.id === "applied_shell"));
+    assert.ok(features.every((f) => f.accepted === false));
+  });
+
+  it("accept requires at least one feature; bind copies ACCEPTANCE + scoped UI-SPEC", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-dloop-"));
     roots.push(root);
     const meta = createDesignLoopMeta({
@@ -62,22 +80,41 @@ describe("design-loop", () => {
       brief: "Dark chrome with orange accent",
     });
     writeDesignLoopMeta(root, meta);
+    const html = `<!DOCTYPE html><html><head><style>:root{--a:#f00}</style></head><body>
+<div class="section-label"><b>1</b> Palette — locked</div>
+<div class="section-label"><b>4</b> Applied — portal shell</div>
+</body></html>`;
     writeDesignLoopVersion({
       projectRoot: root,
       loopId: meta.id,
       version: 1,
-      html: scaffoldDesignLoopMock(meta.brief),
-      notes: "v1 scaffold",
+      html,
+      notes: "v1",
       request: meta.brief,
-      usedScaffold: true,
-      error: "timeout",
+      usedScaffold: false,
     });
     meta.currentVersion = 1;
     writeDesignLoopMeta(root, meta);
+    seedDesignLoopAcceptanceFromHtml({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      html,
+    });
 
-    const accepted = acceptDesignLoop(root, meta.id, 1);
+    assert.throws(
+      () => acceptDesignLoop(root, meta.id, 1, { acceptedFeatureIds: [] }),
+      /at least one/,
+    );
+
+    const accepted = acceptDesignLoop(root, meta.id, 1, {
+      acceptedFeatureIds: ["palette", "applied_shell"],
+    });
     assert.equal(accepted.status, "accepted");
     assert.equal(accepted.acceptedVersion, 1);
+    const acc = readDesignLoopAcceptance(root, meta.id);
+    assert.ok(acc?.features.find((f) => f.id === "palette")?.accepted);
+    assert.ok(acc?.features.find((f) => f.id === "applied_shell")?.accepted);
 
     const bound = bindAcceptedDesignLoopToPhase({
       projectRoot: root,
@@ -86,8 +123,51 @@ describe("design-loop", () => {
     });
     assert.equal(bound.meta.status, "implemented");
     assert.equal(bound.meta.phaseId, "01-look");
+    assert.ok(
+      existsSync(
+        join(root, ".slopcontrol/phases/01-look/design/ACCEPTANCE.json"),
+      ),
+    );
+    const phaseAcc = readPhaseDesignAcceptance(root, "01-look");
+    assert.ok(phaseAcc?.features.some((f) => f.accepted));
+    const uiSpec = readFileSync(
+      join(root, ".slopcontrol/phases/01-look/UI-SPEC.md"),
+      "utf-8",
+    );
+    assert.match(uiSpec, /## Accepted features/);
+    assert.match(uiSpec, /applied_shell/);
+    assert.match(uiSpec, /IN SCOPE \(applied_shell\)/);
+
     const again = readDesignLoopMeta(root, meta.id);
     assert.equal(again?.status, "implemented");
+
+    const reopened = reopenDesignLoopForIterate(root, meta.id);
+    assert.equal(reopened.status, "open");
+    assert.equal(reopened.acceptedVersion, 1);
+    assert.equal(reopened.phaseId, "01-look");
+  });
+
+  it("uiSpecFromDesignLoopMock marks out-of-scope layout when shell unticked", () => {
+    const spec = uiSpecFromDesignLoopMock({
+      brief: "theme",
+      loopId: "loop-1",
+      version: 2,
+      acceptance: {
+        version: 2,
+        features: [
+          { id: "palette", label: "Palette", accepted: true },
+          { id: "applied_shell", label: "Applied frames", accepted: false },
+        ],
+      },
+    });
+    assert.match(spec, /OUT OF SCOPE \(applied_shell not accepted\)/);
+    assert.match(formatAcceptancePromptBlock({
+      version: 2,
+      features: [
+        { id: "palette", label: "Palette", accepted: true },
+        { id: "applied_shell", label: "Applied", accepted: false },
+      ],
+    }), /IN SCOPE/);
   });
 
   it("persists REQUEST + version meta and transcript", () => {
