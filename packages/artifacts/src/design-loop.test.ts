@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, after } from "node:test";
@@ -19,6 +26,10 @@ import {
   readDesignLoopVersionMeta,
   readPhaseDesignAcceptance,
   reopenDesignLoopForIterate,
+  formatDesignLoopReviseBlock,
+  formatPhaseBoundMockPromptBlock,
+  resolveDesignLoopGenerateFallback,
+  rewriteDesignLoopAssetUrls,
   scaffoldDesignLoopMock,
   seedDesignLoopAcceptanceFromHtml,
   setDesignLoopLastError,
@@ -216,5 +227,115 @@ describe("design-loop", () => {
     setDesignLoopLastError(root, meta.id, null);
     assert.equal(readDesignLoopVersionMeta(root, meta.id, 1)?.usedScaffold, false);
     assert.equal(readDesignLoopMeta(root, meta.id)?.lastError, undefined);
+  });
+
+  it("rewriteDesignLoopAssetUrls maps disk paths to HTTP paths", () => {
+    const loopId = "733abcb0-0541-45e1-af71-c877e5db769c";
+    const html = `<img src=".slopcontrol/design-loops/${loopId}/assets/logo.png">
+<img src="./.slopcontrol/design-loops/${loopId}/assets/mark.webp">
+<a href="https://example.com/x.png">ext</a>
+<img src="/other/path.png">`;
+    const out = rewriteDesignLoopAssetUrls(html, {
+      projectId: "proj-1",
+      loopId,
+    });
+    assert.match(
+      out,
+      /src="\/projects\/proj-1\/design-loops\/733abcb0-0541-45e1-af71-c877e5db769c\/assets\/logo\.png"/,
+    );
+    assert.match(
+      out,
+      /src="\/projects\/proj-1\/design-loops\/733abcb0-0541-45e1-af71-c877e5db769c\/assets\/mark\.webp"/,
+    );
+    assert.match(out, /https:\/\/example\.com\/x\.png/);
+    assert.match(out, /src="\/other\/path\.png"/);
+  });
+
+  it("rewriteDesignLoopAssetUrls leaves unrelated URLs alone and supports assetBase", () => {
+    const loopId = "loop-a";
+    const html = `<img src=".slopcontrol/design-loops/${loopId}/assets/a.png">`;
+    const out = rewriteDesignLoopAssetUrls(html, {
+      projectId: "p",
+      loopId,
+      assetBase: "http://localhost:3020",
+    });
+    assert.equal(
+      out,
+      `<img src="http://localhost:3020/projects/p/design-loops/loop-a/assets/a.png">`,
+    );
+  });
+
+  it("resolveDesignLoopGenerateFallback keeps previous mock on continue failure", () => {
+    const prior = "<!DOCTYPE html><html><body>keep-me</body></html>";
+    const kept = resolveDesignLoopGenerateFallback({
+      brief: "x",
+      previousHtml: prior,
+      errorDetail: "Headers Timeout Error",
+      scaffold: () => "<html>scaffold</html>",
+    });
+    assert.equal(kept.html, prior);
+    assert.equal(kept.usedScaffold, false);
+    assert.match(kept.notes, /Kept previous mock/);
+
+    const fresh = resolveDesignLoopGenerateFallback({
+      brief: "x",
+      previousHtml: null,
+      errorDetail: "timeout",
+      scaffold: (b) => `<html>${b}</html>`,
+    });
+    assert.equal(fresh.usedScaffold, true);
+    assert.match(fresh.html, /x/);
+  });
+
+  it("formatDesignLoopReviseBlock includes tokens and section outline", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-revise-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({
+      projectId: "p1",
+      brief: "theme",
+    });
+    writeDesignLoopMeta(root, meta);
+    const html = `<!DOCTYPE html><html><head><style>:root { --a: #f00; }</style></head>
+<body>
+<div class="section-label"><b>1</b> Palette — warm</div>
+<div class="section-label"><b>2</b> Logo — ember</div>
+</body></html>`;
+    const block = formatDesignLoopReviseBlock({
+      projectRoot: root,
+      projectId: "p1",
+      loopId: meta.id,
+      previousHtml: html,
+      maxHtmlChars: 500,
+    });
+    assert.match(block, /--a:\s*#f00/);
+    assert.match(block, /palette/);
+    assert.match(block, /logo/);
+    assert.match(block, /```html/);
+  });
+
+  it("formatPhaseBoundMockPromptBlock cites design/mock.html", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-bound-mock-"));
+    roots.push(root);
+    const phaseId = "01-theme";
+    const designDir = join(root, ".slopcontrol", "phases", phaseId, "design");
+    mkdirSync(designDir, { recursive: true });
+    writeFileSync(
+      join(designDir, "mock.html"),
+      `<!DOCTYPE html><html><head><style>:root{--x:1}</style></head>
+<body><div class="section-label"><b>1</b> Logo — ring</div></body></html>\n`,
+    );
+    writeFileSync(join(designDir, "tokens.css"), `:root { --x: 1; }\n`);
+    mkdirSync(join(designDir, "assets"), { recursive: true });
+    writeFileSync(join(designDir, "assets", "ember.png"), "fake");
+
+    const block = formatPhaseBoundMockPromptBlock({
+      projectRoot: root,
+      phaseId,
+      maxHtmlChars: 2_000,
+    });
+    assert.match(block, new RegExp(`phases/${phaseId}/design/mock\\.html`));
+    assert.match(block, /ember\.png/);
+    assert.match(block, /competing logo/);
+    assert.match(block, /logo/);
   });
 });

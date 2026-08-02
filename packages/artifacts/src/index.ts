@@ -57,6 +57,18 @@ export * from "./development-handoff.js";
 export * from "./ask-session.js";
 export * from "./agent-session.js";
 export * from "./design-loop.js";
+export * from "./design-pack.js";
+export * from "./design-conceptual-model.js";
+export * from "./design-loop-selections.js";
+export * from "./design-loop-continue.js";
+export * from "./design-loop-versions.js";
+export * from "./live-site-inventory.js";
+export * from "./screen-content.js";
+export * from "./continue-intent.js";
+export * from "./design-share.js";
+export * from "./plan-loop.js";
+export * from "./plan-pack.js";
+export * from "./plan-continue-intent.js";
 export { loadDotEnvFile } from "./dotenv.js";
 
 export function slopcontrolRoot(projectRoot: string): string {

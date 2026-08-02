@@ -19,6 +19,15 @@
       "capabilities": { "chat": true, "vision": false, "imageGen": false }
     },
     {
+      "id": "ollama-cloud-deepseek",
+      "label": "Ollama Cloud DeepSeek V4 Pro (text — design-loop / fast chat)",
+      "baseUrl": "https://ollama.com/v1",
+      "apiKey": "${OLLAMA_API_KEY}",
+      "apiType": "openai-chat",
+      "modelId": "deepseek-v4-pro:cloud",
+      "capabilities": { "chat": true, "vision": false, "imageGen": false }
+    },
+    {
       "id": "ollama-kimi-vision",
       "label": "Ollama kimi-k2.7-code (vision chat)",
       "baseUrl": "https://ollama.com/v1",
@@ -53,11 +62,12 @@
     }
   ],
   "roles": {
-    "research": { "endpointId": "ollama-cloud-kimi" },
-    "planning": { "endpointId": "ollama-cloud-kimi" },
-    "supervisor": { "endpointId": "ollama-cloud-kimi" },
-    "coding": { "endpointId": "ollama-cloud-glm" },
-    "design": { "endpointId": "ollama-cloud-kimi" },
+    "research": { "endpointId": "ollama-cloud-deepseek" },
+    "planning": { "endpointId": "ollama-cloud-deepseek" },
+    "supervisor": { "endpointId": "ollama-cloud-deepseek" },
+    "coding": { "endpointId": "ollama-cloud-deepseek" },
+    "design": { "endpointId": "ollama-cloud-deepseek" },
+    "classification": { "endpointId": "ollama-cloud-glm" },
     "designVision": { "endpointId": "ollama-kimi-vision" },
     "designImage": { "endpointId": "ollama-image" }
   }

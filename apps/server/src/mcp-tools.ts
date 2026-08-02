@@ -20,6 +20,69 @@ export function defaultSlopcontrolServerUrl(): string {
 /**
  * Put loopId first so clients reuse it; include mock HTML for display.
  */
+/**
+ * Put loopId first for plan loops; include PLAN.md for display.
+ */
+export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
+  try {
+    const parsed = JSON.parse(body) as {
+      loop?: { id?: string; status?: string; currentVersion?: number };
+      loopId?: string;
+      version?: number;
+      plan?: string;
+      notes?: string;
+      transcript?: string;
+      error?: string;
+      hint?: string;
+      next?: string;
+      phaseId?: string;
+      usedScaffold?: boolean;
+      conceptualModel?: {
+        kind?: string;
+        focus?: string;
+        inScope?: string[];
+      };
+    };
+    const loopId = parsed.loopId || parsed.loop?.id || "";
+    if (!ok) {
+      return [
+        loopId ? `loopId: ${loopId}` : null,
+        parsed.error ? `error: ${parsed.error}` : `error: ${body.slice(0, 500)}`,
+        parsed.hint ? `hint: ${parsed.hint}` : null,
+        "---",
+        body,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    const cm = parsed.conceptualModel;
+    const cmLine = cm
+      ? `conceptualModel: kind=${cm.kind ?? "?"} focus=${cm.focus ?? "?"}`
+      : null;
+    const plan =
+      typeof parsed.plan === "string" && parsed.plan.trim()
+        ? parsed.plan
+        : null;
+    return [
+      `loopId: ${loopId}`,
+      `status: ${parsed.loop?.status ?? "open"}`,
+      parsed.version !== undefined ? `version: ${parsed.version}` : null,
+      parsed.phaseId ? `phaseId: ${parsed.phaseId}` : null,
+      cmLine,
+      parsed.usedScaffold ? "usedScaffold: true" : null,
+      parsed.hint ? `hint: ${parsed.hint}` : null,
+      parsed.next ? `next: ${parsed.next}` : null,
+      parsed.notes ? `notes: ${parsed.notes}` : null,
+      "---",
+      plan ? `\`\`\`markdown\n${plan}\n\`\`\`` : body,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  } catch {
+    return body;
+  }
+}
+
 export function formatDesignLoopMcpEnvelope(body: string, ok: boolean): string {
   try {
     const parsed = JSON.parse(body) as {
@@ -34,6 +97,15 @@ export function formatDesignLoopMcpEnvelope(body: string, ok: boolean): string {
       next?: string;
       phaseId?: string;
       usedScaffold?: boolean;
+      selections?: unknown[];
+      concepts?: unknown[];
+      conceptualModel?: {
+        kind?: string;
+        focus?: string;
+        preserve?: string[];
+        theme?: { modes?: string[]; togglePresent?: boolean };
+        inScope?: string[];
+      };
     };
     const loopId = parsed.loopId || parsed.loop?.id || "";
     if (!ok) {
@@ -62,16 +134,31 @@ export function formatDesignLoopMcpEnvelope(body: string, ok: boolean): string {
         ? `${transcript.slice(0, 12_000)}\n…(truncated; full TRANSCRIPT.md on disk)`
         : transcript
       : null;
+    const cm = parsed.conceptualModel;
+    const cmLine = cm
+      ? `conceptualModel: kind=${cm.kind ?? "?"} focus=${cm.focus ?? "?"}${
+          cm.theme?.modes?.length
+            ? ` theme=${cm.theme.modes.join("/")}`
+            : ""
+        }${cm.inScope?.length ? ` inScope=${cm.inScope.join(",")}` : ""}`
+      : null;
     return [
       `loopId: ${loopId}`,
       `status: ${status}`,
       version !== undefined ? `version: ${version}` : null,
       parsed.phaseId ? `phaseId: ${parsed.phaseId}` : null,
+      cmLine,
       parsed.usedScaffold ? "usedScaffold: true" : null,
       parsed.usedScaffold ? "hint: design_loop_retry" : null,
       parsed.hint && !parsed.usedScaffold ? `hint: ${parsed.hint}` : null,
       parsed.next ? `next: ${parsed.next}` : null,
       parsed.notes ? `notes: ${parsed.notes}` : null,
+      Array.isArray(parsed.selections)
+        ? `selections: ${JSON.stringify(parsed.selections)}`
+        : null,
+      Array.isArray(parsed.concepts)
+        ? `concepts: ${parsed.concepts.length}`
+        : null,
       "---",
       transcriptBlock ? `transcript:\n${transcriptBlock}` : null,
       transcriptBlock && html ? "---" : null,
@@ -173,6 +260,23 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             description: "Optional notes to include while reverse-engineering",
           },
         },
+      },
+    },
+    {
+      name: "rename_project",
+      description:
+        "Rename a project's display name (updates name only; rootPath/id and nested design-loop/phase URLs unchanged).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          rootPath: {
+            type: "string",
+            description: "Absolute project path (used if projectId omitted)",
+          },
+          name: { type: "string", description: "New display name" },
+        },
+        required: ["name"],
       },
     },
     {
@@ -488,7 +592,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_start",
       description:
-        "Start a chat-driven look-and-feel loop: generates self-contained mock HTML (no product edits). Returns loopId + html + transcript. If usedScaffold/timeout, call design_loop_retry to regenerate that version in place. Iterate with design_loop_continue, freeze with design_loop_accept, then implement_design.",
+        "Start a chat-driven look-and-feel loop: generates self-contained mock HTML (no product edits). Returns loopId + html + transcript + conceptualModel (scope/theme). Optional scope narrows the conceptual model (e.g. component+chat.composer). If usedScaffold/timeout, call design_loop_retry. Iterate with design_loop_continue, freeze with design_loop_accept, then implement_design.",
       inputSchema: {
         type: "object",
         properties: {
@@ -505,6 +609,22 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             type: "string",
             description: "Optional related ask session id",
           },
+          scope: {
+            type: "object",
+            description:
+              "Optional conceptual-model scope override: { kind: product|shell|screen|component|flow, focus: string, preserve?: string[] }",
+            properties: {
+              kind: {
+                type: "string",
+                enum: ["product", "shell", "screen", "component", "flow"],
+              },
+              focus: { type: "string" },
+              preserve: {
+                type: "array",
+                items: { type: "string" },
+              },
+            },
+          },
         },
         required: ["projectId", "brief"],
       },
@@ -512,7 +632,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_continue",
       description:
-        "Revise a design-loop mock from operator feedback (new version). Works on open loops, and also reopens accepted/implemented loops so you can iterate (e.g. v2) without starting a new loop. On usedScaffold/timeout, call design_loop_retry. Does not edit product code — accept + implement_design to re-bind.",
+        "Revise a design-loop mock from operator feedback (new version). Works on open loops, and also reopens accepted/implemented loops so you can iterate (e.g. v2) without starting a new loop. Pass baseVersion to fork from a specific active version (default: tip). On usedScaffold/timeout, call design_loop_retry. Does not edit product code — accept + implement_design to re-bind.",
       inputSchema: {
         type: "object",
         properties: {
@@ -522,6 +642,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             type: "string",
             description: "Feedback for the next mock revision",
           },
+          baseVersion: {
+            type: "number",
+            description:
+              "Active version to revise from (default: tip / currentVersion). Use after discarding a bad tip to continue from its parent.",
+          },
         },
         required: ["projectId", "loopId", "message"],
       },
@@ -529,7 +654,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_get",
       description:
-        "Fetch a design loop meta, chat transcript (TRANSCRIPT.md), mock HTML, notes, ACCEPTANCE feature checklist, and usedScaffold for a version. Pass includeHtml=false when you only need chat.",
+        "Fetch a design loop meta, chat transcript (TRANSCRIPT.md), mock HTML, notes, ACCEPTANCE feature checklist, conceptualModel (kind/focus/theme), siteInventory summary (nav/routes/logos), and usedScaffold for a version. Pass includeHtml=false when you only need chat.",
       inputSchema: {
         type: "object",
         properties: {
@@ -543,6 +668,39 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             type: "boolean",
             description: "Include mock HTML (default true). Set false for transcript-only.",
           },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_site_inventory",
+      description:
+        "Read-only live site inventory for a design loop: nav labels/hrefs from header/nav source, CTAs, app routes, token files, logos, public assets. Optional refresh=true rebuilds SITE_INVENTORY.json from the project tree.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          refresh: {
+            type: "boolean",
+            description: "Rebuild inventory from project source (default false)",
+          },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_import_design",
+      description:
+        "Import theme/logos from another project into this loop (design share). Resolves fromProjectId/fromRootPath/fromName (brand aliases like 'jamroast' map to project folders). Copies logos into the loop and ranks the SHARED DESIGN block above LIVE SITE for palette/logos on continue.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          fromProjectId: { type: "string", description: "Registered source project id" },
+          fromRootPath: { type: "string", description: "Absolute path to source project" },
+          fromName: { type: "string", description: "Source project name or brand alias (e.g. 'jamroast')" },
         },
         required: ["projectId", "loopId"],
       },
@@ -632,6 +790,97 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "design_loop_concepts",
+      description:
+        "List design-loop concept catalog + current pinned selections (logo/palette/type/shell/…). Use before design_loop_pin to discover conceptId/asset names. Also returned on design_loop_get.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_pin",
+      description:
+        "Pin a concept/asset as authoritative for a slot (default logo). Continue/retry must keep pinned assets; icon packs prefer pinned / true RGBA. Pass conceptId (e.g. Concept C / concept-c) and/or asset filename (e.g. ember-monogram-alpha.png).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          slot: {
+            type: "string",
+            description: "Selection slot (default logo). Also: palette, type, shell, content.",
+          },
+          conceptId: {
+            type: "string",
+            description: "Concept id or label (e.g. concept-c, Concept C)",
+          },
+          asset: {
+            type: "string",
+            description: "Asset filename under the loop assets/ folder",
+          },
+          label: { type: "string" },
+          excerpt: { type: "string" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_unpin",
+      description:
+        "Unpin a design-loop selection slot (default: clear all pins). Pass slot=logo to clear only the logo pin.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          slot: {
+            type: "string",
+            description: "Slot to unpin (omit to clear all selections)",
+          },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_versions",
+      description:
+        "List design-loop version tree: tip, acceptedVersion, versions[] (parentVersion, status active|invalid), and tree children. Use before discard or continue with baseVersion.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_discard",
+      description:
+        "Soft-discard a bad design-loop version (marks invalid; keeps files). If it is the tip, rewinds currentVersion to parentVersion. Cannot discard the accepted version. Then continue with baseVersion=parent or tip.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: {
+            type: "number",
+            description: "Version number to discard (e.g. 8)",
+          },
+          reason: {
+            type: "string",
+            description: "Optional reason recorded on the version + transcript",
+          },
+        },
+        required: ["projectId", "loopId", "version"],
+      },
+    },
+    {
       name: "implement_design",
       description:
         "Bind an accepted design-loop mock + ACCEPTANCE checklist to a phase: writes UI-SPEC, tokens.css, design/mock.html, design/ACCEPTANCE.json, DESIGN_COMPLETE. Creates a new phase and starts research when phaseId is omitted or the linked phase is complete. Product code still only changes in start_development.",
@@ -662,6 +911,167 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "list_design_loops",
       description: "List design-loop sessions for a project.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "plan_loop_start",
+      description:
+        "Start a chat-driven plan loop: generates structured PLAN.md (no product edits). Returns loopId + plan + conceptualModel. Iterate with plan_loop_continue, tick acceptance, plan_loop_accept, then plan_loop_promote → research.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          brief: { type: "string" },
+          askId: {
+            type: "string",
+            description: "Optional related ask session id",
+          },
+          scope: {
+            type: "object",
+            description:
+              "Optional { kind: feature|bugfix|refactor|integration|spike, focus: string, preserve?: string[] }",
+          },
+        },
+        required: ["projectId", "brief"],
+      },
+    },
+    {
+      name: "plan_loop_continue",
+      description:
+        "Revise a plan-loop PLAN.md from operator feedback (new version). Reopens accepted/promoted loops. Optional baseVersion to fork from an active ancestor.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          message: { type: "string" },
+          baseVersion: { type: "number" },
+        },
+        required: ["projectId", "loopId", "message"],
+      },
+    },
+    {
+      name: "plan_loop_get",
+      description:
+        "Fetch plan loop meta, transcript, PLAN.md, acceptance, planPack, conceptualModel. Pass includePlan=false for chat-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: { type: "number" },
+          includePlan: { type: "boolean" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "plan_loop_acceptance",
+      description:
+        "Save plan acceptance checklist ticks without freezing the loop (goal, scope, approach, areas, success, risks).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          acceptedFeatureIds: {
+            type: "array",
+            items: { type: "string" },
+          },
+          features: { type: "array", items: { type: "object" } },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "plan_loop_accept",
+      description:
+        "Freeze a plan-loop version + checklist as PLAN_PACK.json (requires ≥1 ticked feature and complete PLAN sections). Then call plan_loop_promote.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: { type: "number" },
+          acceptedFeatureIds: {
+            type: "array",
+            items: { type: "string" },
+          },
+          features: { type: "array", items: { type: "object" } },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "plan_loop_promote",
+      description:
+        "Bind accepted PLAN.md + PLAN_PACK to a new phase and start research (default). Research receives the plan contract as authoritative operator intent. Product code still only changes in start_development.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          startResearch: {
+            type: "boolean",
+            description: "Start research after bind (default true)",
+          },
+          dependsOn: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "plan_loop_retry",
+      description:
+        "Regenerate the tip plan version in place after scaffold/timeout.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "plan_loop_versions",
+      description: "List plan-loop version tree (tip, parentVersion, status).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "plan_loop_discard",
+      description:
+        "Soft-discard a bad plan version (marks invalid; rewinds tip to parent when discarding tip).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: { type: "number" },
+          reason: { type: "string" },
+        },
+        required: ["projectId", "loopId", "version"],
+      },
+    },
+    {
+      name: "list_plan_loops",
+      description: "List plan-loop sessions for a project.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1179,6 +1589,62 @@ export function createSlopcontrolMcpServer(
       });
     }
 
+    if (name === "rename_project") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "").trim();
+        const rootPath = String(args.rootPath ?? "").trim();
+        const nextName = String(args.name ?? "").trim();
+        if (!nextName) {
+          return {
+            content: [
+              { type: "text", text: JSON.stringify({ error: "name is required" }) },
+            ],
+            isError: true,
+          };
+        }
+        let id = projectId;
+        if (!id && rootPath) {
+          const list = await fetch(`${SERVER_URL}/projects`);
+          if (list.ok) {
+            const data = (await list.json()) as {
+              projects?: Array<{ id: string; rootPath: string }>;
+            };
+            const normalized = rootPath.replace(/\/$/, "");
+            id =
+              data.projects?.find(
+                (p) => p.rootPath.replace(/\/$/, "") === normalized,
+              )?.id ?? "";
+          }
+        }
+        if (!id) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "projectId or rootPath is required (project not found)",
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(id)}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: nextName }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
     if (name === "delete_project") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "").trim();
@@ -1396,6 +1862,213 @@ export function createSlopcontrolMcpServer(
       });
     }
 
+    if (name === "plan_loop_start") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              brief: args.brief,
+              askId: args.askId,
+              scope: args.scope,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "plan_loop_continue") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const payload: Record<string, unknown> = { message: args.message };
+        if (args.baseVersion !== undefined && args.baseVersion !== null) {
+          payload.baseVersion = Number(args.baseVersion);
+        }
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/continue`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "plan_loop_get") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const qs = new URLSearchParams();
+        if (args.version !== undefined && args.version !== null) {
+          qs.set("version", String(args.version));
+        }
+        if (args.includePlan === false) qs.set("includePlan", "false");
+        const q = qs.toString() ? `?${qs}` : "";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}${q}`,
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "plan_loop_acceptance") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/acceptance`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              features: args.features,
+              acceptedFeatureIds: args.acceptedFeatureIds,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "plan_loop_accept") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/accept`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              version: args.version,
+              features: args.features,
+              acceptedFeatureIds: args.acceptedFeatureIds,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "plan_loop_promote") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/promote`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              startResearch: args.startResearch,
+              dependsOn: args.dependsOn,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "plan_loop_retry") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/retry`,
+          { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "plan_loop_versions") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/versions`,
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "plan_loop_discard") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const version = Number(args.version);
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/versions/${encodeURIComponent(String(version))}/discard`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: args.reason }),
+          },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "list_plan_loops") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops`,
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
     if (name === "design_loop_start") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -1408,6 +2081,7 @@ export function createSlopcontrolMcpServer(
               brief: args.brief,
               phaseId: args.phaseId,
               askId: args.askId,
+              scope: args.scope,
             }),
           },
         );
@@ -1425,12 +2099,16 @@ export function createSlopcontrolMcpServer(
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
         const loopId = String(args.loopId ?? "");
+        const payload: Record<string, unknown> = { message: args.message };
+        if (args.baseVersion !== undefined && args.baseVersion !== null) {
+          payload.baseVersion = Number(args.baseVersion);
+        }
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/continue`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ message: args.message }),
+            body: JSON.stringify(payload),
           },
         );
         const body = await res.text();
@@ -1457,6 +2135,60 @@ export function createSlopcontrolMcpServer(
         const qs = params.toString() ? `?${params}` : "";
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}${qs}`,
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_site_inventory") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const params = new URLSearchParams();
+        if (args.refresh === true || args.refresh === "true") {
+          params.set("refresh", "true");
+        }
+        const qs = params.toString() ? `?${params}` : "";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/site-inventory${qs}`,
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_import_design") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/import-design`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              ...(typeof args.fromProjectId === "string" && args.fromProjectId
+                ? { fromProjectId: args.fromProjectId }
+                : {}),
+              ...(typeof args.fromRootPath === "string" && args.fromRootPath
+                ? { fromRootPath: args.fromRootPath }
+                : {}),
+              ...(typeof args.fromName === "string" && args.fromName
+                ? { fromName: args.fromName }
+                : {}),
+            }),
+          },
         );
         const body = await res.text();
         return {
@@ -1532,6 +2264,133 @@ export function createSlopcontrolMcpServer(
               features: args.features,
               acceptedFeatureIds: args.acceptedFeatureIds,
             }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_concepts") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/concepts`,
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_pin") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        if (!args.conceptId && !args.asset) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "conceptId and/or asset required",
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/selections`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              slot: args.slot || "logo",
+              conceptId: args.conceptId,
+              asset: args.asset,
+              label: args.label,
+              excerpt: args.excerpt,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_unpin") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const qs =
+          typeof args.slot === "string" && args.slot.trim()
+            ? `?slot=${encodeURIComponent(String(args.slot).trim())}`
+            : "";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/selections${qs}`,
+          { method: "DELETE" },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_versions") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/versions`,
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_discard") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const version = Number(args.version);
+        if (!Number.isFinite(version) || version < 1) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ error: "version (number) required" }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/versions/${encodeURIComponent(String(version))}/discard`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: args.reason }),
           },
         );
         const body = await res.text();

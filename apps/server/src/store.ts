@@ -76,7 +76,16 @@ export class SlopStore {
 
   createProject(input: { name: string; rootPath: string }): Project {
     const existing = this.findProjectByRootPath(input.rootPath);
-    if (existing) return existing;
+    if (existing) {
+      // Re-open with a new display name refreshes it (rename via open).
+      const nextName = input.name.trim();
+      if (nextName && nextName !== existing.name) {
+        existing.name = nextName;
+        existing.updatedAt = new Date().toISOString();
+        this.save();
+      }
+      return existing;
+    }
 
     const now = new Date().toISOString();
     const project: Project = {

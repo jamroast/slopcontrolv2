@@ -48,7 +48,7 @@ export async function ensureChangeIntentAsync(
   if (!useHeuristic && opts?.registry) {
     try {
       const { endpoint, modelId } = opts.registry.resolveEndpointForRole(
-        "planning",
+        "classification",
         opts.roleOverrides,
       );
       const prior = findPriorUiMountIntent(projectRoot, phaseId);
@@ -118,7 +118,7 @@ export async function previewChangeIntentAsync(
   if (!useHeuristic && opts.registry) {
     try {
       const { endpoint, modelId } = opts.registry.resolveEndpointForRole(
-        "planning",
+        "classification",
         opts.roleOverrides,
       );
       const prior =

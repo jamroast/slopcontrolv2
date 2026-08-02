@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
+  buildProjectBrandRefPack,
   buildSiblingBrandRefPack,
   excerptCssTokens,
   extractSiblingProjectPaths,
@@ -81,5 +82,35 @@ describe("sibling brand refs", () => {
     );
     assert.match(out, /:root/);
     assert.match(out, /--x/);
+  });
+
+  it("buildProjectBrandRefPack includes this project's tokens without a sibling", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-proj-brand-"));
+    try {
+      mkdirSync(join(root, "src", "app"), { recursive: true });
+      mkdirSync(join(root, "public", "images"), { recursive: true });
+      writeFileSync(
+        join(root, "src", "app", "globals.css"),
+        `:root { --jam-accent: #E8430A; --jam-bg: #0A0A0A; }\n`,
+      );
+      writeFileSync(
+        join(root, "public", "images", "logo.svg"),
+        `<svg xmlns="http://www.w3.org/2000/svg"><title>JamRoast</title></svg>\n`,
+      );
+      writeFileSync(
+        join(root, "src", "app", "page.tsx"),
+        `export default function Page(){ return <h1>{"Taste Room for builders"}</h1> }\n`,
+      );
+      const pack = buildProjectBrandRefPack({
+        projectRoot: root,
+        includeTokenExcerpts: true,
+      });
+      assert.match(pack, /This project brand/);
+      assert.match(pack, /--jam-accent/);
+      assert.match(pack, /images\/logo\.svg/);
+      assert.match(pack, /Taste Room/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

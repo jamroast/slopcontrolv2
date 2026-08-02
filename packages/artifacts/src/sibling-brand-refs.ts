@@ -44,7 +44,7 @@ export function extractSiblingProjectPaths(description: string): string[] {
   return [...found];
 }
 
-function collectConsumedLogoHints(siblingRoot: string): string[] {
+export function collectConsumedLogoHints(siblingRoot: string): string[] {
   const hints = new Set<string>();
   const scanDirs = [
     join(siblingRoot, "src"),
@@ -102,7 +102,7 @@ function walkTsx(
   }
 }
 
-function preferAuthoritativeLogos(
+export function preferAuthoritativeLogos(
   siblingRoot: string,
   consumed: string[],
 ): string[] {
@@ -117,6 +117,125 @@ function preferAuthoritativeLogos(
   );
   const merged = [...new Set([...fromConsumed, ...preferred])];
   return merged.slice(0, 6);
+}
+
+/** Default jam-family sibling dirs under the same Projects parent. */
+export const DEFAULT_FAMILY_SIBLING_NAMES = [
+  "burntjam",
+  "basic-web-agent",
+  "light-weight-crm-and-invoicing",
+];
+
+/** True when operator text asks about brand / theming / content / CRM family. */
+export function descriptionMentionsBrandTheming(description: string): boolean {
+  return /them(?:e|ing)|brand|logo|content|landing|jampress|jam\s*roast|burntjam|basic-web-agent|crm|light-weight-crm|invoicing/i.test(
+    description ?? "",
+  );
+}
+
+export function projectTokenCandidates(root: string): string[] {
+  return [
+    join(root, "src", "app", "globals.css"),
+    join(root, "public", "brand", "tokens.css"),
+    join(root, "src", "app", "tokens.css"),
+  ].filter((p) => existsSync(p));
+}
+
+/** Pull short landing copy from page.tsx / page.jsx for design-loop context. */
+export function excerptLandingCopy(
+  projectRoot: string,
+  maxChars = 2_000,
+): string {
+  const candidates = [
+    join(projectRoot, "src", "app", "page.tsx"),
+    join(projectRoot, "src", "app", "page.jsx"),
+    join(projectRoot, "app", "page.tsx"),
+    join(projectRoot, "app", "page.jsx"),
+  ];
+  for (const p of candidates) {
+    if (!existsSync(p)) continue;
+    try {
+      const raw = readFileSync(p, "utf-8");
+      // Strip imports / JSX tags lightly; keep quoted marketing strings
+      const strings = [...raw.matchAll(/["'`]([^"'`]{12,200})["'`]/g)]
+        .map((m) => (m[1] ?? "").trim())
+        .filter(
+          (s) =>
+            !/^(import|export|from|className|http|\/|#|\.|px-|flex|grid)/i.test(
+              s,
+            ) && /[a-zA-Z]{3,}/.test(s),
+        );
+      const body = strings.slice(0, 24).join("\n");
+      if (!body.trim()) continue;
+      if (body.length <= maxChars) return body;
+      return `${body.slice(0, maxChars)}\n…[truncated landing copy]`;
+    } catch {
+      /* try next */
+    }
+  }
+  return "";
+}
+
+/**
+ * Brand pack for the **current** project (tokens, logos, landing copy).
+ * Sibling pack alone skips projectRoot — design-loop needs this.
+ */
+export function buildProjectBrandRefPack(opts: {
+  projectRoot: string;
+  includeTokenExcerpts?: boolean;
+  maxExcerptChars?: number;
+  maxLandingChars?: number;
+}): string {
+  const root = opts.projectRoot;
+  if (!existsSync(root)) return "";
+  const maxExcerpt = opts.maxExcerptChars ?? 1_800;
+  const consumed = collectConsumedLogoHints(root);
+  const logos = preferAuthoritativeLogos(root, consumed);
+  const tokensCandidates = projectTokenCandidates(root);
+  const landing = excerptLandingCopy(root, opts.maxLandingChars ?? 2_000);
+
+  if (!logos.length && !tokensCandidates.length && !landing) return "";
+
+  const blocks: string[] = [
+    "## This project brand (authoritative — match live site)",
+    "",
+    `Project root: \`${root}\``,
+    "",
+  ];
+  if (logos.length) {
+    blocks.push("Authoritative logo files:");
+    for (const p of logos) blocks.push(`- \`${p}\``);
+  } else {
+    blocks.push("- (no authoritative logo path resolved)");
+  }
+  if (tokensCandidates.length) {
+    blocks.push("Token / theme sources:");
+    for (const p of tokensCandidates) blocks.push(`- \`${p}\``);
+    if (opts.includeTokenExcerpts !== false) {
+      for (const p of tokensCandidates.slice(0, 2)) {
+        try {
+          const raw = readFileSync(p, "utf-8");
+          const excerpt = excerptCssTokens(raw, maxExcerpt);
+          if (excerpt) {
+            blocks.push(`Excerpt from \`${basename(p)}\`:`);
+            blocks.push("```css");
+            blocks.push(excerpt);
+            blocks.push("```");
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  }
+  if (landing) {
+    blocks.push("Landing / marketing copy cues (from page.tsx):");
+    blocks.push("```");
+    blocks.push(landing);
+    blocks.push("```");
+  }
+  blocks.push("");
+  return blocks.join("\n");
 }
 
 /**
@@ -136,20 +255,16 @@ export function buildSiblingBrandRefPack(opts: {
   /** Max chars per token file excerpt (default 1_800). */
   maxExcerptChars?: number;
 }): string {
-  const family = opts.familySiblingNames ?? ["burntjam", "basic-web-agent"];
+  const family = opts.familySiblingNames ?? DEFAULT_FAMILY_SIBLING_NAMES;
   const roots = new Set<string>(extractSiblingProjectPaths(opts.description));
   const parent = dirname(opts.projectRoot);
+  const theming = descriptionMentionsBrandTheming(opts.description);
   for (const name of family) {
     const candidate = join(parent, name);
     if (existsSync(candidate) && candidate !== opts.projectRoot) {
       // Only auto-add family siblings when description mentions brand/theming
       // or names the sibling / JamPress / jam family.
-      const d = opts.description;
-      if (
-        /them(?:e|ing)|brand|logo|jampress|jam\s*roast|burntjam|basic-web-agent/i.test(
-          d,
-        )
-      ) {
+      if (theming) {
         roots.add(candidate);
       }
     }
@@ -172,11 +287,7 @@ export function buildSiblingBrandRefPack(opts: {
     if (!existsSync(root) || root === opts.projectRoot) continue;
     const consumed = collectConsumedLogoHints(root);
     const logos = preferAuthoritativeLogos(root, consumed);
-    const tokensCandidates = [
-      join(root, "src", "app", "globals.css"),
-      join(root, "public", "brand", "tokens.css"),
-      join(root, "src", "app", "tokens.css"),
-    ].filter((p) => existsSync(p));
+    const tokensCandidates = projectTokenCandidates(root);
 
     blocks.push(`### Sibling: \`${basename(root)}\` (\`${root}\`)`);
     if (logos.length) {

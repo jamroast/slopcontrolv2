@@ -96,15 +96,23 @@ pnpm mcp:stdio
 - `agent` — project-scoped inspect/verify chat with **`run_command` in the project root** (`projectId`, `message`; optional `agentId` / `title`). Not development — no worktrees, design, or merge. For implementation use `ask` → `promote_ask` or `start_change`.
 - `list_agents` / `get_agent` — list or fetch agent chat sessions for a project
 - `start_change` — new ordered phase directly (`projectId`, `description`) without an ask conversation
-- `design_loop_start` / `design_loop_continue` / `design_loop_accept` / `implement_design` — chat-driven look-and-feel mocks (HTML under `.slopcontrol/design-loops/`). **Accept freezes a feature checklist** (`ACCEPTANCE.json`: palette, logo, type, applied_shell, …) that research/draft must plan; unticked items are out of scope. After implement, `design_loop_continue` reopens the same loop for v2+; accept again, then `implement_design` (omit `phaseId` if the prior phase is complete so a new research pass starts).
+- `plan_loop_start` / `plan_loop_continue` / `plan_loop_accept` / `plan_loop_promote` — chat-driven **plan** sessions (structured `PLAN.md` under `.slopcontrol/plan-loops/`). Iterate like design loops; tick `ACCEPTANCE` (goal/scope/approach/areas/success/risks); accept compiles `PLAN_PACK.json`; promote binds to a phase and starts research with the plan as an authoritative contract (does **not** skip RESEARCH.md). Prefer this over thin `ask` → `promote_ask` Task briefs for multi-turn planning. Also: `plan_loop_get`, `plan_loop_acceptance`, `plan_loop_retry`, `plan_loop_versions`, `plan_loop_discard`, `list_plan_loops`.
+- `design_loop_start` / `design_loop_continue` / `design_loop_accept` / `implement_design` — chat-driven look-and-feel mocks (HTML under `.slopcontrol/design-loops/`). **Accept freezes a feature checklist** (`ACCEPTANCE.json`: palette, logo, type, applied_shell, theme_modes, …) that research/draft must plan; unticked items are out of scope. After implement, `design_loop_continue` reopens the same loop for v2+; accept again, then `implement_design` (omit `phaseId` if the prior phase is complete so a new research pass starts).
+- **Conceptual model** — durable scope + theme contract on the loop (`META.scope` + `DESIGN_PACK.json`): `kind` (`product`|`shell`|`screen`|`component`|`flow`), `focus` (e.g. `chat.composer`, `theme`), `preserve[]`, and structured `theme` (`data-theme` mechanism, dark/light CSS, requirements). Chat can narrow (“only the chat form”) or widen (“whole site”); start accepts optional `scope` override. Returned as `conceptualModel` on start/continue/get/accept/implement. Acceptance seeds and mock prompts follow the scope (component loops do not auto-require full shell).
+- Theme contract: mocks with dark/light toggle compile `theme.lightTokensCss` into the pack and phase `tokens.css`; research/develop must wire `html[data-theme]` (not an unused `.light` class). `implement_design` may return `themeContractWarning` when product CSS lacks light remaps (warn posture).
 - `design_loop_acceptance` — save checklist ticks without freezing the loop
-- `design_loop_get` — meta + **transcript** + mock HTML/notes + **acceptance** checklist + `usedScaffold` (pass `includeHtml=false` for chat-only)
+- `design_loop_pin` / `design_loop_unpin` / `design_loop_concepts` — pin authoritative concept/asset per slot (logo/palette/…); list candidates + selections. Continues prefer pinned / true RGBA over inventing a new mark.
+- `design_loop_versions` / `design_loop_discard` — version tree (`parentVersion`, active|invalid); soft-discard bad tips (rewinds tip to parent). `design_loop_continue` accepts optional `baseVersion` to fork from an active ancestor.
+- Design-loop continues are **LLM-classified** (`classification` role → `glm-5.2:cloud` by default; falls back to `planning` if unbound) into a structured intent (`scope`, `targets`, `inventLogo`, `adoptTheme`, `navAlign`, `preserveChrome`, optional `designScope` patch); drift gating uses those targets, not regex order. Regex classification remains the offline/test fallback (`fallbackContinueIntentFromText`).
+- `design_loop_get` — meta + **transcript** + mock HTML/notes + **acceptance** checklist + **conceptualModel** + `concepts`/`selections` + `assets[]` + `siteInventory` summary + `usedScaffold` (pass `includeHtml=false` for chat-only). Mock HTML asset `src`s are rewritten to path-only HTTP URLs at serve time; on-disk `mock.html` keeps project-relative paths.
+- `design_loop_site_inventory` — live project nav/routes/tokens/logos **plus per-route screen copy** (headings, table columns, form fields, buttons) and domain entity field names (TS/zod/prisma). Read-only from source; rebuilds `SITE_INVENTORY.json`. Continues use this for menu align and for real UI copy in mocks (do not invent placeholder text for extracted screens). Authority: SHARED DESIGN (imported palette/logos) > LIVE SITE (nav + screen copy + tokens); nav always LIVE SITE.
+- `rename_project` — update a project's display name only (`projectId` or `rootPath`, `name`). `rootPath`, `id`, and all nested design-loop/phase URLs are unchanged.
 - `design_loop_retry` — regenerate a failed/scaffold version **in place** (timeout recovery; does not bump version)
 - `generate_design_image` — raster via `roles.designImage` (local Flux / `openai-images`); hard-fails if unbound
 - `search_design_images` / `import_design_image` — Openverse (open-licensed Wikimedia / Flickr CC / museums); import writes loop `assets/` + attribution sidecar
 - `review_design_loop` — screenshot mock → `roles.designVision` critique (`vN/REVIEW.md`). Needs Playwright Chromium: `pnpm --filter @slopcontrol/coding-tools exec playwright install chromium`
 
-**Ask vs agent vs develop:** `ask` shapes a change (read-only + optional `ask_sub_research`); `agent` runs shell commands to diagnose/verify without starting phases; `start_development` / coding tools own real implementation in a phase worktree. Use `design_loop_*` (not plain ask) for look-and-feel + image search/gen.
+**Ask vs plan vs agent vs develop:** `ask` is light Q&A / sticky explore (Task brief → `promote_ask`); `plan_loop_*` builds a versioned full PLAN.md then `plan_loop_promote` → research; `agent` runs shell inspect/verify without phases; `design_loop_*` is look-and-feel; `start_development` owns product code in a worktree.
 - `list_runs` / `list_phases` — **require** `projectId`
 - `list_worktrees` — phase worktrees under `~/.slopcontrol/worktrees` (`projectId`)
 - `get_git_status` — which branch is checked out in the project folder (`projectId`)
@@ -129,7 +137,7 @@ curl -s localhost:3020/runs -H 'content-type: application/json' -d '{
 Real projects may be audited read-only; writing `BLUEPRINT.md` only via `reconcile_blueprint` with `dryRun: false` after operator approval. Fixture smoke: `packages/artifacts/fixtures/ui-gate-project/`.
 
 **Engagement / form Intent hardening (runs 54–56 lessons):**
-- Change Intent is **LLM-classified** via the `planning` role (`changeKind`: engagement | chrome-hide | backend | other), then finalized deterministically; regex heuristics are the sync fallback when the LLM fails or `heuristicOnly` is set. Align / live `tool-*` / overclaim gates stay deterministic and still key off `interaction`.
+- Change Intent is **LLM-classified** via the `classification` role (`changeKind`: engagement | chrome-hide | backend | other), then finalized deterministically; regex heuristics are the sync fallback when the LLM fails or `heuristicOnly` is set. Align / live `tool-*` / overclaim gates stay deterministic and still key off `interaction`.
 - Draft LLM timeout with an engagement Change Intent **fails closed** (retry draft) — does not write a generic scaffold that fails Intent align.
 - RESEARCH that overclaims “~90% already works” without residual risks is retried once when `interaction` is set (skipped for `chrome-hide` / `backend`).
 - Weak on-disk `INTENT.json` (`uiMount: n/a` / missing interaction / missing `changeKind`) is refreshed on research, draft, and approve.
@@ -142,7 +150,7 @@ Real projects may be audited read-only; writing `BLUEPRINT.md` only via `reconci
 **Brand theming re-run (after Intent/designImage fixes):**
 
 1. Rebuild/restart SlopControl (`pnpm build` then `pnpm slopcontrol -- up`).
-2. Ensure `~/.slopcontrol/endpoints.json` has `designImage` → local `openai-images` model (`ollama pull x/flux2-klein`). Prefer `design` → `kimi-k3:cloud` for UI-SPEC fidelity.
+2. Ensure `~/.slopcontrol/endpoints.json` has `designImage` → local `openai-images` model (`ollama pull x/flux2-klein`). Chat roles (`research` / `planning` / `supervisor` / `coding` / `design`) currently prefer `deepseek-v4-pro:cloud`; bind `classification` → `ollama-cloud-glm` (`glm-5.2:cloud`) for continue-/change-intent JSON; keep `designVision` on a vision model (`kimi-k2.7-code`).
 3. Delete weak `INTENT.json` on the brand phase (or rely on weak refresh when `changeKind` was `backend` but the ask is theming).
 4. Re-run research → draft → design → develop. Confirm RESEARCH cites sibling `images/logo.svg` (and family siblings like burntjam when relevant), not `*-reuse.svg`. Design must not complete on logo `svg_fallback`.
 5. If full look-and-feel is required, approve a PHASE that includes shell/theme machinery — not palette-only hex remaps.
@@ -166,11 +174,16 @@ Real projects may be audited read-only; writing `BLUEPRINT.md` only via `reconci
 - `POST /projects/:id/design-loops` — start design loop (brief → mock HTML)
 - `POST /projects/:id/design-loops/:loopId/continue` — revise mock
 - `POST /projects/:id/design-loops/:loopId/retry` — regenerate a version in place after scaffold/timeout
-- `GET /projects/:id/design-loops/:loopId` — meta + transcript + html (`?includeHtml=false` to skip html)
+- `PATCH /projects/:id` — rename display name (`{ name }`); id/rootPath unchanged
+- `GET /projects/:id/design-loops/:loopId` — meta + transcript + html + `assets[]` + `siteInventory` summary (`?includeHtml=false` to skip html)
+- `GET /projects/:id/design-loops/:loopId/site-inventory` — full live-site inventory (`?refresh=true` to rebuild)
+- `GET /projects/:id/design-loops/:loopId/assets/:name` — serve a loop asset file (PNG/etc.) for remote preview
 - `POST /projects/:id/design-loops/:loopId/accept` / `implement` / `review`
 - `POST /projects/:id/design-images` — generate raster (`designImage`)
 - `POST /projects/:id/design-images/search` — Openverse search
 - `POST /projects/:id/design-images/import` — import Openverse id into loop assets
+
+Design-loop rasters live under `.slopcontrol/design-loops/<loopId>/assets/` (project-relative paths in stored mocks). SlopControl rewrites those refs to `/projects/.../assets/...` in API responses; dashboards should proxy that route (e.g. Hermes `/api/slop/...`) so `srcDoc` iframes stay same-origin.
 - `GET /projects/:id/agents` — list agent chat sessions
 - `POST /projects/:id/agents` — start/continue agent chat (`message`, optional `agentId` / `title`)
 - `GET /projects/:id/agents/:agentId` — full agent transcript
@@ -195,7 +208,7 @@ Real projects may be audited read-only; writing `BLUEPRINT.md` only via `reconci
   archive/BLUEPRINT-…   # superseded blueprints
   asks/<askId>/         # exploratory conversations (TRANSCRIPT.md, meta.json)
   agents/<agentId>/     # inspect/verify chats with run_command (TRANSCRIPT.md, meta.json)
-  design-loops/<id>/    # look-and-feel mocks (META, TRANSCRIPT, vN/mock.html, assets/)
+  design-loops/<id>/    # look-and-feel mocks (META+selections, TRANSCRIPT, vN/mock.html, assets/, CONCEPTS.json, DESIGN_PACK.json on accept)
   generated-images/     # rasters generated without a loopId
   phases/01-slug/       # RESEARCH.md, PHASE.md, APPENDIX.md, status.json
   runs/<uuid>/log.txt
@@ -259,4 +272,4 @@ If the planner narrates or writes `PHASE.md` at the project root via tools, Slop
 
 ## OpenCode
 
-Coding role should map to `ollama-cloud/glm-5.2` (Kimi K3 is reserved for research/planning/supervisor). Sessions use the **worktree path**, not the main checkout. Local env files are re-synced and `.env.slopcontrol` is written each iteration; with `autoMergeOnComplete`, tests run on the project root after merge under the resolved project env + `llmTestProfile`.
+Chat roles currently map to `deepseek-v4-pro:cloud` while Kimi K3 is unstable on Ollama Cloud (`designVision` stays on a vision model). Sessions use the **worktree path**, not the main checkout. Local env files are re-synced and `.env.slopcontrol` is written each iteration; with `autoMergeOnComplete`, tests run on the project root after merge under the resolved project env + `llmTestProfile`.

@@ -65,6 +65,59 @@ describe("@slopcontrol/llm", () => {
     assert.equal(endpointSupportsVision(design.endpoint), false);
   });
 
+  it("falls classification role back to planning when unbound", () => {
+    const registry = new LlmRegistry({
+      endpoints: [
+        {
+          id: "plan",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "deepseek",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+      ],
+      roles: {
+        research: { endpointId: "plan" },
+        planning: { endpointId: "plan" },
+        supervisor: { endpointId: "plan" },
+        coding: { endpointId: "plan" },
+      },
+    });
+    const cls = registry.resolveEndpointForRole("classification");
+    assert.equal(cls.endpoint.id, "plan");
+  });
+
+  it("resolves classification to its own endpoint when bound", () => {
+    const registry = new LlmRegistry({
+      endpoints: [
+        {
+          id: "plan",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "deepseek",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+        {
+          id: "glm",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "glm-5.2",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+      ],
+      roles: {
+        research: { endpointId: "plan" },
+        planning: { endpointId: "plan" },
+        supervisor: { endpointId: "plan" },
+        coding: { endpointId: "plan" },
+        classification: { endpointId: "glm" },
+      },
+    });
+    const cls = registry.resolveEndpointForRole("classification");
+    assert.equal(cls.endpoint.id, "glm");
+    assert.equal(cls.modelId, "glm-5.2");
+  });
+
   it("refuses vision on non-vision endpoints", () => {
     const endpoint = {
       id: "glm",

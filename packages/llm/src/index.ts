@@ -92,8 +92,8 @@ function bindingForRole(
   const direct = roles[role as keyof RoleModelBindings];
   if (direct) return direct;
 
-  // Text design falls back to planning when unbound.
-  if (role === "design") {
+  // Text design / classification fall back to planning when unbound.
+  if (role === "design" || role === "classification") {
     return roles.planning;
   }
 
@@ -178,6 +178,11 @@ export class LlmRegistry {
     if (role === "design") {
       return Boolean(this.roles.design) || Boolean(this.roles.planning);
     }
+    if (role === "classification") {
+      return (
+        Boolean(this.roles.classification) || Boolean(this.roles.planning)
+      );
+    }
     const binding = this.roles[role as keyof RoleModelBindings];
     return Boolean(binding);
   }
@@ -239,4 +244,6 @@ export class LlmRegistry {
 export * from "./vision-chat.js";
 export * from "./json-chat.js";
 export * from "./intent-extract.js";
+export * from "./continue-intent-llm.js";
+export * from "./plan-continue-intent-llm.js";
 export * from "@slopcontrol/types";

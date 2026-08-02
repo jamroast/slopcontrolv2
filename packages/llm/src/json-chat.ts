@@ -8,6 +8,11 @@ export interface ChatJsonOptions {
   user: string;
   timeoutMs?: number;
   temperature?: number;
+  /**
+   * Extra attempts after the first when content is empty or not valid JSON
+   * (default 2 → 3 tries total).
+   */
+  emptyContentRetries?: number;
 }
 
 export interface ChatJsonResult {
@@ -15,6 +20,9 @@ export interface ChatJsonResult {
   parsed: unknown;
   modelId: string;
 }
+
+const JSON_ONLY_NUDGE =
+  "\n\nIMPORTANT: Respond with ONLY a single valid JSON object. No prose, no markdown, no explanation.";
 
 /** Strip optional markdown fences around a JSON object/array. */
 export function stripJsonFence(text: string): string {
@@ -27,9 +35,42 @@ export function stripJsonFence(text: string): string {
   return trimmed;
 }
 
+type ChatMessage = {
+  content?: string | Array<{ type?: string; text?: string }>;
+  reasoning_content?: string;
+  reasoning?: string;
+};
+
+/** Prefer message.content; fall back to reasoning fields some cloud models use. */
+export function extractChatMessageText(message: ChatMessage | undefined): string {
+  if (!message) return "";
+  const content = message.content;
+  if (typeof content === "string" && content.trim()) return content.trim();
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((p) => (typeof p?.text === "string" ? p.text : ""))
+      .filter(Boolean)
+      .join("\n")
+      .trim();
+    if (joined) return joined;
+  }
+  for (const alt of [message.reasoning_content, message.reasoning]) {
+    if (typeof alt === "string" && alt.trim()) {
+      // Reasoning often wraps the JSON; stripJsonFence will locate the object.
+      return alt.trim();
+    }
+  }
+  return "";
+}
+
+function isRetryableChatJsonError(message: string): boolean {
+  return /empty content|parse failed/i.test(message);
+}
+
 /**
  * OpenAI-compatible JSON chat. Prefer `response_format: json_object` for
  * openai-chat; otherwise strip fences and parse.
+ * Retries on empty content or invalid JSON (prose refusals / chatter).
  */
 export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
   const endpoint = resolveEndpointSecrets(opts.endpoint);
@@ -47,55 +88,78 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
   }
 
   const useJsonObject = endpoint.apiType === "openai-chat";
-  const body: Record<string, unknown> = {
-    model: modelId,
-    messages: [
-      { role: "system", content: opts.system },
-      { role: "user", content: opts.user },
-    ],
-    temperature: opts.temperature ?? 0,
-    max_tokens: endpoint.defaultParams?.maxTokens ?? 1024,
-  };
-  if (useJsonObject) {
-    body.response_format = { type: "json_object" };
-  }
-
-  const controller = new AbortController();
   const timeoutMs = opts.timeoutMs ?? endpoint.timeoutMs ?? 15_000;
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const maxAttempts = 1 + Math.max(0, opts.emptyContentRetries ?? 2);
+  let lastError: Error | null = null;
 
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers,
-      signal: controller.signal,
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      throw new Error(
-        `JSON chat failed (${res.status}): ${errBody.slice(0, 400)}`,
-      );
-    }
-
-    const json = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const userContent =
+      attempt === 1 ? opts.user : `${opts.user}${JSON_ONLY_NUDGE}`;
+    const body: Record<string, unknown> = {
+      model: modelId,
+      messages: [
+        { role: "system", content: opts.system },
+        { role: "user", content: userContent },
+      ],
+      temperature: opts.temperature ?? 0,
+      max_tokens: endpoint.defaultParams?.maxTokens ?? 1024,
     };
-    const text = json.choices?.[0]?.message?.content?.trim() ?? "";
-    if (!text) {
-      throw new Error("JSON chat returned empty content");
+    // Keep json_object while retrying parse/prose failures. Drop it only on the
+    // final attempt (some models return empty when response_format is forced).
+    if (useJsonObject && attempt < maxAttempts) {
+      body.response_format = { type: "json_object" };
     }
-    let parsed: unknown;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      parsed = JSON.parse(stripJsonFence(text));
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        signal: controller.signal,
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        throw new Error(
+          `JSON chat failed (${res.status}): ${errBody.slice(0, 400)}`,
+        );
+      }
+
+      const json = (await res.json()) as {
+        choices?: Array<{ message?: ChatMessage }>;
+      };
+      const text = extractChatMessageText(json.choices?.[0]?.message);
+      if (!text) {
+        lastError = new Error(
+          `JSON chat returned empty content (attempt ${attempt}/${maxAttempts})`,
+        );
+        if (attempt < maxAttempts) continue;
+        throw lastError;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(stripJsonFence(text));
+      } catch (err) {
+        lastError = new Error(
+          `JSON chat parse failed: ${err instanceof Error ? err.message : String(err)} (attempt ${attempt}/${maxAttempts}; preview=${JSON.stringify(text.slice(0, 80))})`,
+        );
+        if (attempt < maxAttempts) continue;
+        throw lastError;
+      }
+      return { text, parsed, modelId };
     } catch (err) {
-      throw new Error(
-        `JSON chat parse failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const e = err instanceof Error ? err : new Error(String(err));
+      lastError = e;
+      if (attempt < maxAttempts && isRetryableChatJsonError(e.message)) {
+        continue;
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-    return { text, parsed, modelId };
-  } finally {
-    clearTimeout(timer);
   }
+
+  throw lastError ?? new Error("JSON chat returned empty content");
 }

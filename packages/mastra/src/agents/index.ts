@@ -262,7 +262,7 @@ Answer the operator's questions using the codebase and .slopcontrol BLUEPRINT/RO
 Rules:
 - Be conversational and concise. Prefer repo tools (read_file / list_files / grep_files) before web_search/fetch_url.
 - Never invent files that do not exist. Never print or ask for secrets/API keys.
-- Do NOT write RESEARCH.md or PHASE.md — this is ask mode, not research. Suggest promote_ask when ready.
+- Do NOT write RESEARCH.md or PHASE.md — this is ask mode, not research. Suggest promote_ask when ready for a small change; for multi-turn / full planning suggest plan_loop_start instead.
 - When the operator is shaping a concrete change, include a short markdown section:
 
 ## Task brief
@@ -333,7 +333,6 @@ export function createDesignLoopAgent(
   projectDir: string,
   memory: Memory,
 ): Agent {
-  const tools = createProjectTools(projectDir);
   const media = createDesignLoopMediaTools(projectDir, registry);
 
   return new Agent({
@@ -346,28 +345,88 @@ Produce ONE self-contained HTML mock (wireframe or mid-fi) for look-and-feel dis
 
 Rules:
 - Output a single HTML document in a \`\`\`html fence (or raw <!DOCTYPE html>…). Inline CSS only — no external stylesheets/fonts CDNs.
-- Use :root CSS variables for palette/typography. Prefer sibling brand cues / CSS excerpts already in the prompt.
+- Use :root CSS variables for palette/typography. Prefer LIVE SITE inventory (nav/tokens/logos/routes) and sibling cues already in the prompt. No filesystem reads — inventory is injected for you.
 - Show labeled states when relevant. Keep it one page, not a full SPA.
 - The prompt always states the current loopId — pass that loopId to media tools.
-- Media tools (use when the operator asks; do not claim they ran without a tool result):
-  - find/search/stock/reference images → search_images (Openverse), then import_image for a chosen id
-  - generate/invent logo/mark/icon → generate_image (designImage / Flux)
-  - how does it look / review / critique → review_look (designVision screenshot critique)
-- Prefer search for photographic filler; generate for unique brand marks.
-- After import/gen, embed local relative paths in the mock (<img src=".slopcontrol/...">). Cite attribution in your short notes.
+- PINNED concepts/assets in the prompt are frozen: embed those paths; do NOT replace them with generate_image or a differently named "alpha" file.
+- When the operator names a logo file or says pin/use/go with a mark, call pin_logo with that filename first, then embed it in the mock (menubar + landing). Do not keep an older mark.
+- CONCEPTUAL MODEL in the prompt is authoritative scope: kind/focus/preserve. component/flow → one composition around the focus (ghost chrome ok, labeled out of scope). shell/theme → menubar + data-theme dark/light proof. Do not expand past focus.
+- When theme modes are in the conceptual model, include :root dark tokens AND [data-theme="light"] remaps; toggles must set documentElement data-theme.
+- CONTINUE MODE in the prompt is authoritative: asset_only / section_touch means preserve hero copy, shell, and :root token names — do not invent new landing copy.
+- Prefer true RGBA sources (hasAlpha). Filenames containing "alpha" that are still RGB are INVALID — call make_transparent or use the pinned RGBA mark.
+- Media / edit tools (do not claim they ran without a tool result):
+  - pin / use / go with a named existing asset → pin_logo (then embed that path)
+  - alpha / strip black / transparent background on an EXISTING asset → make_transparent (true RGBA; never Flux)
+  - icon pack / favicons from an EXISTING mark → derive_icon_pack (resize only; uses pinned / true RGBA)
+  - resize / trim / pad existing → resize_image / trim_image / pad_image
+  - invent a brand-new mark (nothing pinned / operator asks to invent) → generate_image
+  - stock photos → search_images then import_image
+  - review look → review_look
+- Never use generate_image to "fix" alpha, backgrounds, or icon packs — that invents a different mark.
+- After import/gen/edit, embed local relative paths (<img src=".slopcontrol/...">). Cite attribution when importing.
 - Cap thrash: ≤1 search and ≤1 generate per turn unless asked for more. Prefer writing the mock when media is not needed.
-- If generation falls back to a scaffold / times out, tell the operator to call MCP \`design_loop_retry\` for this loopId (regenerates the same version in place).
+- If generation falls back to a scaffold / times out, tell the operator to call MCP \`design_loop_retry\` for this loopId.
 - Do NOT write product source files. Do NOT produce UI-SPEC.md as a file.
-- After a short note (1–3 sentences), end with the HTML document and MOCK_HTML_COMPLETE on its own line.
+- After a short note (1–3 sentences), end with the HTML document and MOCK_HTML_COMPLETE — or MOCK_ASSETS_ONLY when CONTINUE MODE is asset_only.
 - Avoid purple-on-white defaults unless the brief asks for them.`,
     model: registry.resolve("design"),
     memory,
     tools: {
-      read_file: tools.readFile,
       generate_image: media.generate_image,
+      pin_logo: media.pin_logo,
+      make_transparent: media.make_transparent,
+      derive_icon_pack: media.derive_icon_pack,
+      resize_image: media.resize_image,
+      trim_image: media.trim_image,
+      pad_image: media.pad_image,
       search_images: media.search_images,
       import_image: media.import_image,
       review_look: media.review_look,
+    },
+  });
+}
+
+/**
+ * Plan-loop agent: produces versioned PLAN.md (no product/phase writes).
+ */
+export function createPlanLoopAgent(
+  registry: LlmRegistry,
+  projectDir: string,
+  memory: Memory,
+): Agent {
+  const tools = createProjectTools(projectDir);
+
+  return new Agent({
+    id: "plan-loop-agent",
+    name: "Plan Loop Agent",
+    description:
+      "Builds a structured PLAN.md through chat for handoff to research",
+    instructions: `You are the SlopControl plan-loop agent.
+Produce ONE structured PLAN.md for operator review before research.
+
+Rules:
+- Output a short rationale (1–3 sentences), then the full plan in a \`\`\`markdown fence (or raw # Plan …).
+- Required H2 sections (exactly these titles): Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes.
+- Prefer repo tools (read_file / list_files / grep_files) before guessing paths. Never invent files that do not exist.
+- CONCEPTUAL MODEL / PLAN CONTINUE INTENT in the prompt are authoritative: revise surgically; do not expand past focus/preserve.
+- Do NOT write RESEARCH.md, PHASE.md, or product source. Do NOT claim promote ran.
+- When continuing, revise the previous PLAN.md — preserve Goal and Out of scope unless those sections are targeted.
+- End with PLAN_COMPLETE on its own line.
+- Keep Likely areas as hypotheses when uncertain; put unknowns under Risks & open questions for research to resolve.`,
+    model: (() => {
+      try {
+        return registry.resolve("planning");
+      } catch {
+        return registry.resolve("research");
+      }
+    })(),
+    memory,
+    tools: {
+      read_file: tools.readFile,
+      list_files: tools.listFiles,
+      grep_files: tools.grepFiles,
+      fetch_url: tools.fetchUrl,
+      web_search: tools.webSearch,
     },
   });
 }

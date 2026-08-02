@@ -55,6 +55,8 @@ export const AgentRoleSchema = z.enum([
   "design",
   "designVision",
   "designImage",
+  /** Structured JSON classification (continue-intent, change-intent) */
+  "classification",
 ]);
 
 export type AgentRole = z.infer<typeof AgentRoleSchema>;
@@ -77,6 +79,11 @@ export const RoleModelBindingsSchema = z.object({
   designVision: RoleBindingSchema.optional(),
   /** Raster image generation — must bind an imageGen-capable model */
   designImage: RoleBindingSchema.optional(),
+  /**
+   * Structured JSON classification (continue-intent / change-intent).
+   * Defaults to planning when omitted.
+   */
+  classification: RoleBindingSchema.optional(),
 });
 
 export type RoleModelBindings = z.infer<typeof RoleModelBindingsSchema>;

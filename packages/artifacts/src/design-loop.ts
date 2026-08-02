@@ -6,8 +6,11 @@ import {
   writeFileSync,
   copyFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { createRequire } from "node:module";
+import { basename, join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
+
+const requireDesignPack = createRequire(import.meta.url);
 
 const SLOP_DIR = ".slopcontrol";
 
@@ -29,12 +32,21 @@ export type DesignLoopMeta = {
   currentVersion: number;
   acceptedVersion?: number;
   lastError?: DesignLoopLastError;
+  /** Dynamic conceptual-model scope frame (product / shell / screen / component / flow). */
+  scope?: import("./design-conceptual-model.js").DesignScope;
   createdAt: string;
   updatedAt: string;
 };
 
+export type DesignLoopVersionStatus = "active" | "invalid";
+
 export type DesignLoopVersionMeta = {
   version: number;
+  /** Prior version this mock was revised from (`null` for v1). */
+  parentVersion: number | null;
+  status: DesignLoopVersionStatus;
+  invalidReason?: string;
+  invalidatedAt?: string;
   usedScaffold: boolean;
   error?: string;
   updatedAt: string;
@@ -53,12 +65,17 @@ export type DesignLoopAcceptance = {
   updatedAt?: string;
 };
 
-/** Stable fallbacks when mock has no parseable section labels. */
+/** Stable fallbacks when mock has no parseable section labels (product scope). */
 export const DESIGN_LOOP_FALLBACK_FEATURES: DesignLoopAcceptanceFeature[] = [
   { id: "palette", label: "Palette — sibling tokens", accepted: false },
   { id: "logo", label: "Logo / mark", accepted: false },
   { id: "type", label: "Typography", accepted: false },
   { id: "applied_shell", label: "Applied frames — shell / dashboard chrome", accepted: false },
+  {
+    id: "theme_modes",
+    label: "Theme modes — dark / light (data-theme)",
+    accepted: false,
+  },
 ];
 
 export function designLoopsRoot(projectRoot: string): string {
@@ -115,6 +132,102 @@ export function designLoopAcceptancePath(
   return join(designLoopDir(projectRoot, loopId), "ACCEPTANCE.json");
 }
 
+export function designLoopAssetsDir(
+  projectRoot: string,
+  loopId: string,
+): string {
+  return join(designLoopDir(projectRoot, loopId), "assets");
+}
+
+/** HTTP path (no host) for a loop asset — dashboard prefixes its proxy. */
+export function designLoopHttpAssetPath(
+  projectId: string,
+  loopId: string,
+  filename: string,
+): string {
+  const name = basename(filename);
+  return `/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/assets/${encodeURIComponent(name)}`;
+}
+
+/**
+ * Path-safe resolve of a file under design-loops/<loopId>/assets/.
+ * Rejects traversal; returns null if missing.
+ */
+export function resolveDesignLoopAssetFile(
+  projectRoot: string,
+  loopId: string,
+  name: string,
+): string | null {
+  const base = basename(String(name ?? ""));
+  if (!base || base !== String(name ?? "") || base.includes("..")) return null;
+  const dir = resolve(designLoopAssetsDir(projectRoot, loopId));
+  const absolute = resolve(dir, base);
+  if (!absolute.startsWith(dir + sep) && absolute !== dir) return null;
+  if (!existsSync(absolute)) return null;
+  return absolute;
+}
+
+export type DesignLoopAssetListing = {
+  name: string;
+  /** Path-only URL under SlopControl (prefix with dashboard proxy for browsers). */
+  url: string;
+};
+
+/** List raster/assets in a loop assets/ folder. */
+export function listDesignLoopAssets(
+  projectRoot: string,
+  projectId: string,
+  loopId: string,
+): DesignLoopAssetListing[] {
+  const dir = designLoopAssetsDir(projectRoot, loopId);
+  if (!existsSync(dir)) return [];
+  const out: DesignLoopAssetListing[] = [];
+  for (const name of readdirSync(dir)) {
+    if (name.startsWith(".")) continue;
+    if (name.endsWith(".json") || name.endsWith(".md")) continue;
+    const abs = resolveDesignLoopAssetFile(projectRoot, loopId, name);
+    if (!abs) continue;
+    out.push({
+      name,
+      url: designLoopHttpAssetPath(projectId, loopId, name),
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Rewrite project-relative design-loop asset paths in mock HTML to HTTP paths
+ * for remote preview. Does not mutate files on disk.
+ *
+ * `assetBase` is prepended (e.g. "" or "http://host:3020"). Default "".
+ */
+export function rewriteDesignLoopAssetUrls(
+  html: string,
+  opts: {
+    projectId: string;
+    loopId: string;
+    /** Optional origin/prefix; paths always start with /projects/... */
+    assetBase?: string;
+  },
+): string {
+  if (!html?.trim()) return html;
+  const loopId = opts.loopId.trim();
+  if (!loopId) return html;
+  const base = (opts.assetBase ?? "").replace(/\/$/, "");
+  const escaped = loopId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Match .slopcontrol/design-loops/<loopId>/assets/<file> with optional ./ or leading /
+  const re = new RegExp(
+    `(?:\\./|\\/)?(?:\\.slopcontrol\\/design-loops\\/${escaped}\\/assets\\/)([^\\s"'<>?#+]+)`,
+    "gi",
+  );
+  return html.replace(re, (_full, file: string) => {
+    const name = basename(String(file).split("?")[0] ?? "");
+    if (!name || name.includes("..")) return _full;
+    const path = designLoopHttpAssetPath(opts.projectId, loopId, name);
+    return `${base}${path}`;
+  });
+}
+
 /** Slug for checklist id from a section label. */
 export function slugifyDesignFeatureId(label: string): string {
   const lower = label.toLowerCase();
@@ -138,6 +251,14 @@ export function slugifyDesignFeatureId(label: string): string {
     /\bwireframe/.test(lower)
   ) {
     return "applied_shell";
+  }
+  if (
+    /\btheme\s*modes?\b/.test(lower) ||
+    /\bdark\b.*\blight\b/.test(lower) ||
+    /\blight\b.*\bdark\b/.test(lower) ||
+    /\bdata-theme\b/.test(lower)
+  ) {
+    return "theme_modes";
   }
   if (
     /\badoption\b/.test(lower) ||
@@ -184,12 +305,25 @@ export function extractFeaturesFromMockHtml(
 export function mergeAcceptanceFeatures(
   proposed: DesignLoopAcceptanceFeature[],
   prior?: DesignLoopAcceptanceFeature[] | null,
+  opts?: {
+    scope?: import("./design-conceptual-model.js").DesignScope | null;
+    includeThemeModes?: boolean;
+  },
 ): DesignLoopAcceptanceFeature[] {
+  // Lazy import avoids circular init with conceptual-model helpers.
+  const {
+    fallbackFeaturesForScope,
+    defaultProductScope,
+  } = requireDesignPack("./design-conceptual-model.js") as typeof import("./design-conceptual-model.js");
+  const scope = opts?.scope ?? defaultProductScope();
+  const fallbacks = fallbackFeaturesForScope(scope, {
+    includeThemeModes: opts?.includeThemeModes,
+  });
   const priorMap = new Map((prior ?? []).map((f) => [f.id, f.accepted]));
   const base =
     proposed.length > 0
       ? proposed
-      : DESIGN_LOOP_FALLBACK_FEATURES.map((f) => ({ ...f }));
+      : fallbacks.map((f) => ({ ...f }));
   const seen = new Set(base.map((f) => f.id));
   const merged = base.map((f) => ({
     ...f,
@@ -199,15 +333,29 @@ export function mergeAcceptanceFeatures(
   for (const f of prior ?? []) {
     if (seen.has(f.id)) continue;
     merged.push({ ...f });
+    seen.add(f.id);
   }
-  // Ensure fallbacks exist when mock had partial sections
-  for (const fb of DESIGN_LOOP_FALLBACK_FEATURES) {
+  // Ensure scope fallbacks exist when mock had partial sections
+  for (const fb of fallbacks) {
     if (seen.has(fb.id)) continue;
     if (merged.some((x) => x.id === fb.id)) continue;
     merged.push({
       ...fb,
       accepted: priorMap.has(fb.id) ? Boolean(priorMap.get(fb.id)) : false,
     });
+    seen.add(fb.id);
+  }
+  // Product scope: still ensure classic fallbacks when kind is product
+  if (scope.kind === "product") {
+    for (const fb of DESIGN_LOOP_FALLBACK_FEATURES) {
+      if (fb.id === "theme_modes" && !opts?.includeThemeModes) continue;
+      if (seen.has(fb.id)) continue;
+      merged.push({
+        ...fb,
+        accepted: priorMap.has(fb.id) ? Boolean(priorMap.get(fb.id)) : false,
+      });
+      seen.add(fb.id);
+    }
   }
   return merged;
 }
@@ -246,7 +394,7 @@ export function writeDesignLoopAcceptance(
 
 /**
  * Seed/refresh ACCEPTANCE.json from mock HTML after start/continue/retry.
- * Preserves prior ticks by feature id.
+ * Preserves prior ticks by feature id. Scope-aware fallbacks + theme_modes.
  */
 export function seedDesignLoopAcceptanceFromHtml(opts: {
   projectRoot: string;
@@ -255,8 +403,25 @@ export function seedDesignLoopAcceptanceFromHtml(opts: {
   html: string;
 }): DesignLoopAcceptance {
   const prior = readDesignLoopAcceptance(opts.projectRoot, opts.loopId);
+  const meta = readDesignLoopMeta(opts.projectRoot, opts.loopId);
+  const {
+    getDesignLoopScope,
+    extractThemeContractFromHtml,
+  } = requireDesignPack("./design-conceptual-model.js") as typeof import("./design-conceptual-model.js");
+  const scope = getDesignLoopScope(meta);
+  const theme = extractThemeContractFromHtml(opts.html);
   const extracted = extractFeaturesFromMockHtml(opts.html);
-  const features = mergeAcceptanceFeatures(extracted, prior?.features);
+  if (theme && !extracted.some((f) => f.id === "theme_modes")) {
+    extracted.push({
+      id: "theme_modes",
+      label: "Theme modes — dark / light (data-theme)",
+      accepted: false,
+    });
+  }
+  const features = mergeAcceptanceFeatures(extracted, prior?.features, {
+    scope,
+    includeThemeModes: Boolean(theme),
+  });
   const acceptance: DesignLoopAcceptance = {
     version: opts.version,
     features,
@@ -344,6 +509,165 @@ export function formatAcceptancePromptBlock(
   return lines.join("\n");
 }
 
+/**
+ * Structured previous-mock block for design-loop continue (tokens + assets +
+ * sections always present; HTML body clipped so the model does not amnesiate).
+ */
+export function formatDesignLoopReviseBlock(opts: {
+  projectRoot: string;
+  projectId: string;
+  loopId: string;
+  previousHtml: string;
+  maxHtmlChars?: number;
+}): string {
+  const html = opts.previousHtml.trim();
+  if (!html) return "(no previous mock — create v1)";
+  const maxHtml = opts.maxHtmlChars ?? 16_000;
+  const tokens = extractTokensCssFromHtml(html);
+  const features = extractFeaturesFromMockHtml(html);
+  const assets = listDesignLoopAssets(
+    opts.projectRoot,
+    opts.projectId,
+    opts.loopId,
+  );
+  const parts: string[] = [
+    "Previous mock (revise this — do not start from scratch unless asked):",
+    "",
+    "### Tokens from previous mock",
+    "```css",
+    tokens.trim() || "/* (none extracted) */",
+    "```",
+    "",
+  ];
+  if (assets.length) {
+    parts.push("### Loop assets (embed these paths; do not invent a competing mark)");
+    for (const a of assets) {
+      parts.push(`- ${a.name} → \`.slopcontrol/design-loops/${opts.loopId}/assets/${a.name}\``);
+    }
+    parts.push("");
+  }
+  if (features.length) {
+    parts.push("### Section outline");
+    for (const f of features) parts.push(`- ${f.id}: ${f.label}`);
+    parts.push("");
+  }
+  const clipped =
+    html.length <= maxHtml
+      ? html
+      : `${html.slice(0, maxHtml)}\n\n…[truncated previous mock: ${html.length} chars total; keep tokens/assets/sections above]`;
+  parts.push("### HTML (may be truncated — preserve structure below the fold)");
+  parts.push("```html");
+  parts.push(clipped);
+  parts.push("```");
+  return parts.join("\n");
+}
+
+/**
+ * On generate failure: keep previousHtml when present; only scaffold for v1.
+ */
+export function resolveDesignLoopGenerateFallback(opts: {
+  brief: string;
+  previousHtml?: string | null;
+  errorDetail: string;
+  scaffold: (brief: string) => string;
+}): { html: string; notes: string; usedScaffold: boolean } {
+  const prior = opts.previousHtml?.trim();
+  if (prior) {
+    return {
+      html: prior,
+      notes: `Kept previous mock (agent error — not scaffolding over it): ${opts.errorDetail}`,
+      usedScaffold: false,
+    };
+  }
+  return {
+    html: opts.scaffold(opts.brief),
+    notes: `Scaffold fallback (agent error): ${opts.errorDetail}`,
+    usedScaffold: true,
+  };
+}
+
+/**
+ * Research/draft prompt digest when phase design/mock.html is bound.
+ */
+export function formatPhaseBoundMockPromptBlock(opts: {
+  projectRoot: string;
+  phaseId: string;
+  maxHtmlChars?: number;
+}): string {
+  const designDir = join(
+    opts.projectRoot,
+    SLOP_DIR,
+    "phases",
+    opts.phaseId,
+    "design",
+  );
+  const mockPath = join(designDir, "mock.html");
+  const tokensPath = join(designDir, "tokens.css");
+  const assetsDir = join(designDir, "assets");
+  if (!existsSync(mockPath)) return "";
+
+  let html = "";
+  try {
+    html = readFileSync(mockPath, "utf-8");
+  } catch {
+    return "";
+  }
+  if (!html.trim()) return "";
+
+  const maxHtml = opts.maxHtmlChars ?? 10_000;
+  const tokensFromFile = existsSync(tokensPath)
+    ? readFileSync(tokensPath, "utf-8")
+    : "";
+  const tokens = tokensFromFile.trim() || extractTokensCssFromHtml(html);
+  const features = extractFeaturesFromMockHtml(html);
+  const assetNames: string[] = [];
+  if (existsSync(assetsDir)) {
+    try {
+      for (const name of readdirSync(assetsDir)) {
+        if (name.startsWith(".") || name.endsWith(".json")) continue;
+        assetNames.push(name);
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const relMock = `.slopcontrol/phases/${opts.phaseId}/design/mock.html`;
+  const parts: string[] = [
+    `Accepted design-loop mock (authoritative visual contract):`,
+    `- Full mock: \`${relMock}\` — RESEARCH must cite this path and plan File Changes against it.`,
+    `- Do NOT invent a competing logo/mark metaphor when assets exist under \`.slopcontrol/phases/${opts.phaseId}/design/assets/\`.`,
+    `- Mount accepted assets (or copy into public/) rather than drawing a new monogram.`,
+    "",
+    "### tokens.css",
+    "```css",
+    tokens.trim().slice(0, 3_000) || "/* missing */",
+    "```",
+    "",
+  ];
+  if (assetNames.length) {
+    parts.push("### design/assets/");
+    for (const n of assetNames.sort()) {
+      parts.push(`- \`.slopcontrol/phases/${opts.phaseId}/design/assets/${n}\``);
+    }
+    parts.push("");
+  }
+  if (features.length) {
+    parts.push("### Mock section outline");
+    for (const f of features) parts.push(`- ${f.id}: ${f.label}`);
+    parts.push("");
+  }
+  const clipped =
+    html.length <= maxHtml
+      ? html
+      : `${html.slice(0, maxHtml)}\n\n…[truncated mock.html: ${html.length} chars; read \`${relMock}\` for the rest]`;
+  parts.push("### mock.html excerpt");
+  parts.push("```html");
+  parts.push(clipped);
+  parts.push("```");
+  return parts.join("\n");
+}
+
 export function writeDesignLoopMeta(
   projectRoot: string,
   meta: DesignLoopMeta,
@@ -410,6 +734,16 @@ export function writeDesignLoopVersion(opts: {
   request?: string;
   usedScaffold?: boolean;
   error?: string;
+  /**
+   * Prior version this revision is based on. Defaults to version-1 (or null for v1)
+   * when omitted. Retry should pass the existing parent.
+   */
+  parentVersion?: number | null;
+  /**
+   * When true (default on write), mark version active and clear invalid markers
+   * (used by successful regenerate/retry).
+   */
+  clearInvalid?: boolean;
 }): { htmlPath: string; notesPath: string; requestPath: string; metaPath: string } {
   const dir = designLoopVersionDir(
     opts.projectRoot,
@@ -430,12 +764,32 @@ export function writeDesignLoopVersion(opts: {
   if (opts.request !== undefined) {
     writeFileSync(requestPath, `${opts.request.trim()}\n`, "utf-8");
   }
+  const prior = readDesignLoopVersionMeta(
+    opts.projectRoot,
+    opts.loopId,
+    opts.version,
+  );
+  const parentVersion =
+    opts.parentVersion !== undefined
+      ? opts.parentVersion
+      : prior?.parentVersion !== undefined
+        ? prior.parentVersion
+        : opts.version <= 1
+          ? null
+          : opts.version - 1;
+  const clearInvalid = opts.clearInvalid !== false;
   const versionMeta: DesignLoopVersionMeta = {
     version: opts.version,
+    parentVersion,
+    status: clearInvalid ? "active" : (prior?.status ?? "active"),
     usedScaffold: Boolean(opts.usedScaffold),
     error: opts.error,
     updatedAt: new Date().toISOString(),
   };
+  if (!clearInvalid && prior?.status === "invalid") {
+    if (prior.invalidReason) versionMeta.invalidReason = prior.invalidReason;
+    if (prior.invalidatedAt) versionMeta.invalidatedAt = prior.invalidatedAt;
+  }
   writeFileSync(metaPath, `${JSON.stringify(versionMeta, null, 2)}\n`, "utf-8");
   return { htmlPath, notesPath, requestPath, metaPath };
 }
@@ -562,6 +916,12 @@ export function acceptDesignLoop(
     );
   }
   const v = version ?? meta.currentVersion;
+  const versionMeta = readDesignLoopVersionMeta(projectRoot, loopId, v);
+  if (versionMeta?.status === "invalid") {
+    throw new Error(
+      `Cannot accept invalid version v${v} — discard was applied; pick an active version`,
+    );
+  }
   const html = readDesignLoopMockHtml(projectRoot, loopId, v);
   if (!html?.trim()) {
     throw new Error(`Design loop version v${v} has no mock.html`);
@@ -603,6 +963,19 @@ export function acceptDesignLoop(
     updatedAt: now,
   };
   writeDesignLoopMeta(projectRoot, next);
+  try {
+    const { compileAndWriteDesignPackOnAccept } = requireDesignPack(
+      "./design-pack.js",
+    ) as typeof import("./design-pack.js");
+    compileAndWriteDesignPackOnAccept({
+      projectRoot,
+      loopId,
+      version: v,
+      acceptance,
+    });
+  } catch {
+    /* accept succeeds even if pack compile fails */
+  }
   return next;
 }
 
@@ -623,8 +996,15 @@ export function createDesignLoopMeta(opts: {
   brief: string;
   phaseId?: string;
   askId?: string;
+  scope?: import("./design-conceptual-model.js").DesignScope;
 }): DesignLoopMeta {
   const now = new Date().toISOString();
+  const { classifyDesignScopeFromText, defaultProductScope } =
+    requireDesignPack("./design-conceptual-model.js") as typeof import("./design-conceptual-model.js");
+  const scope =
+    opts.scope ??
+    classifyDesignScopeFromText(opts.brief, { source: "start" }) ??
+    defaultProductScope("start");
   return {
     id: randomUUID(),
     projectId: opts.projectId,
@@ -633,6 +1013,7 @@ export function createDesignLoopMeta(opts: {
     phaseId: opts.phaseId,
     askId: opts.askId,
     currentVersion: 0,
+    scope,
     createdAt: now,
     updatedAt: now,
   };
@@ -758,22 +1139,33 @@ function escapeHtml(s: string): string {
 }
 
 /** Pull `:root { … }` from mock HTML for tokens.css. */
+/**
+ * Extract :root tokens plus [data-theme="light"] overrides when present.
+ * Prefer extractThemeTokenBlocks for structured dark/light split.
+ */
 export function extractTokensCssFromHtml(html: string): string {
-  const styleBlocks = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)];
-  for (const m of styleBlocks) {
-    const css = m[1] ?? "";
-    const root = css.match(/:root\s*\{([\s\S]*?)\}/);
-    const body = root?.[1]?.trim();
-    if (body) {
-      return `:root {\n${body}\n}\n`;
+  try {
+    const { extractThemeTokenBlocks } = requireDesignPack(
+      "./design-conceptual-model.js",
+    ) as typeof import("./design-conceptual-model.js");
+    return extractThemeTokenBlocks(html).combinedTokensCss;
+  } catch {
+    const styleBlocks = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)];
+    for (const m of styleBlocks) {
+      const css = m[1] ?? "";
+      const root = css.match(/:root\s*\{([\s\S]*?)\}/);
+      const body = root?.[1]?.trim();
+      if (body) {
+        return `:root {\n${body}\n}\n`;
+      }
     }
-  }
-  return `:root {
+    return `:root {
   /* seeded from design-loop mock — refine if needed */
   --color-bg: #0A0A0A;
   --color-text: #F5F0E8;
   --color-accent: #E8430A;
 }\n`;
+  }
 }
 
 /** Seed UI-SPEC.md from an accepted design-loop mock + feature checklist. */
@@ -783,6 +1175,8 @@ export function uiSpecFromDesignLoopMock(opts: {
   version: number;
   notes?: string;
   acceptance?: DesignLoopAcceptance | null;
+  scope?: import("./design-conceptual-model.js").DesignScope | null;
+  theme?: import("./design-conceptual-model.js").ThemeContract | null;
 }): string {
   const features = opts.acceptance?.features ?? [];
   const accepted = features.filter((f) => f.accepted);
@@ -797,12 +1191,60 @@ export function uiSpecFromDesignLoopMock(opts: {
   const hasType = accepted.some((f) => f.id === "type");
   const hasLogo = accepted.some((f) => f.id === "logo");
   const hasShell = accepted.some((f) => f.id === "applied_shell");
+  const hasTheme =
+    accepted.some((f) => f.id === "theme_modes") || Boolean(opts.theme);
+  const scope = opts.scope;
+  const theme = opts.theme;
+
+  const scopeSection = scope
+    ? `## Scope (conceptual model)
+
+- **kind:** ${scope.kind}
+- **focus:** ${scope.focus}
+- **preserve:** ${scope.preserve.length ? scope.preserve.join(", ") : "(none)"}
+${scope.focusPaths.length ? `- **focusPaths:** ${scope.focusPaths.join(", ")}\n` : ""}
+Implement only within this focus. Do not expand into preserved or out-of-scope surfaces.
+`
+    : "";
+
+  const themeSection = hasTheme
+    ? `## Theme
+
+IN SCOPE (theme_modes / theme contract). Implement dark and light modes using \`html[data-theme="dark"|"light"]\`.
+${
+  theme
+    ? `
+- mechanism: ${theme.mechanism}
+- defaultMode: ${theme.defaultMode}
+- modes: ${theme.modes.join(", ")}
+- togglePresent: ${theme.togglePresent}
+
+Requirements:
+${theme.requirements.map((r) => `- ${r}`).join("\n")}
+
+Light token block from accepted mock (must land in product CSS):
+\`\`\`css
+${(theme.lightTokensCss || "/* implement light ladder */").trim().slice(0, 2_500)}
+\`\`\`
+`
+    : `
+- Drive theme via \`data-theme\` on \`<html>\` (not an unused \`.light\` class alone).
+- Remap semantic tokens (\`--background\`, \`--surface\`, \`--foreground\`) under \`[data-theme="light"]\`.
+- Body/chrome must consume those vars — not hard-coded \`--color-dark-*\` that ignore the toggle.
+`
+}
+`
+    : `## Theme
+
+OUT OF SCOPE for this accept — do not add a dual-mode theme system unless required by another accepted feature.
+`;
 
   return `# UI-SPEC
 
 **Source:** design loop \`${opts.loopId}\` v${opts.version} (accepted mock)
 **Brief:** ${opts.brief.trim()}
 
+${scopeSection}
 ## Accepted features
 
 Implement **only** these checklist items (operator-accepted). Research/draft must turn each into Scope / File Changes / Success Criteria / Automated Checks.
@@ -819,7 +1261,7 @@ ${outBlock}
 
 ${
   hasPalette
-    ? "IN SCOPE. Derived from the accepted mock HTML (inline CSS `:root` tokens). Prefer those hex values in product tokens."
+    ? "IN SCOPE. Derived from the accepted mock HTML (inline CSS `:root` tokens + light overrides when present). Prefer those hex values in product tokens."
     : "OUT OF SCOPE for this accept — do not retune the full palette unless required by another accepted feature."
 }
 
@@ -831,6 +1273,7 @@ ${
     : "OUT OF SCOPE for this accept — keep existing type unless required by another accepted feature."
 }
 
+${themeSection}
 ## Layout
 
 ${
@@ -928,12 +1371,23 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     writeFileSync(acceptedHtml, `${html.trim()}\n`, "utf-8");
   }
 
+  const {
+    getDesignLoopScope,
+    extractThemeContractFromHtml,
+  } = requireDesignPack("./design-conceptual-model.js") as typeof import("./design-conceptual-model.js");
+  const scope = getDesignLoopScope(meta);
+  const theme = extractThemeContractFromHtml(html, {
+    request: meta.brief,
+    notes,
+  });
   const uiSpec = uiSpecFromDesignLoopMock({
     brief: meta.brief,
     loopId: opts.loopId,
     version,
     notes: notes ?? undefined,
     acceptance,
+    scope,
+    theme,
   });
   const uiSpecFile = join(
     opts.projectRoot,
@@ -946,6 +1400,7 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     recursive: true,
   });
   writeFileSync(uiSpecFile, uiSpec, "utf-8");
+  // Dark :root + light [data-theme="light"] when present
   writeFileSync(
     join(designDir, "tokens.css"),
     extractTokensCssFromHtml(html),
@@ -982,6 +1437,27 @@ export function bindAcceptedDesignLoopToPhase(opts: {
       `${readFileSync(uiSpecFile, "utf-8").trim()}\n\n## Design-loop vision review\n\n${reviewBody}\n`,
       "utf-8",
     );
+  }
+
+  try {
+    const { copyDesignPackToPhase, compileAndWriteDesignPackOnAccept } =
+      requireDesignPack("./design-pack.js") as typeof import("./design-pack.js");
+    // Ensure pack exists (loops accepted before this feature).
+    if (!existsSync(join(designLoopDir(opts.projectRoot, opts.loopId), "DESIGN_PACK.json"))) {
+      compileAndWriteDesignPackOnAccept({
+        projectRoot: opts.projectRoot,
+        loopId: opts.loopId,
+        version,
+        acceptance,
+      });
+    }
+    copyDesignPackToPhase({
+      projectRoot: opts.projectRoot,
+      loopId: opts.loopId,
+      phaseId: opts.phaseId,
+    });
+  } catch {
+    /* bind still succeeds */
   }
 
   const next: DesignLoopMeta = {

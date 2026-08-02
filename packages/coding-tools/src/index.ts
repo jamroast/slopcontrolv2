@@ -66,6 +66,7 @@ export * from "./ensure-opencode.js";
 export * from "./git-worktree.js";
 export * from "./design-tool.js";
 export * from "./design-media.js";
+export * from "./design-image-edit.js";
 export * from "./mock-screenshot.js";
 export * from "./design-loop-review.js";
 export * from "./registry.js";

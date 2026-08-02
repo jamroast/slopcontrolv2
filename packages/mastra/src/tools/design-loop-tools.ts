@@ -1,15 +1,48 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import {
+  deriveIconPackFromAsset,
   generateDesignImage,
   importDesignImageById,
+  makeTransparentDesignAsset,
+  padDesignAsset,
+  promptLooksLikeImageEdit,
+  resizeDesignAsset,
   reviewDesignLoopLook,
   searchDesignImages,
+  trimDesignAsset,
 } from "@slopcontrol/coding-tools";
 import {
+  getDesignLoopSelections,
+  listDesignLoopAssets,
+  pinDesignLoopLogoAsset,
   readDesignLoopMeta,
 } from "@slopcontrol/artifacts";
 import type { LlmRegistry } from "@slopcontrol/llm";
+
+function pinnedLogoFilename(projectDir: string, loopId: string): string | undefined {
+  const meta = readDesignLoopMeta(projectDir, loopId);
+  const sel = getDesignLoopSelections(meta).find((s) => s.slot === "logo");
+  return sel?.asset;
+}
+
+function resolveLoopAssetName(
+  projectDir: string,
+  loopId: string,
+  filename: string,
+): string | null {
+  const meta = readDesignLoopMeta(projectDir, loopId);
+  if (!meta) return null;
+  const needle = basenameSafe(filename.trim());
+  const assets = listDesignLoopAssets(projectDir, meta.projectId, loopId);
+  const hit = assets.find((a) => a.name.toLowerCase() === needle.toLowerCase());
+  return hit?.name ?? null;
+}
+
+function basenameSafe(relativePath: string): string {
+  const parts = relativePath.replace(/\\/g, "/").split("/");
+  return parts[parts.length - 1] || relativePath;
+}
 
 export function createDesignLoopMediaTools(
   projectDir: string,
@@ -18,18 +51,41 @@ export function createDesignLoopMediaTools(
   const generate_image = createTool({
     id: "generate_image",
     description:
-      "Generate a raster image (logo/icon/hero) via designImage (Flux). Requires loopId. Prefer for brand marks; use search_images for stock photos.",
+      "Invent a NEW raster via Flux. Do NOT use for alpha/transparent/icon-pack/resize on an existing asset — use make_transparent / derive_icon_pack / resize_image instead. Blocked when a logo is pinned unless inventing a clearly new unrelated mark.",
     inputSchema: z.object({
       loopId: z.string().min(1),
       prompt: z.string().min(1),
       filename: z.string().optional(),
       width: z.number().int().positive().optional(),
       height: z.number().int().positive().optional(),
+      /** Set true only when inventing a brand-new mark (not editing pinned). */
+      inventNew: z.boolean().optional(),
     }),
-    execute: async ({ loopId, prompt, filename, width, height }) => {
+    execute: async ({
+      loopId,
+      prompt,
+      filename,
+      width,
+      height,
+      inventNew,
+    }) => {
       try {
         const meta = readDesignLoopMeta(projectDir, loopId);
         if (!meta) return { ok: false, error: `Design loop not found: ${loopId}` };
+        if (promptLooksLikeImageEdit(prompt) && !inventNew) {
+          return {
+            ok: false,
+            error:
+              "This looks like an image EDIT (alpha/icon pack/resize). Use make_transparent, derive_icon_pack, resize_image, trim_image, or pad_image on the existing/pinned asset — do not generate_image.",
+          };
+        }
+        const pinned = pinnedLogoFilename(projectDir, loopId);
+        if (pinned && !inventNew) {
+          return {
+            ok: false,
+            error: `Logo is pinned (${pinned}). Embed that path or call make_transparent/derive_icon_pack on it. Unpin first or pass inventNew=true only to invent an unrelated new mark.`,
+          };
+        }
         const binding = registry.tryResolveDesignImage();
         if (!binding) {
           return {
@@ -54,8 +110,246 @@ export function createDesignLoopMediaTools(
           relativePath: result.relativePath,
           bytes: result.bytes,
           format: result.format,
-          hint: `Embed in mock as <img src="${result.relativePath}"> (or note path for operator).`,
+          hint:
+            `Embed in mock as <img src="${result.relativePath}"> (project-relative; preview rewrites to HTTP). Keep relativePath for disk/implement.`,
         };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+
+  const pin_logo = createTool({
+    id: "pin_logo",
+    description:
+      "Pin an existing loop asset as the authoritative logo. Call when the operator names a file (e.g. jamlight-logo-modern-v4-alpha.png) or says to pin/use/go with that mark. Then embed that asset in the mock menubar/landing — do not invent a competing mark.",
+    inputSchema: z.object({
+      loopId: z.string().min(1),
+      filename: z.string().min(1),
+      label: z.string().optional(),
+    }),
+    execute: async ({ loopId, filename, label }) => {
+      try {
+        const meta = readDesignLoopMeta(projectDir, loopId);
+        if (!meta) return { ok: false, error: `Design loop not found: ${loopId}` };
+        const resolved = resolveLoopAssetName(projectDir, loopId, filename);
+        if (!resolved) {
+          const available = listDesignLoopAssets(
+            projectDir,
+            meta.projectId,
+            loopId,
+          )
+            .map((a) => a.name)
+            .slice(0, 40);
+          return {
+            ok: false,
+            error: `Asset not found in loop: ${filename}`,
+            available,
+          };
+        }
+        const next = pinDesignLoopLogoAsset({
+          projectRoot: projectDir,
+          loopId,
+          asset: resolved,
+          label: label || resolved,
+        });
+        if (!next) {
+          return { ok: false, error: "Failed to pin logo (meta missing)" };
+        }
+        const relativePath = `.slopcontrol/design-loops/${loopId}/assets/${resolved}`;
+        return {
+          ok: true,
+          pinnedLogo: resolved,
+          relativePath,
+          hint: `Pinned logo → ${resolved}. Embed <img src="${relativePath}"> in menubar/landing. Prefer derive_icon_pack on this file for favicons.`,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+
+  const make_transparent = createTool({
+    id: "make_transparent",
+    description:
+      "Deterministic edit: convert near-black (or key color) background of an EXISTING loop asset to true RGBA alpha. Does not invent a new mark. Prefer pinned logo as sourceFilename.",
+    inputSchema: z.object({
+      loopId: z.string().min(1),
+      sourceFilename: z.string().optional(),
+      filename: z.string().optional(),
+      threshold: z.number().int().min(0).max(441).optional(),
+    }),
+    execute: async ({ loopId, sourceFilename, filename, threshold }) => {
+      try {
+        const meta = readDesignLoopMeta(projectDir, loopId);
+        if (!meta) return { ok: false, error: `Design loop not found: ${loopId}` };
+        const source =
+          sourceFilename?.trim() || pinnedLogoFilename(projectDir, loopId);
+        if (!source) {
+          return {
+            ok: false,
+            error:
+              "sourceFilename required (or pin a logo first via selections API)",
+          };
+        }
+        const result = await makeTransparentDesignAsset({
+          projectRoot: projectDir,
+          loopId,
+          sourceFilename: source,
+          filename,
+          threshold,
+        });
+        const outName = basenameSafe(result.relativePath);
+        pinDesignLoopLogoAsset({
+          projectRoot: projectDir,
+          loopId,
+          asset: outName,
+          label: `Alpha mark (${outName})`,
+        });
+        return {
+          ok: true,
+          ...result,
+          pinnedLogo: outName,
+          hint: `Pinned logo → ${outName}. Embed <img src="${result.relativePath}"> — true RGBA from ${result.sourceFilename}. Do not call generate_image.`,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+
+  const derive_icon_pack = createTool({
+    id: "derive_icon_pack",
+    description:
+      "Deterministic resize of an EXISTING asset into favicon/icon sizes (16–512). Never uses Flux. Default source = pinned logo.",
+    inputSchema: z.object({
+      loopId: z.string().min(1),
+      sourceFilename: z.string().optional(),
+      sizes: z.array(z.number().int().positive()).optional(),
+      prefix: z.string().optional(),
+    }),
+    execute: async ({ loopId, sourceFilename, sizes, prefix }) => {
+      try {
+        const meta = readDesignLoopMeta(projectDir, loopId);
+        if (!meta) return { ok: false, error: `Design loop not found: ${loopId}` };
+        const pinned = pinnedLogoFilename(projectDir, loopId);
+        const result = await deriveIconPackFromAsset({
+          projectRoot: projectDir,
+          loopId,
+          sourceFilename: sourceFilename?.trim() || undefined,
+          preferredFilename: pinned,
+          sizes,
+          prefix,
+        });
+        return {
+          ok: true,
+          ...result,
+          hint: `Source ${result.sourceFilename}${
+            result.redirectedFrom
+              ? ` (redirected from fake/opaque ${result.redirectedFrom})`
+              : ""
+          }. Keep primary logo pinned; use pack files for favicons. Do not generate_image.`,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+
+  const resize_image = createTool({
+    id: "resize_image",
+    description: "Deterministic resize of an existing loop asset.",
+    inputSchema: z.object({
+      loopId: z.string().min(1),
+      sourceFilename: z.string().min(1),
+      width: z.number().int().positive(),
+      height: z.number().int().positive().optional(),
+      filename: z.string().optional(),
+    }),
+    execute: async ({ loopId, sourceFilename, width, height, filename }) => {
+      try {
+        const meta = readDesignLoopMeta(projectDir, loopId);
+        if (!meta) return { ok: false, error: `Design loop not found: ${loopId}` };
+        const result = await resizeDesignAsset({
+          projectRoot: projectDir,
+          loopId,
+          sourceFilename,
+          width,
+          height,
+          filename,
+        });
+        return { ok: true, ...result };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+
+  const trim_image = createTool({
+    id: "trim_image",
+    description: "Trim empty/transparent margins from an existing loop asset.",
+    inputSchema: z.object({
+      loopId: z.string().min(1),
+      sourceFilename: z.string().min(1),
+      filename: z.string().optional(),
+    }),
+    execute: async ({ loopId, sourceFilename, filename }) => {
+      try {
+        const meta = readDesignLoopMeta(projectDir, loopId);
+        if (!meta) return { ok: false, error: `Design loop not found: ${loopId}` };
+        const result = await trimDesignAsset({
+          projectRoot: projectDir,
+          loopId,
+          sourceFilename,
+          filename,
+        });
+        return { ok: true, ...result };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+
+  const pad_image = createTool({
+    id: "pad_image",
+    description:
+      "Center an existing asset on a transparent square canvas (e.g. pad to 512).",
+    inputSchema: z.object({
+      loopId: z.string().min(1),
+      sourceFilename: z.string().min(1),
+      size: z.number().int().positive(),
+      filename: z.string().optional(),
+    }),
+    execute: async ({ loopId, sourceFilename, size, filename }) => {
+      try {
+        const meta = readDesignLoopMeta(projectDir, loopId);
+        if (!meta) return { ok: false, error: `Design loop not found: ${loopId}` };
+        const result = await padDesignAsset({
+          projectRoot: projectDir,
+          loopId,
+          sourceFilename,
+          size,
+          filename,
+        });
+        return { ok: true, ...result };
       } catch (error) {
         return {
           ok: false,
@@ -132,7 +426,8 @@ export function createDesignLoopMediaTools(
           relativePath: result.relativePath,
           attribution: result.hit.attribution,
           license: result.hit.license,
-          hint: `Embed as <img src="${result.relativePath}"> and cite attribution in NOTES.`,
+          hint:
+            `Embed as <img src="${result.relativePath}"> (preview rewrites to HTTP) and cite attribution in NOTES.`,
         };
       } catch (error) {
         return {
@@ -193,6 +488,12 @@ export function createDesignLoopMediaTools(
 
   return {
     generate_image,
+    pin_logo,
+    make_transparent,
+    derive_icon_pack,
+    resize_image,
+    trim_image,
+    pad_image,
     search_images,
     import_image,
     review_look,

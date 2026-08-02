@@ -66,6 +66,7 @@ import {
   formatChangeIntentPromptBlock,
   buildAdjacentPhaseContextPack,
   buildSiblingBrandRefPack,
+  descriptionMentionsBrandTheming,
   isBrandThemingAsk,
   phaseDocAlignsWithChangeIntent,
   researchEngagementQuality,
@@ -111,6 +112,59 @@ import {
   scaffoldDesignLoopMock,
   readPhaseDesignAcceptance,
   formatAcceptancePromptBlock,
+  formatDesignLoopReviseBlock,
+  formatPhaseBoundMockPromptBlock,
+  formatDesignPackPromptBlock,
+  formatDesignLoopSelectionsPromptBlock,
+  maybeAutoPinFromOperatorMessage,
+  maybeAutoPinDominantLogoFromMock,
+  designLoopAskNeedsImageEdit,
+  refreshDesignLoopConcepts,
+  readPhaseDesignPack,
+  resolveDesignLoopGenerateFallback,
+  detectMockDrift,
+  patchMockForAssetContinue,
+  getDesignLoopSelections,
+  readDesignLoopMeta,
+  buildLiveSiteInventory,
+  writeLiveSiteInventory,
+  formatLiveSiteInventoryPromptBlock,
+  patchMockNavFromInventory,
+  CONTINUE_INTENT_DEFAULT,
+  fallbackContinueIntentFromText,
+  formatContinueIntentPromptBlock,
+  readSharedDesignImport,
+  formatSharedDesignPromptBlock,
+  detectShareSourceFromText,
+  readShareableDesign,
+  importDesignShareIntoLoop,
+  extractSiblingProjectPaths,
+  getDesignLoopScope,
+  applyContinueIntentToScope,
+  classifyDesignScopeFromText,
+  formatConceptualModelPromptBlock,
+  extractThemeContractFromHtml,
+  packHasThemeModes,
+  withUpdatedScope,
+  writeDesignLoopMeta,
+  readDesignLoopMockHtml,
+  readPlanLoopMeta,
+  writePlanLoopMeta,
+  defaultPlanScope,
+  formatPlanLoopReviseBlock,
+  formatPlanAcceptancePromptBlock,
+  readPlanLoopAcceptance,
+  extractPlanDocument,
+  validatePlanDocument,
+  resolvePlanLoopGenerateFallback,
+  scaffoldPlanDocument,
+  PLAN_CONTINUE_INTENT_DEFAULT,
+  fallbackPlanContinueIntentFromText,
+  formatPlanContinueIntentPromptBlock,
+  formatPhaseBoundPlanPromptBlock,
+  readPhasePlanPack,
+  type ContinueIntent,
+  type PlanContinueIntent,
 } from "@slopcontrol/artifacts";
 import {
   ensureGitInitialized,
@@ -129,8 +183,15 @@ import {
   syncLocalFilesToWorktree,
   syncPhaseArtifactsToWorktree,
   syncIgnoredArtifactsFromWorktree,
+  deriveIconPackFromAsset,
 } from "@slopcontrol/coding-tools";
-import { chatWithImages, filterRasterVisionPaths, type LlmRegistry } from "@slopcontrol/llm";
+import {
+  chatWithImages,
+  classifyContinueIntentViaLlm,
+  classifyPlanContinueIntentViaLlm,
+  filterRasterVisionPaths,
+  type LlmRegistry,
+} from "@slopcontrol/llm";
 import {
   ensureChangeIntentAsync,
   previewChangeIntentAsync,
@@ -191,6 +252,7 @@ export interface OrchestratorAgents {
   reviewAgent: Agent;
   designAgent: Agent;
   designLoopAgent: Agent;
+  planLoopAgent: Agent;
   devSupervisorAgent: Agent;
   blueprintAgent: Agent;
   askAgent: Agent;
@@ -236,6 +298,15 @@ export interface DesignLoopGenerateInput {
   message?: string;
   /** Prior mock HTML to revise (continue). */
   previousHtml?: string;
+  version: number;
+}
+
+export interface PlanLoopGenerateInput {
+  project: Project;
+  loopId: string;
+  brief: string;
+  message?: string;
+  previousPlan?: string;
   version: number;
 }
 
@@ -345,6 +416,15 @@ function clipPromptSection(label: string, text: string, maxChars: number): strin
   if (!body) return `(${label}: none)`;
   if (body.length <= maxChars) return body;
   return `${body.slice(0, maxChars)}\n\n…[truncated ${label}: ${body.length} chars total; read_file \`.slopcontrol/${label}\` if you need more]`;
+}
+
+/** True when brief/feedback likely needs image search/gen/edit/review tools. */
+function designLoopNeedsMediaTools(brief: string, message?: string): boolean {
+  const text = `${brief}\n${message ?? ""}`;
+  if (designLoopAskNeedsImageEdit(text)) return true;
+  return /\b(image|images|search|generate|logo|photo|photos|stock|openverse|import|review|vision|icon|mark|alpha|transparent|favicon|pin)\b/i.test(
+    text,
+  );
 }
 
 /** Persist truncated provider/API detail — bare "Bad Request" is not actionable. */
@@ -1438,35 +1518,376 @@ ${message.trim()}`;
   }> {
     const { project, loopId, brief, message, previousHtml, version } = input;
     ensureSlopcontrolDir(project.rootPath);
+    const isContinue = version > 1 || Boolean(previousHtml?.trim());
+    const desc = [brief, message ?? ""].filter(Boolean).join("\n");
+
+    // Primary classification: LLM → structured ContinueIntent. Regex fallback
+    // only when registry/LLM unavailable (offline, timeout, parse failure).
+    let continueIntent: ContinueIntent = CONTINUE_INTENT_DEFAULT;
+    if (isContinue) {
+      const fallback = fallbackContinueIntentFromText(message?.trim() || desc);
+      try {
+        const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
+          "classification",
+        );
+        continueIntent = await classifyContinueIntentViaLlm({
+          endpoint,
+          modelId,
+          message: message?.trim() || desc,
+          brief,
+          timeoutMs: 15_000,
+        });
+      } catch (err) {
+        slog.warn("design-loop", "continue intent LLM failed; regex fallback", {
+          loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continueIntent = fallback;
+      }
+    } else {
+      continueIntent = {
+        ...CONTINUE_INTENT_DEFAULT,
+        scope: "full_revise",
+        preserveChrome: false,
+      };
+    }
+
+    // Conceptual model scope: classify on start; patch on continue from intent/chat.
+    {
+      const metaNow = readDesignLoopMeta(project.rootPath, loopId);
+      if (metaNow) {
+        const priorScope = getDesignLoopScope(metaNow);
+        const nextScope = isContinue
+          ? applyContinueIntentToScope(
+              priorScope,
+              continueIntent,
+              message?.trim() || desc,
+            )
+          : classifyDesignScopeFromText(brief || desc, { source: "start" });
+        if (
+          nextScope.kind !== priorScope.kind ||
+          nextScope.focus !== priorScope.focus ||
+          !metaNow.scope
+        ) {
+          writeDesignLoopMeta(
+            project.rootPath,
+            withUpdatedScope(metaNow, nextScope),
+          );
+          slog.info("design-loop", "conceptual model scope updated", {
+            loopId,
+            kind: nextScope.kind,
+            focus: nextScope.focus,
+            preserve: nextScope.preserve,
+          });
+        }
+      }
+    }
+
+    if (message?.trim()) {
+      const pinnedByChat = maybeAutoPinFromOperatorMessage({
+        projectRoot: project.rootPath,
+        loopId,
+        message,
+      });
+      if (pinnedByChat) {
+        const logo = getDesignLoopSelections(pinnedByChat).find(
+          (s) => s.slot === "logo",
+        );
+        slog.info("design-loop", "chat pinned selection", {
+          loopId,
+          slot: logo?.slot ?? "logo",
+          asset: logo?.asset,
+          conceptId: logo?.conceptId,
+        });
+      } else if (
+        /\b(pin|go with|use|select|choose)\b/i.test(message) &&
+        /\b(logo|mark|\.png|\.svg|\.webp)\b/i.test(message)
+      ) {
+        slog.warn("design-loop", "chat asked to pin logo but no match found", {
+          loopId,
+          messagePreview: message.slice(0, 200),
+        });
+      }
+    }
+    if (isContinue && previousHtml?.trim()) {
+      maybeAutoPinDominantLogoFromMock({
+        projectRoot: project.rootPath,
+        loopId,
+        previousHtml,
+      });
+    }
+    try {
+      refreshDesignLoopConcepts({
+        projectRoot: project.rootPath,
+        loopId,
+        version: Math.max(1, version - (isContinue ? 1 : 0)),
+      });
+    } catch {
+      /* catalog best-effort */
+    }
+
+    const pinnedLogo =
+      getDesignLoopSelections(
+        readDesignLoopMeta(project.rootPath, loopId),
+      ).find((s) => s.slot === "logo")?.asset ?? null;
+
+    // Live site inventory (nav/tokens/routes/assets) — authoritative for mocks.
+    let siteInventory = buildLiveSiteInventory(project.rootPath);
+    try {
+      siteInventory = writeLiveSiteInventory(
+        project.rootPath,
+        loopId,
+        siteInventory,
+      );
+    } catch {
+      /* best-effort persist */
+    }
+    const siteInventoryBlock = formatLiveSiteInventoryPromptBlock(siteInventory);
+
+    // Deterministic icon-pack derive + patch before any agent rewrite.
+    let workingPreviousHtml = previousHtml;
+    let assetPatchNotes = "";
+    const wantsIconPack =
+      continueIntent.wantsAssetEdit &&
+      /\bicon\s*pack|favicon|browser\s*pack\b/i.test(message ?? desc);
+    if (
+      isContinue &&
+      continueIntent.wantsAssetEdit &&
+      wantsIconPack &&
+      workingPreviousHtml?.trim()
+    ) {
+      try {
+        const pack = await deriveIconPackFromAsset({
+          projectRoot: project.rootPath,
+          loopId,
+          preferredFilename: pinnedLogo ?? undefined,
+          prefix: `icon-v${version}`,
+        });
+        workingPreviousHtml = patchMockForAssetContinue({
+          previousHtml: workingPreviousHtml,
+          loopId,
+          primaryLogoAsset: pack.sourceFilename || pinnedLogo,
+          iconPackFiles: pack.files,
+        });
+        const redirectNote = pack.redirectedFrom
+          ? ` (source redirected from ${pack.redirectedFrom} → ${pack.sourceFilename})`
+          : "";
+        assetPatchNotes = `Icon pack ${pack.files.length} sizes from ${pack.sourceFilename}${redirectNote}.`;
+      } catch (err) {
+        slog.warn("design-loop", "deterministic icon pack failed; falling through", {
+          loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Deterministic nav align from live inventory (no agent rewrite).
+    if (
+      isContinue &&
+      continueIntent.navAlign &&
+      workingPreviousHtml?.trim() &&
+      siteInventory.nav.length > 0
+    ) {
+      workingPreviousHtml = patchMockNavFromInventory(
+        workingPreviousHtml,
+        siteInventory.nav,
+      );
+      const navNote = `Nav aligned to live site: ${siteInventory.nav
+        .map((n) => n.label)
+        .join(", ")}.`;
+      assetPatchNotes = [assetPatchNotes, navNote].filter(Boolean).join(" ");
+      const navHtml = pinnedLogo
+        ? patchMockForAssetContinue({
+            previousHtml: workingPreviousHtml,
+            loopId,
+            primaryLogoAsset: pinnedLogo,
+          })
+        : workingPreviousHtml;
+      return {
+        html: navHtml,
+        notes: `${assetPatchNotes} Prior layout/shell preserved.`,
+        usedScaffold: false,
+      };
+    }
+
+    // Skip agent rewrite when asset-only OR preserve-only (no nav-align left to do).
+    if (
+      isContinue &&
+      workingPreviousHtml?.trim() &&
+      (continueIntent.scope === "assets_only" ||
+        (continueIntent.preserveChrome &&
+          continueIntent.wantsAssetEdit &&
+          wantsIconPack &&
+          !continueIntent.navAlign))
+    ) {
+      const assetHtml = pinnedLogo
+        ? patchMockForAssetContinue({
+            previousHtml: workingPreviousHtml,
+            loopId,
+            primaryLogoAsset: pinnedLogo,
+          })
+        : workingPreviousHtml;
+      return {
+        html: assetHtml,
+        notes: `Asset-only continue: ${assetPatchNotes || "prior mock preserved"}. Prior layout/nav/shell preserved.`,
+        usedScaffold: false,
+      };
+    }
+
+    const wantThemeExcerpts =
+      !isContinue || descriptionMentionsBrandTheming(desc);
+    // Project brand tokens/logos/landing are covered by LIVE SITE inventory.
     const siblingPack = buildSiblingBrandRefPack({
       projectRoot: project.rootPath,
-      description: [brief, message ?? ""].filter(Boolean).join("\n"),
-      includeTokenExcerpts: true,
+      description: desc,
+      includeTokenExcerpts: wantThemeExcerpts,
     });
-    const blueprint = readBlueprint(project.rootPath);
-    const reviseBlock = previousHtml?.trim()
-      ? `Previous mock (revise this — do not start from scratch unless asked):\n\`\`\`html\n${previousHtml.trim().slice(0, 24_000)}\n\`\`\`\n`
+    const blueprint =
+      isContinue ? "" : readBlueprint(project.rootPath);
+    const reviseBlock = workingPreviousHtml?.trim()
+      ? formatDesignLoopReviseBlock({
+          projectRoot: project.rootPath,
+          projectId: project.id,
+          loopId,
+          previousHtml: workingPreviousHtml,
+          maxHtmlChars: 16_000,
+        })
       : "(no previous mock — create v1)";
+    const selectionsBlock = formatDesignLoopSelectionsPromptBlock({
+      projectRoot: project.rootPath,
+      loopId,
+      version: previousHtml ? Math.max(1, version - 1) : version,
+    });
+    const needsMedia = designLoopNeedsMediaTools(brief, message);
+    const needsEdit = designLoopAskNeedsImageEdit(desc);
+    const modeBlock = isContinue
+      ? formatContinueIntentPromptBlock(continueIntent)
+      : "";
+
+    // Chat-driven design share: "pull the theme from jamroast" auto-imports.
+    // Gate: adopt-theme intent, brand/palette/logo targets, or an explicit path.
+    if (isContinue && message?.trim()) {
+      const mentionsPath = extractSiblingProjectPaths(message).length > 0;
+      const wantsSharedDesign =
+        continueIntent.adoptTheme ||
+        mentionsPath ||
+        continueIntent.targets.some((t) =>
+          ["palette", "tokens", "logo", "typography", "brand"].includes(t),
+        );
+      if (wantsSharedDesign) {
+        const detected = detectShareSourceFromText({
+          targetRoot: project.rootPath,
+          text: message,
+        });
+        if (detected) {
+          try {
+            const share = readShareableDesign(detected);
+            if (share) {
+              importDesignShareIntoLoop({
+                targetRoot: project.rootPath,
+                loopId,
+                share,
+              });
+              slog.info("design-loop", "auto-imported shared design from chat", {
+                loopId,
+                from: detected.name ?? detected.rootPath,
+              });
+            } else {
+              slog.warn("design-loop", "chat named a source with nothing shareable", {
+                loopId,
+                from: detected.name ?? detected.rootPath,
+              });
+            }
+          } catch (err) {
+            slog.warn("design-loop", "auto design-share import failed", {
+              loopId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        } else if (continueIntent.adoptTheme || mentionsPath) {
+          slog.warn("design-loop", "adopt-theme intent but no resolvable source in message", {
+            loopId,
+          });
+        }
+      }
+    }
+
+    // Cross-project design share: SHARED DESIGN outranks LIVE SITE for palette/logos.
+    const sharedImport = readSharedDesignImport(project.rootPath, loopId);
+    const sharedDesignBlock = formatSharedDesignPromptBlock(sharedImport);
+    if (sharedDesignBlock) {
+      slog.info("design-loop", "shared design import active", {
+        loopId,
+        from: sharedImport?.source.name ?? sharedImport?.source.rootPath,
+      });
+    }
+
+    const htmlReturnRule =
+      continueIntent.scope === "assets_only" || continueIntent.scope === "nav_align"
+        ? "Prefer MOCK_ASSETS_ONLY (no full HTML). If you return HTML, keep prior mock; only asset src / icon-pack / LIVE SITE nav updates."
+        : continueIntent.scope === "full_revise"
+          ? "Return a short rationale (1–3 sentences) then a complete self-contained HTML document in a ```html fence. Nav must match LIVE SITE inventory."
+          : "Return a complete HTML document based on the prior mock — preserve hero, tokens, shell, and pinned logos; change only requested sections/targets. Nav must match LIVE SITE.";
+
+    const loopMetaForScope = readDesignLoopMeta(project.rootPath, loopId);
+    const conceptualScope = getDesignLoopScope(loopMetaForScope);
+    const priorMockForTheme =
+      workingPreviousHtml?.trim() ||
+      previousHtml?.trim() ||
+      (version > 1
+        ? readDesignLoopMockHtml(project.rootPath, loopId, version - 1)
+        : null) ||
+      "";
+    const themeFromPrior = priorMockForTheme
+      ? extractThemeContractFromHtml(priorMockForTheme, {
+          request: brief,
+          notes: message ?? "",
+        })
+      : extractThemeContractFromHtml("", {
+          request: `${brief}\n${message ?? ""}`,
+        });
+    // Soft theme contract from ask text when mock not yet dual-mode
+    const themeForPrompt =
+      themeFromPrior ??
+      (/\bdark\b/i.test(desc) && /\blight\b/i.test(desc)
+        ? extractThemeContractFromHtml(
+            `<html data-theme="dark"><style>:root{--background:#0A0A0A;--foreground:#F5F0E8}[data-theme="light"]{--background:#FDF8F3;--foreground:#1A1510}</style><button class="theme-toggle">Dark / Light</button></html>`,
+            { request: desc },
+          )
+        : null);
+    const conceptualModelBlock = formatConceptualModelPromptBlock({
+      scope: conceptualScope,
+      theme: themeForPrompt,
+      forMock: true,
+    });
 
     const prompt = `Design loop ${loopId} — produce version v${version} mock HTML.
 
-CRITICAL: Sibling CSS excerpts are already below. Do not spend the turn investigating sibling repos with read_file.
+CRITICAL: LIVE SITE inventory below is authoritative for nav labels/hrefs, routes, tokens, logos, and extracted screen copy / entity fields. Do not invent menu items. For screens with extracted headings/columns/fields/buttons, use that copy verbatim — do not lorem-ipsum. Invent content only for routes with no extraction. Sibling cues are secondary.
 Current loopId (required for media tools): ${loopId}
-When the operator asks to search/generate/import/review images, call search_images / generate_image / import_image / review_look with this loopId.
+${modeBlock ? `${modeBlock}\n` : ""}${conceptualModelBlock}
+
+${needsEdit
+  ? "Operator asked for an IMAGE EDIT (alpha/icon pack/resize). Call make_transparent / derive_icon_pack / resize_image — do NOT generate_image. Prefer pinned / true RGBA sources."
+  : "When inventing a new mark, call generate_image. For stock photos use search_images / import_image. For look critique use review_look."}
 Otherwise prefer writing the mock with few or zero tool calls.
 
+${selectionsBlock}
+
+${sharedDesignBlock ? `${sharedDesignBlock}\n` : ""}${siteInventoryBlock ? `${siteInventoryBlock}\n` : ""}
 Brief:
 ${clipPromptSection("brief", brief, 3_000)}
 
 ${message?.trim() ? `Operator feedback:\n${clipPromptSection("feedback", message, 3_000)}\n` : ""}
 ${reviseBlock}
 
-${siblingPack ? `${siblingPack}\n` : ""}
-BLUEPRINT (excerpt):
-${clipPromptSection("BLUEPRINT.md", blueprint, 3_000)}
-
-Return a short rationale (1–3 sentences) then a complete self-contained HTML document in a \`\`\`html fence.
-Inline CSS with :root tokens drawn from the sibling excerpts when present. Prefer local .slopcontrol asset paths over remote hotlinks. End with MOCK_HTML_COMPLETE on its own line.`;
+${siblingPack ? `${siblingPack}\n` : ""}${
+      isContinue
+        ? ""
+        : `BLUEPRINT (excerpt):\n${clipPromptSection("BLUEPRINT.md", blueprint, 3_000)}\n`
+    }
+${htmlReturnRule}
+Inline CSS with :root tokens drawn from this project / sibling excerpts when present (or keep tokens from the previous mock). When the conceptual model includes theme modes, also include a [data-theme="light"] block remapping --background/--surface/--foreground. Prefer local .slopcontrol asset paths over remote hotlinks. End with MOCK_HTML_COMPLETE or MOCK_ASSETS_ONLY on its own line.`;
 
     let usedScaffold = false;
     let raw = "";
@@ -1475,36 +1896,347 @@ Inline CSS with :root tokens drawn from the sibling excerpts when present. Prefe
         this.ctx.agents.designLoopAgent,
         prompt,
         project.id,
-        `design-loop-${loopId}`,
-        // Media tools (gen/search/review) need headroom beyond plain HTML turns.
-        { maxSteps: 12, timeoutMs: 300_000 },
+        // Fresh thread per version — previousHtml carries the visual contract;
+        // sticky threads were ~65–90k tokens of prior mocks/tool junk.
+        `design-loop-${loopId}-v${version}`,
+        // Media tools need headroom; layout-only continues stay lean.
+        {
+          maxSteps:
+            continueIntent.scope === "assets_only" ? 8 : needsMedia ? 12 : 4,
+          timeoutMs: 300_000,
+        },
       );
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      slog.warn("design-loop", `generate failed; using scaffold`, {
+      slog.warn("design-loop", `generate failed; preserving prior mock if any`, {
         loopId,
         error: detail,
       });
-      usedScaffold = true;
+      return resolveDesignLoopGenerateFallback({
+        brief,
+        previousHtml: workingPreviousHtml ?? previousHtml,
+        errorDetail: detail,
+        scaffold: scaffoldDesignLoopMock,
+      });
+    }
+
+    const baseHtml = workingPreviousHtml?.trim() || previousHtml?.trim() || "";
+    const assetsOnly =
+      /MOCK_ASSETS_ONLY/i.test(raw) && Boolean(baseHtml);
+    const extracted = assetsOnly ? null : extractHtmlDocument(raw);
+
+    if (!extracted && baseHtml && (assetsOnly || continueIntent.scope === "assets_only")) {
+      const html = patchMockForAssetContinue({
+        previousHtml: baseHtml,
+        loopId,
+        primaryLogoAsset: pinnedLogo,
+      });
       return {
-        html: scaffoldDesignLoopMock(brief),
-        notes: `Scaffold fallback (agent error): ${detail}`,
-        usedScaffold: true,
+        html,
+        notes:
+          [
+            assetPatchNotes,
+            raw
+              .replace(/```[\s\S]*?```/g, "")
+              .replace(/MOCK_ASSETS_ONLY/gi, "")
+              .replace(/MOCK_HTML_COMPLETE/gi, "")
+              .trim(),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .slice(0, 1_500) ||
+          `Asset-only continue: prior mock preserved (v${version})`,
+        usedScaffold: false,
       };
     }
 
-    const html = extractHtmlDocument(raw) ?? scaffoldDesignLoopMock(brief);
-    if (!extractHtmlDocument(raw)) usedScaffold = true;
+    if (!extracted) {
+      const fallback = resolveDesignLoopGenerateFallback({
+        brief,
+        previousHtml: workingPreviousHtml ?? previousHtml,
+        errorDetail: "no HTML in agent output",
+        scaffold: scaffoldDesignLoopMock,
+      });
+      usedScaffold = fallback.usedScaffold;
+      return {
+        ...fallback,
+        notes:
+          fallback.notes ||
+          (usedScaffold ? "Scaffold mock (no HTML in agent output)" : `v${version}`),
+      };
+    }
+
+    let html = extracted;
+    if (isContinue && baseHtml && continueIntent.scope !== "full_revise") {
+      const drift = detectMockDrift({
+        previousHtml: baseHtml,
+        nextHtml: html,
+        intent: continueIntent,
+        pinnedLogoAsset: pinnedLogo,
+      });
+      if (drift.length) {
+        const intentSummary = `intent={scope:${continueIntent.scope}, adoptTheme:${continueIntent.adoptTheme}, inventLogo:${continueIntent.inventLogo}, preserveChrome:${continueIntent.preserveChrome}, targets:[${continueIntent.targets.join(",")}]}`;
+        slog.warn("design-loop", "rejecting drifted mock; keeping prior + asset patch", {
+          loopId,
+          version,
+          issues: drift.map((d) => d.code),
+          intent: {
+            scope: continueIntent.scope,
+            adoptTheme: continueIntent.adoptTheme,
+            inventLogo: continueIntent.inventLogo,
+            preserveChrome: continueIntent.preserveChrome,
+            targets: continueIntent.targets,
+          },
+        });
+        html = patchMockForAssetContinue({
+          previousHtml: baseHtml,
+          loopId,
+          primaryLogoAsset: pinnedLogo,
+        });
+        const notes = [
+          assetPatchNotes,
+          `Rejected layout/logo drift (${drift.map((d) => d.code).join(", ")}); kept prior mock.`,
+          intentSummary,
+          ...drift.map((d) => d.detail),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .slice(0, 1_500);
+        return { html, notes, usedScaffold: false };
+      }
+    }
+
+    // Always force pinned primary logo into the final mock (not only asset edits).
+    // Day/night / menubar continues otherwise reintroduce jam-light-mark-v1 etc.
+    if (pinnedLogo && html?.trim()) {
+      const before = html;
+      html = patchMockForAssetContinue({
+        previousHtml: html,
+        loopId,
+        primaryLogoAsset: pinnedLogo,
+      });
+      if (html !== before) {
+        slog.info("design-loop", "applying pinned logo", {
+          loopId,
+          asset: pinnedLogo,
+        });
+      }
+    }
+
     const notes = raw
       .replace(/```[\s\S]*?```/g, "")
       .replace(/<!DOCTYPE[\s\S]*/i, "")
       .replace(/MOCK_HTML_COMPLETE/gi, "")
+      .replace(/MOCK_ASSETS_ONLY/gi, "")
       .trim()
       .slice(0, 1_500);
     return {
       html,
-      notes: notes || (usedScaffold ? "Scaffold mock (no HTML in agent output)" : `v${version}`),
-      usedScaffold,
+      notes: notes || `v${version}`,
+      usedScaffold: false,
+    };
+  }
+
+  /**
+   * Generate or revise a plan-loop PLAN.md (no product / phase writes).
+   */
+  async planLoopGenerate(input: PlanLoopGenerateInput): Promise<{
+    plan: string;
+    notes: string;
+    usedScaffold: boolean;
+  }> {
+    const { project, loopId, brief, message, previousPlan, version } = input;
+    ensureSlopcontrolDir(project.rootPath);
+    const isContinue = version > 1 || Boolean(previousPlan?.trim());
+    const desc = [brief, message ?? ""].filter(Boolean).join("\n");
+
+    let continueIntent: PlanContinueIntent = PLAN_CONTINUE_INTENT_DEFAULT;
+    if (isContinue) {
+      const fallback = fallbackPlanContinueIntentFromText(
+        message?.trim() || desc,
+      );
+      try {
+        const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
+          "classification",
+        );
+        continueIntent = await classifyPlanContinueIntentViaLlm({
+          endpoint,
+          modelId,
+          message: message?.trim() || desc,
+          brief,
+          timeoutMs: 15_000,
+        });
+      } catch (err) {
+        slog.warn("plan-loop", "continue intent LLM failed; regex fallback", {
+          loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continueIntent = fallback;
+      }
+    } else {
+      continueIntent = {
+        ...PLAN_CONTINUE_INTENT_DEFAULT,
+        scope: "full_revise",
+      };
+    }
+
+    const metaNow = readPlanLoopMeta(project.rootPath, loopId);
+    if (metaNow) {
+      let scope = metaNow.scope ?? defaultPlanScope(brief, "start");
+      if (isContinue) {
+        if (continueIntent.focus) {
+          scope = {
+            ...scope,
+            focus: continueIntent.focus,
+            preserve: continueIntent.preserve ?? scope.preserve,
+            source: "continue",
+          };
+        } else if (continueIntent.preserve?.length) {
+          scope = {
+            ...scope,
+            preserve: continueIntent.preserve,
+            source: "continue",
+          };
+        } else if (continueIntent.scope === "full_revise") {
+          scope = defaultPlanScope(message?.trim() || brief, "continue");
+        }
+      }
+      if (
+        !metaNow.scope ||
+        scope.focus !== metaNow.scope.focus ||
+        scope.kind !== metaNow.scope.kind
+      ) {
+        writePlanLoopMeta(project.rootPath, {
+          ...metaNow,
+          scope,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+
+    const scope =
+      readPlanLoopMeta(project.rootPath, loopId)?.scope ??
+      defaultPlanScope(brief, "start");
+    const acceptance = readPlanLoopAcceptance(project.rootPath, loopId);
+    const acceptanceBlock = formatPlanAcceptancePromptBlock(acceptance);
+    const modeBlock = isContinue
+      ? formatPlanContinueIntentPromptBlock(continueIntent)
+      : "";
+    const reviseBlock = previousPlan?.trim()
+      ? formatPlanLoopReviseBlock({ previousPlan })
+      : "(no previous plan — create v1)";
+    const conceptual = [
+      "CONCEPTUAL MODEL (authoritative for this turn):",
+      `- kind: ${scope.kind}`,
+      `- focus: ${scope.focus}`,
+      `- preserve: ${scope.preserve.length ? scope.preserve.join(", ") : "(none)"}`,
+    ].join("\n");
+
+    const prompt = `Plan loop ${loopId} — produce version v${version} PLAN.md.
+
+${conceptual}
+${modeBlock ? `\n${modeBlock}\n` : ""}
+${acceptanceBlock ? `${acceptanceBlock}\n(Ticked sections are locked unless the operator reopens them.)\n` : ""}
+
+Brief:
+${clipPromptSection("brief", brief, 3_000)}
+
+${message?.trim() ? `Operator feedback:\n${clipPromptSection("feedback", message, 3_000)}\n` : ""}
+${reviseBlock}
+
+Required H2 sections: Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes.
+Return a short rationale then the full plan in a markdown fence. End with PLAN_COMPLETE.`;
+
+    let raw = "";
+    try {
+      raw = await runAgent(
+        this.ctx.agents.planLoopAgent,
+        prompt,
+        project.id,
+        `plan-loop-${loopId}-v${version}`,
+        { maxSteps: 10, timeoutMs: 240_000 },
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      slog.warn("plan-loop", "generate failed; preserving prior plan if any", {
+        loopId,
+        error: detail,
+      });
+      return resolvePlanLoopGenerateFallback({
+        brief,
+        previousPlan,
+        errorDetail: detail,
+        scope,
+      });
+    }
+
+    if (continueIntent.scope === "clarify_only" && previousPlan?.trim()) {
+      const notes = raw
+        .replace(/```[\s\S]*?```/g, "")
+        .replace(/PLAN_COMPLETE/gi, "")
+        .trim()
+        .slice(0, 1_500);
+      return {
+        plan: previousPlan.trim(),
+        notes: notes || "Clarify-only continue; prior plan preserved.",
+        usedScaffold: false,
+      };
+    }
+
+    let plan = extractPlanDocument(raw);
+    if (!plan?.trim() && previousPlan?.trim()) {
+      return {
+        plan: previousPlan.trim(),
+        notes: "No PLAN.md extracted; kept prior plan.",
+        usedScaffold: true,
+      };
+    }
+    if (!plan?.trim()) {
+      return {
+        plan: scaffoldPlanDocument({
+          brief,
+          scope,
+          errorDetail: "empty agent plan",
+        }),
+        notes: "Scaffold — empty agent output",
+        usedScaffold: true,
+      };
+    }
+
+    const validation = validatePlanDocument(plan);
+    if (!validation.ok && previousPlan?.trim()) {
+      const priorOk = validatePlanDocument(previousPlan);
+      if (priorOk.ok) {
+        return {
+          plan: previousPlan.trim(),
+          notes: `Rejected incomplete plan (missing: ${validation.missing.join(", ") || "—"}; empty: ${validation.empty.join(", ") || "—"}); kept prior.`,
+          usedScaffold: true,
+        };
+      }
+    }
+    if (!validation.ok && !previousPlan?.trim()) {
+      return {
+        plan: scaffoldPlanDocument({
+          brief,
+          scope,
+          errorDetail: `incomplete: missing ${validation.missing.join(",")}`,
+        }),
+        notes: `Scaffold — incomplete plan sections`,
+        usedScaffold: true,
+      };
+    }
+
+    const notes = raw
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/^#\s+Plan[\s\S]*/im, "")
+      .replace(/PLAN_COMPLETE/gi, "")
+      .trim()
+      .slice(0, 1_500);
+
+    return {
+      plan,
+      notes: notes || `v${version}`,
+      usedScaffold: false,
     };
   }
 
@@ -1703,11 +2435,51 @@ Brand / theming research (mandatory when Change Intent is brand/theming):
 - Explicitly decide: palette-only vs palette+shell/theme machinery vs full layout parity — do not silently freeze shells if the operator asked to apply theming.
 `
       : "";
+    const planContractBlock = formatPhaseBoundPlanPromptBlock({
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+      maxPlanChars: 10_000,
+    });
+    const phasePlanPack = readPhasePlanPack(project.rootPath, phase.id);
+    const planResearchNote = phasePlanPack
+      ? `
+PLAN CONTRACT (authoritative operator plan from plan_loop_promote):
+${planContractBlock}
+- RESEARCH must resolve every openQuestion with code evidence.
+- RESEARCH must not invent a competing Goal; do not expand Out of scope / mustNot.
+- RESEARCH must address every successCriteria (concrete verification notes).
+- Cite \`.slopcontrol/phases/${phase.id}/plan/PLAN.md\` in findings.
+`
+      : planContractBlock
+        ? `\n${planContractBlock}\n`
+        : "";
     const designAcceptance = readPhaseDesignAcceptance(
       project.rootPath,
       phase.id,
     );
     const acceptanceBlock = formatAcceptancePromptBlock(designAcceptance);
+    const designPackBlock = formatDesignPackPromptBlock(
+      readPhaseDesignPack(project.rootPath, phase.id),
+    );
+    const boundMockBlock = formatPhaseBoundMockPromptBlock({
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+      maxHtmlChars: 10_000,
+    });
+    const phasePackForResearch = readPhaseDesignPack(project.rootPath, phase.id);
+    const themeResearchNote =
+      packHasThemeModes(phasePackForResearch) ||
+      designAcceptance?.features?.some(
+        (f) => f.id === "theme_modes" && f.accepted,
+      )
+        ? `
+CRITICAL theme contract (theme_modes):
+- Plan File Changes so product CSS remaps semantic tokens under html[data-theme="light"].
+- ThemeToggle (or equivalent) must set documentElement data-theme — not only a .light class that never receives tokens.
+- Body/chrome must use var(--background)/var(--foreground) (or equivalent semantic vars), not hard-coded --color-dark-* that ignore the toggle.
+- Cite DESIGN_PACK.theme.requirements and lightTokensCss when present.
+`
+        : "";
     const acceptanceResearchNote = designAcceptance?.features?.some((f) => f.accepted)
       ? `
 Design-loop acceptance (authoritative scope for this phase):
@@ -1715,13 +2487,18 @@ ${acceptanceBlock}
 - RESEARCH must figure out HOW to implement every IN SCOPE feature (concrete files, mounts, token paths).
 - Do NOT expand into OUT OF SCOPE features; treat them as mustNot.
 - If applied_shell is in scope, plan portal/dashboard UI fidelity to the accepted mock frames — not palette-only.
+- Obey DESIGN_PACK.json logos/tokens/contentPillars/scope/theme; do not invent a competing mark.
+- If conceptual model scope.kind is component/flow, File Changes must stay within focusPaths/focus — do not expand to full site shell.
+${themeResearchNote}${designPackBlock ? `\n${designPackBlock}\n` : ""}${boundMockBlock ? `\n${boundMockBlock}\n` : ""}
 `
-      : "";
+      : [designPackBlock, boundMockBlock].filter(Boolean).join("\n\n")
+        ? `\n${themeResearchNote}${[designPackBlock, boundMockBlock].filter(Boolean).join("\n\n")}\n`
+        : "";
     const prompt = `Change request:
 ${clipPromptSection("change-request", description, 4_000)}
 
 ${intentBlock}
-${acceptanceResearchNote}${adjacentPack ? `${adjacentPack}\n` : ""}${siblingBrandPack ? `${siblingBrandPack}\n` : ""}Phase id: ${phase.id}
+${planResearchNote}${acceptanceResearchNote}${adjacentPack ? `${adjacentPack}\n` : ""}${siblingBrandPack ? `${siblingBrandPack}\n` : ""}Phase id: ${phase.id}
 ${engagementHonesty}${brandResearchNote}
 Existing blueprint (excerpt — full file at .slopcontrol/BLUEPRINT.md; prefer Live decisions):
 ${clipBlueprintForPrompt(blueprint || "", 6_000)}
@@ -1959,13 +2736,42 @@ Design routing (brand/theming):
       phase.id,
     );
     const draftAcceptanceBlock = formatAcceptancePromptBlock(draftAcceptance);
+    const draftPhasePack = readPhaseDesignPack(project.rootPath, phase.id);
+    const draftPackBlock = formatDesignPackPromptBlock(draftPhasePack);
+    const draftPlanBlock = formatPhaseBoundPlanPromptBlock({
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+      maxPlanChars: 8_000,
+    });
+    const draftPlanNote = readPhasePlanPack(project.rootPath, phase.id)
+      ? `
+CRITICAL plan contract: Scope, File Changes, and Success Criteria MUST cover PLAN_PACK successCriteria and In scope; do NOT expand mustNot / Out of scope. Cite \`.slopcontrol/phases/${phase.id}/plan/PLAN.md\`.
+${draftPlanBlock ? `\n${draftPlanBlock}\n` : ""}
+`
+      : draftPlanBlock
+        ? `\n${draftPlanBlock}\n`
+        : "";
+    const draftThemeNote = packHasThemeModes(draftPhasePack)
+      ? `
+CRITICAL theme_modes: Plan File Changes for html[data-theme] light remaps of semantic tokens; ThemeToggle must set data-theme; body/chrome on var(--background)/var(--foreground) — not hard-coded --color-dark-* alone.
+`
+      : "";
+    const draftBoundMock = formatPhaseBoundMockPromptBlock({
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+      maxHtmlChars: 8_000,
+    });
     const draftAcceptanceNote = draftAcceptance?.features?.some((f) => f.accepted)
       ? `
 ${draftAcceptanceBlock}
 CRITICAL: Scope, File Changes, Success Criteria, and Automated Checks MUST cover every IN SCOPE feature above.
 Do NOT plan OUT OF SCOPE features. Unticked items are mustNot for this phase.
+File Changes must reference DESIGN_PACK logos/tokens/scope/theme and \`.slopcontrol/phases/${phase.id}/design/mock.html\` — do not invent a competing mark.
+${draftPlanNote}${draftThemeNote}${draftPackBlock ? `\n${draftPackBlock}\n` : ""}${draftBoundMock ? `\n${draftBoundMock}\n` : ""}
 `
-      : "";
+      : [draftPlanNote, draftPackBlock, draftBoundMock].filter(Boolean).join("\n\n")
+        ? `\n${draftPlanNote}${draftThemeNote}${[draftPackBlock, draftBoundMock].filter(Boolean).join("\n\n")}\n`
+        : "";
 
     const buildDraftPrompt = (slim: boolean) => {
       const pack = slim ? "" : adjacentPack ? `${adjacentPack}\n` : "";
@@ -2862,8 +3668,15 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     );
     const developAcceptanceBlock =
       formatAcceptancePromptBlock(developAcceptance);
+    const developPhasePack = readPhaseDesignPack(project.rootPath, phase.id);
+    const developPackBlock = formatDesignPackPromptBlock(developPhasePack);
+    const developThemeNote = packHasThemeModes(developPhasePack)
+      ? `CRITICAL: Implement DESIGN_PACK.theme — html[data-theme] toggle, light token remaps for --background/--surface/--foreground, body/chrome on semantic vars (not hard-coded --color-dark-* alone).`
+      : null;
     const designContext = [
       developAcceptance?.features?.length ? developAcceptanceBlock : null,
+      developThemeNote,
+      developPackBlock || null,
       uiSpecDoc.trim()
         ? clipPromptSection("UI-SPEC.md", uiSpecDoc, 6_000)
         : null,
