@@ -158,7 +158,8 @@ test("formatSharedDesignPromptBlock ranks above live site and includes tokens + 
     logoAssetPaths: [".slopcontrol/design-loops/dl_1/assets/logo.png"],
   });
   assert.match(block, /SHARED DESIGN/);
-  assert.match(block, /authoritative for palette\/logos over LIVE SITE/);
+  assert.match(block, /authoritative for palette/);
+  assert.match(block, /LIVE SITE wins only for nav/);
   assert.match(block, /burntjam/);
   assert.match(block, /--brand-primary:#c8552e/);
   assert.match(block, /assets\/logo\.png/);
@@ -222,4 +223,70 @@ test("detectShareSourceFromText: no mention returns null", () => {
   });
   assert.equal(src, null);
   rmSync(parent, { recursive: true, force: true });
+});
+
+test("detectShareSourceFromText: jampress on JamPress is self — returns null", () => {
+  const parent = tmpRoot("chat-self");
+  const target = join(parent, "basic-web-agent");
+  mkdirSync(target, { recursive: true });
+  const src = detectShareSourceFromText({
+    targetRoot: target,
+    text: "pull jampress theming into this mock",
+  });
+  assert.equal(src, null);
+  rmSync(parent, { recursive: true, force: true });
+});
+
+test("detectShareSourceFromText: jamlight alias resolves sibling dir", () => {
+  const parent = tmpRoot("chat-jamlight");
+  const target = join(parent, "basic-web-agent");
+  const source = join(parent, "light-weight-crm-and-invoicing");
+  mkdirSync(target, { recursive: true });
+  mkdirSync(source, { recursive: true });
+  const src = detectShareSourceFromText({
+    targetRoot: target,
+    text: "adopt the jamlight palette and dark/light theme",
+  });
+  assert.ok(src);
+  assert.equal(src!.rootPath, source);
+  rmSync(parent, { recursive: true, force: true });
+});
+
+test("importDesignShareIntoLoop refuses self-import", () => {
+  const root = tmpRoot("self-import");
+  assert.throws(
+    () =>
+      importDesignShareIntoLoop({
+        targetRoot: root,
+        loopId: "loop-1",
+        share: {
+          source: { rootPath: root, name: "jampress" },
+          pack: null,
+          tokensCss: ":root{}",
+          logoFiles: [],
+        },
+      }),
+    /same project/,
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("readSharedDesignImport ignores prior self-import on disk", () => {
+  const root = tmpRoot("read-self");
+  const loopId = "loop-self";
+  mkdirSync(designLoopDir(root, loopId), { recursive: true });
+  writeFileSync(
+    join(designLoopDir(root, loopId), "SHARED_FROM.json"),
+    JSON.stringify({
+      source: { rootPath: root, name: "jampress" },
+      loopId,
+      importedAt: new Date().toISOString(),
+      tokensCss: ":root{}",
+      copiedAssets: [],
+      logoAssetPaths: [],
+    }),
+    "utf-8",
+  );
+  assert.equal(readSharedDesignImport(root, loopId), null);
+  rmSync(root, { recursive: true, force: true });
 });

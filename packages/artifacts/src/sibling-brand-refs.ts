@@ -338,7 +338,23 @@ export function excerptCssTokens(css: string, maxChars: number): string {
   if (!trimmed) return "";
   const root = trimmed.match(/:root\s*\{[\s\S]*?\n\}/);
   const theme = trimmed.match(/@theme\b[\s\S]*?\{[\s\S]*?\n\}/);
-  const chunk = [root?.[0], theme?.[0]].filter(Boolean).join("\n\n") || trimmed;
+  const dualBlocks = [
+    ...trimmed.matchAll(/\.(?:dark|light)\s*\{[\s\S]*?\n\}/g),
+    ...trimmed.matchAll(
+      /(?:html)?\[data-theme\s*=\s*["'](?:dark|light)["']\]\s*\{[\s\S]*?\n\}/g,
+    ),
+  ].map((m) => m[0]);
+  // Dedupe while preserving order
+  const seen = new Set<string>();
+  const uniqueDual: string[] = [];
+  for (const b of dualBlocks) {
+    if (seen.has(b)) continue;
+    seen.add(b);
+    uniqueDual.push(b);
+  }
+  const chunk =
+    [root?.[0], theme?.[0], ...uniqueDual].filter(Boolean).join("\n\n") ||
+    trimmed;
   if (chunk.length <= maxChars) return chunk;
   return `${chunk.slice(0, maxChars)}\n/* …truncated… */`;
 }

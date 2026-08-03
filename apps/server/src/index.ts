@@ -2281,6 +2281,9 @@ app.post("/projects/:id/design-loops", async (req, res) => {
       loopId: meta.id,
       brief,
       version,
+      listProjects: () => store.listProjects(),
+      findProjectByRootPath: (rootPath) =>
+        store.findProjectByRootPath(rootPath),
     });
     writeDesignLoopVersion({
       projectRoot: project.rootPath,
@@ -2439,6 +2442,9 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
       message,
       previousHtml: previousHtml ?? undefined,
       version,
+      listProjects: () => store.listProjects(),
+      findProjectByRootPath: (rootPath) =>
+        store.findProjectByRootPath(rootPath),
     });
     writeDesignLoopVersion({
       projectRoot: project.rootPath,
@@ -2679,6 +2685,9 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
       message: isFirst ? undefined : requestText,
       previousHtml: previousHtml ?? undefined,
       version,
+      listProjects: () => store.listProjects(),
+      findProjectByRootPath: (rootPath) =>
+        store.findProjectByRootPath(rootPath),
     });
 
     writeDesignLoopVersion({
@@ -2884,11 +2893,23 @@ app.post("/projects/:id/design-loops/:loopId/import-design", async (req, res) =>
     });
     return;
   }
-  const imported = importDesignShareIntoLoop({
-    targetRoot: project.rootPath,
-    loopId: meta.id,
-    share,
-  });
+  let imported;
+  try {
+    imported = importDesignShareIntoLoop({
+      targetRoot: project.rootPath,
+      loopId: meta.id,
+      share,
+    });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+      loop: meta,
+      loopId: meta.id,
+      source,
+      hint: "Import from a sibling (e.g. jamroast / jamlight), not this project.",
+    });
+    return;
+  }
   res.json({
     ok: true,
     loopId: meta.id,

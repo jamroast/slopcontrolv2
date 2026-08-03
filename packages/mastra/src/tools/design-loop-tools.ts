@@ -51,14 +51,14 @@ export function createDesignLoopMediaTools(
   const generate_image = createTool({
     id: "generate_image",
     description:
-      "Invent a NEW raster via Flux. Do NOT use for alpha/transparent/icon-pack/resize on an existing asset — use make_transparent / derive_icon_pack / resize_image instead. Blocked when a logo is pinned unless inventing a clearly new unrelated mark.",
+      "Invent a NEW raster via Flux. Do NOT use for alpha/transparent/icon-pack/resize on an existing asset — use make_transparent / derive_icon_pack / resize_image instead. When CONTINUE INTENT says NEW LOGO / inventLogo, pass inventNew=true (required if a logo is still pinned). After success, call pin_logo on the new filename.",
     inputSchema: z.object({
       loopId: z.string().min(1),
       prompt: z.string().min(1),
       filename: z.string().optional(),
       width: z.number().int().positive().optional(),
       height: z.number().int().positive().optional(),
-      /** Set true only when inventing a brand-new mark (not editing pinned). */
+      /** Set true when inventing a brand-new mark (required if a logo is pinned). */
       inventNew: z.boolean().optional(),
     }),
     execute: async ({

@@ -161,21 +161,16 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
     /\b(menu|nav|navigation).{0,80}\b(in\s+the\s+code|what\s+we\s+have|what\s+exists|what\s+is\s+in\s+place)\b/i.test(
       t,
     );
-  const inventLogo =
-    /\b(new|invent|create|generate|design)\b.{0,30}\b(logo|mark|symbol|monogram|brand\s*mark)\b/i.test(
-      t,
-    ) ||
-    /\b(symbolic|new)\s+(mark|logo)\b/i.test(t) ||
-    /\binvent\b.{0,40}\b(logo|mark)\b/i.test(t);
+  const inventLogo = textSignalsInventLogo(t);
   const adoptTheme =
     /\b(theme|theming|palette|brand\s*colors?)\b.{0,60}\b(from|of|like|borrow|pull|adopt)\b/i.test(
       t,
     ) ||
-    /\b(pull|adopt|borrow|use)\b.{0,40}\b(theme|theming|palette)\b.{0,60}\b(burntjam|jamroast|jampress|sibling|other\s*project)\b/i.test(
+    /\b(pull|adopt|borrow|use)\b.{0,40}\b(theme|theming|palette)\b.{0,60}\b(burntjam|jamroast|jampress|jamlight|sibling|other\s*project)\b/i.test(
       t,
     ) ||
     /\bfrom\s+\/Users\/[^/\s]+/i.test(t) ||
-    /\b(burntjam|jamroast|jam\s*roast)\b/i.test(t);
+    /\b(burntjam|jamroast|jam\s*roast|jamlight|jam\s*light)\b/i.test(t);
   const preserveChrome =
     /\b(?:keep|preserve|maintain)\b.{0,60}\b(layout|copy|shell|hero|structure|mock|menu|nav)\b/i.test(
       t,
@@ -217,10 +212,14 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
 
   let scope: ContinueIntentScope = "sections";
   if (wantsFull && !preserveChrome && !navAlign) scope = "full_revise";
-  else if (navAlign) scope = "nav_align";
+  else if (navAlign && !inventLogo) scope = "nav_align";
   else if (inventLogo && !adoptTheme && targets.size <= 1) scope = "logo_invent";
   else if (adoptTheme && !inventLogo && targets.size <= 1) scope = "adopt_theme";
-  else if (wantsAssetEdit && (targets.size === 0 || preserveChrome))
+  else if (
+    wantsAssetEdit &&
+    !inventLogo &&
+    (targets.size === 0 || preserveChrome)
+  )
     scope = "assets_only";
   else if (inventLogo || adoptTheme) scope = "sections";
 
@@ -259,16 +258,108 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
     designScope = { kind: "product", focus: "site", preserve: [] };
   }
 
+  return normalizeContinueIntent(
+    ContinueIntentSchema.parse({
+      scope,
+      targets: [...targets],
+      wantsAssetEdit,
+      inventLogo,
+      adoptTheme,
+      navAlign,
+      preserveChrome: preserve,
+      notes: "",
+      designScope,
+    }),
+    t,
+  );
+}
+
+/** True when operator prose asks to invent/replace/dislike the current logo. */
+export function textSignalsInventLogo(text: string): boolean {
+  const t = text ?? "";
+  return (
+    /\b(new|invent|create|generate|design|redo|replace|different|another)\b.{0,40}\b(logo|mark|symbol|monogram|brand\s*mark)s?\b/i.test(
+      t,
+    ) ||
+    /\b(logo|mark|symbol|monogram)s?\b.{0,40}\b(new|invent|create|generate|replace|different|another|redo)\b/i.test(
+      t,
+    ) ||
+    /\b(symbolic|new)\s+(mark|logo)s?\b/i.test(t) ||
+    /\binvent\b.{0,40}\b(logo|mark)s?\b/i.test(t) ||
+    /\b(unhappy|not\s+happy|don't\s+like|dont\s+like|do\s+not\s+like|dislike|hate|looks?\s+bad|not\s+working)\b.{0,60}\b(logo|mark|symbol|monogram)s?\b/i.test(
+      t,
+    ) ||
+    /\b(logo|mark|symbol|monogram)s?\b.{0,40}\b(unhappy|don't\s+like|dont\s+like|dislike|hate|looks?\s+bad|wrong|awful|terrible)\b/i.test(
+      t,
+    ) ||
+    /\b(change|swap|update)\b.{0,20}\b(the\s+)?(logo|mark)s?\b/i.test(t) ||
+    /\b(logo|mark)s?\b.{0,20}\b(change|swap|update|replace)\b/i.test(t)
+  );
+}
+
+/**
+ * Post-classify normalize: invent/theme cues from text override weak LLM
+ * fields; invent never lands on assets_only; redesign clears preserveChrome
+ * unless the operator explicitly asked to keep chrome.
+ */
+export function normalizeContinueIntent(
+  intent: ContinueIntent,
+  text: string,
+): ContinueIntent {
+  const t = text ?? "";
+  const inventFromText = textSignalsInventLogo(t);
+  const inventLogo = intent.inventLogo || inventFromText;
+  const adoptTheme =
+    intent.adoptTheme ||
+    (/\b(burntjam|jamroast|jam\s*roast|jamlight|jam\s*light)\b/i.test(t) &&
+      /\b(theme|theming|palette|brand|skin|dark|light)\b/i.test(t));
+
+  const explicitKeepChrome =
+    /\b(?:keep|preserve|maintain)\b.{0,60}\b(layout|copy|shell|hero|structure|mock|menu|nav)\b/i.test(
+      t,
+    ) ||
+    /\b(?:do\s+not|don't|dont)\s+(?:change|touch|alter|rewrite|modify)\b.{0,60}\b(layout|copy|shell|hero|structure|mock|menu|nav)\b/i.test(
+      t,
+    );
+
+  const redesign =
+    inventLogo ||
+    adoptTheme ||
+    intent.scope === "full_revise" ||
+    intent.scope === "logo_invent" ||
+    intent.scope === "adopt_theme";
+
+  let scope = intent.scope;
+  if (inventLogo && scope === "assets_only") {
+    scope =
+      inventLogo && !adoptTheme && intent.targets.every((x) => x === "logo")
+        ? "logo_invent"
+        : "sections";
+  }
+  if (inventLogo && !adoptTheme && scope === "sections") {
+    const onlyLogo =
+      intent.targets.length === 0 ||
+      intent.targets.every((x) => x === "logo");
+    if (onlyLogo) scope = "logo_invent";
+  }
+
+  const targets = new Set(intent.targets);
+  if (inventLogo) targets.add("logo");
+  if (adoptTheme) targets.add("palette");
+
+  const preserveChrome = redesign
+    ? explicitKeepChrome
+    : intent.preserveChrome;
+
   return ContinueIntentSchema.parse({
+    ...intent,
     scope,
     targets: [...targets],
-    wantsAssetEdit,
     inventLogo,
     adoptTheme,
-    navAlign,
-    preserveChrome: preserve,
-    notes: "",
-    designScope,
+    preserveChrome,
+    // Invent/replace is not an alpha/icon-pack edit path.
+    wantsAssetEdit: inventLogo ? false : intent.wantsAssetEdit,
   });
 }
 
@@ -294,12 +385,12 @@ export function formatContinueIntentPromptBlock(
   }
   if (intent.inventLogo) {
     lines.push(
-      "- NEW LOGO: you may generate_image a new mark; replacing the prior pinned logo is allowed for this continue.",
+      "- NEW LOGO: prior logo pin is superseded. Call generate_image with inventNew=true, embed the new asset, then pin_logo that filename.",
     );
   }
   if (intent.adoptTheme) {
     lines.push(
-      "- ADOPT THEME: apply sibling palette/token excerpts over prior mock tokens; LIVE SITE stays authoritative for nav/routes only.",
+      "- ADOPT THEME: apply sibling palette/token excerpts (incl. dark/light ladders) over prior mock tokens; LIVE SITE stays authoritative for nav/routes/screen copy only.",
     );
   }
   if (intent.targets.length) {

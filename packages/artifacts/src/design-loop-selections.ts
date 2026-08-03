@@ -409,6 +409,8 @@ export function formatDesignLoopSelectionsPromptBlock(opts: {
   projectRoot: string;
   loopId: string;
   version?: number;
+  /** When true, prior logo pin may be replaced via generate_image + pin_logo. */
+  inventLogo?: boolean;
 }): string {
   const meta = readDesignLoopMeta(opts.projectRoot, opts.loopId);
   if (!meta) return "";
@@ -418,11 +420,18 @@ export function formatDesignLoopSelectionsPromptBlock(opts: {
     version: opts.version,
   });
   const selections = getDesignLoopSelections(meta);
+  const inventLogo = Boolean(opts.inventLogo);
   const lines: string[] = [];
 
-  lines.push(
-    "PINNED (authoritative — keep these; do NOT regenerate or replace with generate_image):",
-  );
+  if (inventLogo) {
+    lines.push(
+      "PINNED (logo pin SUPERSEDED this turn — invent a NEW mark with generate_image inventNew=true, then pin_logo the new file):",
+    );
+  } else {
+    lines.push(
+      "PINNED (authoritative — keep these; do NOT regenerate or replace with generate_image):",
+    );
+  }
   if (!selections.length) {
     lines.push("- (none pinned)");
   } else {
@@ -430,8 +439,12 @@ export function formatDesignLoopSelectionsPromptBlock(opts: {
       const path = s.asset
         ? `.slopcontrol/design-loops/${opts.loopId}/assets/${s.asset}`
         : "";
+      const logoNote =
+        inventLogo && s.slot === "logo"
+          ? " (superseded — do not re-embed; invent + pin a replacement)"
+          : "";
       lines.push(
-        `- ${s.slot}: ${s.label || s.conceptId}${path ? ` → ${path}` : ""}${
+        `- ${s.slot}: ${s.label || s.conceptId}${path ? ` → ${path}` : ""}${logoNote}${
           s.excerpt ? ` — ${s.excerpt.slice(0, 120)}` : ""
         }`,
       );
@@ -463,9 +476,15 @@ export function formatDesignLoopSelectionsPromptBlock(opts: {
     "- icon pack / favicons / browser pack → derive_icon_pack(sourceFilename=...)",
   );
   lines.push("- resize / trim / pad → resize_image / trim_image / pad_image");
-  lines.push(
-    "- generate_image is ONLY for inventing a NEW mark when nothing is pinned and the operator asks to invent — never to 'fix' alpha or packs.",
-  );
+  if (inventLogo) {
+    lines.push(
+      "- generate_image: REQUIRED this turn for a NEW mark — pass inventNew=true, then pin_logo the result. Never reuse the superseded logo path.",
+    );
+  } else {
+    lines.push(
+      "- generate_image is ONLY for inventing a NEW mark when nothing is pinned and the operator asks to invent — never to 'fix' alpha or packs.",
+    );
+  }
 
   return lines.join("\n");
 }

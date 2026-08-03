@@ -71,6 +71,22 @@ describe("fallbackContinueIntentFromText", () => {
     );
     assert.equal(intent.inventLogo, true);
     assert.ok(intent.targets.includes("logo"));
+    assert.equal(intent.preserveChrome, false);
+  });
+
+  it("detects dissatisfaction / replace logo language as inventLogo", () => {
+    for (const ask of [
+      "I am unhappy with the logos",
+      "I don't like the current logos",
+      "Please replace the logos",
+      "Can we try different logos",
+      "change the logo",
+    ]) {
+      const intent = fallbackContinueIntentFromText(ask);
+      assert.equal(intent.inventLogo, true, ask);
+      assert.notEqual(intent.scope, "assets_only", ask);
+      assert.equal(intent.preserveChrome, false, ask);
+    }
   });
 
   it("detects adopt theme from sibling project", () => {
@@ -122,6 +138,10 @@ describe("continue-intent eval fixture (real operator asks)", () => {
     {
       ask: "Invent a new symbolic logo for this product",
       expect: { inventLogo: true },
+    },
+    {
+      ask: "I am unhappy with the logos — please invent new ones",
+      expect: { inventLogo: true, preserveChrome: false },
     },
     {
       ask: "Do not change hero or shell. Just make the logo transparent and re-derive the icon pack",

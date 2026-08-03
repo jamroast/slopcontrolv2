@@ -132,6 +132,8 @@ import {
   patchMockNavFromInventory,
   CONTINUE_INTENT_DEFAULT,
   fallbackContinueIntentFromText,
+  normalizeContinueIntent,
+  continueIntentAllowsLogoSwap,
   formatContinueIntentPromptBlock,
   readSharedDesignImport,
   formatSharedDesignPromptBlock,
@@ -139,6 +141,9 @@ import {
   readShareableDesign,
   importDesignShareIntoLoop,
   extractSiblingProjectPaths,
+  unpinDesignLoopSelection,
+  pinDesignLoopLogoAsset,
+  dominantMockLogoAsset,
   getDesignLoopScope,
   applyContinueIntentToScope,
   classifyDesignScopeFromText,
@@ -299,6 +304,11 @@ export interface DesignLoopGenerateInput {
   /** Prior mock HTML to revise (continue). */
   previousHtml?: string;
   version: number;
+  /** Store lookups for chat auto design-share (registered project names). */
+  listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+  findProjectByRootPath?: (
+    rootPath: string,
+  ) => { id: string; name: string; rootPath: string } | undefined;
 }
 
 export interface PlanLoopGenerateInput {
@@ -1520,12 +1530,13 @@ ${message.trim()}`;
     ensureSlopcontrolDir(project.rootPath);
     const isContinue = version > 1 || Boolean(previousHtml?.trim());
     const desc = [brief, message ?? ""].filter(Boolean).join("\n");
+    const continueText = message?.trim() || desc;
 
     // Primary classification: LLM → structured ContinueIntent. Regex fallback
     // only when registry/LLM unavailable (offline, timeout, parse failure).
     let continueIntent: ContinueIntent = CONTINUE_INTENT_DEFAULT;
     if (isContinue) {
-      const fallback = fallbackContinueIntentFromText(message?.trim() || desc);
+      const fallback = fallbackContinueIntentFromText(continueText);
       try {
         const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
           "classification",
@@ -1533,7 +1544,7 @@ ${message.trim()}`;
         continueIntent = await classifyContinueIntentViaLlm({
           endpoint,
           modelId,
-          message: message?.trim() || desc,
+          message: continueText,
           brief,
           timeoutMs: 15_000,
         });
@@ -1544,6 +1555,7 @@ ${message.trim()}`;
         });
         continueIntent = fallback;
       }
+      continueIntent = normalizeContinueIntent(continueIntent, continueText);
     } else {
       continueIntent = {
         ...CONTINUE_INTENT_DEFAULT,
@@ -1583,7 +1595,22 @@ ${message.trim()}`;
       }
     }
 
-    if (message?.trim()) {
+    // Invent/replace: clear prior logo pin so generate_image + force-pin cannot
+    // restore the superseded mark. Skip auto-pin from mock on invent turns.
+    if (isContinue && continueIntent.inventLogo) {
+      try {
+        unpinDesignLoopSelection({
+          projectRoot: project.rootPath,
+          loopId,
+          slot: "logo",
+        });
+        slog.info("design-loop", "unpinned logo for invent continue", {
+          loopId,
+        });
+      } catch {
+        /* best-effort */
+      }
+    } else if (message?.trim()) {
       const pinnedByChat = maybeAutoPinFromOperatorMessage({
         projectRoot: project.rootPath,
         loopId,
@@ -1609,7 +1636,11 @@ ${message.trim()}`;
         });
       }
     }
-    if (isContinue && previousHtml?.trim()) {
+    if (
+      isContinue &&
+      previousHtml?.trim() &&
+      !continueIntent.inventLogo
+    ) {
       maybeAutoPinDominantLogoFromMock({
         projectRoot: project.rootPath,
         loopId,
@@ -1642,7 +1673,8 @@ ${message.trim()}`;
     } catch {
       /* best-effort persist */
     }
-    const siteInventoryBlock = formatLiveSiteInventoryPromptBlock(siteInventory);
+    // siteInventoryBlock rebuilt after share import (authority depends on SHARED).
+    let siteInventoryBlock = formatLiveSiteInventoryPromptBlock(siteInventory);
 
     // Deterministic icon-pack derive + patch before any agent rewrite.
     let workingPreviousHtml = previousHtml;
@@ -1757,27 +1789,33 @@ ${message.trim()}`;
       projectRoot: project.rootPath,
       loopId,
       version: previousHtml ? Math.max(1, version - 1) : version,
+      inventLogo: continueIntent.inventLogo,
     });
-    const needsMedia = designLoopNeedsMediaTools(brief, message);
-    const needsEdit = designLoopAskNeedsImageEdit(desc);
+    const needsMedia =
+      designLoopNeedsMediaTools(brief, message) || continueIntent.inventLogo;
+    const needsEdit =
+      designLoopAskNeedsImageEdit(desc) && !continueIntent.inventLogo;
     const modeBlock = isContinue
       ? formatContinueIntentPromptBlock(continueIntent)
       : "";
 
     // Chat-driven design share: "pull the theme from jamroast" auto-imports.
-    // Gate: adopt-theme intent, brand/palette/logo targets, or an explicit path.
+    // Gate: adopt-theme intent, brand/palette/typography targets, or an explicit path.
+    // Do NOT treat inventLogo alone as a share request (avoids self-alias traps).
     if (isContinue && message?.trim()) {
       const mentionsPath = extractSiblingProjectPaths(message).length > 0;
       const wantsSharedDesign =
         continueIntent.adoptTheme ||
         mentionsPath ||
         continueIntent.targets.some((t) =>
-          ["palette", "tokens", "logo", "typography", "brand"].includes(t),
+          ["palette", "tokens", "typography", "brand"].includes(t),
         );
       if (wantsSharedDesign) {
         const detected = detectShareSourceFromText({
           targetRoot: project.rootPath,
           text: message,
+          listProjects: input.listProjects,
+          findProjectByRootPath: input.findProjectByRootPath,
         });
         if (detected) {
           try {
@@ -1815,6 +1853,10 @@ ${message.trim()}`;
     // Cross-project design share: SHARED DESIGN outranks LIVE SITE for palette/logos.
     const sharedImport = readSharedDesignImport(project.rootPath, loopId);
     const sharedDesignBlock = formatSharedDesignPromptBlock(sharedImport);
+    const sharedDesignActive = Boolean(sharedDesignBlock) || continueIntent.adoptTheme;
+    siteInventoryBlock = formatLiveSiteInventoryPromptBlock(siteInventory, 6_500, {
+      sharedDesignActive,
+    });
     if (sharedDesignBlock) {
       slog.info("design-loop", "shared design import active", {
         loopId,
@@ -1825,9 +1867,11 @@ ${message.trim()}`;
     const htmlReturnRule =
       continueIntent.scope === "assets_only" || continueIntent.scope === "nav_align"
         ? "Prefer MOCK_ASSETS_ONLY (no full HTML). If you return HTML, keep prior mock; only asset src / icon-pack / LIVE SITE nav updates."
-        : continueIntent.scope === "full_revise"
-          ? "Return a short rationale (1–3 sentences) then a complete self-contained HTML document in a ```html fence. Nav must match LIVE SITE inventory."
-          : "Return a complete HTML document based on the prior mock — preserve hero, tokens, shell, and pinned logos; change only requested sections/targets. Nav must match LIVE SITE.";
+        : continueIntent.inventLogo
+          ? "Return a complete HTML document based on the prior mock — invent a NEW logo via generate_image (inventNew=true) + pin_logo; do not re-embed the superseded pin. Nav must match LIVE SITE."
+          : continueIntent.scope === "full_revise"
+            ? "Return a short rationale (1–3 sentences) then a complete self-contained HTML document in a ```html fence. Nav must match LIVE SITE inventory."
+            : "Return a complete HTML document based on the prior mock — preserve hero, tokens, shell, and pinned logos; change only requested sections/targets. Nav must match LIVE SITE.";
 
     const loopMetaForScope = readDesignLoopMeta(project.rootPath, loopId);
     const conceptualScope = getDesignLoopScope(loopMetaForScope);
@@ -1861,15 +1905,21 @@ ${message.trim()}`;
       forMock: true,
     });
 
+    const authorityCritical = sharedDesignActive
+      ? "CRITICAL: SHARED DESIGN (or adopt-theme sibling excerpts) is authoritative for palette, tokens, dual theme, and logos. LIVE SITE is authoritative for nav labels/hrefs, routes, and extracted screen copy only — do not invent menu items or purple/cream palettes. For screens with extracted headings/columns/fields/buttons, use that copy verbatim."
+      : "CRITICAL: LIVE SITE inventory below is authoritative for nav labels/hrefs, routes, tokens, logos, and extracted screen copy / entity fields. Do not invent menu items. For screens with extracted headings/columns/fields/buttons, use that copy verbatim — do not lorem-ipsum. Invent content only for routes with no extraction. Sibling cues are secondary.";
+
     const prompt = `Design loop ${loopId} — produce version v${version} mock HTML.
 
-CRITICAL: LIVE SITE inventory below is authoritative for nav labels/hrefs, routes, tokens, logos, and extracted screen copy / entity fields. Do not invent menu items. For screens with extracted headings/columns/fields/buttons, use that copy verbatim — do not lorem-ipsum. Invent content only for routes with no extraction. Sibling cues are secondary.
+${authorityCritical}
 Current loopId (required for media tools): ${loopId}
 ${modeBlock ? `${modeBlock}\n` : ""}${conceptualModelBlock}
 
 ${needsEdit
   ? "Operator asked for an IMAGE EDIT (alpha/icon pack/resize). Call make_transparent / derive_icon_pack / resize_image — do NOT generate_image. Prefer pinned / true RGBA sources."
-  : "When inventing a new mark, call generate_image. For stock photos use search_images / import_image. For look critique use review_look."}
+  : continueIntent.inventLogo
+    ? "Operator asked for a NEW logo. Call generate_image with inventNew=true, embed the new relativePath, then pin_logo that filename. Do not reuse the superseded pin."
+    : "When inventing a new mark, call generate_image with inventNew=true if a logo was previously pinned. For stock photos use search_images / import_image. For look critique use review_look."}
 Otherwise prefer writing the mock with few or zero tool calls.
 
 ${selectionsBlock}
@@ -2006,9 +2056,10 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
       }
     }
 
-    // Always force pinned primary logo into the final mock (not only asset edits).
-    // Day/night / menubar continues otherwise reintroduce jam-light-mark-v1 etc.
-    if (pinnedLogo && html?.trim()) {
+    // Force pinned primary logo into the final mock — except invent/logo-swap
+    // continues, where the agent (or share import) may introduce a new mark.
+    const allowLogoSwap = continueIntentAllowsLogoSwap(continueIntent);
+    if (pinnedLogo && html?.trim() && !continueIntent.inventLogo && !allowLogoSwap) {
       const before = html;
       html = patchMockForAssetContinue({
         previousHtml: html,
@@ -2020,6 +2071,27 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
           loopId,
           asset: pinnedLogo,
         });
+      }
+    } else if (continueIntent.inventLogo && html?.trim()) {
+      const newLogo = dominantMockLogoAsset(html);
+      if (newLogo && newLogo !== pinnedLogo) {
+        try {
+          pinDesignLoopLogoAsset({
+            projectRoot: project.rootPath,
+            loopId,
+            asset: newLogo,
+            label: `Invented mark (${newLogo})`,
+          });
+          slog.info("design-loop", "re-pinned invented logo", {
+            loopId,
+            asset: newLogo,
+          });
+        } catch (err) {
+          slog.warn("design-loop", "failed to re-pin invented logo", {
+            loopId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
 

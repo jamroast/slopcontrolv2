@@ -104,6 +104,15 @@ describe("design-loop-selections", () => {
     assert.match(block, /make_transparent/);
     assert.match(block, /CANDIDATES/);
 
+    const inventBlock = formatDesignLoopSelectionsPromptBlock({
+      projectRoot: root,
+      loopId: meta.id,
+      inventLogo: true,
+    });
+    assert.match(inventBlock, /SUPERSEDED/);
+    assert.match(inventBlock, /inventNew=true/);
+    assert.match(inventBlock, /do not re-embed/);
+
     unpinDesignLoopSelection({
       projectRoot: root,
       loopId: meta.id,

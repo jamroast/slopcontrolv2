@@ -435,12 +435,16 @@ function formatScreenLine(s: ScreenContent, maxChars = 400): string {
 export function formatLiveSiteInventoryPromptBlock(
   inv: LiveSiteInventory | null | undefined,
   maxChars = 6_500,
+  opts?: { sharedDesignActive?: boolean },
 ): string {
   if (!inv) return "";
   const screens = inv.screens ?? [];
   const entities = inv.entities ?? [];
+  const shared = Boolean(opts?.sharedDesignActive);
   const lines: string[] = [
-    "## LIVE SITE (authoritative — match this; do not invent nav/menus/tokens/screen copy)",
+    shared
+      ? "## LIVE SITE (authoritative for nav/routes/screen copy only — palette/tokens/logos deferred to SHARED DESIGN)"
+      : "## LIVE SITE (authoritative — match this; do not invent nav/menus/tokens/screen copy)",
     "",
     `Project root: \`${inv.projectRoot}\``,
     "",

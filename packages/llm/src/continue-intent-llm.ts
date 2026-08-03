@@ -1,6 +1,7 @@
 import {
   ContinueIntentSchema,
   fallbackContinueIntentFromText,
+  normalizeContinueIntent,
   type ContinueIntent,
 } from "@slopcontrol/artifacts";
 import type { LlmEndpoint } from "@slopcontrol/types";
@@ -22,12 +23,12 @@ Return ONLY a JSON object with these fields:
 - designScope: optional object to narrow/widen the conceptual model — { kind: "product"|"shell"|"screen"|"component"|"flow", focus: string, preserve?: string[] }. Omit when scope should stay unchanged. Use component+focus for "only the chat form/composer"; shell+focus "theme" for dark/light toggle work; product+focus "site" only for explicit whole-site redesign.
 
 Rules:
-- "new logo" / "symbolic mark" / "invent a mark" / "circular logo" → inventLogo=true, targets include "logo" (and "landing" when look/design is also changing). Replacing the prior logo is expected. Set preserveChrome=false unless the operator explicitly says keep layout/hero/shell.
-- "pull/adopt theme or theming/design from burntjam|jamroast|sibling|other project" → adoptTheme=true, targets include "palette" and usually "landing". Set preserveChrome=false — a new theme is an intentional redesign; do NOT preserve the prior mock's look unless asked.
+- "new logo" / "symbolic mark" / "invent a mark" / "circular logo" / "replace the logos" / "different logo" / "I am unhappy with the logos" / "don't like the current logos" / "change the logo" → inventLogo=true, targets include "logo". Replacing the prior pinned logo is expected. Never assets_only for these. Set preserveChrome=false unless the operator explicitly says keep layout/hero/shell.
+- "pull/adopt theme or theming/design from burntjam|jamroast|jamlight|sibling|other project" → adoptTheme=true, targets include "palette" and usually "landing". Set preserveChrome=false — a new theme is an intentional redesign; do NOT preserve the prior mock's look unless asked.
 - "align menu/nav with the code" → navAlign=true.
-- "derive icon pack" / "make transparent" / "alpha" → wantsAssetEdit=true.
+- "derive icon pack" / "make transparent" / "alpha" → wantsAssetEdit=true (only when NOT asking for a new/different logo).
 - "I like the current look" / "keep the hero" / "do not change layout" → preserveChrome=true. "do not change hero" is NOT a request to change hero.
-- scope picks the dominant intent: full_revise only for explicit redesign/start-over; nav_align for menu sync; assets_only when only media edits requested; logo_invent/adopt_theme when that dominates; otherwise sections.
+- scope picks the dominant intent: full_revise only for explicit redesign/start-over; nav_align for menu sync; assets_only when only media edits requested (never when inventLogo); logo_invent/adopt_theme when that dominates; otherwise sections.
 - When inventLogo or adoptTheme is true, prefer preserveChrome=false. Fingerprint drift must not veto an intentional theme/logo redesign.
 - "only/just the chat form|composer|bubble" → designScope={kind:"component", focus:"chat.composer", preserve:["chrome","palette","logo","nav","shell"]}.
 - "dark and light / theme toggle" without full redesign → designScope={kind:"shell", focus:"theme", preserve:["logo","content"]}.
@@ -67,9 +68,10 @@ export async function classifyContinueIntentViaLlm(
   });
 
   const intent = ContinueIntentSchema.parse(parsed);
-  return {
+  const merged: ContinueIntent = {
     ...fallbackContinueIntentFromText(opts.message),
     ...intent,
     targets: intent.targets,
   };
+  return normalizeContinueIntent(merged, opts.message);
 }

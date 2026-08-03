@@ -348,18 +348,18 @@ Rules:
 - Use :root CSS variables for palette/typography. Prefer LIVE SITE inventory (nav/tokens/logos/routes) and sibling cues already in the prompt. No filesystem reads — inventory is injected for you.
 - Show labeled states when relevant. Keep it one page, not a full SPA.
 - The prompt always states the current loopId — pass that loopId to media tools.
-- PINNED concepts/assets in the prompt are frozen: embed those paths; do NOT replace them with generate_image or a differently named "alpha" file.
-- When the operator names a logo file or says pin/use/go with a mark, call pin_logo with that filename first, then embed it in the mock (menubar + landing). Do not keep an older mark.
+- PINNED concepts/assets in the prompt are frozen UNLESS CONTINUE INTENT says NEW LOGO / inventLogo (logo pin superseded): then generate_image with inventNew=true, embed the new path, pin_logo the new filename — do NOT re-embed the superseded mark.
+- When the operator names a logo file or says pin/use/go with a mark (and is not asking to invent), call pin_logo with that filename first, then embed it in the mock (menubar + landing). Do not keep an older mark.
 - CONCEPTUAL MODEL in the prompt is authoritative scope: kind/focus/preserve. component/flow → one composition around the focus (ghost chrome ok, labeled out of scope). shell/theme → menubar + data-theme dark/light proof. Do not expand past focus.
-- When theme modes are in the conceptual model, include :root dark tokens AND [data-theme="light"] remaps; toggles must set documentElement data-theme.
-- CONTINUE MODE in the prompt is authoritative: asset_only / section_touch means preserve hero copy, shell, and :root token names — do not invent new landing copy.
+- When theme modes are in the conceptual model, include :root dark tokens AND [data-theme="light"] remaps; toggles must set documentElement data-theme. Prefer SHARED DESIGN / sibling dual-theme ladders over inventing purple/cream.
+- CONTINUE MODE in the prompt is authoritative: asset_only / section_touch means preserve hero copy, shell, and :root token names — do not invent new landing copy (except when inventLogo/adoptTheme).
 - Prefer true RGBA sources (hasAlpha). Filenames containing "alpha" that are still RGB are INVALID — call make_transparent or use the pinned RGBA mark.
 - Media / edit tools (do not claim they ran without a tool result):
   - pin / use / go with a named existing asset → pin_logo (then embed that path)
   - alpha / strip black / transparent background on an EXISTING asset → make_transparent (true RGBA; never Flux)
   - icon pack / favicons from an EXISTING mark → derive_icon_pack (resize only; uses pinned / true RGBA)
   - resize / trim / pad existing → resize_image / trim_image / pad_image
-  - invent a brand-new mark (nothing pinned / operator asks to invent) → generate_image
+  - invent / replace / unhappy with logos → generate_image with inventNew=true, then pin_logo
   - stock photos → search_images then import_image
   - review look → review_look
 - Never use generate_image to "fix" alpha, backgrounds, or icon packs — that invents a different mark.

@@ -84,6 +84,23 @@ describe("sibling brand refs", () => {
     assert.match(out, /--x/);
   });
 
+  it("excerptCssTokens includes .dark / .light surface ladders", () => {
+    const out = excerptCssTokens(
+      [
+        ":root { --brand-orange: #E8430A; }",
+        ".dark { --background: #0A0A0A; --foreground: #F5F0E8; }",
+        ".light { --background: #FDF8F3; --foreground: #1A1510; }",
+        "body { margin: 0; }",
+      ].join("\n"),
+      800,
+    );
+    assert.match(out, /:root/);
+    assert.match(out, /\.dark/);
+    assert.match(out, /\.light/);
+    assert.match(out, /#0A0A0A/);
+    assert.match(out, /#FDF8F3/);
+  });
+
   it("buildProjectBrandRefPack includes this project's tokens without a sibling", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-proj-brand-"));
     try {

@@ -24,6 +24,7 @@ import {
 import {
   excerptCssTokens,
   extractSiblingProjectPaths,
+  isDesignFallbackBrandPath,
   preferAuthoritativeLogos,
   projectTokenCandidates,
 } from "./sibling-brand-refs.js";
@@ -73,6 +74,9 @@ const SHARE_ALIASES: Record<string, string> = {
   "jam roast": "burntjam",
   jam_roast: "burntjam",
   jampress: "basic-web-agent",
+  jamlight: "light-weight-crm-and-invoicing",
+  "jam light": "light-weight-crm-and-invoicing",
+  jam_light: "light-weight-crm-and-invoicing",
 };
 
 export function resolveShareAlias(name: string): string {
@@ -82,6 +86,28 @@ export function resolveShareAlias(name: string): string {
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** True when share source is the same project as the target (self-import). */
+export function isSameDesignShareRoot(
+  targetRoot: string,
+  sourceRoot: string,
+): boolean {
+  const norm = (p: string) => p.replace(/\/$/, "");
+  if (norm(targetRoot) === norm(sourceRoot)) return true;
+  return (
+    basename(norm(targetRoot)).toLowerCase() ===
+    basename(norm(sourceRoot)).toLowerCase()
+  );
+}
+
+function rejectSelfShare(
+  targetRoot: string,
+  source: DesignShareSource | null,
+): DesignShareSource | null {
+  if (!source) return null;
+  if (isSameDesignShareRoot(targetRoot, source.rootPath)) return null;
+  return source;
 }
 
 /**
@@ -103,25 +129,31 @@ export function detectShareSourceFromText(opts: {
   const targetBase = basename(opts.targetRoot.replace(/\/$/, "")).toLowerCase();
 
   const tryName = (name: string): DesignShareSource | null =>
-    resolveDesignShareSource({
-      targetRoot: opts.targetRoot,
-      fromName: name,
-      listProjects: opts.listProjects,
-      findProjectByRootPath: opts.findProjectByRootPath,
-    });
+    rejectSelfShare(
+      opts.targetRoot,
+      resolveDesignShareSource({
+        targetRoot: opts.targetRoot,
+        fromName: name,
+        listProjects: opts.listProjects,
+        findProjectByRootPath: opts.findProjectByRootPath,
+      }),
+    );
 
   // 1. Explicit absolute paths (".../Projects/burntjam").
   for (const p of extractSiblingProjectPaths(text)) {
-    const src = resolveDesignShareSource({
-      targetRoot: opts.targetRoot,
-      fromRootPath: p,
-      listProjects: opts.listProjects,
-      findProjectByRootPath: opts.findProjectByRootPath,
-    });
+    const src = rejectSelfShare(
+      opts.targetRoot,
+      resolveDesignShareSource({
+        targetRoot: opts.targetRoot,
+        fromRootPath: p,
+        listProjects: opts.listProjects,
+        findProjectByRootPath: opts.findProjectByRootPath,
+      }),
+    );
     if (src) return src;
   }
 
-  // 2. Brand aliases ("jamroast", "jam roast", "jampress").
+  // 2. Brand aliases ("jamroast", "jamlight", "jampress").
   for (const alias of Object.keys(SHARE_ALIASES)) {
     if (new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(lower)) {
       const src = tryName(alias);
@@ -133,6 +165,7 @@ export function detectShareSourceFromText(opts: {
   for (const p of opts.listProjects?.() ?? []) {
     const base = basename(p.rootPath.replace(/\/$/, "")).toLowerCase();
     if (base === targetBase) continue;
+    if (isSameDesignShareRoot(opts.targetRoot, p.rootPath)) continue;
     const candidates = [p.name, base].filter(Boolean);
     for (const c of candidates) {
       if (c.length < 3) continue;
@@ -182,40 +215,56 @@ export function resolveDesignShareSource(opts: {
     | undefined;
 }): DesignShareSource | null {
   const projects = opts.listProjects?.() ?? [];
+  let resolved: DesignShareSource | null = null;
   if (opts.fromProjectId) {
     const p = projects.find((x) => x.id === opts.fromProjectId);
-    if (p) return { projectId: p.id, rootPath: p.rootPath, name: p.name };
+    if (p) resolved = { projectId: p.id, rootPath: p.rootPath, name: p.name };
   }
-  if (opts.fromRootPath) {
+  if (!resolved && opts.fromRootPath) {
     const viaStore = opts.findProjectByRootPath?.(opts.fromRootPath);
     if (viaStore) {
-      return { projectId: viaStore.id, rootPath: viaStore.rootPath, name: viaStore.name };
-    }
-    if (existsSync(opts.fromRootPath)) {
+      resolved = {
+        projectId: viaStore.id,
+        rootPath: viaStore.rootPath,
+        name: viaStore.name,
+      };
+    } else if (existsSync(opts.fromRootPath)) {
       const p = projects.find(
-        (x) => x.rootPath.replace(/\/$/, "") === opts.fromRootPath!.replace(/\/$/, ""),
+        (x) =>
+          x.rootPath.replace(/\/$/, "") ===
+          opts.fromRootPath!.replace(/\/$/, ""),
       );
-      return { projectId: p?.id, rootPath: opts.fromRootPath, name: p?.name };
+      resolved = {
+        projectId: p?.id,
+        rootPath: opts.fromRootPath,
+        name: p?.name,
+      };
     }
   }
-  if (opts.fromName) {
+  if (!resolved && opts.fromName) {
     const want = resolveShareAlias(opts.fromName).toLowerCase();
     const byName = projects.find(
       (x) =>
         x.name.toLowerCase() === want ||
-        x.rootPath.split("/").filter(Boolean).pop()?.toLowerCase() === want,
+        x.rootPath.split("/").filter(Boolean).pop()?.toLowerCase() === want ||
+        x.name.toLowerCase() === opts.fromName!.trim().toLowerCase(),
     );
     if (byName) {
-      return { projectId: byName.id, rootPath: byName.rootPath, name: byName.name };
-    }
-    // Sibling dir under target's parent folder.
-    const parent = join(opts.targetRoot, "..");
-    const candidate = join(parent, resolveShareAlias(opts.fromName));
-    if (existsSync(candidate)) {
-      return { rootPath: candidate, name: opts.fromName };
+      resolved = {
+        projectId: byName.id,
+        rootPath: byName.rootPath,
+        name: byName.name,
+      };
+    } else {
+      // Sibling dir under target's parent folder.
+      const parent = join(opts.targetRoot, "..");
+      const candidate = join(parent, resolveShareAlias(opts.fromName));
+      if (existsSync(candidate)) {
+        resolved = { rootPath: candidate, name: opts.fromName };
+      }
     }
   }
-  return null;
+  return rejectSelfShare(opts.targetRoot, resolved);
 }
 
 const LOGO_FILE_RE = /logo|mark|brand/i;
@@ -244,7 +293,11 @@ function scanPublicLogos(rootPath: string, max = 6): string[] {
       }
       if (st.isDirectory()) {
         walk(full, depth + 1);
-      } else if (LOGO_EXT_RE.test(name) && LOGO_FILE_RE.test(name)) {
+      } else if (
+        LOGO_EXT_RE.test(name) &&
+        LOGO_FILE_RE.test(name) &&
+        !isDesignFallbackBrandPath(full)
+      ) {
         out.push(full);
         if (out.length >= max) return;
       }
@@ -257,14 +310,22 @@ function scanPublicLogos(rootPath: string, max = 6): string[] {
 function collectSourceLogoFiles(rootPath: string, pack: DesignPack | null): string[] {
   const files = new Set<string>();
   for (const p of preferAuthoritativeLogos(rootPath, [])) {
-    if (existsSync(p)) files.add(p);
+    if (existsSync(p) && !isDesignFallbackBrandPath(p)) files.add(p);
   }
   // Pack-declared logos (loop-relative or absolute).
   for (const l of pack?.logos ?? []) {
     const abs = l.path.startsWith("/") ? l.path : join(rootPath, l.path);
-    if (existsSync(abs) && LOGO_EXT_RE.test(abs)) files.add(abs);
+    if (
+      existsSync(abs) &&
+      LOGO_EXT_RE.test(abs) &&
+      !isDesignFallbackBrandPath(abs)
+    ) {
+      files.add(abs);
+    }
   }
-  for (const p of scanPublicLogos(rootPath)) files.add(p);
+  for (const p of scanPublicLogos(rootPath)) {
+    if (!isDesignFallbackBrandPath(p)) files.add(p);
+  }
   return [...files].slice(0, 8);
 }
 
@@ -297,6 +358,10 @@ export function readShareableDesign(source: DesignShareSource): ShareableDesign 
   }
 
   let tokensCss = (pack?.tokens ?? "").trim();
+  const lightCss = (pack?.theme?.lightTokensCss ?? "").trim();
+  if (tokensCss && lightCss) {
+    tokensCss = `${tokensCss}\n\n/* theme.lightTokensCss */\n${lightCss}`;
+  }
   if (!tokensCss) {
     for (const cssPath of projectTokenCandidates(root)) {
       try {
@@ -336,7 +401,18 @@ export function readSharedDesignImport(
   const path = sharedFromPath(projectRoot, loopId);
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, "utf-8")) as ImportedDesignShare;
+    const imported = JSON.parse(
+      readFileSync(path, "utf-8"),
+    ) as ImportedDesignShare;
+    // Ignore prior self-imports (e.g. jampress→jampress) so LIVE SITE/sibling
+    // cues are not overridden by incomplete local tokens.
+    if (
+      imported?.source?.rootPath &&
+      isSameDesignShareRoot(projectRoot, imported.source.rootPath)
+    ) {
+      return null;
+    }
+    return imported;
   } catch {
     return null;
   }
@@ -351,6 +427,11 @@ export function importDesignShareIntoLoop(opts: {
   loopId: string;
   share: ShareableDesign;
 }): ImportedDesignShare {
+  if (isSameDesignShareRoot(opts.targetRoot, opts.share.source.rootPath)) {
+    throw new Error(
+      `Refusing to import design from the same project (${opts.share.source.rootPath})`,
+    );
+  }
   const assetsDir = designLoopAssetsDir(opts.targetRoot, opts.loopId);
   mkdirSync(assetsDir, { recursive: true });
   mkdirSync(designLoopDir(opts.targetRoot, opts.loopId), { recursive: true });
@@ -358,6 +439,7 @@ export function importDesignShareIntoLoop(opts: {
   const copiedAssets: string[] = [];
   const logoAssetPaths: string[] = [];
   for (const abs of opts.share.logoFiles) {
+    if (isDesignFallbackBrandPath(abs)) continue;
     const name = basename(abs);
     const dest = join(assetsDir, name);
     try {
@@ -398,14 +480,18 @@ export function formatSharedDesignPromptBlock(
 ): string {
   if (!imported) return "";
   const lines: string[] = [
-    "## SHARED DESIGN (imported from another project — authoritative for palette/logos over LIVE SITE)",
+    "## SHARED DESIGN (imported from another project — authoritative for palette, tokens, dual theme, and logos over LIVE SITE)",
+    "",
+    "CRITICAL: Apply these tokens/logos. Do not invent a new purple/cream palette. LIVE SITE wins only for nav/routes/screen copy.",
     "",
     `Source: ${imported.source.name ?? imported.source.rootPath}`,
     `Imported: ${imported.importedAt}`,
     "",
   ];
   if (imported.tokensCss.trim()) {
-    lines.push("### Shared tokens (apply over prior mock / LIVE SITE palette)");
+    lines.push(
+      "### Shared tokens (apply over prior mock; include dark + light ladders when present)",
+    );
     lines.push("```css");
     lines.push(imported.tokensCss.trim().slice(0, 2_200));
     lines.push("```");

@@ -3,6 +3,7 @@ import { describe, it, mock } from "node:test";
 import {
   ContinueIntentSchema,
   fallbackContinueIntentFromText,
+  normalizeContinueIntent,
 } from "@slopcontrol/artifacts";
 import { CONTINUE_INTENT_SYSTEM_PROMPT } from "./continue-intent-llm.js";
 
@@ -13,12 +14,13 @@ import { CONTINUE_INTENT_SYSTEM_PROMPT } from "./continue-intent-llm.js";
 function mergeValidated(message: string, parsed: unknown) {
   const intent = ContinueIntentSchema.parse(parsed);
   // Same merge semantics as classifyContinueIntentViaLlm:
-  // LLM fields win, targets pass through; fallback only fills when LLM omits.
-  return {
+  // LLM fields win, then normalize forces invent/theme cues from text.
+  const merged = {
     ...fallbackContinueIntentFromText(message),
     ...intent,
     targets: intent.targets,
   };
+  return normalizeContinueIntent(merged, message);
 }
 
 describe("continue-intent-llm", () => {
@@ -27,10 +29,42 @@ describe("continue-intent-llm", () => {
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("adoptTheme"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("navAlign"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("logo_invent"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("unhappy with the logos"));
     assert.ok(
       CONTINUE_INTENT_SYSTEM_PROMPT.includes("prefer preserveChrome=false"),
       "theme/logo redesign must not default to preserving chrome",
     );
+  });
+
+  it("normalize forces inventLogo when LLM misses dissatisfaction language", () => {
+    const merged = mergeValidated("I am unhappy with the logos", {
+      scope: "sections",
+      targets: [],
+      wantsAssetEdit: false,
+      inventLogo: false,
+      adoptTheme: false,
+      navAlign: false,
+      preserveChrome: true,
+      notes: "noop",
+    });
+    assert.equal(merged.inventLogo, true);
+    assert.equal(merged.preserveChrome, false);
+    assert.notEqual(merged.scope, "assets_only");
+  });
+
+  it("normalize clears preserveChrome when LLM set inventLogo with preserveChrome true", () => {
+    const merged = mergeValidated("invent a new logo please", {
+      scope: "logo_invent",
+      targets: ["logo"],
+      wantsAssetEdit: false,
+      inventLogo: true,
+      adoptTheme: false,
+      navAlign: false,
+      preserveChrome: true,
+      notes: "new mark",
+    });
+    assert.equal(merged.inventLogo, true);
+    assert.equal(merged.preserveChrome, false);
   });
 
   it("validates LLM JSON for invent-logo continue", async () => {
@@ -116,6 +150,8 @@ describe("continue-intent-llm", () => {
     assert.equal(merged.scope, "logo_invent");
     assert.equal(merged.inventLogo, true);
     assert.ok(merged.targets.includes("logo"));
+    // Explicit keep layout → preserveChrome stays true after normalize
+    assert.equal(merged.preserveChrome, true);
     assert.equal(chatJsonMock.mock.callCount(), 1);
   });
 });
