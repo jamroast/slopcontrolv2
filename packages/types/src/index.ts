@@ -684,6 +684,8 @@ export const IterationMemoryEntrySchema = z.object({
   noProgressStreak: z.number().int().nonnegative(),
   timestamp: z.string().datetime(),
   details: z.string(),
+  /** Distilled supervisor ## Next actions (no tool/OM blobs). */
+  nextActionsSummary: z.string().optional(),
 });
 
 export type IterationMemoryEntry = z.infer<typeof IterationMemoryEntrySchema>;

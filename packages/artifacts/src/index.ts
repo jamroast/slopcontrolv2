@@ -28,6 +28,8 @@ import {
   reconcileBlueprintDecisions,
   extractLiveDecisions,
   isBrandThemingAsk,
+  isThemeWiringAsk,
+  isNotApplicableDesignSection,
 } from "./change-intent.js";
 import type { ChangeIntent } from "./change-intent.js";
 import { probeProjectForDecisions } from "./blueprint-probes.js";
@@ -52,6 +54,8 @@ export * from "./project-env.js";
 export * from "./sibling-brand-refs.js";
 export * from "./shell-checks.js";
 export * from "./check-runners.js";
+export * from "./claim-vs-proof.js";
+export * from "./design-delivery.js";
 export * from "./phase-complete-gate.js";
 export * from "./development-handoff.js";
 export * from "./ask-session.js";
@@ -66,6 +70,10 @@ export * from "./live-site-inventory.js";
 export * from "./screen-content.js";
 export * from "./continue-intent.js";
 export * from "./design-share.js";
+export * from "./design-element.js";
+export * from "./npm-registry.js";
+export * from "./cross-project-catalog.js";
+export * from "./sibling-code-refs.js";
 export * from "./plan-loop.js";
 export * from "./plan-pack.js";
 export * from "./plan-continue-intent.js";
@@ -748,15 +756,23 @@ export function isDesignComplete(projectRoot: string, phaseId: string): boolean 
 export function phaseForcesVisualDesign(phaseDoc: string): boolean {
   if (!phaseDoc.trim()) return false;
   if (/Requires\s+design\s+pass\s*:\s*yes/i.test(phaseDoc)) return true;
-  if (/^##\s+Brand\b/im.test(phaseDoc)) return true;
-  if (/^##\s+Assets\b/im.test(phaseDoc)) return true;
+  if (/Requires\s+design\s+pass\s*:\s*no/i.test(phaseDoc)) return false;
+  if (/^##\s+Brand\b/im.test(phaseDoc)) {
+    const brand = extractSection(phaseDoc, "Brand") ?? "";
+    if (!isNotApplicableDesignSection(brand)) return true;
+  }
+  if (/^##\s+Assets\b/im.test(phaseDoc)) {
+    const assets = extractSection(phaseDoc, "Assets") ?? "";
+    if (!isNotApplicableDesignSection(assets)) return true;
+  }
   return false;
 }
 
 /**
  * True when this phase should run the design stage before coding.
- * Brand/theming Intents always need design. chrome-hide / backend skip unless
- * PHASE forces visuals. Other kinds keep UI-SPEC / Brand / Assets signals.
+ * Brand identity / sibling theming Intents need design. Theme-toggle wiring
+ * alone does not. chrome-hide / backend skip unless PHASE forces visuals.
+ * Other kinds keep UI-SPEC / real Brand / Assets signals.
  */
 export function phaseNeedsDesign(
   projectRoot: string,
@@ -770,14 +786,15 @@ export function phaseNeedsDesign(
   const forcedVisual = phaseForcesVisualDesign(phaseDoc);
   const intent = readChangeIntent(projectRoot, phaseId);
   const kind = intent?.changeKind;
-  const brandAsk = isBrandThemingAsk(
-    [intent?.title, intent?.goal, intent?.rawDescription]
-      .filter(Boolean)
-      .join("\n"),
-  );
+  const intentText = [intent?.title, intent?.goal, intent?.rawDescription]
+    .filter(Boolean)
+    .join("\n");
+  const brandAsk = isBrandThemingAsk(intentText);
+  const themeWiringOnly = isThemeWiringAsk(intentText);
 
-  // Brand/theming always needs a design pass (even if mislabeled backend).
-  if (brandAsk) return true;
+  // Brand identity / apply sibling theming needs design (even if mislabeled
+  // backend). Theme toggle / data-theme wiring alone does not.
+  if (brandAsk && !themeWiringOnly) return true;
 
   if (kind === "chrome-hide" || kind === "backend") {
     // Do not treat leftover UI-SPEC as requiring design for structural/non-UI work.
@@ -974,6 +991,8 @@ export type PersistedDiagnosis = {
   nextActions: string;
   fingerprint: string;
   codingAgentShouldFix: boolean;
+  /** Classifier tags for coding-retry routing (long-lived, host-utility, …). */
+  tags?: string[];
   failingStep?: { name: string; command?: string; exitCode: number };
   phaseId?: string;
   runId?: string;
@@ -1217,6 +1236,7 @@ import {
   extractCheckCells,
   createDefaultCheckRegistry,
 } from "./check-runners.js";
+import { validateRuntimeClaimProofs } from "./claim-vs-proof.js";
 
 /**
  * Extract runnable check bodies from PHASE.md `## Automated Checks`.
@@ -1289,7 +1309,10 @@ export function isFreeTierForceCheck(command: string): boolean {
  * (manual-only success criteria are not enough). Rejects secret-bearing probes.
  * Rejects truncated extracts that lack a real `# Phase` title / `## Scope`.
  */
-export function validatePhaseDocForDev(phaseDoc: string): {
+export function validatePhaseDocForDev(
+  phaseDoc: string,
+  opts?: { projectRoot?: string; phaseId?: string },
+): {
   ok: boolean;
   issues: string[];
 } {
@@ -1353,6 +1376,9 @@ export function validatePhaseDocForDev(phaseDoc: string): {
     issues.push(
       "PHASE.md must not mandate switching product env to OLLAMA_TIER=free / free-tier :cloud models — that is an operator entitlement decision, not a coding fix",
     );
+  }
+  for (const issue of validateRuntimeClaimProofs(phaseDoc, opts)) {
+    issues.push(issue);
   }
   return { ok: issues.length === 0, issues };
 }

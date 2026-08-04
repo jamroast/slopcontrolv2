@@ -253,6 +253,35 @@ export class SlopStore {
     return ask;
   }
 
+  /**
+   * Replace the last assistant message (used for live "Working…" stub → final reply).
+   * If the last message is not assistant, appends instead.
+   */
+  replaceLastAssistantAskMessage(
+    askId: string,
+    content: string,
+    at?: string,
+  ): AskSession | undefined {
+    const ask = this.getAsk(askId);
+    if (!ask) return undefined;
+    const stamp = at ?? new Date().toISOString();
+    const last = ask.messages[ask.messages.length - 1];
+    if (last?.role === "assistant") {
+      ask.messages = [
+        ...ask.messages.slice(0, -1),
+        { role: "assistant", content, at: stamp },
+      ];
+    } else {
+      ask.messages = [
+        ...ask.messages,
+        { role: "assistant", content, at: stamp },
+      ];
+    }
+    ask.updatedAt = stamp;
+    this.updateAsk(ask);
+    return ask;
+  }
+
   updateAsk(ask: AskSession): void {
     const index = this.data.asks.findIndex((item) => item.id === ask.id);
     if (index >= 0) {

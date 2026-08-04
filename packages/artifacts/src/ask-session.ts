@@ -80,6 +80,16 @@ export function writeAskArtifacts(
   return { transcript, meta };
 }
 
+/** True when askTurn / runAgent rejected with the Ask agent wall-clock timeout. */
+export function isAskAgentTimeoutError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error ?? "");
+  return /Agent\s+Ask\s+timed\s+out\s+after/i.test(msg);
+}
+
+export const ASK_TIMEOUT_RECOVERY_MESSAGE = `Ask timed out before a complete answer.
+
+Retry with a narrower question (e.g. which file hosts ThemeToggle / Menubar), or promote_ask with a ## Task brief when you already know the change. For several probes, use ask_sub_research (max 4 topics).`;
+
 export function readAskMeta(
   projectRoot: string,
   askId: string,

@@ -35,6 +35,26 @@ describe("intent-extract (mocked chatJson path)", () => {
     assert.equal(intent.uiMount, "composer");
     assert.equal(intent.interaction, undefined);
     assert.ok(CHANGE_INTENT_SYSTEM_PROMPT.includes("chrome-hide"));
+    assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /theme toggle/i);
+    assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /clickable/i);
+  });
+
+  it("finalize strips needsInteraction for theme/other without form cues", () => {
+    const intent = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "Audit light/dark theme toggle",
+        goal: "Landing page responds to ThemeToggle data-theme.",
+        uiMount: "page",
+        changeKind: "other",
+        needsInteraction: true,
+      }),
+      {
+        description:
+          "Audit the existing light/dark theme toggle on the landing page.",
+      },
+    );
+    assert.equal(intent.changeKind, "other");
+    assert.equal(intent.interaction, undefined);
   });
 
   it("mock extractChangeIntentViaLlm via module mock", async () => {

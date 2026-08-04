@@ -142,31 +142,63 @@ export function planLoopAcceptancePath(
   return join(planLoopDir(projectRoot, loopId), "ACCEPTANCE.json");
 }
 
+/** Short Goal / title text from a long operator brief (never paste the dump). */
+export function summarizeBriefForGoal(brief: string, maxChars = 240): string {
+  const t = (brief ?? "").replace(/\s+/g, " ").trim();
+  if (!t) return "(Define goal)";
+  const sentence = t.match(/^(.{12,}?[.!?])(?:\s|$)/)?.[1]?.trim();
+  const base = sentence && sentence.length <= maxChars ? sentence : t;
+  if (base.length <= maxChars) return base;
+  return `${base.slice(0, maxChars - 1).trim()}…`;
+}
+
 export function defaultPlanScope(
   brief: string,
   source: PlanScope["source"] = "start",
 ): PlanScope {
-  const t = brief ?? "";
+  // Ignore "not only …" so vision lists do not trigger narrow preserve.
+  const t = (brief ?? "").replace(/\bnot\s+only\b/gi, " ");
   let kind: PlanScopeKind = "feature";
   if (/\b(bug|fix|regress|broken)\b/i.test(t)) kind = "bugfix";
   else if (/\b(refactor|cleanup|debt)\b/i.test(t)) kind = "refactor";
+  else if (/\b(spike|explore|prototype|poc|investigate|research\s+this)\b/i.test(t))
+    kind = "spike";
   else if (/\b(integrat|wire|connect|api)\b/i.test(t)) kind = "integration";
-  else if (/\b(spike|explore|prototype|poc)\b/i.test(t)) kind = "spike";
 
   let focus = "change";
-  const only = t.match(
-    /\b(?:only|just|focus\s+on)\b.{0,40}\b([a-z0-9._/-]{3,40})/i,
-  );
-  if (only?.[1]) focus = only[1].toLowerCase();
-  else {
-    const region = t.match(
-      /\b(chat\.?composer|composer|theme|menubar|invoice|dashboard|auth|crm)\b/i,
-    );
-    if (region?.[1]) focus = region[1].toLowerCase().replace(/\s+/g, ".");
+  // Prefer primary product cues over incidental vision nouns (invoice/crm/…).
+  if (/\bfirst\s+component\b/i.test(t) || /\bchat\b/i.test(t)) {
+    focus = "chat";
+  } else if (/\btheme(-toggle)?\b/i.test(t)) {
+    focus = "theme";
+  } else {
+    const focusOn = t.match(/\bfocus\s+on\b.{0,40}\b([a-z0-9._/-]{3,40})\b/i);
+    if (focusOn?.[1]) {
+      focus = focusOn[1].toLowerCase();
+    } else {
+      const only = t.match(
+        /\b(?:only|just)\b.{0,40}\b([a-z0-9._/-]{3,40})\b/i,
+      );
+      if (only?.[1] && !/^(workflows?|management|projects?)$/i.test(only[1])) {
+        focus = only[1].toLowerCase();
+      } else {
+        const region = t.match(
+          /\b(chat\.?composer|composer|theme|menubar|dashboard|auth)\b/i,
+        );
+        if (region?.[1]) focus = region[1].toLowerCase().replace(/\s+/g, ".");
+      }
+    }
   }
 
   const preserve: string[] = [];
-  if (/\b(only|just)\b/i.test(t)) {
+  // Genuine narrowing only — not "not only" (already stripped) and not investigate dumps.
+  if (
+    /\b(narrow|shrink)\b/i.test(t) ||
+    (/\b(?:only|just)\b.{0,40}\b(this|that|the)\b/i.test(t) &&
+      !/\binvestigate|research\s+this|first\s+component|present.+plan/i.test(
+        brief ?? "",
+      ))
+  ) {
     preserve.push("unrelated modules", "brand", "shell");
   }
 
@@ -484,6 +516,78 @@ export function validatePlanDocument(plan: string): PlanSectionValidation {
   };
 }
 
+const PLAN_SECTION_STUB = "- (to research)";
+
+/**
+ * Fill missing/empty required H2 sections from prior plan or stubs.
+ * Prefer incoming content; never discard a substantively new Goal/In scope.
+ */
+export function mergePlanDocumentSections(opts: {
+  incoming: string;
+  prior?: string | null;
+  title?: string;
+}): { plan: string; filledFromPrior: string[]; filledStub: string[] } {
+  const incoming = (opts.incoming ?? "").trim();
+  const prior = (opts.prior ?? "").trim();
+  const filledFromPrior: string[] = [];
+  const filledStub: string[] = [];
+
+  const titleLine =
+    incoming.match(/^#\s+.+$/m)?.[0] ||
+    prior.match(/^#\s+.+$/m)?.[0] ||
+    `# Plan — ${opts.title?.trim().slice(0, 80) || "change"}`;
+
+  const bodies: Record<string, string> = {};
+  for (const title of PLAN_REQUIRED_SECTIONS) {
+    const fromIncoming = extractPlanSection(incoming, title);
+    const incomingOk =
+      fromIncoming &&
+      fromIncoming.replace(/[-*]\s*\(none\)/gi, "").trim().length >= 3;
+    if (incomingOk) {
+      bodies[title] = fromIncoming!.trim();
+      continue;
+    }
+    const fromPrior = extractPlanSection(prior, title);
+    const priorOk =
+      fromPrior &&
+      fromPrior.replace(/[-*]\s*\(none\)/gi, "").trim().length >= 3;
+    if (priorOk) {
+      bodies[title] = fromPrior!.trim();
+      filledFromPrior.push(title);
+      continue;
+    }
+    bodies[title] = PLAN_SECTION_STUB;
+    filledStub.push(title);
+  }
+
+  const plan = [
+    titleLine,
+    "",
+    ...PLAN_REQUIRED_SECTIONS.flatMap((title) => [
+      `## ${title}`,
+      "",
+      bodies[title] ?? PLAN_SECTION_STUB,
+      "",
+    ]),
+  ]
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return { plan: `${plan}\n`, filledFromPrior, filledStub };
+}
+
+/** True when extracted plan is worth merging (not empty noise). */
+export function planDocumentWorthMerging(plan: string): boolean {
+  const p = (plan ?? "").trim();
+  if (!p || !/^#\s+/m.test(p)) return false;
+  return (
+    /##\s*Goal/i.test(p) ||
+    /##\s*In scope/i.test(p) ||
+    /##\s*Approach/i.test(p)
+  );
+}
+
 export function extractPlanSection(
   plan: string,
   title: string,
@@ -517,16 +621,27 @@ export function scaffoldPlanDocument(opts: {
   scope?: PlanScope | null;
   errorDetail?: string;
 }): string {
-  const focus = opts.scope?.focus ?? "change";
-  const kind = opts.scope?.kind ?? "feature";
+  // On generation failure, avoid poisoned focus (e.g. incidental "invoice").
+  const focus = opts.errorDetail
+    ? "change"
+    : (opts.scope?.focus ?? "change");
+  const kind = opts.errorDetail
+    ? "feature"
+    : (opts.scope?.kind ?? "feature");
+  const goal = summarizeBriefForGoal(opts.brief);
+  const title = goal.slice(0, 80) || focus;
   const note = opts.errorDetail
     ? `\n\n_Scaffold — generation failed: ${opts.errorDetail.slice(0, 200)}_`
     : "";
-  return `# Plan — ${opts.brief.trim().slice(0, 80) || focus}
+  const preserve =
+    opts.errorDetail || !opts.scope?.preserve?.length
+      ? ["Unrelated product areas"]
+      : opts.scope.preserve;
+  return `# Plan — ${title}
 
 ## Goal
 
-${opts.brief.trim() || `(Define goal for ${focus})`}${note}
+${goal}${note}
 
 ## Constraints
 
@@ -539,11 +654,7 @@ ${opts.brief.trim() || `(Define goal for ${focus})`}${note}
 
 ## Out of scope
 
-${
-  opts.scope?.preserve?.length
-    ? opts.scope.preserve.map((p) => `- ${p}`).join("\n")
-    : "- Unrelated product areas"
-}
+${preserve.map((p) => `- ${p}`).join("\n")}
 
 ## Approach
 
@@ -569,6 +680,101 @@ ${
 
 PLAN_COMPLETE
 `;
+}
+
+/**
+ * Explicit failure tip when the agent returns empty on start (no prior plan).
+ * Does not invent invoice/crm-scoped implementation steps.
+ */
+export function failurePlanDocument(opts: {
+  brief: string;
+  errorDetail?: string;
+}): string {
+  const goal = summarizeBriefForGoal(opts.brief);
+  const detail = (opts.errorDetail ?? "empty agent plan").slice(0, 200);
+  return `# Plan — ${goal.slice(0, 80)}
+
+## Goal
+
+${goal}
+
+_Generation failed: ${detail}. Call \`plan_loop_retry\` (or continue with a shorter brief)._
+
+## Constraints
+
+- Prefer existing project patterns and \`.slopcontrol\` contracts
+- Do not invent architecture without sibling/code evidence
+
+## In scope
+
+- (undefined until a successful generate — retry required)
+
+## Out of scope
+
+- Speculative implementation without investigation
+
+## Approach
+
+1. Retry plan generation (\`plan_loop_retry\`)
+2. Ensure planning LLM is up; shorten the brief if needed
+3. When SIBLING INVESTIGATION is present, the agent must read those paths before planning
+
+## Likely areas
+
+- (generation failed — retry)
+
+## Success criteria
+
+- A non-scaffold PLAN.md with concrete Likely areas citing real paths
+
+## Risks & open questions
+
+- Prior turn returned no extractable PLAN.md (${detail})
+
+## Handoff notes
+
+- Do not promote this failure document; retry until usedScaffold is false
+
+PLAN_COMPLETE
+`;
+}
+
+/** True when PLAN.md is a generation failure / scaffold stub (must not accept or promote). */
+export function isPlanLoopFailureOrScaffoldDocument(plan: string): boolean {
+  const text = plan ?? "";
+  return (
+    /_Generation failed:/i.test(text) ||
+    /_Scaffold —/i.test(text) ||
+    /empty agent plan after repair/i.test(text) ||
+    /\(undefined until a successful generate/i.test(text) ||
+    /Do not promote this failure document/i.test(text) ||
+    /\(generation failed — retry\)/i.test(text) ||
+    /retry until usedScaffold is false/i.test(text)
+  );
+}
+
+export const PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR =
+  "usedScaffold / failure plan — call plan_loop_retry";
+
+/**
+ * Reject accept/promote when version META.usedScaffold or PLAN.md is a failure stub.
+ */
+export function assertPlanLoopVersionAcceptable(
+  projectRoot: string,
+  loopId: string,
+  version: number,
+): void {
+  const vm = readPlanLoopVersionMeta(projectRoot, loopId, version);
+  if (vm?.usedScaffold) {
+    throw new Error(PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR);
+  }
+  const plan = readPlanLoopPlanMd(projectRoot, loopId, version);
+  if (!plan?.trim()) {
+    throw new Error(`PLAN.md missing for v${version}`);
+  }
+  if (isPlanLoopFailureOrScaffoldDocument(plan)) {
+    throw new Error(PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR);
+  }
 }
 
 export function readPlanLoopAcceptance(
@@ -601,6 +807,33 @@ export function writePlanLoopAcceptance(
     )}\n`,
     "utf-8",
   );
+}
+
+/**
+ * Clear all acceptance ticks (keep feature ids/labels) — used when continue
+ * intent is expand_scope / full_revise so prior kitchen-sink locks do not fight.
+ */
+export function clearPlanLoopAcceptanceLocks(opts: {
+  projectRoot: string;
+  loopId: string;
+  version?: number;
+}): PlanLoopAcceptance {
+  const prior = readPlanLoopAcceptance(opts.projectRoot, opts.loopId);
+  const meta = readPlanLoopMeta(opts.projectRoot, opts.loopId);
+  const version =
+    opts.version ?? prior?.version ?? meta?.currentVersion ?? 1;
+  const baseFeatures =
+    prior?.features?.length
+      ? prior.features
+      : PLAN_LOOP_FALLBACK_FEATURES.map((f) => ({ ...f }));
+  const acceptance: PlanLoopAcceptance = {
+    version,
+    features: baseFeatures.map((f) => ({ ...f, accepted: false })),
+    acceptedAt: undefined,
+    updatedAt: new Date().toISOString(),
+  };
+  writePlanLoopAcceptance(opts.projectRoot, opts.loopId, acceptance);
+  return acceptance;
 }
 
 export function seedPlanLoopAcceptance(opts: {
@@ -705,6 +938,7 @@ export function acceptPlanLoop(
   if (!planLoopVersionExists(projectRoot, loopId, v)) {
     throw new Error(`Plan version v${v} missing for loop ${loopId}`);
   }
+  assertPlanLoopVersionAcceptable(projectRoot, loopId, v);
   const plan = readPlanLoopPlanMd(projectRoot, loopId, v);
   if (!plan?.trim()) throw new Error(`PLAN.md missing for v${v}`);
   const validation = validatePlanDocument(plan);
@@ -784,6 +1018,7 @@ export function bindAcceptedPlanLoopToPhase(opts: {
     );
   }
   const version = meta.acceptedVersion ?? meta.currentVersion;
+  assertPlanLoopVersionAcceptable(opts.projectRoot, opts.loopId, version);
   const plan = readPlanLoopPlanMd(opts.projectRoot, opts.loopId, version);
   if (!plan?.trim()) {
     throw new Error(`Accepted plan missing for loop ${opts.loopId} v${version}`);
@@ -875,17 +1110,16 @@ export function resolvePlanLoopGenerateFallback(opts: {
   if (opts.previousPlan?.trim()) {
     return {
       plan: opts.previousPlan.trim(),
-      notes: `Preserved prior plan after generate failure: ${opts.errorDetail ?? "unknown"}`,
+      notes: `Agent returned empty plan; prior kept. Call plan_loop_retry. (${opts.errorDetail ?? "unknown"})`,
       usedScaffold: true,
     };
   }
   return {
-    plan: scaffoldPlanDocument({
+    plan: failurePlanDocument({
       brief: opts.brief,
-      scope: opts.scope,
-      errorDetail: opts.errorDetail,
+      errorDetail: opts.errorDetail ?? "generate failed",
     }),
-    notes: `Scaffold plan: ${opts.errorDetail ?? "generate failed"}`,
+    notes: `Failure plan — ${opts.errorDetail ?? "generate failed"}. Call plan_loop_retry.`,
     usedScaffold: true,
   };
 }

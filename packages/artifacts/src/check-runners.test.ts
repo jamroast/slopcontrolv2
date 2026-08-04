@@ -9,7 +9,33 @@ import {
   parseFenceInfo,
   normalizeCheckLanguage,
   validatePhaseDocForDev,
+  stripRedundantCwdCd,
+  hasEchoExitCodeCaptureAntipattern,
+  hasAbsoluteCdInCheck,
+  hasGnuTimeoutInCheck,
+  hasLongLivedServerInCheck,
+  hasBackgroundWaitHangAntipattern,
 } from "./index.js";
+
+function phaseWithCheck(body: string): string {
+  return `# Phase demo
+
+## Scope
+x
+
+## File Changes
+- a.ts
+
+## Success Criteria
+ok
+
+## Automated Checks
+
+\`\`\`bash
+${body}
+\`\`\`
+`;
+}
 
 describe("check cells", () => {
   it("extractCheckCells keeps assign+if fence as one cell", () => {
@@ -216,5 +242,110 @@ print("meta-ok")
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("rejects echo VAR=$? exit-code capture antipattern", () => {
+    assert.equal(
+      hasEchoExitCodeCaptureAntipattern('echo "BUILD_EXIT=$?"'),
+      true,
+    );
+    const gate = validatePhaseDocForDev(
+      phaseWithCheck(`pnpm build
+echo "BUILD_EXIT=$?"
+test "$BUILD_EXIT" -eq 0 || exit 1`),
+    );
+    assert.equal(gate.ok, false);
+    assert.ok(
+      gate.issues.some((i) => /echo "VAR=\$\?"|does not assign/i.test(i)),
+      gate.issues.join("; "),
+    );
+  });
+
+  it("rejects absolute cd in Automated Checks", () => {
+    assert.equal(
+      hasAbsoluteCdInCheck(
+        "cd /Users/brett/Projects/demo && pnpm build || exit 1",
+      ),
+      true,
+    );
+    const gate = validatePhaseDocForDev(
+      phaseWithCheck(
+        "cd /Users/brettchaldecott/Projects/jamroast-components && pnpm build || exit 1",
+      ),
+    );
+    assert.equal(gate.ok, false);
+    assert.ok(
+      gate.issues.some((i) => /absolute `cd|verify cwd/i.test(i)),
+      gate.issues.join("; "),
+    );
+  });
+
+  it("stripRedundantCwdCd removes cd to verify cwd", () => {
+    const cwd = "/Users/brett/Projects/demo";
+    const out = stripRedundantCwdCd(
+      `cd ${cwd} && pnpm build || exit 1`,
+      cwd,
+    );
+    assert.match(out, /pnpm build/);
+    assert.doesNotMatch(out, /cd \/Users/);
+  });
+
+  it("rejects GNU timeout in Automated Checks", () => {
+    assert.equal(
+      hasGnuTimeoutInCheck(
+        "cd playground && pnpm install --silent && timeout 8 pnpm dev 2>&1 | tee /tmp/vite-startup.log",
+      ),
+      true,
+    );
+    const gate = validatePhaseDocForDev(
+      phaseWithCheck(
+        "cd playground && timeout 8 pnpm dev 2>&1 | tee /tmp/vite-startup.log",
+      ),
+    );
+    assert.equal(gate.ok, false);
+    assert.ok(
+      gate.issues.some((i) => /timeout|gtimeout|macOS/i.test(i)),
+      gate.issues.join("; "),
+    );
+  });
+
+  it("rejects long-lived server starts in Automated Checks", () => {
+    assert.equal(hasLongLivedServerInCheck("pnpm dev"), true);
+    assert.equal(hasLongLivedServerInCheck("npm run start"), true);
+    assert.equal(hasLongLivedServerInCheck("vite"), true);
+    assert.equal(hasLongLivedServerInCheck("vite build"), false);
+    assert.equal(
+      hasLongLivedServerInCheck("docker compose up -d"),
+      true,
+    );
+    assert.equal(
+      hasLongLivedServerInCheck(
+        "docker compose up --abort-on-container-exit",
+      ),
+      false,
+    );
+    const gate = validatePhaseDocForDev(
+      phaseWithCheck("cd playground && pnpm dev 2>&1 &"),
+    );
+    assert.equal(gate.ok, false);
+    assert.ok(
+      gate.issues.some((i) => /long-lived server|finite/i.test(i)),
+      gate.issues.join("; "),
+    );
+  });
+
+  it("rejects background & + wait hang antipattern", () => {
+    const hang = `cd playground && pnpm install --silent 2>&1 && pnpm dev 2>&1 &
+VITE_PID=$!
+sleep 8
+kill $VITE_PID 2>/dev/null
+wait $VITE_PID 2>/dev/null`;
+    assert.equal(hasBackgroundWaitHangAntipattern(hang), true);
+    const gate = validatePhaseDocForDev(phaseWithCheck(hang));
+    assert.equal(gate.ok, false);
+    assert.ok(
+      gate.issues.some((i) => /wait|background|long-lived/i.test(i)),
+      gate.issues.join("; "),
+    );
   });
 });

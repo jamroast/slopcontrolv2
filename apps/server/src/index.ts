@@ -1,7 +1,7 @@
 import "./load-env.js";
 
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import cors from "cors";
 import express from "express";
 import {
@@ -21,6 +21,8 @@ import {
   handoffSummary,
   buildAskTaskDescription,
   writeAskArtifacts,
+  isAskAgentTimeoutError,
+  ASK_TIMEOUT_RECOVERY_MESSAGE,
   writeAgentArtifacts,
   formatChangeIntentPromptBlock,
   phaseDocAlignsWithChangeIntent,
@@ -74,6 +76,27 @@ import {
   importDesignShareIntoLoop,
   readSharedDesignImport,
   formatSharedDesignPromptBlock,
+  listProjectElements,
+  listRegistryElements,
+  resolveDesignElement,
+  publishDesignElement,
+  extractAndPublishDesignElementFromLoop,
+  extractDesignElementFromMock,
+  importDesignElementIntoLoop,
+  readDesignLoopElements,
+  formatDesignElementsPromptBlock,
+  projectElementsRoot,
+  registryElementsRoot,
+  ensureNpmRegistryLayout,
+  ensureProjectNpmrc,
+  listNpmRegistryPackages,
+  readNpmRegistryMeta,
+  prepareDesignElementNpmPackage,
+  recordDesignElementNpmPublish,
+  jamPackageNameForElement,
+  buildCrossProjectCatalog,
+  resolveDependencyRecommendation,
+  detectDependencyIntentFromText,
   DesignScopeSchema,
   conceptualModelFromLoop,
   classifyDesignScopeFromText,
@@ -98,6 +121,8 @@ import {
   writePlanLoopAcceptance,
   applyPlanAcceptanceTicks,
   bindAcceptedPlanLoopToPhase,
+  assertPlanLoopVersionAcceptable,
+  PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR,
   allocateNextPlanLoopVersion,
   assertActivePlanLoopBase,
   buildPlanLoopVersionTree,
@@ -123,7 +148,14 @@ import {
   reviewDesignLoopLook,
 } from "@slopcontrol/coding-tools";
 import { loadEndpointsConfig } from "@slopcontrol/llm";
-import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync } from "@slopcontrol/mastra";
+import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError } from "@slopcontrol/mastra";
+import {
+  bindLiveTurn,
+  wantsLiveStream,
+  workingStubFromBound,
+} from "./live-turn-http.js";
+import { liveTurns } from "./live-turns.js";
+import { startLiveTurnWatcher } from "./live-turn-watcher.js";
 import { ObsidianSync } from "@slopcontrol/obsidian";
 import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
@@ -385,19 +417,50 @@ function rejectIfDevelopInProgress(
   return true;
 }
 
-app.get("/health", (_req, res) => {
+app.get("/health", async (_req, res) => {
   const dataDir = defaultDataDir();
   const mastraPath = join(dataDir, "mastra.db");
   const mastraStorage = probeMastraDbFile(mastraPath);
+  let npmRegistry: {
+    enabled: boolean;
+    up: boolean;
+    url?: string;
+    status?: string;
+    packageCount?: number;
+  } = { enabled: false, up: false };
+  try {
+    const { refreshNpmRegistryStatus, getNpmRegistryStatus } = await import(
+      "./npm-registry.js"
+    );
+    const meta = isNpmRegistryEnvOff()
+      ? null
+      : await refreshNpmRegistryStatus(dataDir).catch(() => null);
+    const st = getNpmRegistryStatus(dataDir);
+    npmRegistry = {
+      enabled: st.enabled,
+      up: Boolean(meta?.status === "up" || st.up),
+      url: meta?.url ?? st.meta?.url,
+      status: meta?.status ?? st.meta?.status,
+      packageCount: st.packages.length,
+    };
+  } catch {
+    /* optional */
+  }
   res.json({
     ok: true,
     projects: store.listProjects().length,
     activeRuns: activeRuns.size,
     dataDir,
     mastraStorage,
+    npmRegistry,
     mcp: { path: "/mcp", transport: "streamable-http" },
   });
 });
+
+function isNpmRegistryEnvOff(): boolean {
+  const v = (process.env.SLOPCONTROL_NPM_REGISTRY ?? "1").trim().toLowerCase();
+  return v === "0" || v === "false" || v === "off" || v === "no";
+}
 
 // ===== Runs list (for dashboard) =====
 
@@ -790,6 +853,7 @@ app.post("/projects/:id/asks", async (req, res) => {
     req.body?.forceNew === true ||
     req.body?.newAsk === "true" ||
     req.body?.forceNew === "true";
+  const stream = wantsLiveStream(req);
 
   const now = new Date().toISOString();
   const userMsg = { role: "user" as const, content: message, at: now };
@@ -843,6 +907,15 @@ app.post("/projects/:id/asks", async (req, res) => {
     .slice(0, -1)
     .map((m) => ({ role: m.role, content: m.content }));
 
+  const bound = bindLiveTurn({
+    kind: "ask",
+    projectId: project.id,
+    sessionId: ask.id,
+    res,
+    stream,
+  });
+  let workingStubStarted = false;
+
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const { reply } = await orchestrator.askTurn({
@@ -850,15 +923,48 @@ app.post("/projects/:id/asks", async (req, res) => {
       askId: ask.id,
       message,
       history,
+      listProjects: () => store.listProjects(),
+      dataDir: defaultDataDir(),
+      abortSignal: bound.signal,
+      onProgress: (event) => {
+        bound.onProgress(event);
+        const line = askProgressLine(event);
+        if (!line) return;
+        const stub = workingStubFromBound(bound);
+        if (!workingStubStarted) {
+          ask = store.appendAskMessage(ask!.id, {
+            role: "assistant",
+            content: stub,
+            at: new Date().toISOString(),
+          }) ?? ask;
+          workingStubStarted = true;
+        } else {
+          ask =
+            store.replaceLastAssistantAskMessage(ask!.id, stub) ?? ask;
+        }
+        writeAskArtifacts(project.rootPath, ask!);
+      },
     });
-    const assistantMsg = {
-      role: "assistant" as const,
-      content: reply,
-      at: new Date().toISOString(),
-    };
-    ask = store.appendAskMessage(ask.id, assistantMsg) ?? ask;
+    const assistantAt = new Date().toISOString();
+    if (workingStubStarted) {
+      ask =
+        store.replaceLastAssistantAskMessage(ask.id, reply, assistantAt) ??
+        ask;
+    } else {
+      ask =
+        store.appendAskMessage(ask.id, {
+          role: "assistant",
+          content: reply,
+          at: assistantAt,
+        }) ?? ask;
+    }
     writeAskArtifacts(project.rootPath, ask);
-    res.json({ ask, reply, askId: ask.id });
+    if (stream) {
+      bound.completeDone({ reply, askId: ask.id, ask });
+      return;
+    }
+    liveTurns.complete(bound.turnId, "done");
+    res.json({ ask, reply, askId: ask.id, turnId: bound.turnId });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error("ask", "ask turn failed", {
@@ -866,9 +972,124 @@ app.post("/projects/:id/asks", async (req, res) => {
       askId: ask.id,
       error: errMsg,
     });
+
+    if (isLiveTurnInterruptedError(error)) {
+      const partial =
+        (error as { partialReply?: string }).partialReply?.trim() ||
+        workingStubFromBound(bound) ||
+        "Interrupted.";
+      const recovery = `${partial}\n\n---\nAsk interrupted (${liveTurns.get(bound.turnId)?.interruptReason ?? "operator_stop"}). Call ask again or narrow the question.`;
+      const assistantAt = new Date().toISOString();
+      if (workingStubStarted) {
+        ask =
+          store.replaceLastAssistantAskMessage(
+            ask.id,
+            recovery,
+            assistantAt,
+          ) ?? ask;
+      } else {
+        ask =
+          store.appendAskMessage(ask.id, {
+            role: "assistant",
+            content: recovery,
+            at: assistantAt,
+          }) ?? ask;
+      }
+      writeAskArtifacts(project.rootPath, ask);
+      if (stream) {
+        bound.completeInterrupted(recovery, { askId: ask.id, ask });
+        return;
+      }
+      liveTurns.complete(bound.turnId, "interrupted", {
+        partialReply: recovery,
+      });
+      res.status(499).json({
+        error: errMsg,
+        code: "interrupted",
+        reply: recovery,
+        ask,
+        askId: ask.id,
+        turnId: bound.turnId,
+      });
+      return;
+    }
+
+    if (isAskAgentTimeoutError(error)) {
+      const recovery = ASK_TIMEOUT_RECOVERY_MESSAGE;
+      const assistantAt = new Date().toISOString();
+      if (workingStubStarted) {
+        ask =
+          store.replaceLastAssistantAskMessage(
+            ask.id,
+            recovery,
+            assistantAt,
+          ) ?? ask;
+      } else {
+        ask =
+          store.appendAskMessage(ask.id, {
+            role: "assistant",
+            content: recovery,
+            at: assistantAt,
+          }) ?? ask;
+      }
+      writeAskArtifacts(project.rootPath, ask);
+      if (stream) {
+        bound.completeFailed(errMsg, {
+          code: "ask_timeout",
+          reply: recovery,
+          askId: ask.id,
+          ask,
+          hint: "retry_ask_or_narrow",
+        });
+        return;
+      }
+      liveTurns.complete(bound.turnId, "failed", { reason: errMsg });
+      res.status(504).json({
+        error: errMsg,
+        code: "ask_timeout",
+        reply: recovery,
+        hint: "retry_ask_or_narrow",
+        ask,
+        askId: ask.id,
+      });
+      return;
+    }
     writeAskArtifacts(project.rootPath, ask);
+    if (stream) {
+      bound.completeFailed(errMsg, { askId: ask.id, ask });
+      return;
+    }
+    liveTurns.complete(bound.turnId, "failed", { reason: errMsg });
     res.status(500).json({ error: errMsg, ask, askId: ask.id });
   }
+});
+
+app.post("/projects/:id/asks/:askId/stop", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const ask = store.getAsk(req.params.askId);
+  if (!ask || ask.projectId !== project.id) {
+    res.status(404).json({ error: "Ask not found" });
+    return;
+  }
+  const stopped = liveTurns.stop("ask", ask.id, "operator_stop");
+  if (!stopped) {
+    res.status(409).json({
+      error: "No active ask turn to stop",
+      askId: ask.id,
+    });
+    return;
+  }
+  res.json({
+    ok: true,
+    code: "interrupted",
+    askId: ask.id,
+    turnId: stopped.turnId,
+    reason: stopped.interruptReason,
+  });
 });
 
 app.post("/projects/:id/asks/:askId/fork", (req, res) => {
@@ -969,6 +1190,7 @@ app.post("/projects/:id/asks/:askId/promote", async (req, res) => {
       phase: store.getPhase(phase.id) ?? phase,
       run: store.getRun(run.id) ?? run,
       description,
+      listProjects: () => store.listProjects(),
       onStage: (s) => touchRunStage(run.id, s),
     });
     touchRunStage(run.id, stage);
@@ -1118,6 +1340,7 @@ app.post("/projects/:id/agents", async (req, res) => {
     typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
   const agentId =
     typeof req.body?.agentId === "string" ? req.body.agentId.trim() : "";
+  const stream = wantsLiveStream(req);
 
   const now = new Date().toISOString();
   const userMsg = { role: "user" as const, content: message, at: now };
@@ -1150,6 +1373,15 @@ app.post("/projects/:id/agents", async (req, res) => {
     .slice(0, -1)
     .map((m) => ({ role: m.role, content: m.content }));
 
+  const bound = bindLiveTurn({
+    kind: "agent",
+    projectId: project.id,
+    sessionId: agent.id,
+    res,
+    stream,
+  });
+  let workingStubStarted = false;
+
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const { reply } = await orchestrator.agentTurn({
@@ -1157,15 +1389,65 @@ app.post("/projects/:id/agents", async (req, res) => {
       agentId: agent.id,
       message,
       history,
+      listProjects: () => store.listProjects(),
+      dataDir: defaultDataDir(),
+      abortSignal: bound.signal,
+      onProgress: (event) => {
+        bound.onProgress(event);
+        const line = askProgressLine(event);
+        if (!line) return;
+        const stub = workingStubFromBound(bound);
+        if (!workingStubStarted) {
+          agent = store.appendAgentMessage(agent!.id, {
+            role: "assistant",
+            content: stub,
+            at: new Date().toISOString(),
+          }) ?? agent;
+          workingStubStarted = true;
+        } else {
+          const a = store.getAgent(agent!.id);
+          if (a && a.messages[a.messages.length - 1]?.role === "assistant") {
+            a.messages = [
+              ...a.messages.slice(0, -1),
+              {
+                role: "assistant",
+                content: stub,
+                at: new Date().toISOString(),
+              },
+            ];
+            store.updateAgent(a);
+            agent = a;
+          }
+        }
+        writeAgentArtifacts(project.rootPath, agent!);
+      },
     });
-    const assistantMsg = {
-      role: "assistant" as const,
-      content: reply,
-      at: new Date().toISOString(),
-    };
-    agent = store.appendAgentMessage(agent.id, assistantMsg) ?? agent;
+    const assistantAt = new Date().toISOString();
+    if (workingStubStarted) {
+      const a = store.getAgent(agent.id);
+      if (a && a.messages[a.messages.length - 1]?.role === "assistant") {
+        a.messages = [
+          ...a.messages.slice(0, -1),
+          { role: "assistant", content: reply, at: assistantAt },
+        ];
+        store.updateAgent(a);
+        agent = a;
+      }
+    } else {
+      agent =
+        store.appendAgentMessage(agent.id, {
+          role: "assistant",
+          content: reply,
+          at: assistantAt,
+        }) ?? agent;
+    }
     writeAgentArtifacts(project.rootPath, agent);
-    res.json({ agent, reply });
+    if (stream) {
+      bound.completeDone({ reply, agentId: agent.id, agent });
+      return;
+    }
+    liveTurns.complete(bound.turnId, "done");
+    res.json({ agent, reply, turnId: bound.turnId });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error("agent", "agent turn failed", {
@@ -1173,8 +1455,86 @@ app.post("/projects/:id/agents", async (req, res) => {
       agentId: agent.id,
       error: errMsg,
     });
+    if (isLiveTurnInterruptedError(error)) {
+      const partial =
+        (error as { partialReply?: string }).partialReply?.trim() ||
+        workingStubFromBound(bound) ||
+        "Interrupted.";
+      const reason =
+        liveTurns.get(bound.turnId)?.interruptReason ?? "operator_stop";
+      const recovery = `${partial}\n\n---\nAgent turn interrupted (${reason}). Call agent again or use stop_session next time to redirect sooner.`;
+      if (workingStubStarted) {
+        const a = store.getAgent(agent.id);
+        if (a && a.messages[a.messages.length - 1]?.role === "assistant") {
+          a.messages = [
+            ...a.messages.slice(0, -1),
+            {
+              role: "assistant",
+              content: recovery,
+              at: new Date().toISOString(),
+            },
+          ];
+          store.updateAgent(a);
+          agent = a;
+        }
+      } else {
+        agent =
+          store.appendAgentMessage(agent.id, {
+            role: "assistant",
+            content: recovery,
+            at: new Date().toISOString(),
+          }) ?? agent;
+      }
+      writeAgentArtifacts(project.rootPath, agent);
+      if (stream) {
+        bound.completeInterrupted(recovery, { agentId: agent.id, agent });
+        return;
+      }
+      liveTurns.complete(bound.turnId, "interrupted", {
+        partialReply: recovery,
+      });
+      res.status(499).json({
+        error: errMsg,
+        code: "interrupted",
+        reply: recovery,
+        agent,
+      });
+      return;
+    }
+    if (stream) {
+      bound.completeFailed(errMsg, { agent });
+      return;
+    }
+    liveTurns.complete(bound.turnId, "failed", { reason: errMsg });
     res.status(500).json({ error: errMsg, agent });
   }
+});
+
+app.post("/projects/:id/agents/:agentId/stop", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const agent = store.getAgent(req.params.agentId);
+  if (!agent || agent.projectId !== project.id) {
+    res.status(404).json({ error: "Agent session not found" });
+    return;
+  }
+  const stopped = liveTurns.stop("agent", agent.id, "operator_stop");
+  if (!stopped) {
+    res.status(409).json({
+      error: "No active agent turn to stop",
+      agentId: agent.id,
+    });
+    return;
+  }
+  res.json({
+    ok: true,
+    code: "interrupted",
+    agentId: agent.id,
+    turnId: stopped.turnId,
+  });
 });
 
 // ── Plan loops (chat → PLAN.md → accept → promote → research) ─────────────
@@ -1293,12 +1653,63 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const version = 1;
-    const { plan, notes, usedScaffold } = await orchestrator.planLoopGenerate({
-      project,
-      loopId: meta.id,
-      brief,
-      version,
+    const stream = wantsLiveStream(req);
+    const bound = bindLiveTurn({
+      kind: "plan_loop",
+      projectId: project.id,
+      sessionId: meta.id,
+      res,
+      stream,
     });
+    let plan: string;
+    let notes: string;
+    let usedScaffold: boolean;
+    try {
+      ({ plan, notes, usedScaffold } = await orchestrator.planLoopGenerate({
+        project,
+        loopId: meta.id,
+        brief,
+        version,
+        listProjects: () => store.listProjects(),
+        dataDir: defaultDataDir(),
+        abortSignal: bound.signal,
+        onProgress: bound.onProgress,
+      }));
+    } catch (genErr) {
+      if (isLiveTurnInterruptedError(genErr)) {
+        const reason =
+          liveTurns.get(bound.turnId)?.interruptReason ?? "operator_stop";
+        const partial =
+          (genErr as { partialReply?: string }).partialReply ||
+          "Plan generate interrupted.";
+        const recovery = `${partial}\n\n---\nPlan generate interrupted (${reason}). Call plan_loop_continue or plan_loop_retry with a narrower brief.`;
+        appendPlanLoopTranscript(
+          project.rootPath,
+          meta.id,
+          "assistant",
+          recovery,
+        );
+        if (stream) {
+          bound.completeInterrupted(recovery, {
+            loopId: meta.id,
+            notes: recovery,
+          });
+          return;
+        }
+        liveTurns.complete(bound.turnId, "interrupted", {
+          partialReply: recovery,
+        });
+        res.status(499).json({
+          error: "interrupted",
+          code: "interrupted",
+          loopId: meta.id,
+          notes: recovery,
+        });
+        return;
+      }
+      throw genErr;
+    }
+    if (!stream) liveTurns.complete(bound.turnId, "done");
     writePlanLoopVersion({
       projectRoot: project.rootPath,
       loopId: meta.id,
@@ -1336,7 +1747,7 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
       "assistant",
       `${notes}\n\n\`\`\`markdown\n${plan.slice(0, 4_000)}${plan.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
     );
-    res.status(201).json({
+    const planStartPayload = {
       loop: next,
       loopId: next.id,
       version,
@@ -1352,7 +1763,12 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
       transcript: readPlanLoopTranscript(project.rootPath, meta.id),
       versions: buildPlanLoopVersionTree(project.rootPath, meta.id),
       next: "Iterate with plan_loop_continue, tick acceptance, plan_loop_accept, then plan_loop_promote.",
-    });
+    };
+    if (stream) {
+      bound.completeDone(planStartPayload);
+      return;
+    }
+    res.status(201).json(planStartPayload);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error("plan-loop", "start failed", {
@@ -1421,14 +1837,65 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
       project.rootPath,
       working.id,
     );
-    const { plan, notes, usedScaffold } = await orchestrator.planLoopGenerate({
-      project,
-      loopId: working.id,
-      brief: working.brief,
-      message,
-      previousPlan: previousPlan ?? undefined,
-      version,
+    const stream = wantsLiveStream(req);
+    const bound = bindLiveTurn({
+      kind: "plan_loop",
+      projectId: project.id,
+      sessionId: working.id,
+      res,
+      stream,
     });
+    let plan: string;
+    let notes: string;
+    let usedScaffold: boolean;
+    try {
+      ({ plan, notes, usedScaffold } = await orchestrator.planLoopGenerate({
+        project,
+        loopId: working.id,
+        brief: working.brief,
+        message,
+        previousPlan: previousPlan ?? undefined,
+        version,
+        listProjects: () => store.listProjects(),
+        dataDir: defaultDataDir(),
+        abortSignal: bound.signal,
+        onProgress: bound.onProgress,
+      }));
+    } catch (genErr) {
+      if (isLiveTurnInterruptedError(genErr)) {
+        const reason =
+          liveTurns.get(bound.turnId)?.interruptReason ?? "operator_stop";
+        const partial =
+          (genErr as { partialReply?: string }).partialReply ||
+          "Plan continue interrupted.";
+        const recovery = `${partial}\n\n---\nPlan continue interrupted (${reason}). Call plan_loop_continue again or plan_loop_retry.`;
+        appendPlanLoopTranscript(
+          project.rootPath,
+          working.id,
+          "assistant",
+          recovery,
+        );
+        if (stream) {
+          bound.completeInterrupted(recovery, {
+            loopId: working.id,
+            notes: recovery,
+          });
+          return;
+        }
+        liveTurns.complete(bound.turnId, "interrupted", {
+          partialReply: recovery,
+        });
+        res.status(499).json({
+          error: "interrupted",
+          code: "interrupted",
+          loopId: working.id,
+          notes: recovery,
+        });
+        return;
+      }
+      throw genErr;
+    }
+    if (!stream) liveTurns.complete(bound.turnId, "done");
     writePlanLoopVersion({
       projectRoot: project.rootPath,
       loopId: working.id,
@@ -1467,7 +1934,7 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
       "assistant",
       `${notes}\n\n\`\`\`markdown\n${plan.slice(0, 4_000)}${plan.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
     );
-    res.json({
+    const planContinuePayload = {
       loop: next,
       loopId: next.id,
       version,
@@ -1482,7 +1949,12 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
       next: "Tick features, plan_loop_accept, then plan_loop_promote.",
       transcript: readPlanLoopTranscript(project.rootPath, working.id),
       versions: buildPlanLoopVersionTree(project.rootPath, working.id),
-    });
+    };
+    if (stream) {
+      bound.completeDone(planContinuePayload);
+      return;
+    }
+    res.json(planContinuePayload);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error("plan-loop", "continue failed", {
@@ -1492,6 +1964,34 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
     });
     res.status(500).json({ error: errMsg, loop: working, loopId: working.id });
   }
+});
+
+
+app.post("/projects/:id/plan-loops/:loopId/stop", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readPlanLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Plan loop not found" });
+    return;
+  }
+  const stopped = liveTurns.stop("plan_loop", meta.id, "operator_stop");
+  if (!stopped) {
+    res.status(409).json({
+      error: "No active plan-loop turn to stop",
+      loopId: meta.id,
+    });
+    return;
+  }
+  res.json({
+    ok: true,
+    code: "interrupted",
+    loopId: meta.id,
+    turnId: stopped.turnId,
+  });
 });
 
 app.put("/projects/:id/plan-loops/:loopId/acceptance", (req, res) => {
@@ -1585,6 +2085,15 @@ app.post("/projects/:id/plan-loops/:loopId/accept", (req, res) => {
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
+    if (errMsg.includes(PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR) || /usedScaffold|failure plan/i.test(errMsg)) {
+      res.status(409).json({
+        error: errMsg,
+        loop: meta,
+        loopId: meta.id,
+        hint: "plan_loop_retry",
+      });
+      return;
+    }
     res.status(400).json({ error: errMsg, loop: meta, loopId: meta.id });
   }
 });
@@ -1606,6 +2115,19 @@ app.post("/projects/:id/plan-loops/:loopId/promote", async (req, res) => {
       loop: meta,
       loopId: meta.id,
       hint: "plan_loop_accept",
+    });
+    return;
+  }
+  const promoteVersion = meta.acceptedVersion ?? meta.currentVersion;
+  try {
+    assertPlanLoopVersionAcceptable(project.rootPath, meta.id, promoteVersion);
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    res.status(409).json({
+      error: errMsg,
+      loop: meta,
+      loopId: meta.id,
+      hint: "plan_loop_retry",
     });
     return;
   }
@@ -1666,7 +2188,8 @@ app.post("/projects/:id/plan-loops/:loopId/promote", async (req, res) => {
             phase: store.getPhase(phase.id) ?? phase,
             run: store.getRun(run!.id) ?? run!,
             description,
-            onStage: (s) => touchRunStage(run!.id, s),
+            listProjects: () => store.listProjects(),
+      onStage: (s) => touchRunStage(run!.id, s),
           });
           touchRunStage(run!.id, stage);
           updatePhaseStatus(
@@ -1713,6 +2236,15 @@ app.post("/projects/:id/plan-loops/:loopId/promote", async (req, res) => {
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
+    if (errMsg.includes(PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR) || /usedScaffold|failure plan/i.test(errMsg)) {
+      res.status(409).json({
+        error: errMsg,
+        loop: meta,
+        loopId: meta.id,
+        hint: "plan_loop_retry",
+      });
+      return;
+    }
     res.status(400).json({ error: errMsg, loop: meta, loopId: meta.id });
   }
 });
@@ -1743,14 +2275,65 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
     readPlanLoopRequest(project.rootPath, meta.id, version) ?? meta.brief;
   try {
     const { orchestrator } = getRuntime(project.rootPath);
-    const { plan, notes, usedScaffold } = await orchestrator.planLoopGenerate({
-      project,
-      loopId: meta.id,
-      brief: meta.brief,
-      message: version > 1 ? request : undefined,
-      previousPlan: previousPlan ?? undefined,
-      version,
+    const stream = wantsLiveStream(req);
+    const bound = bindLiveTurn({
+      kind: "plan_loop",
+      projectId: project.id,
+      sessionId: meta.id,
+      res,
+      stream,
     });
+    let plan: string;
+    let notes: string;
+    let usedScaffold: boolean;
+    try {
+      ({ plan, notes, usedScaffold } = await orchestrator.planLoopGenerate({
+        project,
+        loopId: meta.id,
+        brief: meta.brief,
+        message: version > 1 ? request : undefined,
+        previousPlan: previousPlan ?? undefined,
+        version,
+        listProjects: () => store.listProjects(),
+        dataDir: defaultDataDir(),
+        abortSignal: bound.signal,
+        onProgress: bound.onProgress,
+      }));
+    } catch (genErr) {
+      if (isLiveTurnInterruptedError(genErr)) {
+        const reason =
+          liveTurns.get(bound.turnId)?.interruptReason ?? "operator_stop";
+        const partial =
+          (genErr as { partialReply?: string }).partialReply ||
+          "Plan retry interrupted.";
+        const recovery = `${partial}\n\n---\nPlan retry interrupted (${reason}). Call plan_loop_retry again.`;
+        appendPlanLoopTranscript(
+          project.rootPath,
+          meta.id,
+          "assistant",
+          recovery,
+        );
+        if (stream) {
+          bound.completeInterrupted(recovery, {
+            loopId: meta.id,
+            notes: recovery,
+          });
+          return;
+        }
+        liveTurns.complete(bound.turnId, "interrupted", {
+          partialReply: recovery,
+        });
+        res.status(499).json({
+          error: "interrupted",
+          code: "interrupted",
+          loopId: meta.id,
+          notes: recovery,
+        });
+        return;
+      }
+      throw genErr;
+    }
+    if (!stream) liveTurns.complete(bound.turnId, "done");
     writePlanLoopVersion({
       projectRoot: project.rootPath,
       loopId: meta.id,
@@ -1775,7 +2358,7 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
           ? { version, reason: notes, at: new Date().toISOString() }
           : null,
       ) ?? meta;
-    res.json({
+    const retryPayload = {
       loop: next,
       loopId: next.id,
       version,
@@ -1783,7 +2366,12 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
       notes,
       usedScaffold,
       hint: usedScaffold ? "plan_loop_retry" : undefined,
-    });
+    };
+    if (stream) {
+      bound.completeDone(retryPayload);
+      return;
+    }
+    res.json(retryPayload);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: errMsg, loop: meta, loopId: meta.id });
@@ -2276,15 +2864,69 @@ app.post("/projects/:id/design-loops", async (req, res) => {
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const version = 1;
-    const { html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
-      project,
-      loopId: meta.id,
-      brief,
-      version,
-      listProjects: () => store.listProjects(),
-      findProjectByRootPath: (rootPath) =>
-        store.findProjectByRootPath(rootPath),
+    const stream = wantsLiveStream(req);
+    const bound = bindLiveTurn({
+      kind: "design_loop",
+      projectId: project.id,
+      sessionId: meta.id,
+      res,
+      stream,
     });
+    let html: string;
+    let notes: string;
+    let usedScaffold: boolean;
+    try {
+      ({ html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
+        project,
+        loopId: meta.id,
+        brief,
+        version,
+        listProjects: () => store.listProjects(),
+        findProjectByRootPath: (rootPath) =>
+          store.findProjectByRootPath(rootPath),
+        dataDir: defaultDataDir(),
+        abortSignal: bound.signal,
+        onProgress: bound.onProgress,
+      }));
+    } catch (genErr) {
+      if (isLiveTurnInterruptedError(genErr)) {
+        const reason =
+          liveTurns.get(bound.turnId)?.interruptReason ?? "operator_stop";
+        const partial =
+          (genErr as { partialReply?: string }).partialReply ||
+          "Design generate interrupted.";
+        const recovery = `${partial}\n\n---\nDesign generate interrupted (${reason}). Call design_loop_continue or design_loop_retry.`;
+        appendDesignLoopTranscript(
+          project.rootPath,
+          meta.id,
+          "assistant",
+          recovery,
+        );
+        if (stream) {
+          bound.completeInterrupted(recovery, {
+            loopId: meta.id,
+            notes: recovery,
+          });
+          return;
+        }
+        liveTurns.complete(bound.turnId, "interrupted", {
+          partialReply: recovery,
+        });
+        res.status(499).json({
+          error: "interrupted",
+          code: "interrupted",
+          loopId: meta.id,
+          notes: recovery,
+        });
+        return;
+      }
+      throw genErr;
+    }
+    if (stream) {
+      // fall through to write version then SSE done below — mark after artifacts
+    } else {
+      liveTurns.complete(bound.turnId, "done");
+    }
     writeDesignLoopVersion({
       projectRoot: project.rootPath,
       loopId: meta.id,
@@ -2330,7 +2972,7 @@ app.post("/projects/:id/design-loops", async (req, res) => {
       readLiveSiteInventory(project.rootPath, next.id) ??
       buildLiveSiteInventory(project.rootPath);
     const startPack = readDesignLoopPack(project.rootPath, next.id);
-    res.status(201).json({
+    const startPayload = {
       loop: next,
       loopId: next.id,
       version,
@@ -2352,7 +2994,12 @@ app.post("/projects/:id/design-loops", async (req, res) => {
       transcript: readDesignLoopTranscript(project.rootPath, meta.id),
       versions: buildDesignLoopVersionTree(project.rootPath, meta.id),
       siteInventory: summarizeLiveSiteInventory(siteInv),
-    });
+    };
+    if (stream) {
+      bound.completeDone(startPayload);
+      return;
+    }
+    res.status(201).json(startPayload);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error("design-loop", "start failed", {
@@ -2435,17 +3082,67 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
       project.rootPath,
       working.id,
     );
-    const { html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
-      project,
-      loopId: working.id,
-      brief: working.brief,
-      message,
-      previousHtml: previousHtml ?? undefined,
-      version,
-      listProjects: () => store.listProjects(),
-      findProjectByRootPath: (rootPath) =>
-        store.findProjectByRootPath(rootPath),
+    const stream = wantsLiveStream(req);
+    const bound = bindLiveTurn({
+      kind: "design_loop",
+      projectId: project.id,
+      sessionId: working.id,
+      res,
+      stream,
     });
+    let html: string;
+    let notes: string;
+    let usedScaffold: boolean;
+    try {
+      ({ html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
+        project,
+        loopId: working.id,
+        brief: working.brief,
+        message,
+        previousHtml: previousHtml ?? undefined,
+        version,
+        listProjects: () => store.listProjects(),
+        findProjectByRootPath: (rootPath) =>
+          store.findProjectByRootPath(rootPath),
+        dataDir: defaultDataDir(),
+        abortSignal: bound.signal,
+        onProgress: bound.onProgress,
+      }));
+    } catch (genErr) {
+      if (isLiveTurnInterruptedError(genErr)) {
+        const reason =
+          liveTurns.get(bound.turnId)?.interruptReason ?? "operator_stop";
+        const partial =
+          (genErr as { partialReply?: string }).partialReply ||
+          "Design continue interrupted.";
+        const recovery = `${partial}\n\n---\nDesign continue interrupted (${reason}). Call design_loop_continue again or design_loop_retry.`;
+        appendDesignLoopTranscript(
+          project.rootPath,
+          working.id,
+          "assistant",
+          recovery,
+        );
+        if (stream) {
+          bound.completeInterrupted(recovery, {
+            loopId: working.id,
+            notes: recovery,
+          });
+          return;
+        }
+        liveTurns.complete(bound.turnId, "interrupted", {
+          partialReply: recovery,
+        });
+        res.status(499).json({
+          error: "interrupted",
+          code: "interrupted",
+          loopId: working.id,
+          notes: recovery,
+        });
+        return;
+      }
+      throw genErr;
+    }
+    if (!stream) liveTurns.complete(bound.turnId, "done");
     writeDesignLoopVersion({
       projectRoot: project.rootPath,
       loopId: working.id,
@@ -2492,7 +3189,7 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
       readLiveSiteInventory(project.rootPath, next.id) ??
       buildLiveSiteInventory(project.rootPath);
     const continuePack = readDesignLoopPack(project.rootPath, next.id);
-    res.json({
+    const continuePayload = {
       loop: next,
       loopId: next.id,
       version,
@@ -2517,7 +3214,12 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
       next: "Tick features (PUT .../acceptance), design_loop_accept, then implement_design.",
       transcript: readDesignLoopTranscript(project.rootPath, working.id),
       versions: buildDesignLoopVersionTree(project.rootPath, working.id),
-    });
+    };
+    if (stream) {
+      bound.completeDone(continuePayload);
+      return;
+    }
+    res.json(continuePayload);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error("design-loop", "continue failed", {
@@ -2527,6 +3229,34 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
     });
     res.status(500).json({ error: errMsg, loop: working, loopId: working.id });
   }
+});
+
+
+app.post("/projects/:id/design-loops/:loopId/stop", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  const stopped = liveTurns.stop("design_loop", meta.id, "operator_stop");
+  if (!stopped) {
+    res.status(409).json({
+      error: "No active design-loop turn to stop",
+      loopId: meta.id,
+    });
+    return;
+  }
+  res.json({
+    ok: true,
+    code: "interrupted",
+    loopId: meta.id,
+    turnId: stopped.turnId,
+  });
 });
 
 app.get("/projects/:id/design-loops/:loopId/versions", (req, res) => {
@@ -2678,17 +3408,67 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const isFirst = version === 1;
-    const { html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
-      project,
-      loopId: meta.id,
-      brief: isFirst ? requestText : meta.brief,
-      message: isFirst ? undefined : requestText,
-      previousHtml: previousHtml ?? undefined,
-      version,
-      listProjects: () => store.listProjects(),
-      findProjectByRootPath: (rootPath) =>
-        store.findProjectByRootPath(rootPath),
+    const stream = wantsLiveStream(req);
+    const bound = bindLiveTurn({
+      kind: "design_loop",
+      projectId: project.id,
+      sessionId: meta.id,
+      res,
+      stream,
     });
+    let html: string;
+    let notes: string;
+    let usedScaffold: boolean;
+    try {
+      ({ html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
+        project,
+        loopId: meta.id,
+        brief: isFirst ? requestText : meta.brief,
+        message: isFirst ? undefined : requestText,
+        previousHtml: previousHtml ?? undefined,
+        version,
+        listProjects: () => store.listProjects(),
+        findProjectByRootPath: (rootPath) =>
+          store.findProjectByRootPath(rootPath),
+        dataDir: defaultDataDir(),
+        abortSignal: bound.signal,
+        onProgress: bound.onProgress,
+      }));
+    } catch (genErr) {
+      if (isLiveTurnInterruptedError(genErr)) {
+        const reason =
+          liveTurns.get(bound.turnId)?.interruptReason ?? "operator_stop";
+        const partial =
+          (genErr as { partialReply?: string }).partialReply ||
+          "Design retry interrupted.";
+        const recovery = `${partial}\n\n---\nDesign retry interrupted (${reason}). Call design_loop_retry again.`;
+        appendDesignLoopTranscript(
+          project.rootPath,
+          meta.id,
+          "assistant",
+          recovery,
+        );
+        if (stream) {
+          bound.completeInterrupted(recovery, {
+            loopId: meta.id,
+            notes: recovery,
+          });
+          return;
+        }
+        liveTurns.complete(bound.turnId, "interrupted", {
+          partialReply: recovery,
+        });
+        res.status(499).json({
+          error: "interrupted",
+          code: "interrupted",
+          loopId: meta.id,
+          notes: recovery,
+        });
+        return;
+      }
+      throw genErr;
+    }
+    if (!stream) liveTurns.complete(bound.turnId, "done");
 
     writeDesignLoopVersion({
       projectRoot: project.rootPath,
@@ -2732,7 +3512,7 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
       "assistant",
       `Retry v${version} result:\n${notes}\n\n\`\`\`html\n${html.slice(0, 4_000)}${html.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
     );
-    res.json({
+    const retryPayload = {
       loop: next,
       loopId: next.id,
       version,
@@ -2746,7 +3526,12 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
       hint: usedScaffold ? "design_loop_retry" : undefined,
       transcript: readDesignLoopTranscript(project.rootPath, meta.id),
       versions: buildDesignLoopVersionTree(project.rootPath, meta.id),
-    });
+    };
+    if (stream) {
+      bound.completeDone(retryPayload);
+      return;
+    }
+    res.json(retryPayload);
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error("design-loop", "retry failed", {
@@ -2923,6 +3708,469 @@ app.post("/projects/:id/design-loops/:loopId/import-design", async (req, res) =>
   });
 });
 
+/** Unified cross-project elements + npm packages + registered projects. */
+app.get("/projects/:id/cross-deps", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const catalog = buildCrossProjectCatalog({
+    targetRoot: project.rootPath,
+    dataDir: defaultDataDir(),
+    listProjects: () => store.listProjects(),
+  });
+  const filterId =
+    typeof req.query.projectId === "string" ? req.query.projectId : undefined;
+  const projects = filterId
+    ? catalog.projects.filter((p) => p.id === filterId || p.name === filterId)
+    : catalog.projects;
+  const elements = filterId
+    ? catalog.elements.filter(
+        (e) =>
+          e.projectName === filterId ||
+          e.origin.includes(filterId) ||
+          projects.some((p) => p.name === e.projectName),
+      )
+    : catalog.elements;
+  res.json({
+    projectId: project.id,
+    registryUrl: catalog.registryUrl,
+    elements,
+    npmPackages: catalog.npmPackages,
+    projects,
+    neverNpmLink: true,
+    hint: "Prefer npm_registry_ensure_rc → pnpm add @jam/… or design_element_import. Never npm link.",
+  });
+});
+
+app.post("/projects/:id/resolve-dependency", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const body = (req.body ?? {}) as {
+    text?: string;
+    elementId?: string;
+    packageName?: string;
+    fromName?: string;
+  };
+  const catalog = buildCrossProjectCatalog({
+    targetRoot: project.rootPath,
+    dataDir: defaultDataDir(),
+    listProjects: () => store.listProjects(),
+  });
+  const resolved = resolveDependencyRecommendation({
+    text: body.text,
+    elementId: body.elementId,
+    packageName: body.packageName,
+    fromName: body.fromName,
+    catalog,
+    intent: body.text
+      ? detectDependencyIntentFromText(body.text)
+      : undefined,
+  });
+  res.json({
+    projectId: project.id,
+    intent: resolved.intent,
+    recommended: resolved.recommended,
+    neverNpmLink: true,
+    nextActions: [
+      "npm_registry_ensure_rc",
+      "design_element_import / list_design_elements",
+      "pnpm add @jam/… (after ensure_rc)",
+    ],
+  });
+});
+
+/** List design elements (project library + optional registry). */
+app.get("/projects/:id/design-elements", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const includeRegistry = req.query.includeRegistry !== "false";
+  res.json({
+    projectId: project.id,
+    projectElements: listProjectElements(project.rootPath),
+    registryElements: includeRegistry
+      ? listRegistryElements(defaultDataDir())
+      : [],
+    projectLibrary: projectElementsRoot(project.rootPath),
+    registryLibrary: registryElementsRoot(defaultDataDir()),
+  });
+});
+
+app.get("/projects/:id/design-elements/:elementId", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const version = req.query.version
+    ? Number(req.query.version)
+    : undefined;
+  const origin =
+    typeof req.query.origin === "string" ? req.query.origin : undefined;
+  const bundle = resolveDesignElement({
+    elementId: req.params.elementId,
+    version: Number.isFinite(version) ? version : undefined,
+    origin,
+    targetRoot: project.rootPath,
+    dataDir: defaultDataDir(),
+    listProjects: () => store.listProjects(),
+  });
+  if (!bundle) {
+    res.status(404).json({ error: "Design element not found" });
+    return;
+  }
+  res.json({
+    meta: bundle.meta,
+    spec: bundle.spec,
+    mockHtml: bundle.mockHtml,
+    tokensCss: bundle.tokensCss,
+    srcFiles: Object.keys(bundle.srcFiles),
+    hasCode: bundle.meta.hasCode,
+    rootPath: bundle.rootPath,
+  });
+});
+
+app.post("/projects/:id/design-elements/publish", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const elementId =
+    typeof req.body?.elementId === "string" ? req.body.elementId.trim() : "";
+  const mockHtml =
+    typeof req.body?.mockHtml === "string" ? req.body.mockHtml : "";
+  const spec = typeof req.body?.spec === "string" ? req.body.spec : "";
+  if (!elementId || !mockHtml.trim() || !spec.trim()) {
+    res.status(400).json({
+      error: "elementId, mockHtml, and spec are required (or use extract)",
+    });
+    return;
+  }
+  const srcFiles =
+    req.body?.srcFiles && typeof req.body.srcFiles === "object"
+      ? (req.body.srcFiles as Record<string, string>)
+      : undefined;
+  try {
+    const meta = publishDesignElement({
+      projectRoot: project.rootPath,
+      elementId,
+      kind: req.body?.kind,
+      label: typeof req.body?.label === "string" ? req.body.label : undefined,
+      spec,
+      mockHtml,
+      tokensCss:
+        typeof req.body?.tokensCss === "string" ? req.body.tokensCss : undefined,
+      srcFiles,
+      states: Array.isArray(req.body?.states) ? req.body.states : undefined,
+      a11y: Array.isArray(req.body?.a11y) ? req.body.a11y : undefined,
+      mountHints: Array.isArray(req.body?.mountHints)
+        ? req.body.mountHints
+        : undefined,
+      themeRequirements: Array.isArray(req.body?.themeRequirements)
+        ? req.body.themeRequirements
+        : undefined,
+      publishToRegistry: Boolean(req.body?.publishToRegistry),
+      dataDir: defaultDataDir(),
+      sourceProjectId: project.id,
+    });
+    res.json({
+      ok: true,
+      meta,
+      next: meta.hasCode
+        ? "Consumers can import this element; implement prefers src/ TS/JS."
+        : "Consumers import + implement from SPEC + mock.",
+    });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+app.post("/projects/:id/design-loops/:loopId/elements/extract", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const loopMeta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!loopMeta || loopMeta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  const publish = req.body?.publish !== false;
+  try {
+    if (publish) {
+      const meta = extractAndPublishDesignElementFromLoop({
+        projectRoot: project.rootPath,
+        loopId: loopMeta.id,
+        version:
+          typeof req.body?.version === "number"
+            ? req.body.version
+            : undefined,
+        elementId:
+          typeof req.body?.elementId === "string"
+            ? req.body.elementId
+            : undefined,
+        kind: req.body?.kind,
+        label: typeof req.body?.label === "string" ? req.body.label : undefined,
+        publishToRegistry: Boolean(req.body?.publishToRegistry),
+        dataDir: defaultDataDir(),
+        sourceProjectId: project.id,
+      });
+      res.json({
+        ok: true,
+        published: true,
+        meta,
+        next: "Import into consumer loops with design_element_import or chat 'use theme-toggle from jamroast'.",
+      });
+      return;
+    }
+    const version =
+      typeof req.body?.version === "number"
+        ? req.body.version
+        : loopMeta.currentVersion;
+    const html =
+      readDesignLoopMockHtml(project.rootPath, loopMeta.id, version) ?? "";
+    const extracted = extractDesignElementFromMock({
+      html,
+      elementId:
+        typeof req.body?.elementId === "string"
+          ? req.body.elementId
+          : undefined,
+      kind: req.body?.kind,
+      label: typeof req.body?.label === "string" ? req.body.label : undefined,
+      brief: loopMeta.brief,
+    });
+    res.json({ ok: true, published: false, extracted });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+app.post("/projects/:id/design-loops/:loopId/elements/import", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const loopMeta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!loopMeta || loopMeta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  const elementId =
+    typeof req.body?.elementId === "string"
+      ? req.body.elementId.trim()
+      : "theme-toggle";
+  const origin =
+    typeof req.body?.origin === "string" ? req.body.origin : undefined;
+  const version =
+    typeof req.body?.version === "number" ? req.body.version : undefined;
+  const bundle = resolveDesignElement({
+    elementId,
+    version,
+    origin,
+    targetRoot: project.rootPath,
+    dataDir: defaultDataDir(),
+    listProjects: () => store.listProjects(),
+  });
+  if (!bundle) {
+    res.status(404).json({
+      error: `Could not resolve element ${elementId}`,
+      hint: "Publish from a brand project first, or pass origin=registry|project:jamroast",
+    });
+    return;
+  }
+  const ref = importDesignElementIntoLoop({
+    targetRoot: project.rootPath,
+    loopId: loopMeta.id,
+    bundle,
+    origin: origin?.startsWith("registry")
+      ? "registry"
+      : "project",
+    sourceName: bundle.meta.sourceRootPath
+      ? basename(bundle.meta.sourceRootPath)
+      : undefined,
+  });
+  res.json({
+    ok: true,
+    element: ref,
+    elements: readDesignLoopElements(project.rootPath, loopMeta.id),
+    promptBlock: formatDesignElementsPromptBlock(
+      readDesignLoopElements(project.rootPath, loopMeta.id),
+      { projectRoot: project.rootPath, loopId: loopMeta.id },
+    ),
+    next: "Continue the design loop — SHARED ELEMENTS must be embedded once (no inventing a second toggle).",
+  });
+});
+
+// ===== Private npm registry (Verdaccio) =====
+
+app.get("/npm-registry", async (_req, res) => {
+  try {
+    const { refreshNpmRegistryStatus, getNpmRegistryStatus } = await import(
+      "./npm-registry.js"
+    );
+    const dataDir = defaultDataDir();
+    const meta = isNpmRegistryEnvOff()
+      ? ensureNpmRegistryLayout(dataDir)
+      : await refreshNpmRegistryStatus(dataDir);
+    const st = getNpmRegistryStatus(dataDir);
+    res.json({
+      enabled: st.enabled && !isNpmRegistryEnvOff(),
+      meta,
+      up: meta.status === "up",
+      packages: st.packages,
+      scopes: meta.scopes,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+app.post("/npm-registry/start", async (_req, res) => {
+  try {
+    const { startNpmRegistry } = await import("./npm-registry.js");
+    const meta = await startNpmRegistry(defaultDataDir());
+    res.json({ ok: true, meta, up: meta.status === "up" });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+app.post("/npm-registry/stop", async (_req, res) => {
+  try {
+    const { stopNpmRegistry } = await import("./npm-registry.js");
+    const meta = await stopNpmRegistry(defaultDataDir());
+    res.json({ ok: true, meta });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+app.post("/npm-registry/ensure-rc", (req, res) => {
+  const projectId =
+    typeof req.body?.projectId === "string" ? req.body.projectId.trim() : "";
+  const project = projectId ? store.getProject(projectId) : null;
+  if (!project) {
+    res.status(404).json({ error: "Project not found (pass projectId)" });
+    return;
+  }
+  const meta =
+    readNpmRegistryMeta(defaultDataDir()) ??
+    ensureNpmRegistryLayout(defaultDataDir());
+  const result = ensureProjectNpmrc({
+    projectRoot: project.rootPath,
+    registryUrl: meta.url,
+    authToken: meta.authToken,
+    scopes: meta.scopes,
+  });
+  res.json({
+    ok: true,
+    path: result.path,
+    registryUrl: meta.url,
+    scopes: meta.scopes,
+    hint: "Add .npmrc to .gitignore if it should not be committed. Then: pnpm add @jam/<pkg>",
+  });
+});
+
+app.get("/npm-registry/packages", (_req, res) => {
+  const dataDir = defaultDataDir();
+  ensureNpmRegistryLayout(dataDir);
+  res.json({
+    packages: listNpmRegistryPackages(dataDir),
+    meta: readNpmRegistryMeta(dataDir),
+  });
+});
+
+app.post("/npm-registry/publish", async (req, res) => {
+  const packageDir =
+    typeof req.body?.packageDir === "string" ? req.body.packageDir.trim() : "";
+  if (!packageDir || !existsSync(packageDir)) {
+    res.status(400).json({ error: "packageDir must be an existing directory" });
+    return;
+  }
+  try {
+    const { publishToNpmRegistry } = await import("./npm-registry.js");
+    const result = await publishToNpmRegistry({
+      dataDir: defaultDataDir(),
+      packageDir,
+      tag: typeof req.body?.tag === "string" ? req.body.tag : undefined,
+    });
+    res.json({
+      ok: true,
+      stdout: result.stdout.slice(0, 2_000),
+      registryUrl: result.meta.url,
+      packages: listNpmRegistryPackages(defaultDataDir()),
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+app.post("/projects/:id/design-elements/:elementId/publish-npm", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const elementId = req.params.elementId;
+  const version =
+    typeof req.body?.version === "number" ? req.body.version : undefined;
+  try {
+    const prepared = prepareDesignElementNpmPackage({
+      projectRoot: project.rootPath,
+      elementId,
+      version,
+    });
+    const { publishToNpmRegistry } = await import("./npm-registry.js");
+    const published = await publishToNpmRegistry({
+      dataDir: defaultDataDir(),
+      packageDir: prepared.packageRoot,
+    });
+    const meta = recordDesignElementNpmPublish({
+      projectRoot: project.rootPath,
+      elementId: prepared.meta.id,
+      version: prepared.meta.version,
+      npmPackage: prepared.packageName,
+      npmVersion: prepared.packageVersion,
+    });
+    res.json({
+      ok: true,
+      meta,
+      packageName: prepared.packageName,
+      packageVersion: prepared.packageVersion,
+      registryUrl: published.meta.url,
+      stdout: published.stdout.slice(0, 1_500),
+      next: `On consumers: npm_registry_ensure_rc then pnpm add ${prepared.packageName}@${prepared.packageVersion}`,
+    });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+      hint: `Publish the element first (design_element_publish / extract). Package name: ${jamPackageNameForElement(elementId)}`,
+    });
+  }
+});
+
 app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
   const project = store.getProject(req.params.id);
   if (!project) {
@@ -3007,6 +4255,7 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
             phase: phase!,
             run: run!,
             description: meta.brief,
+            listProjects: () => store.listProjects(),
             onStage: (s) => touchRunStage(run!.id, s),
           });
           // Final stage (in_review / failed) is returned, not always pushed via onStage.
@@ -4097,7 +5346,8 @@ app.post("/runs", async (req, res) => {
           phase: store.getPhase(phase.id) ?? phase,
           run: store.getRun(run.id) ?? run,
           description: action.description,
-          onStage: (s) => touchRunStage(run.id, s),
+          listProjects: () => store.listProjects(),
+      onStage: (s) => touchRunStage(run.id, s),
         });
         touchRunStage(run.id, stage);
         updatePhaseStatus(phase.id, stage === "in_review" ? "in_review" : "draft");
@@ -4248,6 +5498,7 @@ app.post("/runs", async (req, res) => {
             phase: store.getPhase(phase.id) ?? phase,
             run: store.getRun(run.id) ?? run,
             signal,
+            listProjects: () => store.listProjects(),
             autoDesign: action.autoDesign,
           });
 
@@ -4442,6 +5693,7 @@ app.post("/runs", async (req, res) => {
             phase: store.getPhase(phase.id) ?? phase,
             run: store.getRun(run.id) ?? run,
             signal,
+            listProjects: () => store.listProjects(),
           });
           const latestPhase = store.getPhase(phase.id);
           if (latestPhase) {
@@ -4547,7 +5799,8 @@ app.post("/runs", async (req, res) => {
           phase,
           run,
           description: phase.description,
-          onStage: (s) => touchRunStage(run.id, s),
+          listProjects: () => store.listProjects(),
+      onStage: (s) => touchRunStage(run.id, s),
         });
         touchRunStage(run.id, stage);
         updatePhaseStatus(phase.id, stage === "in_review" ? "in_review" : "draft");
@@ -4877,9 +6130,24 @@ app.post("/runs", async (req, res) => {
 });
 
 app.listen(PORT, () => {
+  startLiveTurnWatcher();
   log.info("server", `listening on http://localhost:${PORT}`, {
     dataDir: defaultDataDir(),
     logLevel: process.env.SLOPCONTROL_LOG_LEVEL ?? "info",
     ollamaApiKey: process.env.OLLAMA_API_KEY ? "set" : "NOT set",
   });
+  void import("./npm-registry.js")
+    .then(({ autoStartNpmRegistry }) =>
+      autoStartNpmRegistry(defaultDataDir()),
+    )
+    .then(() => {
+      log.info("npm-registry", "auto-start attempted", {
+        dataDir: defaultDataDir(),
+      });
+    })
+    .catch((err) => {
+      log.warn("npm-registry", "auto-start failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
 });

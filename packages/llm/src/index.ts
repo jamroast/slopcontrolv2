@@ -246,4 +246,5 @@ export * from "./json-chat.js";
 export * from "./intent-extract.js";
 export * from "./continue-intent-llm.js";
 export * from "./plan-continue-intent-llm.js";
+export * from "./dependency-intent-llm.js";
 export * from "@slopcontrol/types";

@@ -21,9 +21,10 @@ Classification rules:
 - chrome-hide: hide empty form / tab strip / chrome when nothing to gather — no fill/submit contract. Set needsInteraction false. Prefer uiMount "composer".
 - engagement: broken or missing fill/submit / populate / validate on forms at a mount. Set needsInteraction true.
 - backend: non-UI / infrastructure / API-only (DB, migrations, env, servers). needsInteraction false; uiMount usually "n/a".
-- other: UI or product change that is neither chrome-hide nor engagement — INCLUDING brand, theming, logo, palette, design-system, look-and-feel. Never classify brand/theming/logo as backend.
+- other: UI or product change that is neither chrome-hide nor engagement — INCLUDING brand, theming, logo, palette, design-system, look-and-feel, theme toggle / light-dark switch, landing-page chrome. Never classify brand/theming/logo as backend. Set needsInteraction false.
 - Multilingual OK (Afrikaans, English, mixed).
 - Do NOT invent needsInteraction=true for chrome-hide or backend.
+- Do NOT set needsInteraction for non-form clicks (theme toggle, nav links, decorative controls) — clickable ≠ fill/submit form contract.
 - Do NOT use status/roadmap questions or promote boilerplate ("generate a task to promote…") as the title — use the product work (e.g. "Port JamPress theming + cleaner logo").`;
 
 export interface ExtractChangeIntentViaLlmOptions {

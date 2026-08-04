@@ -15,8 +15,16 @@ import {
   type PlanLoopMeta,
   type PlanScope,
 } from "./plan-loop.js";
+import { parsePlanDependencyLines } from "./cross-project-catalog.js";
 
 const SLOP_DIR = ".slopcontrol";
+
+export type PlanPackDependency = {
+  kind: "element" | "npm" | "project";
+  id: string;
+  version?: string;
+  from?: string;
+};
 
 export type PlanPack = {
   name: string;
@@ -32,6 +40,8 @@ export type PlanPack = {
   likelyAreas: string[];
   successCriteria: string[];
   openQuestions: string[];
+  /** Element / npm / sibling project deps inferred from plan text. */
+  dependencies?: PlanPackDependency[];
   planPath: string;
   createdAt: string;
   updatedAt: string;
@@ -103,6 +113,15 @@ export function compilePlanPackFromAccept(opts: {
   const openQuestions = extractPlanBulletLines(
     extractPlanSection(plan, "Risks & open questions"),
   );
+  const handoffNotes =
+    extractPlanSection(plan, "Handoff notes") ??
+    extractPlanSection(plan, "Handoff") ??
+    "";
+  const dependencies = parsePlanDependencyLines(
+    [...likelyAreas, handoffNotes, extractPlanSection(plan, "Approach") ?? ""].join(
+      "\n",
+    ),
+  );
 
   const acceptedIds = opts.acceptance.features
     .filter((f) => f.accepted)
@@ -139,6 +158,7 @@ export function compilePlanPackFromAccept(opts: {
     likelyAreas,
     successCriteria,
     openQuestions,
+    dependencies: dependencies.length ? dependencies : undefined,
     planPath: `.slopcontrol/plan-loops/${opts.loopId}/v${opts.version}/PLAN.md`,
     createdAt: now,
     updatedAt: now,
@@ -255,6 +275,29 @@ export function formatPlanPackPromptBlock(
   if (pack.openQuestions.length) {
     lines.push("### openQuestions (research must resolve with code evidence)");
     for (const q of pack.openQuestions) lines.push(`- ${q}`);
+    lines.push("");
+  }
+  if (pack.dependencies?.length) {
+    lines.push(
+      "### dependencies (CRITICAL — install from private registry / pin elements; NEVER npm link)",
+    );
+    for (const d of pack.dependencies) {
+      const ver = d.version ? `@${d.version}` : "";
+      const from = d.from ? ` from ${d.from}` : "";
+      if (d.kind === "npm") {
+        lines.push(
+          `- npm: \`${d.id}${ver}\` — npm_registry_ensure_rc then \`pnpm add ${d.id}${ver}\`${from}`,
+        );
+      } else if (d.kind === "element") {
+        lines.push(
+          `- element: \`${d.id}\` — design_element_import / pin${from}`,
+        );
+      } else {
+        lines.push(
+          `- project: \`${d.id}\` — reuse published @jam/@slopcontrol packages or elements only (no link)${from}`,
+        );
+      }
+    }
     lines.push("");
   }
   return lines.join("\n");

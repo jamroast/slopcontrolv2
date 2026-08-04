@@ -29,6 +29,10 @@ import {
   type DesignScope,
   type ThemeContract,
 } from "./design-conceptual-model.js";
+import {
+  getDesignLoopElements,
+  type DesignElementRef,
+} from "./design-element.js";
 
 const SLOP_DIR = ".slopcontrol";
 
@@ -59,6 +63,8 @@ export type DesignPack = {
   scope?: DesignScope;
   /** Structured dark/light contract when dual modes / toggle present. */
   theme?: ThemeContract;
+  /** Pinned shared design elements (controls/patterns) on accept. */
+  elements?: DesignElementRef[];
   createdAt: string;
   updatedAt: string;
 };
@@ -253,6 +259,8 @@ export function compileDesignPackFromAccept(opts: {
     meta.brief.trim().slice(0, 80) ||
     `design-loop-${opts.loopId.slice(0, 8)}`;
 
+  const elements = getDesignLoopElements(meta);
+
   return {
     name,
     version: 1,
@@ -270,10 +278,17 @@ export function compileDesignPackFromAccept(opts: {
       html,
     }),
     inScope,
-    mustNot: buildMustNot(opts.acceptance, logos, scope),
+    mustNot: [
+      ...buildMustNot(opts.acceptance, logos, scope),
+      ...elements.map(
+        (e) =>
+          `Do not invent a competing control for shared element ${e.id}@${e.version} — mount the pinned element`,
+      ),
+    ].slice(0, 32),
     mockPath: `.slopcontrol/design-loops/${opts.loopId}/v${opts.version}/mock.html`,
     scope: { ...scope, source: "accept" },
     theme,
+    elements: elements.length ? elements : undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -438,6 +453,29 @@ export function formatDesignPackPromptBlock(
   if (pack.contentPillars.length) {
     lines.push("### contentPillars");
     for (const c of pack.contentPillars) lines.push(`- ${c}`);
+    lines.push("");
+  }
+  if (pack.elements?.length) {
+    lines.push(
+      "### elements (CRITICAL — mount these shared controls; prefer element src/ TS/JS when hasCode; prefer pnpm add when npmPackage set — never npm link)",
+    );
+    for (const e of pack.elements) {
+      const npm =
+        e.npmPackage != null
+          ? ` npmPackage=${e.npmPackage}${e.npmVersion ? `@${e.npmVersion}` : ""}`
+          : "";
+      lines.push(
+        `- ${e.id}@${e.version} (${e.kind ?? "control"})${e.hasCode ? " [hasCode]" : ""}${npm} mount: ${(e.mountHints ?? []).join(", ") || "host"}`,
+      );
+      if (e.mockPath) lines.push(`  mock: \`${e.mockPath}\``);
+      if (e.specPath) lines.push(`  spec: \`${e.specPath}\``);
+      if (e.codePath) lines.push(`  code: \`${e.codePath}\``);
+      if (e.npmPackage) {
+        lines.push(
+          `  install: npm_registry_ensure_rc → pnpm add ${e.npmPackage}@${e.npmVersion ?? "latest"}`,
+        );
+      }
+    }
     lines.push("");
   }
   if (pack.mustNot.length) {

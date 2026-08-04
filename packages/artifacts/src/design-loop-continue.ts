@@ -264,7 +264,8 @@ export type MockDriftIssue = {
     | "logo_swapped"
     | "section_ids_dropped"
     | "nav_changed"
-    | "shell_dropped";
+    | "shell_dropped"
+    | "element_invented";
   detail: string;
 };
 
@@ -279,10 +280,12 @@ export function detectMockDrift(opts: {
   mode?: DesignLoopContinueMode;
   intent?: ContinueIntent;
   pinnedLogoAsset?: string | null;
+  /** Pinned shared elements — competing theme toggles are rejected. */
+  pinnedElements?: Array<{ id: string }>;
 }): MockDriftIssue[] {
   const mode = opts.mode;
   const intent = opts.intent;
-  if (!mode && !intent) return [];
+  if (!mode && !intent && !opts.pinnedElements?.length) return [];
   const isFullRevise = intent
     ? intent.scope === "full_revise"
     : mode?.kind === "full_revise";
@@ -290,17 +293,39 @@ export function detectMockDrift(opts: {
 
   // LLM intent wins: theme/logo redesign with preserveChrome=false must not be
   // vetoed by hero/logo/token/nav fingerprints (keeps prior mock = silent no-op).
-  if (
+  // Element invent checks still apply when shared elements are pinned.
+  const skipStructureDrift = Boolean(
     intent &&
-    continueIntentAllowsRedesign(intent) &&
-    !intent.preserveChrome
-  ) {
-    return [];
-  }
+      continueIntentAllowsRedesign(intent) &&
+      !intent.preserveChrome,
+  );
 
   const prev = extractMockStructureFingerprint(opts.previousHtml);
   const next = extractMockStructureFingerprint(opts.nextHtml);
   const issues: MockDriftIssue[] = [];
+
+  const hasThemeEl = (opts.pinnedElements ?? []).some(
+    (e) => e.id === "theme-toggle" || /theme.?toggle/i.test(e.id),
+  );
+  if (hasThemeEl) {
+    const html = opts.nextHtml ?? "";
+    const toggleNodes =
+      html.match(
+        /<(?:button|div|label|a)[^>]*>[\s\S]{0,200}?(?:dark\s*\/\s*light|day\s*\/\s*night|theme\s*toggle)[\s\S]{0,200}?<\/(?:button|div|label|a)>/gi,
+      ) ?? [];
+    const classToggles =
+      html.match(/class=["'][^"']*theme-toggle[^"']*["']/gi) ?? [];
+    const count = Math.max(toggleNodes.length, classToggles.length);
+    if (count > 1) {
+      issues.push({
+        code: "element_invented",
+        detail: `Pinned theme-toggle but mock has ${count} theme controls — embed the shared element once`,
+      });
+    }
+  }
+
+  if (skipStructureDrift) return issues;
+  if (!mode && !intent) return issues;
 
   const preserveChrome = intent
     ? intent.preserveChrome

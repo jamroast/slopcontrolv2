@@ -181,6 +181,34 @@ describe("design-loop", () => {
     }), /IN SCOPE/);
   });
 
+  it("uiSpecFromDesignLoopMock requires visibility/@source when togglePresent", () => {
+    const spec = uiSpecFromDesignLoopMock({
+      brief: "day/night theme toggle",
+      loopId: "loop-vis",
+      version: 1,
+      acceptance: {
+        version: 1,
+        features: [
+          { id: "theme_modes", label: "Theme", accepted: true },
+          { id: "applied_shell", label: "Shell", accepted: true },
+        ],
+      },
+      theme: {
+        mechanism: "data-theme",
+        defaultMode: "dark",
+        modes: ["dark", "light"],
+        togglePresent: true,
+        requirements: ["ThemeToggle sets data-theme"],
+        lightTokensCss: ":root[data-theme=light] { --background: #fff; }",
+        darkTokensCss: "",
+      },
+    });
+    assert.match(spec, /Visibility \(mandatory when togglePresent\)/);
+    assert.match(spec, /@source/);
+    assert.match(spec, /visible/);
+    assert.match(spec, /text-text-secondary|style emission/);
+  });
+
   it("persists REQUEST + version meta and transcript", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-dloop-"));
     roots.push(root);

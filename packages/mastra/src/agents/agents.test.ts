@@ -11,8 +11,12 @@ import {
   createAgentChatAgent,
   createAskAgent,
   createPlanLoopAgent,
+  createPlanLoopRepairAgent,
   createAskSubResearchAgent,
   createDesignLoopAgent,
+  createDevSupervisorAgent,
+  createPhasePlannerAgent,
+  createResearchAgent,
 } from "./index.js";
 
 function testRegistry(dir: string): LlmRegistry {
@@ -99,6 +103,118 @@ describe("ask / agent chat tool split", () => {
       assert.equal("run_command" in planTools, false);
       assert.equal("write_file" in planTools, false);
       assert.equal("generate_image" in planTools, false);
+
+      const supervisor = createDevSupervisorAgent(registry, projectDir, memory);
+      const supervisorTools = await supervisor.listTools();
+      assert.equal("run_command" in supervisorTools, false);
+      assert.equal("write_file" in supervisorTools, false);
+      assert.equal("read_file" in supervisorTools, false);
+      assert.equal("list_files" in supervisorTools, false);
+      // Curated enrich: no Memory / OM (memory:false generate must not need threadId)
+      assert.equal(
+        (supervisor as { memory?: unknown }).memory,
+        undefined,
+        "supervisor must not attach shared Memory with ObservationalMemory",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("research and planner instructions cover Vite resolve claim-vs-proof", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-agents-vite-"));
+    try {
+      const registry = testRegistry(dir);
+      const storage = new LibSQLStore({
+        id: "test-storage-vite",
+        url: `file:${join(dir, "mastra.db")}`,
+      });
+      const memory = new Memory({
+        storage,
+        options: { lastMessages: 5 },
+      });
+      const research = createResearchAgent(registry, join(dir, "proj"), memory);
+      const planner = createPhasePlannerAgent(
+        registry,
+        join(dir, "proj"),
+        memory,
+      );
+      const researchInstr = String(
+        await (
+          research as { getInstructions: () => Promise<string> | string }
+        ).getInstructions(),
+      );
+      const plannerInstr = String(
+        await (
+          planner as { getInstructions: () => Promise<string> | string }
+        ).getInstructions(),
+      );
+      assert.match(researchInstr, /prefix order|first matching alias/i);
+      assert.match(researchInstr, /vite build|resolveId/i);
+      assert.match(plannerInstr, /finite resolve proof|vite build/i);
+      assert.match(plannerInstr, /Grep-for-alias|insufficient/i);
+      assert.match(researchInstr, /Mounted ≠ visible|@source/i);
+      assert.match(plannerInstr, /style visibility|Mounted ≠ visible/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ask agent instructions include tool budget and answer-early rule", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-agents-ask-"));
+    try {
+      const registry = testRegistry(dir);
+      const storage = new LibSQLStore({
+        id: "test-storage-ask-budget",
+        url: `file:${join(dir, "mastra.db")}`,
+      });
+      const memory = new Memory({
+        storage,
+        options: { lastMessages: 5 },
+      });
+      const ask = createAskAgent(registry, join(dir, "proj"), memory);
+      const instr = String(
+        await (
+          ask as { getInstructions: () => Promise<string> | string }
+        ).getInstructions(),
+      );
+      assert.match(instr, /Tool budget|6–8|6-8/i);
+      assert.match(instr, /answer immediately/i);
+      assert.match(instr, /BLUEPRINT archaeology/i);
+      assert.match(instr, /not appearing|invisible|can't see/i);
+      assert.match(instr, /style visibility|@source/i);
+      assert.match(instr, /Confirm \*\*mount\*\*|Confirm mount/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("plan-loop emit rule and repair agent has no tools", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-agents-plan-"));
+    try {
+      const registry = testRegistry(dir);
+      const storage = new LibSQLStore({
+        id: "test-storage-plan",
+        url: `file:${join(dir, "mastra.db")}`,
+      });
+      const memory = new Memory({
+        storage,
+        options: { lastMessages: 5 },
+      });
+      const plan = createPlanLoopAgent(registry, join(dir, "proj"), memory);
+      const repair = createPlanLoopRepairAgent(registry, memory);
+      const planInstr = String(
+        await (
+          plan as { getInstructions: () => Promise<string> | string }
+        ).getInstructions(),
+      );
+      assert.match(planInstr, /CRITICAL emit rule|Never end a turn without/i);
+      assert.match(planInstr, /exhaustive sibling|step budget/i);
+      const repairTools = await repair.listTools();
+      assert.equal("read_file" in repairTools, false);
+      assert.equal("list_files" in repairTools, false);
+      assert.equal("grep_files" in repairTools, false);
+      assert.equal(Object.keys(repairTools).length, 0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

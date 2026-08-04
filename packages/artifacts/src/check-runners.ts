@@ -150,6 +150,68 @@ export function normalizeShellCheckBody(body: string): string {
   return joinShellContinuations(lines).join("\n");
 }
 
+/** Detect `echo "VAR=$?"` which prints but does not assign. */
+export function hasEchoExitCodeCaptureAntipattern(body: string): boolean {
+  return /echo\s+["'][A-Z_][A-Z0-9_]*=\$\?["']/i.test(body);
+}
+
+/** Detect `cd /absolute/path` that bypasses verify cwd. */
+export function hasAbsoluteCdInCheck(body: string): boolean {
+  // cd /Users/..., /home/..., /var/..., /tmp/..., /opt/..., or any cd /path
+  return /(?:^|[\n;&|])\s*cd\s+(?:["'])?\/(?:Users|home|var|tmp|opt|root|private|[A-Za-z0-9._-]+)/im.test(
+    body,
+  );
+}
+
+/**
+ * Strip leading `cd <cwd> &&` / `cd <cwd>;` so legacy absolute-path checks
+ * still run relative to the verify cwd.
+ */
+export function stripRedundantCwdCd(body: string, cwd: string): string {
+  const trimmedCwd = cwd.replace(/\/+$/, "");
+  if (!trimmedCwd) return body;
+  const escaped = trimmedCwd.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(
+    `(^|[\\n;&|])\\s*cd\\s+(?:["']${escaped}["']|${escaped})\\s*(?:&&|;|\\n)\\s*`,
+    "g",
+  );
+  return body.replace(re, "$1");
+}
+
+/** Detect bare GNU `timeout` / `gtimeout` (not available on macOS by default). */
+export function hasGnuTimeoutInCheck(body: string): boolean {
+  // Match `timeout 8 …` / `timeout -- …` / `gtimeout 5 …` as a command (not a word in a comment about timeout)
+  return /(?:^|[\n;&|])\s*(?:g?timeout)(?:\.exe)?\s+(?:--|\d)/im.test(body);
+}
+
+/** Detect long-lived server start commands that hang verify. */
+export function hasLongLivedServerInCheck(body: string): boolean {
+  if (/(?:^|[\n;&|])\s*(?:pnpm|npm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve)\b/im.test(body)) {
+    return true;
+  }
+  if (/(?:^|[\n;&|])\s*next\s+dev\b/im.test(body)) return true;
+  if (/(?:^|[\n;&|])\s*nuxi?\s+dev\b/im.test(body)) return true;
+  // bare `vite` / `vite …` but not `vite build`
+  if (/(?:^|[\n;&|])\s*vite(?:\s|$)/im.test(body) && !/\bvite\s+build\b/im.test(body)) {
+    return true;
+  }
+  // docker compose up without one-shot abort
+  if (
+    /\bdocker\s+compose\s+up\b/im.test(body) &&
+    !/--abort-on-container-exit\b/im.test(body)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Background `&` plus `wait` — classic hang when children outlive kill. */
+export function hasBackgroundWaitHangAntipattern(body: string): boolean {
+  const hasBg = /&\s*(?:#.*)?$/m.test(body) || /&\s*\n/.test(body);
+  const hasWait = /(?:^|[\n;&|])\s*wait\b/m.test(body);
+  return hasBg && hasWait;
+}
+
 function shellValidate(cell: CheckCell): string[] {
   const issues: string[] = [];
   if (!cell.body.trim()) {
@@ -168,6 +230,31 @@ function shellValidate(cell: CheckCell): string[] {
       `Broken Automated Check is an incomplete shell compound (e.g. \`if\` without \`fi\`). Use one complete fence with a closed if/fi (while/done) block: ${normalized.slice(0, 120)}`,
     );
   }
+  if (hasEchoExitCodeCaptureAntipattern(normalized)) {
+    issues.push(
+      `Broken Automated Check uses \`echo "VAR=$?"\` which prints but does not assign. Prefer \`cmd || exit 1\` or \`VAR=$?\` then \`test "$VAR" -eq 0\`: ${normalized.slice(0, 120)}`,
+    );
+  }
+  if (hasAbsoluteCdInCheck(normalized)) {
+    issues.push(
+      `Broken Automated Check uses absolute \`cd /…\` — checks already run in the verify cwd. Use relative commands (e.g. \`pnpm build || exit 1\`), not \`cd /Users/…\`: ${normalized.slice(0, 120)}`,
+    );
+  }
+  if (hasGnuTimeoutInCheck(normalized)) {
+    issues.push(
+      `Broken Automated Check uses GNU \`timeout\`/\`gtimeout\`, which is not available on macOS by default. Prefer finite structural checks (grep/config asserts) — do not start long-lived servers: ${normalized.slice(0, 120)}`,
+    );
+  }
+  if (hasLongLivedServerInCheck(normalized)) {
+    issues.push(
+      `Broken Automated Check starts a long-lived server (pnpm/npm/yarn/bun dev|start|serve, vite, next dev, docker compose up). Automated Checks must be finite — use structural asserts (grep alias/config) or a short Node one-shot: ${normalized.slice(0, 120)}`,
+    );
+  }
+  if (hasBackgroundWaitHangAntipattern(normalized)) {
+    issues.push(
+      `Broken Automated Check backgrounds a process (\`&\`) and then \`wait\` — children often outlive kill and hang verify. Do not background servers in Automated Checks: ${normalized.slice(0, 120)}`,
+    );
+  }
   return issues;
 }
 
@@ -179,9 +266,13 @@ export function createShellFamilyRunner(runner: CheckCommandRunner): CheckRunner
     async run(cell, ctx) {
       const lang = normalizeCheckLanguage(cell.language);
       const bin = lang === "zsh" ? "zsh" : "bash";
+      const body = stripRedundantCwdCd(
+        normalizeShellCheckBody(cell.body),
+        ctx.cwd,
+      );
       return runViaTempFile(
         runner,
-        cell.body,
+        body,
         ".sh",
         (file) => `${bin} ${shellQuote(file)}`,
         ctx,

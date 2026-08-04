@@ -12,6 +12,7 @@ import {
   extractPlannedFileChanges,
   formatDiagnosisCard,
   isIncompleteShellCompound,
+  isMissingNodeBinFailure,
   joinShellContinuations,
   promoteLearning,
   readLearningIndex,
@@ -225,6 +226,150 @@ sh: vitest: command not found
     assert.equal(c.class, "process");
     assert.equal(c.codingAgentShouldFix, true);
     assert.match(c.summary, /127|not found|deps/i);
+  });
+
+  it("exit 127 nextActions tell agent to install in verify cwd", () => {
+    const d = buildFailureDiagnosis({
+      output: "sh: tsup: command not found",
+      firstFailure: {
+        name: "build",
+        command: "npm run build",
+        exitCode: 127,
+        output: "Build failed.\n\n> pkg@0.0.0 build\n> tsup\n\nsh: tsup: command not found\n",
+      },
+    });
+    assert.equal(d.class, "process");
+    assert.match(d.nextActions, /verify cwd|pnpm install|npm ci/i);
+    assert.match(d.nextActions, /Do not edit PHASE\.md Automated Checks/i);
+    assert.doesNotMatch(d.nextActions, /Fix the failure of `npm run build`/);
+  });
+
+  it("classifies integer expression expected as broken Automated Check", () => {
+    const d = buildFailureDiagnosis({
+      output: "post-merge failure",
+      firstFailure: {
+        name: "post-merge-root-verify:automatedCheck",
+        command: "cd /Users/x/proj && pnpm build",
+        exitCode: 1,
+        output: [
+          "POST-MERGE ROOT VERIFY FAILED — worktree build passed; phase branch merged.",
+          "> pkg@0.0.0 build",
+          "> tsup",
+          "BUILD_EXIT=0",
+          "/tmp/slop-check/check.sh: line 3: test: : integer expression expected",
+        ].join("\n"),
+      },
+    });
+    assert.equal(d.class, "process");
+    assert.equal(d.confidence, "high");
+    assert.match(d.title, /empty test|exit-code capture/i);
+    assert.match(d.nextActions, /echo "VAR=\$\?"|`cmd \|\| exit 1`|PHASE\.md/i);
+  });
+
+  it("classifies timeout: command not found as host utility, not deps", () => {
+    const d = buildFailureDiagnosis({
+      output: "timeout missing",
+      firstFailure: {
+        name: "post-merge-root-verify:automatedCheck",
+        command:
+          "cd playground && pnpm install --silent && timeout 8 pnpm dev 2>&1 | tee /tmp/vite-startup.log",
+        exitCode: 1,
+        output:
+          "/var/folders/wn/x/T/slop-check-MUcfWn/check.sh: line 1: timeout: command not found\n",
+      },
+    });
+    assert.equal(d.class, "process");
+    assert.equal(d.confidence, "high");
+    assert.match(d.title, /host utility|timeout/i);
+    assert.ok(d.nextActions);
+    assert.match(d.nextActions, /PHASE\.md|portable|timeout/i);
+    assert.doesNotMatch(d.nextActions, /pnpm install --frozen|npm ci/i);
+    // Must forbid (not recommend) the hang antipattern that replaced GNU timeout
+    assert.match(d.nextActions, /Do NOT background/i);
+    assert.match(
+      d.learning?.lesson ?? "",
+      /do NOT start long-lived|finite structural/i,
+    );
+    assert.doesNotMatch(
+      d.nextActions,
+      /try background|background pnpm dev \+ sleep/i,
+    );
+    assert.equal(
+      isMissingNodeBinFailure({
+        name: d.failingStep?.name,
+        command: d.failingStep?.command,
+        exitCode: 1,
+        output:
+          "/var/folders/wn/x/T/slop-check/check.sh: line 1: timeout: command not found\n",
+      }),
+      false,
+    );
+  });
+
+  it("classifies CHECK_TIMEOUT as process/high Automated Check hang", () => {
+    const d = buildFailureDiagnosis({
+      output: "check timed out",
+      firstFailure: {
+        name: "post-merge-root-verify:automatedCheck",
+        command: "pnpm dev & wait",
+        exitCode: 124,
+        output:
+          "VITE v5 ready\n\nCHECK_TIMEOUT after 60000ms\n",
+      },
+    });
+    assert.equal(d.class, "process");
+    assert.equal(d.confidence, "high");
+    assert.match(d.title, /wall clock|CHECK_TIMEOUT|Automated Check/i);
+    assert.match(d.nextActions, /long-lived|PHASE\.md|structural/i);
+    assert.doesNotMatch(d.nextActions, /pnpm install --frozen|npm ci/i);
+  });
+
+  it("classifies phase-doc-validation long-lived server as long-lived, not trailing-backslash", () => {
+    const evidence = `PHASE.md validation failed:
+- Broken Automated Check starts a long-lived server (pnpm/npm/yarn/bun dev|start|serve, vite, next dev, docker compose up). Automated Checks must be finite — use structural asserts (grep alias/config) or a short Node one-shot: cd playground && pnpm install --silent 2>&1 && pnpm dev 2>&1 &
+VITE_PID=$!
+sleep 8
+kill $VITE_PID 2>/dev/null
+wait $VITE
+- Broken Automated Check backgrounds a process (\`&\`) and then \`wait\` — children often outlive kill and hang verify. Do not background servers in Automated Checks: cd playground && pnpm install --silent 2>&1 && pnpm dev 2>&1 &`;
+    const d = buildFailureDiagnosis({
+      output: evidence,
+      firstFailure: {
+        name: "phase-doc-validation",
+        exitCode: 1,
+        output: evidence,
+      },
+    });
+    assert.equal(d.class, "process");
+    assert.equal(d.confidence, "high");
+    assert.match(d.title, /long-lived server/i);
+    assert.ok(d.tags?.includes("long-lived"), String(d.tags));
+    assert.match(d.nextActions, /long-lived|structural|Do not background/i);
+    assert.doesNotMatch(d.nextActions, /trailing `\\\\`|one complete line/i);
+  });
+
+  it("still treats tsup: command not found as node-bin deps", () => {
+    const d = buildFailureDiagnosis({
+      output: "sh: tsup: command not found",
+      firstFailure: {
+        name: "build",
+        command: "npm run build",
+        exitCode: 127,
+        output: "sh: tsup: command not found\n",
+      },
+    });
+    assert.equal(d.class, "process");
+    assert.match(d.title, /missing deps|exit 127/i);
+    assert.match(d.nextActions, /verify cwd|pnpm install|npm ci/i);
+    assert.equal(
+      isMissingNodeBinFailure({
+        name: "build",
+        command: "npm run build",
+        exitCode: 127,
+        output: "sh: tsup: command not found\n",
+      }),
+      true,
+    );
   });
 
   it("classifies Failed to load url / MODULE_NOT_FOUND as deps process", () => {

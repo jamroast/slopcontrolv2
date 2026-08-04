@@ -16,6 +16,7 @@ export type DesignLoopSelectionSlot =
   | "type"
   | "shell"
   | "content"
+  | "element"
   | string;
 
 export type DesignLoopSelection = {
@@ -75,6 +76,7 @@ function slugConceptId(label: string): string {
 
 function inferSlot(label: string, hasAsset: boolean): DesignLoopSelectionSlot {
   const l = label.toLowerCase();
+  if (/\belement\b|\btoggle\b|\bcontrol\b|\bpattern\b/.test(l)) return "element";
   if (/\bpalette\b|\bswatch|\bcolor/.test(l)) return "palette";
   if (/\btype\b|\btypo|\bfont/.test(l)) return "type";
   if (/\bshell\b|\bframe|\bdashboard|\bchrome/.test(l)) return "shell";
@@ -339,8 +341,11 @@ export function pinDesignLoopSelection(opts: {
     excerpt,
     pinnedAt: new Date().toISOString(),
   };
-  const prior = getDesignLoopSelections(meta).filter(
-    (s) => s.slot !== opts.slot,
+  // Element pins are multi-valued (theme-toggle + others); other slots stay 1:1.
+  const prior = getDesignLoopSelections(meta).filter((s) =>
+    opts.slot === "element"
+      ? !(s.slot === "element" && s.conceptId === conceptId)
+      : s.slot !== opts.slot,
   );
   const next: DesignLoopMetaWithSelections = {
     ...meta,
@@ -485,6 +490,10 @@ export function formatDesignLoopSelectionsPromptBlock(opts: {
       "- generate_image is ONLY for inventing a NEW mark when nothing is pinned and the operator asks to invent — never to 'fix' alpha or packs.",
     );
   }
+  lines.push("");
+  lines.push(
+    "ELEMENTS: when META pins slot=element (or SHARED ELEMENTS block is present), embed that control once — do not invent a second day/night toggle.",
+  );
 
   return lines.join("\n");
 }

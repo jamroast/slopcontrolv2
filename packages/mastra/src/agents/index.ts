@@ -39,7 +39,16 @@ Rules:
   - Do NOT claim fill/submit already works solely because prior form phases are \`complete\`.
   - Verify engagement in code; call out open risks (tool part \`toolName\` vs \`type: tool-*\`, superseded classification, wrong mount) when evidence supports them.
   - Prefer residual gaps that still prove fill+submit at the locked mount — chip/taxonomy-only is not enough.
-- Obey Change Intent uiMount over older contradictory Blueprint Deltas; prefer Live decisions (verified then claimed) from the blueprint excerpt.`,
+- Obey Change Intent uiMount over older contradictory Blueprint Deltas; prefer Live decisions (verified then claimed) from the blueprint excerpt.
+- When the ask mentions \`Can't resolve\`, Vite, CSS \`@import\`, Tailwind, or module aliases:
+  - Read the Vite \`resolve.alias\` map and the importing CSS/TS file.
+  - Call out **prefix order**: Vite applies the first matching alias — put longer/more-specific entries (e.g. \`@pkg/styles\`) **before** shorter prefixes (\`@pkg\`).
+  - Note \`@tailwindcss/vite\` resolves CSS \`@import\` via its own path (enhanced-resolve / Vite alias bridge) — string presence in config ≠ runtime resolve.
+  - Prefer \`web_search\` / Vite docs for alias order when unsure; cite URLs in RESEARCH.md.
+  - Recommend a **finite** proof for Automated Checks (\`vite build\` in the app/playground cwd, or a short Node \`resolveId\` / \`createServer\`+close one-shot) — never \`pnpm dev\` / bare \`vite\` as the check.
+- When ThemeToggle / day-night / menubar theme controls are in scope (especially design \`theme_modes\` / \`togglePresent\`):
+  - **Mounted ≠ visible.** Confirm Menubar mounts ThemeToggle, then check playground CSS for \`@source\` covering package \`../src\` **or** that built CSS would contain ThemeToggle utilities (\`text-text-secondary\`, size classes).
+  - Recommend Automated Checks: mount greps **plus** \`@source\` / built-CSS utility greps — not import-order-only (\`@import "tailwindcss"\` first).`,
     model: registry.resolve("research"),
     memory,
     tools: {
@@ -121,6 +130,9 @@ Include: scope, file changes, build order, success criteria, ## Automated Checks
 - Choose the fence language to match the runner (\`bash\`, \`zsh\`, \`typescript\`, …). For other languages use meta: \`\`\`python cmd=python3\`\`\` (body written to a temp file; \`{file}\` optional in cmd).
 - For shell/CLI/script bugs: include a regression test command (e.g. npm test -- tests/docker.test.ts).
 - Manual UI/docker smoke may stay under Success Criteria, but cannot be the only gate.
+- If Success Criteria claim “no \`Can't resolve\`” / clean Vite start / CSS \`@import\` works / module resolution: Automated Checks **must** include a finite resolve proof (\`vite build\` in the relevant package cwd, or Node \`resolveId\`/\`createServer\`+close one-shot). Grep-for-alias-string alone is **insufficient** (may remain as a secondary check). Do not use long-lived \`pnpm dev\` / bare \`vite\`.
+- If Success Criteria claim ThemeToggle / day-night is on the menubar / playground **or** is **visible** / utilities resolve: Automated Checks **must** prove mount (\`<ThemeToggle\` in shell menubar **and** \`<Menubar\` in playground App) **plus** style visibility (\`@source\` covering package \`../src\`, **or** \`vite build\` + grep built \`dist/assets/*.css\` for \`text-text-secondary\` / size utilities, **or** non-utility \`var(--text-secondary)\` color/size on ThemeToggle). Import-order-only and bare \`vite build\` are **insufficient**. Mounted ≠ visible.
+- Other runtime claims (chat stream, fill/submit, migrate applied) likewise need proof beyond greps — do not invent live curls with API keys; prefer existing project tests or finite builds.
 - Do NOT put live curl/http probes that require API keys in Automated Checks (they leak secrets and trip rate limits).
 - LLM coverage: rely on SlopControl llmTestProfile (local Ollama / fixture) injected into tests — never curl api.ollama.cloud and never require free-tier cloud models.
 - Env greps (e.g. no \`:cloud\` in \`.env.docker\`): match assignment lines only — bare \`grep ':cloud'\` also hits comments.
@@ -211,36 +223,31 @@ Rules:
 
 export function createDevSupervisorAgent(
   registry: LlmRegistry,
-  projectDir: string,
-  memory: Memory,
+  _projectDir: string,
+  _memory?: Memory,
 ): Agent {
-  const tools = createProjectTools(projectDir);
-
+  // No Memory / ObservationalMemory — enrich is curated-prompt only
+  // (runAgent uses memory: false). Attaching shared OM Memory requires a
+  // threadId and previously crashed supervisor enrich.
   return new Agent({
     id: "dev-supervisor-agent",
     name: "Dev Supervisor Agent",
     description: "Supervises coding tool execution and evaluates results",
     instructions: `You are the SlopControl development supervisor.
 You enrich a deterministic Failure diagnosis — do not re-litigate full verify logs.
+Use ONLY the diagnosis card and capped excerpts in the user prompt. You have no tools — do not ask for full logs or re-read trees.
 When checks fail, prioritize fixing the **failing step** named in the diagnosis (Automated Checks / testCommand / preflight).
 Automated Checks that print FAIL: but exit 0 are still failures — rewrite them to \`|| exit 1\`. Broken checks ending in \`\\\` or incomplete \`if …; then\` (no \`fi\`) must be rewritten as complete statements in PHASE.md.
 Empty-var RC-DEADLOCK (\`AI_CHAT_MODEL= == AI_CODE_MODEL=\`) means the check cell was split or vars were not assigned in the same fence — put assign+assert in one fence.
 Naive \`grep ':cloud' .env.docker\` matches documentation comments — prefer assignment-only patterns or fix the comment; that is a process fix, not LLM quota.
 When class=process / Automated Check shell failure: tell the coding agent to edit \`.slopcontrol/phases/<phaseId>/PHASE.md\` **first** — product edits alone will not clear the gate.
 Chat hang after \`[chat] Stream started\` / api-routing-complete-gate: OpenAI-compat stream+tools or wrong host/ID — require promised routing file edits (model-resolver/env/chat), not catalogue-only; do not force free-tier.
-Full check dumps live under .slopcontrol/runs/<runId>/checks/.
+Full check dumps live under .slopcontrol/runs/<runId>/checks/ — point the **coding** agent at that path / the named failing command when more detail is needed.
 When LLM/env/verify fails (entitlement, 429, missing keys, runtime down): audience is operator — use MCP get_operator_suggestions; NEVER edit product to work only in a worktree; NEVER rewrite \`.env.docker\` to free-tier cloud models or set OLLAMA_TIER=free just to pass tests (\`.env.slopcontrol\` is the test overlay); NEVER curl api.ollama.cloud with API keys.
 **Infra/env failures** (ECONNREFUSED, missing secrets, failed verifyPreflightCommand, LLM quota) are NOT app bugs — tell the operator to restore deps; prefer DEV_BLOCKED after repeated infra.
 Obey durable project learnings. Respond with concise Next actions only.
 Use DEV_BLOCKED when unrecoverable.`,
     model: registry.resolve("supervisor"),
-    memory,
-    tools: {
-      read_file: tools.readFile,
-      write_file: tools.writeFile,
-      list_files: tools.listFiles,
-      run_command: tools.runCommand,
-    },
   });
 }
 
@@ -261,19 +268,29 @@ Answer the operator's questions using the codebase and .slopcontrol BLUEPRINT/RO
 
 Rules:
 - Be conversational and concise. Prefer repo tools (read_file / list_files / grep_files) before web_search/fetch_url.
+- Tool budget: keep tool use to about 6–8 calls. For presence/wiring questions (e.g. "is the day/night button on the menubar?"), grep/read the target shell/playground files, then **answer immediately** with concrete paths — do not exhaust the turn on BLUEPRINT archaeology or long phase history.
+- When the operator says a shell/menubar control is **not appearing / invisible / can't see** (ThemeToggle, day/night, light/dark):
+  1. Confirm **mount** (Menubar renders ThemeToggle; playground mounts Menubar).
+  2. Confirm **style visibility**: read playground CSS entry for \`@source\` / content coverage of package \`src\`, **or** inspect built \`dist/assets/*.css\` (or the component \`className\`) for utilities the toggle needs (\`text-text-secondary\`, size classes). Mounted ≠ visible.
+  3. Do **not** ship a Task brief that only swaps \`@import\` order unless step 2 already shows those utilities present after the current order.
+  - Task brief Success Criteria for this class must require mount **and** style proof (\`@source\` / built-CSS utility greps / non-utility fallback) — matching claim-vs-proof.
 - Never invent files that do not exist. Never print or ask for secrets/API keys.
 - Do NOT write RESEARCH.md or PHASE.md — this is ask mode, not research. Suggest promote_ask when ready for a small change; for multi-turn / full planning suggest plan_loop_start instead.
-- When the operator is shaping a concrete change, include a short markdown section:
+- When DEPENDENCY INTENT / CROSS-PROJECT DEPS appear in the prompt, follow them: prefer design_element_import and private registry \`pnpm add @jam/…\` after npm_registry_ensure_rc. NEVER recommend npm link / pnpm link / file: into a sibling node_modules.
+- When the operator is shaping a concrete **implement** change (not a pure investigate), include a short markdown section:
 
 ## Task brief
 - Title: …
 - Goal: …
 - Likely areas: …
 - Out of scope: …
+- Element: … (when reusing a shared design element)
+- Package: … (when installing @jam/@slopcontrol from the private registry)
+- From project: … (when reusing from a sibling)
 
 Keep the Task brief to a title plus 2–5 bullets so promote_ask can seed start_research.
+- If the question is purely informational / investigate-only, answer without a Task brief.
 - If the operator needs several separate investigations, recommend MCP/HTTP \`ask_sub_research\` with a short topics list (max 4). Do not pretend sub-research ran unless that API was invoked.
-- If the question is purely informational, answer without a Task brief.
 - Cite paths you inspected. Do not claim work is implemented unless you verified it.`,
     model: registry.resolve("research"),
     memory,
@@ -352,6 +369,7 @@ Rules:
 - When the operator names a logo file or says pin/use/go with a mark (and is not asking to invent), call pin_logo with that filename first, then embed it in the mock (menubar + landing). Do not keep an older mark.
 - CONCEPTUAL MODEL in the prompt is authoritative scope: kind/focus/preserve. component/flow → one composition around the focus (ghost chrome ok, labeled out of scope). shell/theme → menubar + data-theme dark/light proof. Do not expand past focus.
 - When theme modes are in the conceptual model, include :root dark tokens AND [data-theme="light"] remaps; toggles must set documentElement data-theme. Prefer SHARED DESIGN / sibling dual-theme ladders over inventing purple/cream.
+- SHARED ELEMENTS in the prompt are authoritative controls (e.g. theme-toggle): embed that snippet once at the mount hint — never invent a second day/night button.
 - CONTINUE MODE in the prompt is authoritative: asset_only / section_touch means preserve hero copy, shell, and :root token names — do not invent new landing copy (except when inventLogo/adoptTheme).
 - Prefer true RGBA sources (hasAlpha). Filenames containing "alpha" that are still RGB are INVALID — call make_transparent or use the pinned RGBA mark.
 - Media / edit tools (do not claim they ran without a tool result):
@@ -395,6 +413,13 @@ export function createPlanLoopAgent(
   memory: Memory,
 ): Agent {
   const tools = createProjectTools(projectDir);
+  const resolvePlanningModel = () => {
+    try {
+      return registry.resolve("planning");
+    } catch {
+      return registry.resolve("research");
+    }
+  };
 
   return new Agent({
     id: "plan-loop-agent",
@@ -406,20 +431,21 @@ Produce ONE structured PLAN.md for operator review before research.
 
 Rules:
 - Output a short rationale (1–3 sentences), then the full plan in a \`\`\`markdown fence (or raw # Plan …).
-- Required H2 sections (exactly these titles): Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes.
-- Prefer repo tools (read_file / list_files / grep_files) before guessing paths. Never invent files that do not exist.
-- CONCEPTUAL MODEL / PLAN CONTINUE INTENT in the prompt are authoritative: revise surgically; do not expand past focus/preserve.
+- Required H2 sections (exactly these titles — always emit all nine, even if some bodies are brief stubs): Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes.
+- Goal must be 1–3 sentences summarizing intent — NEVER paste the operator brief verbatim.
+- CRITICAL emit rule: after at most a few targeted tool calls (confirm local paths that will appear under Likely areas), WRITE the fenced PLAN.md. Never end a turn without \`## Goal\`, all nine H2 titles, and PLAN_COMPLETE.
+- Prefer incomplete-but-valid Likely areas / Risks over exploring until the step budget is gone with no document.
+- Prefer repo tools (read_file / list_files / grep_files) before guessing paths. Never invent files that do not exist. Absolute paths are allowed for sibling roots listed in the prompt.
+- When SIBLING INVESTIGATION is present: cite those absolute paths under Likely areas / Approach from the prompt pack. Do NOT burn the step budget on exhaustive sibling tours before the plan exists — research will deepen later.
+- Never emit a plan that only restates the brief with empty Likely areas.
+- CONCEPTUAL MODEL / PLAN CONTINUE INTENT in the prompt are authoritative.
+- When PLAN CONTINUE INTENT is expand_scope or full_revise: rewrite Goal/In scope/Approach as needed; do NOT keep the old Goal solely because acceptance was previously ticked. Still emit every required H2 title.
+- When INTENT is sections/narrow_scope: revise surgically; preserve Goal and Out of scope unless those sections are targeted.
+- When CROSS-PROJECT DEPS / DEPENDENCY INTENT appear: put package/element deps under **Likely areas** and **Handoff notes** (e.g. \`deps: @jam/theme-toggle@1.0.0 from jamroast\` or \`element:theme-toggle from jamroast\`). Prefer registry install over inventing; NEVER npm link.
 - Do NOT write RESEARCH.md, PHASE.md, or product source. Do NOT claim promote ran.
-- When continuing, revise the previous PLAN.md — preserve Goal and Out of scope unless those sections are targeted.
 - End with PLAN_COMPLETE on its own line.
 - Keep Likely areas as hypotheses when uncertain; put unknowns under Risks & open questions for research to resolve.`,
-    model: (() => {
-      try {
-        return registry.resolve("planning");
-      } catch {
-        return registry.resolve("research");
-      }
-    })(),
+    model: resolvePlanningModel(),
     memory,
     tools: {
       read_file: tools.readFile,
@@ -428,6 +454,43 @@ Rules:
       fetch_url: tools.fetchUrl,
       web_search: tools.webSearch,
     },
+  });
+}
+
+/**
+ * Text-only repair when the tool-capable plan agent returned no extractable PLAN.md.
+ * No tools — must emit the markdown fence immediately.
+ */
+export function createPlanLoopRepairAgent(
+  registry: LlmRegistry,
+  memory: Memory,
+): Agent {
+  const resolvePlanningModel = () => {
+    try {
+      return registry.resolve("planning");
+    } catch {
+      return registry.resolve("research");
+    }
+  };
+
+  return new Agent({
+    id: "plan-loop-repair-agent",
+    name: "Plan Loop Repair Agent",
+    description:
+      "Emits extractable PLAN.md only — no tools — used after empty plan extract",
+    instructions: `You are the SlopControl plan-loop repair agent.
+The prior turn failed to produce an extractable PLAN.md. You have NO tools.
+
+Rules:
+- Output ONLY a \`\`\`markdown fence containing the full PLAN.md (optional 1-line rationale before the fence is OK).
+- Required H2 titles (exact): Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes.
+- Goal: 1–3 sentences summarizing the operator intent (do not paste the brief).
+- Fill every section with concrete stubs if uncertain; cite any sibling paths given in the user prompt under Likely areas.
+- Do NOT call tools. Do NOT explore. Do NOT narrate investigation.
+- End with PLAN_COMPLETE on its own line.`,
+    model: resolvePlanningModel(),
+    memory,
+    // Intentionally no tools — empty extract repair must not re-explore.
   });
 }
 
@@ -454,6 +517,7 @@ Rules:
 - cwd for run_command is the project root — never invent worktrees or claim development is running.
 - Do NOT start phases, design, or development. Suggest ask / start_change / promote_ask when the operator wants implementation work.
 - Prefer inspect commands (git status, typecheck, tests, logs). Refuse broad destructive deletes (rm -rf of large trees) unless the operator explicitly insists.
+- When DEPENDENCY INTENT / CROSS-PROJECT DEPS appear: follow them. You may run \`pnpm add @jam/…\` only after npm_registry_ensure_rc guidance — never npm/pnpm link or file: sibling installs.
 - Never print secrets/API keys. Never claim DEV_COMPLETE or that a phase merged.
 - Cite paths and command outcomes you actually ran.`,
     model: registry.resolve("research"),

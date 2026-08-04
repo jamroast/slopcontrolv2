@@ -14,6 +14,7 @@ import {
   formatChangeIntentPromptBlock,
   ChangeIntentLlmOutputSchema,
   garbageCollectSupersededMountBds,
+  isChangeIntentWeak,
   isWorktreeIsolationPort,
   loadCanonicalRuntimeEnv,
   phaseDocAlignsWithChangeIntent,
@@ -484,6 +485,105 @@ The dynamic forms for the chat are working. As I go through the process the chat
     );
     assert.equal(backend.changeKind, "backend");
     assert.equal(backend.interaction, undefined);
+  });
+
+  it("finalizeChangeIntent: other + needsInteraction true without form cues gets no interaction", () => {
+    const themeDesc =
+      "Audit the existing light/dark theme toggle on the landing page and fix ThemeToggle / data-theme wiring.";
+    const theme = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "Audit light/dark theme toggle on landing page",
+        goal: "Verify ThemeToggle drives landing components via data-theme.",
+        uiMount: "page",
+        changeKind: "other",
+        needsInteraction: true, // model mistake — clickable toggle ≠ fill/submit
+      }),
+      { description: themeDesc },
+    );
+    assert.equal(theme.changeKind, "other");
+    assert.equal(theme.uiMount, "page");
+    assert.equal(theme.interaction, undefined);
+    assert.ok(!theme.mustNot.some((m) => /fill\/submit/i.test(m)));
+  });
+
+  it("theme toggle heuristic extract is other without interaction", () => {
+    const intent = extractChangeIntent(
+      "Audit the existing light/dark theme toggle implementation and verify it drives the landing page Hero and FeaturesGrid.",
+    );
+    assert.equal(intent.changeKind, "other");
+    assert.equal(intent.interaction, undefined);
+  });
+
+  it("isChangeIntentWeak refreshes other Intent with spurious interaction", () => {
+    const desc =
+      "Audit the existing light/dark theme toggle on the landing page.";
+    const weak = isChangeIntentWeak(
+      {
+        title: "Audit theme toggle",
+        goal: "Fix theme toggle on landing.",
+        uiMount: "page",
+        changeKind: "other",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [
+          "do not treat summary chips or classification-only changes as satisfying fill/submit",
+        ],
+        rawDescription: desc,
+        interaction: {
+          mount: "page",
+          primaryAction: "submit form",
+          proof: ["interactive control at locked mount"],
+          forbiddenSubstitutes: ["summary-chip-only"],
+        },
+      },
+      desc,
+    );
+    assert.equal(weak, true);
+
+    const strong = isChangeIntentWeak(
+      {
+        title: "Audit theme toggle",
+        goal: "Fix theme toggle on landing.",
+        uiMount: "page",
+        changeKind: "other",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: desc,
+      },
+      desc,
+    );
+    assert.equal(strong, false);
+  });
+
+  it("theme PHASE aligns when Intent has no interaction contract", () => {
+    const intent = extractChangeIntent(
+      "Audit light/dark theme toggle on the landing page; ThemeToggle must set data-theme.",
+    );
+    assert.equal(intent.interaction, undefined);
+    const phase = `# PHASE: 09-theme-toggle
+
+## Scope
+Wire ThemeToggle to html data-theme for landing components.
+
+## Success Criteria
+- ThemeToggle click switches data-theme between dark and light
+- Landing Hero responds to theme tokens
+
+## Automated Checks
+\`\`\`bash
+pnpm test
+\`\`\`
+
+\`\`\`bash
+cd playground && pnpm build || exit 1
+\`\`\`
+
+## Blueprint Deltas
+None.
+`;
+    const align = phaseDocAlignsWithChangeIntent(phase, intent);
+    assert.equal(align.ok, true, align.issues.join("; "));
   });
 
   it("populate/submit without chrome-hide still gets interaction", () => {

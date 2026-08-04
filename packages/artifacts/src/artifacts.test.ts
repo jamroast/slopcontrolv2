@@ -1284,6 +1284,47 @@ true
           "Please apply the theming from JamPress and a cleaner logo",
       });
       assert.equal(phaseNeedsDesign(root, brandId), true);
+
+      // Theme toggle / data-theme wiring is not a brand identity design pass
+      const themeId = "09-theme-toggle";
+      writePhaseDoc(
+        root,
+        themeId,
+        `# Phase ${themeId}
+
+## Scope
+Audit ThemeToggle and data-theme wiring on the landing page.
+
+## Brand
+Not applicable — this phase does not introduce new brand assets, logos, or wordmarks.
+
+## Assets
+Not applicable — no new static assets, favicons, or design files.
+
+## File Changes
+- src/hooks/useTheme.ts
+
+## Success Criteria
+ThemeToggle switches data-theme
+
+## Automated Checks
+\`\`\`bash
+pnpm test
+\`\`\`
+`,
+      );
+      writeChangeIntent(root, themeId, {
+        title: "Audit and fix light/dark theme toggle on landing page",
+        goal: "Verify ThemeToggle drives landing components via data-theme.",
+        uiMount: "page",
+        changeKind: "other",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription:
+          "Audit the existing light/dark theme toggle implementation and verify it drives the landing page.",
+      });
+      assert.equal(phaseNeedsDesign(root, themeId), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

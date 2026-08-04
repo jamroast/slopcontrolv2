@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
+  consumeAskSseStream,
   formatAskMcpEnvelope,
   formatDesignLoopMcpEnvelope,
+  parseSseDataLine,
 } from "./mcp-tools.js";
 import { sanitizeAskTitle, SlopStore } from "./store.js";
 
@@ -227,6 +229,23 @@ describe("formatAskMcpEnvelope", () => {
     assert.match(text, /askId: old-1/);
     assert.match(text, /hint: fork_ask/);
   });
+
+  it("surfaces ask_timeout recovery reply on error envelope", () => {
+    const text = formatAskMcpEnvelope(
+      JSON.stringify({
+        error: "Agent Ask timed out after 180000ms",
+        code: "ask_timeout",
+        reply: "Ask timed out before a complete answer.\n\nRetry with a narrower question.",
+        hint: "retry_ask_or_narrow",
+        askId: "ask-7c9",
+      }),
+      false,
+    );
+    assert.match(text, /askId: ask-7c9/);
+    assert.match(text, /code: ask_timeout/);
+    assert.match(text, /hint: retry_ask_or_narrow/);
+    assert.match(text, /Ask timed out before a complete answer/);
+  });
 });
 
 describe("formatDesignLoopMcpEnvelope", () => {
@@ -264,5 +283,74 @@ describe("formatDesignLoopMcpEnvelope", () => {
     assert.match(text, /hint: design_loop_retry/);
     assert.match(text, /transcript:/);
     assert.match(text, /hello/);
+  });
+});
+
+describe("ask SSE helpers", () => {
+  it("parses SSE data lines", () => {
+    assert.deepEqual(parseSseDataLine('data: {"type":"tool_call","tool":"x"}'), {
+      type: "tool_call",
+      tool: "x",
+    });
+    assert.equal(parseSseDataLine(": ping"), null);
+    assert.equal(parseSseDataLine("data: [DONE]"), null);
+  });
+
+  it("consumes ask SSE stream to done", async () => {
+    const payload = [
+      'data: {"type":"tool_call","tool":"grep_files","summary":"grep @source"}\n\n',
+      'data: {"type":"done","reply":"fixed","askId":"a1"}\n\n',
+    ].join("");
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(payload));
+        controller.close();
+      },
+    });
+    const events: Record<string, unknown>[] = [];
+    const result = await consumeAskSseStream(body, (e) => {
+      events.push(e);
+    });
+    assert.equal(result.ok, true);
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.type, "tool_call");
+    assert.equal(result.done?.reply, "fixed");
+  });
+});
+
+describe("replaceLastAssistantAskMessage", () => {
+  it("updates working stub in place", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-store-ask-stub-"));
+    try {
+      const store = new SlopStore(join(dir, "store.json"));
+      const projectRoot = join(dir, "proj");
+      mkdirSync(projectRoot, { recursive: true });
+      const project = store.createProject({
+        name: "demo",
+        rootPath: projectRoot,
+      });
+      const ask = store.createAsk({
+        projectId: project.id,
+        title: "vis",
+        firstMessage: {
+          role: "user",
+          content: "why invisible?",
+          at: new Date().toISOString(),
+        },
+      });
+      store.appendAskMessage(ask.id, {
+        role: "assistant",
+        content: "Working…\n- grep",
+        at: new Date().toISOString(),
+      });
+      const updated = store.replaceLastAssistantAskMessage(
+        ask.id,
+        "Final diagnosis",
+      );
+      assert.equal(updated?.messages.length, 2);
+      assert.equal(updated?.messages[1]?.content, "Final diagnosis");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

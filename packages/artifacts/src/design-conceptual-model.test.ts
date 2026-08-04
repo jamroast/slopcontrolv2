@@ -193,6 +193,9 @@ describe("design-conceptual-model", () => {
     assert.match(ui, /## Theme/);
     assert.match(ui, /## Scope/);
     assert.match(ui, /data-theme/);
+    assert.match(ui, /Visibility \(mandatory when togglePresent\)/);
+    assert.match(ui, /@source|style emission|text-text-secondary/);
+    assert.match(ui, /visible/);
   });
 
   it("bind writes phase tokens.css with light block", () => {

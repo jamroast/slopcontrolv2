@@ -1221,6 +1221,16 @@ ${
 
 Requirements:
 ${theme.requirements.map((r) => `- ${r}`).join("\n")}
+${
+  theme.togglePresent
+    ? `
+**Visibility (mandatory when togglePresent):** The day/night control must be **visible** in the playground/app shell menubar — not only mounted in the DOM / able to set \`data-theme\`.
+- Consumer CSS entry (e.g. \`playground/src/index.css\`) must \`@source\` / scan package component trees that host the toggle (e.g. \`@source "../src/**/*.{ts,tsx}"\`), **or** the toggle must not rely on Tailwind utilities that only exist in unscanned files (use inline \`style={{ color: 'var(--text-secondary)' }}\` / CSS module sizing).
+- Success Criteria must claim the control is **visible** (icons/chrome readable on dark and light).
+- Automated Checks must prove **both** mount (\`<ThemeToggle\` in shell menubar **and** \`<Menubar\` in playground App) **and** style emission (\`@source\` covering \`../src\`, **or** after \`vite build\` grep built \`dist/assets/*.css\` for ThemeToggle utilities such as \`text-text-secondary\` / size, **or** non-utility color/size fallback). Import-order-only greps (\`@import "tailwindcss"\` first) are **insufficient**.
+`
+    : ""
+}
 
 Light token block from accepted mock (must land in product CSS):
 \`\`\`css
@@ -1231,6 +1241,7 @@ ${(theme.lightTokensCss || "/* implement light ladder */").trim().slice(0, 2_500
 - Drive theme via \`data-theme\` on \`<html>\` (not an unused \`.light\` class alone).
 - Remap semantic tokens (\`--background\`, \`--surface\`, \`--foreground\`) under \`[data-theme="light"]\`.
 - Body/chrome must consume those vars — not hard-coded \`--color-dark-*\` that ignore the toggle.
+- If a theme toggle control is in scope: it must be **visible** in playground/app shell; prove mount + Tailwind \`@source\` / built-CSS utilities (not import-order alone).
 `
 }
 `
@@ -1458,6 +1469,19 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     });
   } catch {
     /* bind still succeeds */
+  }
+
+  try {
+    const { bindDesignElementsToPhase } = requireDesignPack(
+      "./design-element.js",
+    ) as typeof import("./design-element.js");
+    bindDesignElementsToPhase({
+      projectRoot: opts.projectRoot,
+      loopId: opts.loopId,
+      phaseId: opts.phaseId,
+    });
+  } catch {
+    /* elements optional */
   }
 
   const next: DesignLoopMeta = {

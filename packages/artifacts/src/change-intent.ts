@@ -99,6 +99,40 @@ export function isBrandThemingAsk(description: string): boolean {
   return BRAND_THEMING_RE.test(text) || LOGO_TYPO_RE.test(text);
 }
 
+/**
+ * Theme toggle / data-theme / light-dark wiring without new brand identity.
+ * These should not force a design pass (UI-SPEC / logo gen) — coding only.
+ */
+export function isThemeWiringAsk(description: string): boolean {
+  const text = description ?? "";
+  if (
+    !/\b(?:theme\s*toggle|light\s*[\/&-]?\s*dark|dark\s*[\/&-]?\s*light|data-theme|useTheme|prefers-color-scheme|color-scheme)\b/i.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  // New brand identity / port sibling theming still needs design.
+  if (
+    /\b(?:logo|wordmark|favicon|re-?brand|visual\s+identity|new\s+palette|apply\s+(?:the\s+)?theming|port\s+(?:the\s+)?them|design\s+system)\b/i.test(
+      text,
+    ) || LOGO_TYPO_RE.test(text)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** Brand/Assets section body that explicitly opts out of visual design work. */
+export function isNotApplicableDesignSection(section: string): boolean {
+  const t = (section ?? "").trim();
+  if (!t) return true;
+  const firstLine = t.split(/\r?\n/).find((l) => l.trim().length > 0)?.trim() ?? "";
+  return /^(?:not\s+applicable|n\/?a\b|none\b|no\s+(?:new\s+)?(?:brand|assets|visual)|this\s+phase\s+does\s+not)/i.test(
+    firstLine,
+  );
+}
+
 const LIVE_DECISIONS_HEADING = "## Live decisions";
 const LIVE_VERIFIED_HEADING = "## Live decisions — verified";
 const LIVE_CLAIMED_HEADING = "## Live decisions — claimed unverified";
@@ -299,7 +333,8 @@ function normalizeRefinementOf(
 /**
  * Deterministic post-process for LLM or heuristic Intent fields.
  * Clips lengths, applies mount side effects, and sets interaction only for
- * engagement — never for chrome-hide / backend.
+ * engagement — never for chrome-hide / backend. For changeKind "other",
+ * ignore LLM needsInteraction unless the description needs a form contract.
  */
 export function finalizeChangeIntent(
   raw: ChangeIntentLlmOutput,
@@ -317,7 +352,10 @@ export function finalizeChangeIntent(
   const allowInteraction =
     changeKind !== "chrome-hide" &&
     changeKind !== "backend" &&
-    (raw.needsInteraction || changeKind === "engagement");
+    (changeKind === "engagement" ||
+      (changeKind === "other"
+        ? needsInteractionContract(description)
+        : Boolean(raw.needsInteraction)));
 
   const resolvePriorMount = (): void => {
     if (!opts.projectRoot || refinementOf.length > 0) return;
@@ -583,6 +621,10 @@ export function isChangeIntentWeak(
       /(?:promote\s+to\s+research|for\s+me\s+to\s+promote|^untitled)/i.test(
         existing.title,
       ));
+  const spuriousInteraction =
+    Boolean(existing.interaction) &&
+    !needsIx &&
+    existing.changeKind !== "engagement";
   return (
     !existing.changeKind ||
     (existing.uiMount === "n/a" && (needsIx || chromeOnly)) ||
@@ -590,6 +632,7 @@ export function isChangeIntentWeak(
     (chromeOnly && Boolean(existing.interaction)) ||
     (chromeOnly && existing.changeKind !== "chrome-hide") ||
     (brandAsk && existing.changeKind === "backend") ||
+    spuriousInteraction ||
     weakMustNot ||
     weakTitle
   );

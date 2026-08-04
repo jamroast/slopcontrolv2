@@ -23,6 +23,7 @@
     "cors": "^2.8.5",
     "dotenv": "^17.4.2",
     "express": "^4.21.0",
+    "verdaccio": "^5.33.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

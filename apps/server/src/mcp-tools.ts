@@ -14,6 +14,124 @@ export function defaultSlopcontrolServerUrl(): string {
   return `http://127.0.0.1:${process.env.SLOPCONTROL_PORT ?? 3020}`;
 }
 
+/** Parse one SSE `data:` JSON payload line (ignores comments / empty). */
+export function parseSseDataLine(line: string): Record<string, unknown> | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("data:")) return null;
+  const raw = trimmed.slice(5).trim();
+  if (!raw || raw === "[DONE]") return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function askProgressLogLine(event: Record<string, unknown>): string | null {
+  const type = String(event.type ?? "");
+  if (type === "tool_call" || type === "tool_result") {
+    return String(event.summary ?? event.tool ?? type);
+  }
+  if (type === "status") {
+    const summary = String(event.summary ?? "");
+    if (!summary || summary === "step") return null;
+    return summary;
+  }
+  if (type === "error") {
+    return `error: ${String(event.error ?? "ask failed")}`;
+  }
+  return null;
+}
+
+async function consumeLiveTurnSse(
+  server: Server,
+  logger: string,
+  body: ReadableStream<Uint8Array> | null,
+): Promise<{
+  ok: boolean;
+  done?: Record<string, unknown>;
+  errorText?: string;
+}> {
+  return consumeAskSseStream(body, async (event) => {
+    const line = askProgressLogLine(event);
+    if (!line) return;
+    try {
+      await server.sendLoggingMessage({
+        level: "info",
+        logger,
+        data: line,
+      });
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+/**
+ * Consume ask SSE body; invoke onEvent for each progress payload.
+ * Returns the terminal done/error event (or a synthetic error).
+ */
+export async function consumeAskSseStream(
+  body: ReadableStream<Uint8Array> | null,
+  onEvent: (event: Record<string, unknown>) => void | Promise<void>,
+): Promise<{
+  ok: boolean;
+  done?: Record<string, unknown>;
+  errorText?: string;
+}> {
+  if (!body) {
+    return { ok: false, errorText: "empty SSE body" };
+  }
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let terminal: Record<string, unknown> | undefined;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n");
+    buffer = parts.pop() ?? "";
+    for (const line of parts) {
+      const event = parseSseDataLine(line);
+      if (!event) continue;
+      await onEvent(event);
+      const t = String(event.type ?? "");
+      if (t === "done" || t === "error" || t === "interrupted") {
+        terminal = event;
+      }
+    }
+  }
+  if (buffer.trim()) {
+    const event = parseSseDataLine(buffer);
+    if (event) {
+      await onEvent(event);
+      const t = String(event.type ?? "");
+      if (t === "done" || t === "error" || t === "interrupted") terminal = event;
+    }
+  }
+
+  if (!terminal) {
+    return { ok: false, errorText: "ask stream ended without done event" };
+  }
+  if (String(terminal.type) === "error" || String(terminal.type) === "interrupted") {
+    return {
+      ok: false,
+      done: terminal,
+      errorText: String(
+        terminal.error ??
+          (terminal.type === "interrupted" ? "interrupted" : "ask failed"),
+      ),
+    };
+  }
+  return { ok: true, done: terminal };
+}
+
 /**
  * Put askId first in MCP text so clients reliably reuse it on the next turn.
  */
@@ -182,6 +300,7 @@ export function formatAskMcpEnvelope(body: string, ok: boolean): string {
       askId?: string;
       reply?: string;
       error?: string;
+      code?: string;
       hint?: string;
       promotedPhaseId?: string;
       forkedFrom?: string;
@@ -190,8 +309,12 @@ export function formatAskMcpEnvelope(body: string, ok: boolean): string {
     if (!ok) {
       return [
         askId ? `askId: ${askId}` : null,
+        parsed.code ? `code: ${parsed.code}` : null,
         parsed.error ? `error: ${parsed.error}` : `error: ${body.slice(0, 500)}`,
         parsed.hint ? `hint: ${parsed.hint}` : null,
+        typeof parsed.reply === "string" && parsed.reply.trim()
+          ? `reply:\n${parsed.reply.trim()}`
+          : null,
         parsed.promotedPhaseId
           ? `promotedPhaseId: ${parsed.promotedPhaseId}`
           : null,
@@ -909,6 +1032,203 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "npm_registry_status",
+      description:
+        "Status of SlopControl's private Verdaccio npm registry (url, up, scopes, packages). Auto-starts with the server unless SLOPCONTROL_NPM_REGISTRY=0.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
+    {
+      name: "npm_registry_start",
+      description: "Start the private Verdaccio registry under ~/.slopcontrol/npm-registry.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "npm_registry_stop",
+      description: "Stop the private Verdaccio registry process.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "npm_registry_ensure_rc",
+      description:
+        "Write scoped @jam / @slopcontrol registry lines + auth token into a project's .npmrc so pnpm/npm can install private packages.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "npm_registry_list",
+      description: "List packages published to the private registry storage.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "npm_registry_publish",
+      description:
+        "npm publish a package directory to the local SlopControl registry (starts registry if needed).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          packageDir: {
+            type: "string",
+            description: "Absolute path to a folder with package.json",
+          },
+          tag: { type: "string" },
+        },
+        required: ["packageDir"],
+      },
+    },
+    {
+      name: "design_element_publish_npm",
+      description:
+        "Scaffold @jam/<elementId> from a design element's src/ and publish it to the private npm registry. Prefer after design_element_extract/publish.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          elementId: { type: "string" },
+          version: { type: "number" },
+        },
+        required: ["projectId", "elementId"],
+      },
+    },
+    {
+      name: "list_design_elements",
+      description:
+        "List shared design elements in the project library (.slopcontrol/elements) and the global registry (~/.slopcontrol/shared-elements). Use before design_element_import.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          includeRegistry: {
+            type: "boolean",
+            description: "Include global registry (default true)",
+          },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "list_cross_project_deps",
+      description:
+        "Unified catalog: design elements (local/registry/siblings), private npm packages (@jam/@slopcontrol), and registered project summaries. Prefer this before inventing shared UI or recommending npm link. After resolve, use design_element_import / npm_registry_ensure_rc / pnpm add.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          filterProjectId: {
+            type: "string",
+            description: "Optional filter by registered project id or name",
+          },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "resolve_dependency",
+      description:
+        "Resolve free-text or structured element/package/from-project into recommended actions (ensure_rc, import_element, pnpm_add). Never recommends npm link. Then call list_design_elements / design_element_import / npm_registry_* as needed.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          text: { type: "string" },
+          elementId: { type: "string" },
+          packageName: { type: "string" },
+          fromName: { type: "string" },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "design_element_get",
+      description:
+        "Resolve and fetch a shared design element (meta, SPEC, mock snippet, hasCode). origin: registry | project:jamroast | omit for resolve order.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          elementId: { type: "string" },
+          version: { type: "number" },
+          origin: { type: "string" },
+        },
+        required: ["projectId", "elementId"],
+      },
+    },
+    {
+      name: "design_element_publish",
+      description:
+        "Publish a design element into the project library (A/C). Set publishToRegistry=true to also write the global registry (B). Provide elementId + spec + mockHtml; optional srcFiles for TS/JS.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          elementId: { type: "string" },
+          spec: { type: "string" },
+          mockHtml: { type: "string" },
+          label: { type: "string" },
+          kind: {
+            type: "string",
+            description: "control | shell | pattern",
+          },
+          tokensCss: { type: "string" },
+          srcFiles: {
+            type: "object",
+            description: "Map of relative path → source text under element src/",
+          },
+          mountHints: { type: "array", items: { type: "string" } },
+          publishToRegistry: { type: "boolean" },
+        },
+        required: ["projectId", "elementId", "spec", "mockHtml"],
+      },
+    },
+    {
+      name: "design_element_extract",
+      description:
+        "Extract a shared element (default theme-toggle) from a design-loop mock and publish to the project library. Optional publishToRegistry. Author path for central brand projects.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          elementId: { type: "string" },
+          version: { type: "number" },
+          label: { type: "string" },
+          kind: { type: "string" },
+          publish: {
+            type: "boolean",
+            description: "Publish after extract (default true)",
+          },
+          publishToRegistry: { type: "boolean" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_element_import",
+      description:
+        "Import a resolved shared element into a design loop (pins META.elements + selection). Mock continues must embed it once. origin e.g. project:jamroast or registry.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          elementId: {
+            type: "string",
+            description: "Default theme-toggle",
+          },
+          version: { type: "number" },
+          origin: { type: "string" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
       name: "list_design_loops",
       description: "List design-loop sessions for a project.",
       inputSchema: {
@@ -992,7 +1312,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "plan_loop_accept",
       description:
-        "Freeze a plan-loop version + checklist as PLAN_PACK.json (requires ≥1 ticked feature and complete PLAN sections). Then call plan_loop_promote.",
+        "Freeze a plan-loop version + checklist as PLAN_PACK.json (requires ≥1 ticked feature and complete PLAN sections). Rejects usedScaffold / failure-scaffold PLAN.md — call plan_loop_retry until usedScaffold is false. Then call plan_loop_promote.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1011,7 +1331,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "plan_loop_promote",
       description:
-        "Bind accepted PLAN.md + PLAN_PACK to a new phase and start research (default). Research receives the plan contract as authoritative operator intent. Product code still only changes in start_development.",
+        "Bind accepted PLAN.md + PLAN_PACK to a new phase and start research (default). Rejects usedScaffold / failure-scaffold plans — call plan_loop_retry first. Research receives the plan contract as authoritative operator intent. Product code still only changes in start_development.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1147,7 +1467,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "ask",
       description:
-        "Project-scoped AI conversation (exploratory, read-only). Does not create a phase. Omitting askId continues the project's latest open ask (sticky resume). Pass askId to target a specific session. Pass newAsk=true to force a fresh conversation. Always reuse askId from the previous ask response. For several investigations use ask_sub_research. When the change is clear, call promote_ask. After promote, use fork_ask to keep chatting. For shell inspect/verify without develop, use agent. For look-and-feel mocks use design_loop_start.",
+        "Project-scoped AI conversation (exploratory, read-only). Does not create a phase. Omitting askId continues the project's latest open ask (sticky resume). Pass askId to target a specific session. Pass newAsk=true to force a fresh conversation. Always reuse askId from the previous ask response. For several investigations use ask_sub_research. When the change is clear, call promote_ask. After promote, use fork_ask to keep chatting. For shell inspect/verify without develop, use agent. For look-and-feel mocks use design_loop_start. While a turn is running, call stop_session to interrupt.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1253,9 +1573,29 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "stop_session",
+      description:
+        "Interrupt an in-flight interactive turn (ask, agent, design_loop, or plan_loop). Use when the turn is looping, too slow, or the operator wants to redirect. Returns immediately; the streaming tool call ends with code interrupted.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          kind: {
+            type: "string",
+            enum: ["ask", "agent", "design_loop", "plan_loop"],
+          },
+          id: {
+            type: "string",
+            description: "askId / agentId / loopId for that kind",
+          },
+        },
+        required: ["projectId", "kind", "id"],
+      },
+    },
+    {
       name: "agent",
       description:
-        "Project-scoped agent chat that can run shell commands in the project root (inspect/verify/diagnose). Not development — no worktrees, design, or merge. Pass agentId to continue. For exploratory task shaping without shell, use ask; for implementation use start_change / start_development.",
+        "Project-scoped agent chat that can run shell commands in the project root (inspect/verify/diagnose). Not development — no worktrees, design, or merge. Pass agentId to continue. For exploratory task shaping without shell, use ask; for implementation use start_change / start_development. While running, call stop_session to interrupt.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1372,6 +1712,7 @@ export function createSlopcontrolMcpServer(
     {
       capabilities: {
         tools: {},
+        logging: {},
       },
     },
   );
@@ -1866,10 +2207,13 @@ export function createSlopcontrolMcpServer(
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
         const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops`,
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops?stream=1`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
             body: JSON.stringify({
               brief: args.brief,
               askId: args.askId,
@@ -1877,12 +2221,47 @@ export function createSlopcontrolMcpServer(
             }),
           },
         );
-        const body = await res.text();
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          const body = await res.text();
+          return {
+            content: [
+              { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+            ],
+            isError: !res.ok,
+          };
+        }
+        const consumed = await consumeLiveTurnSse(server, "plan_loop", res.body);
+        if (!consumed.ok || !consumed.done) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: formatPlanLoopMcpEnvelope(
+                  JSON.stringify({
+                    error: consumed.errorText,
+                    code: consumed.done?.code ?? consumed.done?.type,
+                    notes: consumed.done?.notes ?? consumed.done?.reply,
+                    loopId: consumed.done?.loopId,
+                  }),
+                  false,
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
         return {
           content: [
-            { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+            {
+              type: "text",
+              text: formatPlanLoopMcpEnvelope(
+                JSON.stringify(consumed.done),
+                true,
+              ),
+            },
           ],
-          isError: !res.ok,
+          isError: false,
         };
       });
     }
@@ -1896,19 +2275,57 @@ export function createSlopcontrolMcpServer(
           payload.baseVersion = Number(args.baseVersion);
         }
         const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/continue`,
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/continue?stream=1`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
             body: JSON.stringify(payload),
           },
         );
-        const body = await res.text();
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          const body = await res.text();
+          return {
+            content: [
+              { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+            ],
+            isError: !res.ok,
+          };
+        }
+        const consumed = await consumeLiveTurnSse(server, "plan_loop", res.body);
+        if (!consumed.ok || !consumed.done) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: formatPlanLoopMcpEnvelope(
+                  JSON.stringify({
+                    error: consumed.errorText,
+                    code: consumed.done?.code ?? consumed.done?.type,
+                    notes: consumed.done?.notes ?? consumed.done?.reply,
+                    loopId: consumed.done?.loopId,
+                  }),
+                  false,
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
         return {
           content: [
-            { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
+            {
+              type: "text",
+              text: formatPlanLoopMcpEnvelope(
+                JSON.stringify(consumed.done),
+                true,
+              ),
+            },
           ],
-          isError: !res.ok,
+          isError: false,
         };
       });
     }
@@ -2073,10 +2490,13 @@ export function createSlopcontrolMcpServer(
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
         const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops`,
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops?stream=1`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
             body: JSON.stringify({
               brief: args.brief,
               phaseId: args.phaseId,
@@ -2085,12 +2505,51 @@ export function createSlopcontrolMcpServer(
             }),
           },
         );
-        const body = await res.text();
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          const body = await res.text();
+          return {
+            content: [
+              { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+            ],
+            isError: !res.ok,
+          };
+        }
+        const consumed = await consumeLiveTurnSse(
+          server,
+          "design_loop",
+          res.body,
+        );
+        if (!consumed.ok || !consumed.done) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: formatDesignLoopMcpEnvelope(
+                  JSON.stringify({
+                    error: consumed.errorText,
+                    code: consumed.done?.code ?? consumed.done?.type,
+                    notes: consumed.done?.notes ?? consumed.done?.reply,
+                    loopId: consumed.done?.loopId,
+                  }),
+                  false,
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
         return {
           content: [
-            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+            {
+              type: "text",
+              text: formatDesignLoopMcpEnvelope(
+                JSON.stringify(consumed.done),
+                true,
+              ),
+            },
           ],
-          isError: !res.ok,
+          isError: false,
         };
       });
     }
@@ -2104,19 +2563,61 @@ export function createSlopcontrolMcpServer(
           payload.baseVersion = Number(args.baseVersion);
         }
         const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/continue`,
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/continue?stream=1`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
             body: JSON.stringify(payload),
           },
         );
-        const body = await res.text();
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          const body = await res.text();
+          return {
+            content: [
+              { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+            ],
+            isError: !res.ok,
+          };
+        }
+        const consumed = await consumeLiveTurnSse(
+          server,
+          "design_loop",
+          res.body,
+        );
+        if (!consumed.ok || !consumed.done) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: formatDesignLoopMcpEnvelope(
+                  JSON.stringify({
+                    error: consumed.errorText,
+                    code: consumed.done?.code ?? consumed.done?.type,
+                    notes: consumed.done?.notes ?? consumed.done?.reply,
+                    loopId: consumed.done?.loopId,
+                  }),
+                  false,
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
         return {
           content: [
-            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+            {
+              type: "text",
+              text: formatDesignLoopMcpEnvelope(
+                JSON.stringify(consumed.done),
+                true,
+              ),
+            },
           ],
-          isError: !res.ok,
+          isError: false,
         };
       });
     }
@@ -2157,6 +2658,261 @@ export function createSlopcontrolMcpServer(
         const qs = params.toString() ? `?${params}` : "";
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/site-inventory${qs}`,
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "npm_registry_status") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/npm-registry`);
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "npm_registry_start") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/npm-registry/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "npm_registry_stop") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/npm-registry/stop`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "npm_registry_ensure_rc") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/npm-registry/ensure-rc`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId: args.projectId }),
+        });
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "npm_registry_list") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/npm-registry/packages`);
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "npm_registry_publish") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/npm-registry/publish`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            packageDir: args.packageDir,
+            tag: args.tag,
+          }),
+        });
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "design_element_publish_npm") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const elementId = String(args.elementId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-elements/${encodeURIComponent(elementId)}/publish-npm`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              version: args.version,
+            }),
+          },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "list_design_elements") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const params = new URLSearchParams();
+        if (args.includeRegistry === false || args.includeRegistry === "false") {
+          params.set("includeRegistry", "false");
+        }
+        const qs = params.toString() ? `?${params}` : "";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-elements${qs}`,
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "list_cross_project_deps") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const params = new URLSearchParams();
+        if (typeof args.filterProjectId === "string" && args.filterProjectId) {
+          params.set("projectId", args.filterProjectId);
+        }
+        const qs = params.toString() ? `?${params}` : "";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/cross-deps${qs}`,
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "resolve_dependency") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/resolve-dependency`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: args.text,
+              elementId: args.elementId,
+              packageName: args.packageName,
+              fromName: args.fromName,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_element_get") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const elementId = String(args.elementId ?? "");
+        const params = new URLSearchParams();
+        if (typeof args.version === "number") {
+          params.set("version", String(args.version));
+        }
+        if (typeof args.origin === "string" && args.origin) {
+          params.set("origin", args.origin);
+        }
+        const qs = params.toString() ? `?${params}` : "";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-elements/${encodeURIComponent(elementId)}${qs}`,
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_element_publish") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-elements/publish`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              elementId: args.elementId,
+              spec: args.spec,
+              mockHtml: args.mockHtml,
+              label: args.label,
+              kind: args.kind,
+              tokensCss: args.tokensCss,
+              srcFiles: args.srcFiles,
+              mountHints: args.mountHints,
+              publishToRegistry: args.publishToRegistry === true,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_element_extract") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/elements/extract`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              elementId: args.elementId,
+              version: args.version,
+              label: args.label,
+              kind: args.kind,
+              publish: args.publish !== false,
+              publishToRegistry: args.publishToRegistry === true,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_element_import") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/elements/import`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              elementId: args.elementId ?? "theme-toggle",
+              version: args.version,
+              origin: args.origin,
+            }),
+          },
         );
         const body = await res.text();
         return {
@@ -2539,10 +3295,13 @@ export function createSlopcontrolMcpServer(
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
         const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/asks`,
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/asks?stream=1`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
             body: JSON.stringify({
               message: args.message,
               askId: args.askId,
@@ -2551,10 +3310,105 @@ export function createSlopcontrolMcpServer(
             }),
           },
         );
-        const body = await res.text();
+
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          const body = await res.text();
+          return {
+            content: [
+              { type: "text", text: formatAskMcpEnvelope(body, res.ok) },
+            ],
+            isError: !res.ok,
+          };
+        }
+
+        const progressToken = (
+          request.params as {
+            _meta?: { progressToken?: string | number };
+          }
+        )._meta?.progressToken;
+        let progressN = 0;
+
+        const consumed = await consumeAskSseStream(res.body, async (event) => {
+          const line = askProgressLogLine(event);
+          if (line) {
+            try {
+              await server.sendLoggingMessage({
+                level: "info",
+                logger: "ask",
+                data: line,
+              });
+            } catch {
+              /* client may not support logging */
+            }
+            if (progressToken !== undefined) {
+              progressN += 1;
+              try {
+                await server.notification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken,
+                    progress: progressN,
+                    total: undefined,
+                    message: line,
+                  },
+                });
+              } catch {
+                /* optional */
+              }
+            }
+          }
+        });
+
+        if (!consumed.ok || !consumed.done) {
+          const errPayload = {
+            error: consumed.errorText ?? "ask stream failed",
+            code:
+              typeof consumed.done?.code === "string"
+                ? consumed.done.code
+                : undefined,
+            reply:
+              typeof consumed.done?.reply === "string"
+                ? consumed.done.reply
+                : undefined,
+            askId:
+              typeof consumed.done?.askId === "string"
+                ? consumed.done.askId
+                : undefined,
+            ask: consumed.done?.ask,
+            hint:
+              typeof consumed.done?.hint === "string"
+                ? consumed.done.hint
+                : undefined,
+          };
+          return {
+            content: [
+              {
+                type: "text",
+                text: formatAskMcpEnvelope(
+                  JSON.stringify(errPayload),
+                  false,
+                ),
+              },
+            ],
+            isError: true,
+          };
+        }
+
+        const done = consumed.done;
+        const okPayload = {
+          ask: done.ask,
+          askId: done.askId,
+          reply: done.reply,
+        };
         return {
-          content: [{ type: "text", text: formatAskMcpEnvelope(body, res.ok) }],
-          isError: !res.ok,
+          content: [
+            {
+              type: "text",
+              text: formatAskMcpEnvelope(JSON.stringify(okPayload), true),
+            },
+          ],
+          isError: false,
         };
       });
     }
@@ -2631,6 +3485,38 @@ export function createSlopcontrolMcpServer(
       });
     }
 
+    if (name === "stop_session") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const kind = String(args.kind ?? "");
+        const id = String(args.id ?? "");
+        const pathByKind: Record<string, string> = {
+          ask: `/projects/${encodeURIComponent(projectId)}/asks/${encodeURIComponent(id)}/stop`,
+          agent: `/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(id)}/stop`,
+          design_loop: `/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(id)}/stop`,
+          plan_loop: `/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(id)}/stop`,
+        };
+        const path = pathByKind[kind];
+        if (!path) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `error: kind must be ask|agent|design_loop|plan_loop`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        const res = await fetch(`${SERVER_URL}${path}`, { method: "POST" });
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
     if (name === "ask_sub_research") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -2657,10 +3543,13 @@ export function createSlopcontrolMcpServer(
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
         const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/agents`,
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/agents?stream=1`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
             body: JSON.stringify({
               message: args.message,
               agentId: args.agentId,
@@ -2668,10 +3557,85 @@ export function createSlopcontrolMcpServer(
             }),
           },
         );
-        const body = await res.text();
+
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          const body = await res.text();
+          return {
+            content: [{ type: "text", text: body }],
+            isError: !res.ok,
+          };
+        }
+
+        const progressToken = (
+          request.params as {
+            _meta?: { progressToken?: string | number };
+          }
+        )._meta?.progressToken;
+        let progressN = 0;
+
+        const consumed = await consumeAskSseStream(res.body, async (event) => {
+          const line = askProgressLogLine(event);
+          if (line) {
+            try {
+              await server.sendLoggingMessage({
+                level: "info",
+                logger: "agent",
+                data: line,
+              });
+            } catch {
+              /* ignore */
+            }
+            if (progressToken !== undefined) {
+              progressN += 1;
+              try {
+                await server.notification({
+                  method: "notifications/progress",
+                  params: {
+                    progressToken,
+                    progress: progressN,
+                    message: line,
+                  },
+                });
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+        });
+
+        if (!consumed.ok || !consumed.done) {
+          const errPayload = {
+            error: consumed.errorText ?? "agent stream failed",
+            code:
+              typeof consumed.done?.code === "string"
+                ? consumed.done.code
+                : String(consumed.done?.type ?? "") === "interrupted"
+                  ? "interrupted"
+                  : undefined,
+            reply:
+              typeof consumed.done?.reply === "string"
+                ? consumed.done.reply
+                : undefined,
+            agent: consumed.done?.agent,
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(errPayload) }],
+            isError: true,
+          };
+        }
+
         return {
-          content: [{ type: "text", text: body }],
-          isError: !res.ok,
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                agent: consumed.done.agent,
+                reply: consumed.done.reply,
+              }),
+            },
+          ],
+          isError: false,
         };
       });
     }

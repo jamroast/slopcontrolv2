@@ -202,11 +202,21 @@ describe("platform learnings seed", () => {
           /Placeholder hosts stay in \*\.example/i.test(L.title),
         ),
       );
+      assert.ok(
+        learnings.some((L) =>
+          /Vite alias first-match|grep ≠ resolve/i.test(L.title),
+        ),
+      );
       const block = loadLearningsPromptBlock(root, {
         phaseDescription: "ollama openai chat stream hang",
         failureText: "Stream started toolCount",
       });
       assert.match(block, /ollama\.com\/v1/);
+      const viteBlock = loadLearningsPromptBlock(root, {
+        phaseDescription: "playground Can't resolve styles vite alias",
+        failureText: "Can't resolve '@jamroast/components/styles'",
+      });
+      assert.match(viteBlock, /first matching|vite build|resolveId/i);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

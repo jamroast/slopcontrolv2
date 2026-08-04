@@ -51,6 +51,10 @@ export type HandoffDiagnosisSnippet = {
   title?: string;
   class?: string;
   operatorActions?: string[];
+  /** Latest diagnosis nextActions for coding retry routing. */
+  nextActions?: string;
+  /** Classifier tags (long-lived, host-utility, …). */
+  tags?: string[];
 };
 
 export type DevelopmentHandoff = {

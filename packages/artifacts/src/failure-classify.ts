@@ -33,6 +33,117 @@ export type VerifyFailureStep = {
   output: string;
 };
 
+/** Host OS utilities that are not cured by pnpm/npm install. */
+const HOST_UTILITY_CMDS = new Set([
+  "timeout",
+  "gtimeout",
+  "timeout.exe",
+  "watch",
+  "column",
+  "stdbuf",
+  "flock",
+  "unbuffer",
+  "script",
+]);
+
+/** Typical node_modules /.bin names — missing → reinstall deps. */
+const NODE_BIN_CMDS = new Set([
+  "vitest",
+  "tsup",
+  "eslint",
+  "jest",
+  "tsc",
+  "vite",
+  "next",
+  "tsx",
+  "webpack",
+  "rollup",
+  "prettier",
+  "turbo",
+  "nodemon",
+  "mocha",
+  "ava",
+  "playwright",
+  "cypress",
+]);
+
+export type MissingCommandKind = "host-utility" | "node-bin" | "unknown";
+
+export type MissingCommandClassification = {
+  kind: MissingCommandKind;
+  command: string | null;
+};
+
+/** Extract `cmd` from `cmd: command not found` / `sh: cmd: command not found`. */
+export function extractMissingCommand(text: string): string | null {
+  const raw = text ?? "";
+  const bashLine = raw.match(
+    /line\s+\d+:\s*([A-Za-z0-9._+-]+):\s*command not found/i,
+  );
+  if (bashLine?.[1]) return bashLine[1].toLowerCase();
+  const m = raw.match(
+    /(?:^|\n)\s*(?:sh:\s*)?([A-Za-z0-9._+-]+):\s*command not found/i,
+  );
+  return m?.[1]?.toLowerCase() ?? null;
+}
+
+/**
+ * Classify a command-not-found failure as host utility vs package bin.
+ * Used by diagnosis and auto deps-install so they stay aligned.
+ */
+export function classifyMissingCommand(
+  stepCtx: string,
+  opts?: { exitCode?: number; stepName?: string },
+): MissingCommandClassification {
+  const command = extractMissingCommand(stepCtx);
+  if (command && HOST_UTILITY_CMDS.has(command)) {
+    return { kind: "host-utility", command };
+  }
+  if (command && NODE_BIN_CMDS.has(command)) {
+    return { kind: "node-bin", command };
+  }
+  if (
+    /\b(timeout|gtimeout|stdbuf|flock)\b.{0,40}command not found|command not found.{0,40}\b(timeout|gtimeout)\b/i.test(
+      stepCtx,
+    )
+  ) {
+    const inferred =
+      command ??
+      (/\bgtimeout\b/i.test(stepCtx) ? "gtimeout" : "timeout");
+    return { kind: "host-utility", command: inferred };
+  }
+  if (
+    opts?.exitCode === 127 ||
+    /command not found|not found \(exit 127\)/i.test(stepCtx)
+  ) {
+    return { kind: "node-bin", command };
+  }
+  return { kind: "unknown", command };
+}
+
+/** True when auto deps-install should run (missing package bin, not host utility). */
+export function isMissingNodeBinFailure(step: {
+  name?: string;
+  command?: string;
+  exitCode?: number;
+  output?: string;
+}): boolean {
+  const stepCtx = [step.name ?? "", step.command ?? "", step.output ?? ""].join(
+    "\n",
+  );
+  if (
+    !/command not found|not found \(exit 127\)/i.test(stepCtx) &&
+    step.exitCode !== 127
+  ) {
+    return false;
+  }
+  const classified = classifyMissingCommand(stepCtx, {
+    exitCode: step.exitCode,
+    stepName: step.name,
+  });
+  return classified.kind === "node-bin";
+}
+
 export type FailureDiagnosis = {
   class: FailureClass;
   confidence: "high" | "medium" | "low";
@@ -44,6 +155,8 @@ export type FailureDiagnosis = {
   codingAgentShouldFix: boolean;
   audience: "operator" | "coding";
   operatorActions: string[];
+  /** Classifier tags (e.g. long-lived, host-utility) for retry routing. */
+  tags?: string[];
   learning?: LearningCandidate;
   failingStep?: { name: string; command?: string; exitCode: number };
 };
@@ -68,8 +181,47 @@ export function classifyVerifyFailure(
   const stepCtx = [opts?.stepName ?? "", opts?.command ?? "", text].join("\n");
   const lower = stepCtx.toLowerCase();
 
-  // Missing binary / node_modules (exit 127) — install deps, do not invent app fixes
+  // Host OS utilities (e.g. GNU timeout on macOS) — not cured by pnpm install
+  const missingCmd = classifyMissingCommand(stepCtx, {
+    exitCode: opts?.exitCode,
+    stepName: opts?.stepName,
+  });
+  if (missingCmd.kind === "host-utility") {
+    const util = missingCmd.command ?? "utility";
+    return build(
+      "process",
+      "high",
+      `Missing host utility in Automated Check (\`${util}\`)`,
+      ["automated-checks", "host-utility", "macos-portability"],
+      {
+        codingAgentShouldFix: true,
+        lesson: `Automated Check invoked host utility \`${util}\`, which is not available on this OS (macOS has no GNU timeout by default). Rewrite PHASE.md ## Automated Checks to finite structural asserts (grep/config) — do NOT start long-lived servers (\`pnpm dev\` / vite) and do NOT run pnpm/npm install for this fingerprint.`,
+        evidence: stepCtx.slice(-600),
+        opts,
+      },
+    );
+  }
+
+  // Per-check wall-clock budget exceeded (long-lived server / hung wait)
+  if (/CHECK_TIMEOUT\b/i.test(stepCtx)) {
+    return build(
+      "process",
+      "high",
+      "Broken Automated Check (exceeded wall clock)",
+      ["automated-checks", "check-timeout", "long-lived"],
+      {
+        codingAgentShouldFix: true,
+        lesson:
+          "Automated Check exceeded SlopControl wall-clock budget (CHECK_TIMEOUT). Remove long-lived servers (`pnpm dev` / vite / docker compose up) and background `&`+`wait` patterns. Prefer finite structural asserts in PHASE.md ## Automated Checks.",
+        evidence: stepCtx.slice(-600),
+        opts,
+      },
+    );
+  }
+
+  // Missing package bin / node_modules (exit 127) — install deps, do not invent app fixes
   if (
+    missingCmd.kind === "node-bin" ||
     opts?.exitCode === 127 ||
     /command not found|not found \(exit 127\)|ENOENT.*spawn|no such file or directory.*bin\//i.test(
       stepCtx,
@@ -127,6 +279,29 @@ export function classifyVerifyFailure(
         codingAgentShouldFix: true,
         lesson:
           "Automated Checks must be complete shell commands. Never leave a trailing `\\` continuation — put the full command on one line (or ensure continuations are joined). Fix PHASE.md ## Automated Checks, then re-run.",
+        evidence: stepCtx.slice(-600),
+        opts,
+      },
+    );
+  }
+
+  // echo "VAR=$?" prints but does not assign — test "$VAR" sees empty → integer expression expected
+  if (
+    /integer expression expected|unary operator expected|test:\s*:/i.test(
+      stepCtx,
+    ) ||
+    (/echo\s+["'][A-Z_][A-Z0-9_]*=\$\?["']/i.test(stepCtx) &&
+      /test\s+"?\$[A-Z_][A-Z0-9_]*"?\s+-eq/i.test(stepCtx))
+  ) {
+    return build(
+      "process",
+      "high",
+      "Broken Automated Check (empty test / exit-code capture)",
+      ["automated-checks", "shell-syntax", "exit-capture"],
+      {
+        codingAgentShouldFix: true,
+        lesson:
+          'Do not use `echo "VAR=$?"` — that prints but does not assign. Prefer `cmd || exit 1`, or `VAR=$?` then `test "$VAR" -eq 0`. Fix PHASE.md ## Automated Checks, then re-run.',
         evidence: stepCtx.slice(-600),
         opts,
       },
@@ -523,7 +698,49 @@ export function classifyVerifyFailure(
     });
   }
 
-  // PHASE validation / process
+  // PHASE validation — long-lived server / bg+wait (before generic phase-doc)
+  if (
+    /phase\.md validation failed|broken automated check/i.test(stepCtx) &&
+    /long-lived server|backgrounds a process|do not background servers/i.test(
+      stepCtx,
+    )
+  ) {
+    return build(
+      "process",
+      "high",
+      "Broken Automated Check (long-lived server)",
+      ["automated-checks", "long-lived", "phase-doc"],
+      {
+        codingAgentShouldFix: true,
+        lesson:
+          "PHASE.md ## Automated Checks must be finite. Remove long-lived servers (`pnpm/npm/yarn/bun dev|start|serve`, vite, next dev, docker compose up) and background `&`+`wait`. Prefer structural asserts (grep alias/config) or a short Node one-shot.",
+        evidence: stepCtx.slice(-600),
+        opts,
+      },
+    );
+  }
+
+  // PHASE validation — GNU timeout rejected at validate (align with host-utility rewrite)
+  if (
+    /phase\.md validation failed|broken automated check/i.test(stepCtx) &&
+    /GNU `timeout`|gtimeout|not available on macOS/i.test(stepCtx)
+  ) {
+    return build(
+      "process",
+      "high",
+      "Broken Automated Check (GNU timeout / host utility)",
+      ["automated-checks", "host-utility", "macos-portability", "phase-doc"],
+      {
+        codingAgentShouldFix: true,
+        lesson:
+          "Automated Check used GNU `timeout`/`gtimeout`, which is not available on macOS by default. Rewrite PHASE.md ## Automated Checks to finite structural asserts (grep/config) — do NOT start long-lived servers and do NOT background `pnpm dev` with sleep/kill/wait.",
+        evidence: stepCtx.slice(-600),
+        opts,
+      },
+    );
+  }
+
+  // PHASE validation / process (generic)
   if (/phase\.md validation failed|broken automated check/i.test(stepCtx)) {
     return build("process", "high", "PHASE.md validation / Automated Checks process failure", [
       "phase-doc",
@@ -640,6 +857,7 @@ export function buildFailureDiagnosis(input: {
     codingAgentShouldFix: classified.codingAgentShouldFix,
     audience: classified.audience,
     operatorActions: classified.operatorActions,
+    tags: classified.tags,
     learning: classified.learning,
     failingStep: step
       ? { name: step.name, command: step.command, exitCode: step.exitCode }
@@ -692,7 +910,45 @@ function nextActionsFor(
   if (classified.class === "infra") {
     return "Operator: restore runtime dependencies (or fix verifyPreflightCommand), then retry_development. Coding agent: do not invent bring-up scripts.";
   }
-  if (classified.class === "process" && /shell|continuation|automated check/i.test(classified.summary)) {
+  if (
+    classified.class === "process" &&
+    (classified.tags.includes("check-timeout") ||
+      classified.tags.includes("long-lived") ||
+      /exceeded wall clock|CHECK_TIMEOUT|long-lived server/i.test(
+        classified.summary,
+      ))
+  ) {
+    return "Edit PHASE.md ## Automated Checks: remove long-lived servers and `&`+`wait` hangs. Use finite structural checks (grep/config). Do not background `pnpm dev`/vite.";
+  }
+  if (
+    classified.class === "process" &&
+    (classified.tags.includes("host-utility") ||
+      /host utility|macos-portability|GNU timeout/i.test(classified.summary))
+  ) {
+    return "Edit PHASE.md ## Automated Checks: replace GNU `timeout` / missing host utilities with finite structural checks (grep/config asserts). Do NOT background `pnpm dev`/vite with sleep/kill/wait. Do NOT run pnpm/npm install for this fingerprint.";
+  }
+  if (
+    classified.class === "process" &&
+    (/exit 127|missing deps|command not found/i.test(classified.summary) ||
+      classified.tags.includes("exit-127") ||
+      classified.tags.includes("node-modules") ||
+      step?.exitCode === 127) &&
+    !classified.tags.includes("host-utility")
+  ) {
+    return "Install dependencies in the **verify cwd** (worktree or project root being checked) with the project package manager (`pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile`, or `npm ci`). Do not edit PHASE.md Automated Checks for this fingerprint. Do not validate build only on the project root while the worktree lacks node_modules.";
+  }
+  if (
+    classified.class === "process" &&
+    /shell|continuation|automated check|PHASE\.md validation/i.test(
+      classified.summary,
+    ) &&
+    !classified.tags.includes("long-lived") &&
+    !classified.tags.includes("host-utility") &&
+    !classified.tags.includes("check-timeout")
+  ) {
+    if (/empty test|exit-code capture/i.test(classified.summary)) {
+      return 'Edit PHASE.md ## Automated Checks: do not use `echo "VAR=$?"` (prints, does not assign). Prefer `cmd || exit 1` or `VAR=$?` then `test "$VAR" -eq 0`.';
+    }
     return "Edit PHASE.md ## Automated Checks: put each check on one complete line (no trailing `\\`). Then address any real product failures.";
   }
   if (

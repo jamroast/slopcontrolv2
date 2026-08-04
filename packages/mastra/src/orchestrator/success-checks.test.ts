@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { writeProjectConfig } from "@slopcontrol/artifacts";
 import { ProjectConfigSchema, type Project } from "@slopcontrol/types";
-import { runSuccessChecks, type CommandRunner } from "./index.js";
+import {
+  runCommandWithTimeout,
+  runSuccessChecks,
+  type CommandRunner,
+} from "./index.js";
 
 /** Read body of a temp check script invoked as `bash '/path/check.sh'`. */
 function checkScriptBody(command: string): string | null {
@@ -59,6 +63,27 @@ ${checks}
 \`\`\`
 `;
 }
+
+describe("runCommandWithTimeout", () => {
+  it("kills hung commands and returns CHECK_TIMEOUT", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-check-timeout-"));
+    try {
+      const started = Date.now();
+      const result = await runCommandWithTimeout(
+        "sleep 30",
+        root,
+        process.env,
+        200,
+      );
+      const elapsed = Date.now() - started;
+      assert.notEqual(result.exitCode, 0);
+      assert.match(result.output, /CHECK_TIMEOUT after 200ms/);
+      assert.ok(elapsed < 5000, `expected quick kill, took ${elapsed}ms`);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("runSuccessChecks", () => {
   it("surfaces firstFailure and summary for the failing step", async () => {
@@ -260,6 +285,55 @@ describe("runSuccessChecks", () => {
       const testIdx = calls.indexOf("npm test");
       assert.ok(ciIdx >= 0 && testIdx > ciIdx);
       assert.ok(result.steps.some((s) => s.name === "deps-install"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("installs deps before build when node_modules is missing (build mode)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-deps-build-"));
+    try {
+      mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({
+          name: "demo",
+          packageManager: "pnpm@9.15.0",
+          scripts: { build: "tsup" },
+        }),
+      );
+      writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      writeConfig(root, {
+        buildCommand: "npm run build",
+        testCommand: "npm test",
+      });
+
+      const calls: string[] = [];
+      const result = await runSuccessChecks(
+        fakeProject(root),
+        validPhaseDoc("echo auto-ok"),
+        root,
+        {
+          mode: "build",
+          runner: async (command) => {
+            calls.push(command);
+            return { output: "ok\n", exitCode: 0 };
+          },
+        },
+      );
+      assert.equal(result.ok, true, result.output);
+      assert.ok(
+        calls.includes("pnpm install --frozen-lockfile"),
+        `expected pnpm install before build, got: ${calls.join(" | ")}`,
+      );
+      const installIdx = calls.indexOf("pnpm install --frozen-lockfile");
+      const buildIdx = calls.indexOf("npm run build");
+      assert.ok(
+        installIdx >= 0 && buildIdx > installIdx,
+        `install must precede build: ${calls.join(" | ")}`,
+      );
+      assert.ok(result.steps.some((s) => s.name === "deps-install"));
+      assert.ok(result.steps.some((s) => s.name === "build"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

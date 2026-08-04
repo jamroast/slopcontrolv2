@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { exec } from "node:child_process";
+import { exec, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { Agent } from "@mastra/core/agent";
 import {
@@ -44,6 +44,7 @@ import {
   phaseDocWatchPaths,
   phaseNeedsDesign,
   promoteLearning,
+  isMissingNodeBinFailure,
   readAppendix,
   readBlueprint,
   readPhaseDoc,
@@ -68,8 +69,11 @@ import {
   buildSiblingBrandRefPack,
   descriptionMentionsBrandTheming,
   isBrandThemingAsk,
+  isThemeWiringAsk,
   phaseDocAlignsWithChangeIntent,
   researchEngagementQuality,
+  formatAntiAuditThemeDeliveryNote,
+  phaseDocRejectsMissingThemeAudit,
   clipBlueprintForPrompt,
   isUxPlacementKnowledge,
   upsertRoadmapEntry,
@@ -144,6 +148,10 @@ import {
   unpinDesignLoopSelection,
   pinDesignLoopLogoAsset,
   dominantMockLogoAsset,
+  readDesignLoopElements,
+  formatDesignElementsPromptBlock,
+  detectElementImportFromText,
+  importDesignElementIntoLoop,
   getDesignLoopScope,
   applyContinueIntentToScope,
   classifyDesignScopeFromText,
@@ -159,17 +167,30 @@ import {
   formatPlanLoopReviseBlock,
   formatPlanAcceptancePromptBlock,
   readPlanLoopAcceptance,
+  clearPlanLoopAcceptanceLocks,
   extractPlanDocument,
   validatePlanDocument,
+  mergePlanDocumentSections,
+  planDocumentWorthMerging,
   resolvePlanLoopGenerateFallback,
   scaffoldPlanDocument,
+  failurePlanDocument,
   PLAN_CONTINUE_INTENT_DEFAULT,
   fallbackPlanContinueIntentFromText,
+  normalizePlanContinueIntent,
   formatPlanContinueIntentPromptBlock,
+  buildSiblingInvestigationPack,
+  briefWantsSiblingInvestigation,
   formatPhaseBoundPlanPromptBlock,
   readPhasePlanPack,
+  buildCrossProjectCatalog,
+  detectDependencyIntentFromText,
+  formatCrossProjectCatalogPromptBlock,
+  formatDependencyIntentPromptBlock,
+  formatAskDependencyTaskBriefNudge,
   type ContinueIntent,
   type PlanContinueIntent,
+  type DependencyIntent,
 } from "@slopcontrol/artifacts";
 import {
   ensureGitInitialized,
@@ -194,6 +215,8 @@ import {
   chatWithImages,
   classifyContinueIntentViaLlm,
   classifyPlanContinueIntentViaLlm,
+  classifyDependencyIntentViaLlm,
+  shouldClassifyDependencyIntent,
   filterRasterVisionPaths,
   type LlmRegistry,
 } from "@slopcontrol/llm";
@@ -201,7 +224,22 @@ import {
   ensureChangeIntentAsync,
   previewChangeIntentAsync,
 } from "./change-intent-async.js";
-import { dirname, join } from "node:path";
+import {
+  ASK_SYNTHESIS_PROMPT_PREFIX,
+  askProgressFromStreamChunk,
+  isAskNarrationOnlyReply,
+  LiveTurnInterruptedError,
+  type AskProgressCallback,
+  type LiveProgressCallback,
+} from "./ask-stream.js";
+import {
+  buildSupervisorEnrichPrompt,
+  extractNextActionsSummary,
+  isPromptTooLongError,
+  priorNextActionsFromMemory,
+  resolveAgentMemoryOption,
+} from "../supervisor-enrich.js";
+import { basename, dirname, join } from "node:path";
 import {
   copyFileSync,
   existsSync,
@@ -213,6 +251,15 @@ import {
   depsInstallCommand,
   needsDepsInstall,
 } from "./deps-install.js";
+import { buildDevelopCodingRetryPrompt } from "./coding-retry-prompt.js";
+export {
+  buildDevelopCodingRetryPrompt,
+  resolveDevelopCodingRetryKind,
+} from "./coding-retry-prompt.js";
+export type {
+  DevelopCodingRetryInput,
+  DevelopCodingRetryKind,
+} from "./coding-retry-prompt.js";
 import {
   ASK_SUB_RESEARCH_MAX_TOPICS,
   COMPLETION_TOKENS,
@@ -258,6 +305,7 @@ export interface OrchestratorAgents {
   designAgent: Agent;
   designLoopAgent: Agent;
   planLoopAgent: Agent;
+  planLoopRepairAgent: Agent;
   devSupervisorAgent: Agent;
   blueprintAgent: Agent;
   askAgent: Agent;
@@ -271,21 +319,17 @@ export interface OrchestratorContext {
   agents: OrchestratorAgents;
 }
 
-export interface StartResearchInput {
-  project: Project;
-  phase: Phase;
-  run: Run;
-  description: string;
-  /** Advance run stage (e.g. researching → drafting) without guessing wall-clock in the HTTP layer. */
-  onStage?: (stage: RunStage) => void;
-}
-
 export interface AskTurnInput {
   project: Project;
   askId: string;
   message: string;
   /** Prior messages excluding the new user message (already appended by caller optionally) */
   history: Array<{ role: "user" | "assistant"; content: string }>;
+  listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+  dataDir?: string;
+  /** Live tool/text progress (SSE / MCP). */
+  onProgress?: AskProgressCallback;
+  abortSignal?: AbortSignal;
 }
 
 export interface AskSubResearchInput {
@@ -309,6 +353,10 @@ export interface DesignLoopGenerateInput {
   findProjectByRootPath?: (
     rootPath: string,
   ) => { id: string; name: string; rootPath: string } | undefined;
+  /** SlopControl data dir for global shared-elements registry (B). */
+  dataDir?: string;
+  onProgress?: LiveProgressCallback;
+  abortSignal?: AbortSignal;
 }
 
 export interface PlanLoopGenerateInput {
@@ -318,6 +366,10 @@ export interface PlanLoopGenerateInput {
   message?: string;
   previousPlan?: string;
   version: number;
+  listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+  dataDir?: string;
+  onProgress?: LiveProgressCallback;
+  abortSignal?: AbortSignal;
 }
 
 export interface AgentTurnInput {
@@ -325,6 +377,20 @@ export interface AgentTurnInput {
   agentId: string;
   message: string;
   history: Array<{ role: "user" | "assistant"; content: string }>;
+  listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+  dataDir?: string;
+  onProgress?: LiveProgressCallback;
+  abortSignal?: AbortSignal;
+}
+
+export interface StartResearchInput {
+  project: Project;
+  phase: Phase;
+  run: Run;
+  description: string;
+  /** Advance run stage (e.g. researching → drafting) without guessing wall-clock in the HTTP layer. */
+  onStage?: (stage: RunStage) => void;
+  listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
 }
 
 export interface ReviewInput {
@@ -513,7 +579,12 @@ async function runAgent(
   prompt: string,
   resourceId: string,
   threadId: string,
-  opts?: { maxSteps?: number; timeoutMs?: number },
+  opts?: {
+    maxSteps?: number;
+    timeoutMs?: number;
+    /** Pass false to skip Mastra thread replay (supervisor enrich). */
+    memory?: false | { resource: string; thread: string };
+  },
 ): Promise<string> {
   const name =
     (agent as { name?: string }).name ??
@@ -521,6 +592,11 @@ async function runAgent(
     "agent";
   const maxSteps = opts?.maxSteps ?? 30;
   const timeoutMs = opts?.timeoutMs;
+  const memoryOpt = resolveAgentMemoryOption(
+    resourceId,
+    threadId,
+    opts?.memory,
+  );
   const started = Date.now();
   slog.info("agent", `start ${name}`, {
     resourceId,
@@ -528,15 +604,13 @@ async function runAgent(
     promptChars: prompt.length,
     maxSteps,
     timeoutMs,
+    memory: memoryOpt ? "thread" : "none",
   });
   try {
     const generate = () =>
       agent.generate(prompt, {
         maxSteps,
-        memory: {
-          resource: resourceId,
-          thread: threadId,
-        },
+        ...(memoryOpt ? { memory: memoryOpt } : {}),
       });
     const result =
       timeoutMs && timeoutMs > 0
@@ -572,12 +646,24 @@ async function runAgent(
       durationMs: Date.now() - started,
       error: detail,
     });
-    if (/memory|storage|libsql|observational/i.test(detail)) {
+    if (
+      /memory|storage|libsql|observational/i.test(detail) &&
+      !/requires a threadId|none was found in RequestContext/i.test(detail)
+    ) {
       slog.error(
         "agent",
         "Mastra Memory/storage failure — check ~/.slopcontrol/mastra.db is writable and the supervisor LLM endpoint resolves for observationalMemory",
         {
           hint: "GET /health → mastraStorage; configure endpoints.json supervisor role",
+        },
+      );
+    }
+    if (/requires a threadId|ObservationalMemory.*threadId/i.test(detail)) {
+      slog.error(
+        "agent",
+        "ObservationalMemory requires threadId — supervisor enrich must use memory:false without OM Memory on the agent",
+        {
+          hint: "createDevSupervisorAgent must not attach shared Memory with observationalMemory",
         },
       );
     }
@@ -589,6 +675,272 @@ async function runAgent(
     }
     throw new Error(detail, { cause: error });
   }
+}
+
+/**
+ * Stream an agent live turn with progress + AbortSignal.
+ * Optional narration→synthesis for ask-style turns.
+ */
+async function runAgentLiveTurn(
+  agent: Agent,
+  prompt: string,
+  resourceId: string,
+  threadId: string,
+  opts?: {
+    maxSteps?: number;
+    timeoutMs?: number;
+    onProgress?: LiveProgressCallback;
+    abortSignal?: AbortSignal;
+    /** When true, narration-only + tools → synthesis pass */
+    synthesizeIfNarration?: boolean;
+    statusLabel?: string;
+  },
+): Promise<{ reply: string; toolCallCount: number; synthesized: boolean }> {
+  const name =
+    (agent as { name?: string }).name ??
+    (agent as { id?: string }).id ??
+    "agent";
+  const maxSteps = opts?.maxSteps ?? 12;
+  const timeoutMs = opts?.timeoutMs ?? 240_000;
+  const onProgress = opts?.onProgress;
+  const signal = opts?.abortSignal;
+  const memoryOpt = resolveAgentMemoryOption(resourceId, threadId);
+  const started = Date.now();
+  let toolCallCount = 0;
+  let textAccum = "";
+
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw new LiveTurnInterruptedError(
+        "Live turn interrupted",
+        textAccum.trim(),
+      );
+    }
+  };
+
+  const emit = (event: Parameters<NonNullable<LiveProgressCallback>>[0]) => {
+    try {
+      onProgress?.(event);
+    } catch {
+      /* ignore listener errors */
+    }
+  };
+
+  slog.info("agent", `start ${name} (stream)`, {
+    resourceId,
+    threadId,
+    promptChars: prompt.length,
+    maxSteps,
+    timeoutMs,
+  });
+  emit({
+    type: "status",
+    summary: opts?.statusLabel ?? "turn started",
+  });
+
+  const runStream = async (): Promise<string> => {
+    throwIfAborted();
+    const streamResult = await agent.stream(prompt, {
+      maxSteps,
+      ...(memoryOpt ? { memory: memoryOpt } : {}),
+      ...(signal ? { abortSignal: signal } : {}),
+    });
+    const fullStream = (
+      streamResult as { fullStream?: AsyncIterable<unknown> }
+    ).fullStream;
+    if (fullStream && typeof fullStream[Symbol.asyncIterator] === "function") {
+      for await (const chunk of fullStream) {
+        throwIfAborted();
+        const events = askProgressFromStreamChunk(chunk);
+        for (const ev of events) {
+          if (ev.type === "tool_call") toolCallCount += 1;
+          if (ev.type === "text") textAccum += ev.text;
+          emit(ev);
+        }
+      }
+    }
+    throwIfAborted();
+    const finalTextRaw = (streamResult as { text?: Promise<string> | string })
+      .text;
+    const finalText =
+      typeof finalTextRaw === "string"
+        ? finalTextRaw
+        : finalTextRaw &&
+            typeof (finalTextRaw as Promise<string>).then === "function"
+          ? await finalTextRaw
+          : textAccum;
+    return (finalText || textAccum || "").trim();
+  };
+
+  try {
+    throwIfAborted();
+    const reply = await Promise.race([
+      runStream(),
+      new Promise<never>((_, reject) => {
+        const onAbort = () => {
+          reject(
+            new LiveTurnInterruptedError(
+              "Live turn interrupted",
+              textAccum.trim(),
+            ),
+          );
+        };
+        if (signal) {
+          if (signal.aborted) onAbort();
+          else signal.addEventListener("abort", onAbort, { once: true });
+        }
+        setTimeout(
+          () =>
+            reject(
+              new Error(`Agent ${name} timed out after ${timeoutMs}ms`),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+
+    let out = reply;
+    let synthesized = false;
+    if (
+      opts?.synthesizeIfNarration !== false &&
+      isAskNarrationOnlyReply(out) &&
+      toolCallCount > 0
+    ) {
+      throwIfAborted();
+      emit({
+        type: "status",
+        summary: "synthesizing answer from tool findings",
+      });
+      slog.info("agent", `${name} narration-only; synthesis pass`, {
+        toolCallCount,
+        outputChars: out.length,
+      });
+      const synthPrompt = `${ASK_SYNTHESIS_PROMPT_PREFIX}
+
+---
+${prompt}
+
+---
+Draft / incomplete reply to replace:
+${out.slice(0, 2_000) || "(empty)"}`;
+      const remainingMs = Math.max(
+        30_000,
+        timeoutMs - (Date.now() - started),
+      );
+      const synthMemory = {
+        resource: resourceId,
+        thread: `${threadId}-synth`,
+      };
+      const synthGenerate = () =>
+        agent.generate(synthPrompt, {
+          maxSteps: 1,
+          activeTools: [],
+          memory: synthMemory,
+          ...(signal ? { abortSignal: signal } : {}),
+        });
+      const synthResult =
+        remainingMs > 0
+          ? await Promise.race([
+              synthGenerate(),
+              new Promise<never>((_, reject) => {
+                const onAbort = () => {
+                  reject(
+                    new LiveTurnInterruptedError(
+                      "Live turn interrupted",
+                      out,
+                    ),
+                  );
+                };
+                if (signal) {
+                  if (signal.aborted) onAbort();
+                  else signal.addEventListener("abort", onAbort, { once: true });
+                }
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        `Agent ${name} synthesis timed out after ${remainingMs}ms`,
+                      ),
+                    ),
+                  remainingMs,
+                );
+              }),
+            ])
+          : await synthGenerate();
+      const synthText = (synthResult as { text?: Promise<string> | string })
+        .text;
+      out = String(
+        typeof synthText === "string"
+          ? synthText
+          : synthText && typeof synthText.then === "function"
+            ? await synthText
+            : "",
+      ).trim();
+      synthesized = true;
+      if (out) {
+        emit({ type: "text", text: out });
+      }
+    }
+
+    slog.info("agent", `done ${name} (stream)`, {
+      resourceId,
+      threadId,
+      durationMs: Date.now() - started,
+      duration: formatDurationMs(Date.now() - started),
+      outputChars: out.length,
+      toolCallCount,
+      synthesized,
+    });
+    return {
+      reply: out || "(empty reply)",
+      toolCallCount,
+      synthesized,
+    };
+  } catch (error) {
+    if (error instanceof LiveTurnInterruptedError) {
+      slog.info("agent", `interrupted ${name}`, {
+        resourceId,
+        threadId,
+        durationMs: Date.now() - started,
+        partialChars: error.partialReply.length,
+      });
+      throw error;
+    }
+    const detail = formatLlmErrorForLog(error);
+    slog.error("agent", `failed ${name} (stream)`, {
+      resourceId,
+      threadId,
+      durationMs: Date.now() - started,
+      error: detail,
+    });
+    if (error instanceof Error) {
+      if (detail !== error.message) {
+        throw new Error(detail, { cause: error });
+      }
+      throw error;
+    }
+    throw new Error(detail, { cause: error });
+  }
+}
+
+/** @deprecated Prefer runAgentLiveTurn */
+async function runAskAgentStream(
+  agent: Agent,
+  prompt: string,
+  resourceId: string,
+  threadId: string,
+  opts?: {
+    maxSteps?: number;
+    timeoutMs?: number;
+    onProgress?: AskProgressCallback;
+    abortSignal?: AbortSignal;
+  },
+): Promise<{ reply: string; toolCallCount: number; synthesized: boolean }> {
+  return runAgentLiveTurn(agent, prompt, resourceId, threadId, {
+    ...opts,
+    synthesizeIfNarration: true,
+    statusLabel: "ask started",
+  });
 }
 
 function writeBlueprintAndRoadmap(projectRoot: string, rawOutput: string): string {
@@ -621,6 +973,114 @@ export type CommandRunner = (
   cwd: string,
   env?: NodeJS.ProcessEnv,
 ) => Promise<{ output: string; exitCode: number }>;
+
+/** Default wall-clock budget for verify/check commands (ms). */
+export function resolveCheckTimeoutMs(): number {
+  const n = Number(process.env.SLOPCONTROL_CHECK_MS ?? 60_000);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 60_000;
+}
+
+/**
+ * Run a shell command with a wall-clock budget. On timeout, kills the process
+ * group (Unix) and returns exit 124 with a CHECK_TIMEOUT marker.
+ */
+export async function runCommandWithTimeout(
+  command: string,
+  cwd: string,
+  env?: NodeJS.ProcessEnv,
+  timeoutMs: number = resolveCheckTimeoutMs(),
+): Promise<{ output: string; exitCode: number }> {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return runCommand(command, cwd, env);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const chunks: Buffer[] = [];
+    const child = spawn("/bin/sh", ["-c", command], {
+      cwd,
+      env: { ...process.env, ...(env ?? {}) },
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const append = (d: Buffer) => {
+      chunks.push(d);
+    };
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
+
+    const finish = (exitCode: number, extra = "") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        output: Buffer.concat(chunks).toString("utf8") + extra,
+        exitCode,
+      });
+    };
+
+    const timer = setTimeout(() => {
+      const pid = child.pid;
+      if (pid != null) {
+        try {
+          if (process.platform !== "win32") {
+            process.kill(-pid, "SIGKILL");
+          } else {
+            child.kill("SIGKILL");
+          }
+        } catch {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+      finish(124, `\nCHECK_TIMEOUT after ${timeoutMs}ms\n`);
+    }, timeoutMs);
+
+    child.on("error", (err) => {
+      finish(1, `\n${err.message}\n`);
+    });
+    child.on("close", (code) => {
+      finish(code ?? 1);
+    });
+  });
+}
+
+/** Wrap a runner with a wall-clock budget (process-group kill for default path). */
+export function withCommandTimeout(
+  runner: CommandRunner,
+  timeoutMs: number = resolveCheckTimeoutMs(),
+): CommandRunner {
+  return async (command, cwd, env) => {
+    if (!timeoutMs || timeoutMs <= 0) {
+      return runner(command, cwd, env);
+    }
+    if (runner === runCommand) {
+      return runCommandWithTimeout(command, cwd, env, timeoutMs);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        runner(command, cwd, env).finally(() => {
+          if (timer) clearTimeout(timer);
+        }),
+        new Promise<{ output: string; exitCode: number }>((resolve) => {
+          timer = setTimeout(() => {
+            resolve({
+              output: `CHECK_TIMEOUT after ${timeoutMs}ms\n`,
+              exitCode: 124,
+            });
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+}
 
 export async function runCommand(
   command: string,
@@ -669,6 +1129,25 @@ export {
   needsDepsInstall,
 } from "./deps-install.js";
 export type { PackageManager } from "./deps-install.js";
+export {
+  ASK_SYNTHESIS_PROMPT_PREFIX,
+  askProgressFromStreamChunk,
+  askProgressLine,
+  clipAskProgress,
+  formatAskWorkingStub,
+  isAskNarrationOnlyReply,
+  isLiveTurnInterruptedError,
+  LiveTurnInterruptedError,
+  summarizeToolArgs,
+  summarizeToolResult,
+  toolCallFingerprint,
+} from "./ask-stream.js";
+export type {
+  AskProgressCallback,
+  AskProgressEvent,
+  LiveProgressCallback,
+  LiveProgressEvent,
+} from "./ask-stream.js";
 export {
   ensureChangeIntentAsync,
   previewChangeIntentAsync,
@@ -739,6 +1218,20 @@ function failResult(
   };
 }
 
+function isExit127CommandNotFoundFailure(
+  checks: SuccessCheckResult,
+): boolean {
+  const fail = checks.firstFailure;
+  if (!fail) return false;
+  // Only auto deps-install for missing package bins — not host utilities (timeout).
+  return isMissingNodeBinFailure({
+    name: fail.name,
+    command: fail.command,
+    exitCode: fail.exitCode,
+    output: fail.output,
+  });
+}
+
 /**
  * Gates for marking development complete.
  * - full: build + phase-doc validation + tests + automated checks + verify + DB
@@ -759,6 +1252,8 @@ export async function runSuccessChecks(
      * root verify — gitignored node_modules never arrives via merge).
      */
     forceDepsInstall?: boolean;
+    /** When set, claim-vs-proof can read phase design ACCEPTANCE / mock. */
+    phaseId?: string;
   },
 ): Promise<SuccessCheckResult> {
   const mode = opts?.mode ?? "full";
@@ -790,7 +1285,14 @@ export async function runSuccessChecks(
     if (mode === "verify") {
       llmOverlay = scrubIsolationKeysFromEnvRecord(llmOverlay);
     }
-    runner = withEnvOverlay(baseRunner, llmOverlay);
+    // Wall-clock budget for deps/test/Automated Checks (not build — that keeps baseRunner).
+    const budgetMs = resolveCheckTimeoutMs();
+    const budgetedBase: CommandRunner =
+      baseRunner === runCommand
+        ? (command, cwd, env) =>
+            runCommandWithTimeout(command, cwd, env, budgetMs)
+        : withCommandTimeout(baseRunner, budgetMs);
+    runner = withEnvOverlay(budgetedBase, llmOverlay);
     parts.push(
       [
         `Project env: ${Object.keys(projectEnv.env).length} key(s) from [${projectEnv.fromFiles.join(", ") || "none"}]`,
@@ -809,7 +1311,39 @@ export async function runSuccessChecks(
     });
   }
 
+  // Install when node_modules is missing/stale or forceDepsInstall — before
+  // build (worktree build gate) and before tests (verify). At most once per pass.
+  let depsInstalledThisPass = false;
+  const tryDepsInstall = async (): Promise<SuccessCheckResult | null> => {
+    if (depsInstalledThisPass) return null;
+    if (
+      !needsDepsInstall(cwd, { force: opts?.forceDepsInstall === true })
+    ) {
+      return null;
+    }
+    const installCmd = depsInstallCommand(cwd);
+    const install = await runner(installCmd, cwd);
+    const installStep: SuccessCheckStep = {
+      name: "deps-install",
+      command: installCmd,
+      exitCode: install.exitCode,
+      output: install.output,
+    };
+    parts.push(`deps-install (${installCmd}):\n${install.output.slice(-2000)}`);
+    if (install.exitCode !== 0) {
+      return failResult(parts.slice(0, -1), steps, {
+        ...installStep,
+        output: `Dependency install failed.\n${install.output}`,
+      });
+    }
+    steps.push(installStep);
+    depsInstalledThisPass = true;
+    return null;
+  };
+
   if (runBuildStep) {
+    const installFail = await tryDepsInstall();
+    if (installFail) return installFail;
     const build = await runBuild(project, cwd, baseRunner);
     const step: SuccessCheckStep = {
       name: "build",
@@ -828,7 +1362,10 @@ export async function runSuccessChecks(
   }
 
   if (!opts?.skipPhaseDocValidation) {
-    const phaseGate = validatePhaseDocForDev(phaseDoc);
+    const phaseGate = validatePhaseDocForDev(phaseDoc, {
+      projectRoot: project.rootPath,
+      phaseId: opts?.phaseId,
+    });
     if (!phaseGate.ok) {
       const msg = `PHASE.md validation failed:\n${phaseGate.issues.map((i) => `- ${i}`).join("\n")}`;
       parts.push(msg);
@@ -871,28 +1408,10 @@ export async function runSuccessChecks(
     }
   }
 
-  // Install before test/checks when node_modules is missing, stale (manifest
-  // newer than nm), or forceDepsInstall (post-merge root verify).
-  if (
-    runTestStep &&
-    needsDepsInstall(cwd, { force: opts?.forceDepsInstall === true })
-  ) {
-    const installCmd = depsInstallCommand(cwd);
-    const install = await runner(installCmd, cwd);
-    const installStep: SuccessCheckStep = {
-      name: "deps-install",
-      command: installCmd,
-      exitCode: install.exitCode,
-      output: install.output,
-    };
-    parts.push(`deps-install (${installCmd}):\n${install.output.slice(-2000)}`);
-    if (install.exitCode !== 0) {
-      return failResult(parts.slice(0, -1), steps, {
-        ...installStep,
-        output: `Dependency install failed.\n${install.output}`,
-      });
-    }
-    steps.push(installStep);
+  // Verify-only (no build): still install before test/checks.
+  if (runTestStep) {
+    const installFail = await tryDepsInstall();
+    if (installFail) return installFail;
   }
 
   if (
@@ -1064,6 +1583,48 @@ export async function runSuccessChecks(
 
 export class ChangeOrchestrator {
   constructor(private readonly ctx: OrchestratorContext) {}
+
+  /**
+   * Shared CROSS-PROJECT DEPS + DEPENDENCY INTENT prompt blocks for ask/agent/plan/research.
+   */
+  private async buildCrossProjectDependencyPrompt(opts: {
+    projectRoot: string;
+    message?: string;
+    listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+    dataDir?: string;
+    includeAskBriefNudge?: boolean;
+  }): Promise<string> {
+    const dataDir = opts.dataDir ?? this.ctx.dataDir;
+    const catalog = buildCrossProjectCatalog({
+      targetRoot: opts.projectRoot,
+      dataDir,
+      listProjects: opts.listProjects,
+    });
+    const catalogBlock = formatCrossProjectCatalogPromptBlock(catalog);
+    const text = opts.message?.trim() ?? "";
+    let intent: DependencyIntent | null = null;
+    if (text && shouldClassifyDependencyIntent(text)) {
+      intent = detectDependencyIntentFromText(text);
+      try {
+        const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
+          "classification",
+        );
+        intent = await classifyDependencyIntentViaLlm({
+          endpoint,
+          modelId,
+          message: text,
+          timeoutMs: 12_000,
+        });
+      } catch {
+        /* regex fallback already set */
+      }
+    }
+    const intentBlock = formatDependencyIntentPromptBlock(intent);
+    const briefNudge = opts.includeAskBriefNudge
+      ? formatAskDependencyTaskBriefNudge(intent)
+      : "";
+    return [catalogBlock, intentBlock, briefNudge].filter(Boolean).join("\n\n");
+  }
 
   /**
    * Inventory → structured reverse-engineer → validate → optional repair → write BP + ROADMAP.
@@ -1479,6 +2040,7 @@ ${blueprintContractPromptBlock()}`;
   /**
    * One turn of a project-scoped ask conversation (exploratory chat).
    * Does not create a phase — use promote_ask / start_research for that.
+   * Streams tool progress via onProgress when provided.
    */
   async askTurn(input: AskTurnInput): Promise<{ reply: string }> {
     const { project, askId, message, history } = input;
@@ -1493,6 +2055,14 @@ ${blueprintContractPromptBlock()}`;
             .map((m) => `${m.role.toUpperCase()}: ${m.content.slice(0, 2_000)}`)
             .join("\n\n");
 
+    const depPack = await this.buildCrossProjectDependencyPrompt({
+      projectRoot: project.rootPath,
+      message,
+      listProjects: input.listProjects,
+      dataDir: input.dataDir,
+      includeAskBriefNudge: true,
+    });
+
     const prompt = `Project ask conversation (askId=${askId}).
 Answer the operator using the codebase and planning docs. When shaping a change, include ## Task brief.
 
@@ -1501,19 +2071,24 @@ ${clipPromptSection("BLUEPRINT.md", blueprint, 6_000)}
 
 ROADMAP (excerpt):
 ${clipPromptSection("ROADMAP.md", roadmap, 3_000)}
-
+${depPack ? `\n${depPack}\n` : ""}
 Recent conversation:
 ${historyBlock}
 
 Operator message:
 ${message.trim()}`;
 
-    const reply = await runAgent(
+    const { reply } = await runAskAgentStream(
       this.ctx.agents.askAgent,
       prompt,
       project.id,
       `ask-${askId}`,
-      { maxSteps: 20, timeoutMs: 180_000 },
+      {
+        maxSteps: 12,
+        timeoutMs: 240_000,
+        onProgress: input.onProgress,
+        abortSignal: input.abortSignal,
+      },
     );
     return { reply: reply.trim() || "(empty reply)" };
   }
@@ -1864,6 +2439,44 @@ ${message.trim()}`;
       });
     }
 
+    // Shared design elements (theme-toggle etc.): chat import + prompt block.
+    if (isContinue && message?.trim()) {
+      try {
+        const elBundle = detectElementImportFromText({
+          text: message,
+          targetRoot: project.rootPath,
+          dataDir: input.dataDir ?? this.ctx.dataDir,
+          listProjects: input.listProjects,
+        });
+        if (elBundle) {
+          importDesignElementIntoLoop({
+            targetRoot: project.rootPath,
+            loopId,
+            bundle: elBundle,
+            origin: elBundle.meta.sourceRootPath ? "project" : "registry",
+            sourceName: elBundle.meta.sourceRootPath
+              ? basename(elBundle.meta.sourceRootPath)
+              : "registry",
+          });
+          slog.info("design-loop", "auto-imported shared element from chat", {
+            loopId,
+            elementId: elBundle.meta.id,
+            version: elBundle.meta.version,
+          });
+        }
+      } catch (err) {
+        slog.warn("design-loop", "element auto-import failed", {
+          loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    const loopElements = readDesignLoopElements(project.rootPath, loopId);
+    const elementsBlock = formatDesignElementsPromptBlock(loopElements, {
+      projectRoot: project.rootPath,
+      loopId,
+    });
+
     const htmlReturnRule =
       continueIntent.scope === "assets_only" || continueIntent.scope === "nav_align"
         ? "Prefer MOCK_ASSETS_ONLY (no full HTML). If you return HTML, keep prior mock; only asset src / icon-pack / LIVE SITE nav updates."
@@ -1924,7 +2537,7 @@ Otherwise prefer writing the mock with few or zero tool calls.
 
 ${selectionsBlock}
 
-${sharedDesignBlock ? `${sharedDesignBlock}\n` : ""}${siteInventoryBlock ? `${siteInventoryBlock}\n` : ""}
+${sharedDesignBlock ? `${sharedDesignBlock}\n` : ""}${elementsBlock ? `${elementsBlock}\n` : ""}${siteInventoryBlock ? `${siteInventoryBlock}\n` : ""}
 Brief:
 ${clipPromptSection("brief", brief, 3_000)}
 
@@ -1942,21 +2555,24 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
     let usedScaffold = false;
     let raw = "";
     try {
-      raw = await runAgent(
+      const live = await runAgentLiveTurn(
         this.ctx.agents.designLoopAgent,
         prompt,
         project.id,
-        // Fresh thread per version — previousHtml carries the visual contract;
-        // sticky threads were ~65–90k tokens of prior mocks/tool junk.
         `design-loop-${loopId}-v${version}`,
-        // Media tools need headroom; layout-only continues stay lean.
         {
           maxSteps:
             continueIntent.scope === "assets_only" ? 8 : needsMedia ? 12 : 4,
           timeoutMs: 300_000,
+          onProgress: input.onProgress,
+          abortSignal: input.abortSignal,
+          synthesizeIfNarration: false,
+          statusLabel: "design generate started",
         },
       );
+      raw = live.reply;
     } catch (err) {
+      if (err instanceof LiveTurnInterruptedError) throw err;
       const detail = err instanceof Error ? err.message : String(err);
       slog.warn("design-loop", `generate failed; preserving prior mock if any`, {
         loopId,
@@ -2023,6 +2639,7 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         nextHtml: html,
         intent: continueIntent,
         pinnedLogoAsset: pinnedLogo,
+        pinnedElements: readDesignLoopElements(project.rootPath, loopId),
       });
       if (drift.length) {
         const intentSummary = `intent={scope:${continueIntent.scope}, adoptTheme:${continueIntent.adoptTheme}, inventLogo:${continueIntent.inventLogo}, preserveChrome:${continueIntent.preserveChrome}, targets:[${continueIntent.targets.join(",")}]}`;
@@ -2045,7 +2662,7 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         });
         const notes = [
           assetPatchNotes,
-          `Rejected layout/logo drift (${drift.map((d) => d.code).join(", ")}); kept prior mock.`,
+          `Rejected layout/logo/element drift (${drift.map((d) => d.code).join(", ")}); kept prior mock.`,
           intentSummary,
           ...drift.map((d) => d.detail),
         ]
@@ -2124,7 +2741,8 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
 
     let continueIntent: PlanContinueIntent = PLAN_CONTINUE_INTENT_DEFAULT;
     if (isContinue) {
-      const fallback = fallbackPlanContinueIntentFromText(
+      const fallback = normalizePlanContinueIntent(
+        fallbackPlanContinueIntentFromText(message?.trim() || desc),
         message?.trim() || desc,
       );
       try {
@@ -2152,11 +2770,31 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
       };
     }
 
+    const reopenLocks =
+      isContinue &&
+      (continueIntent.scope === "expand_scope" ||
+        continueIntent.scope === "full_revise");
+    if (reopenLocks) {
+      clearPlanLoopAcceptanceLocks({
+        projectRoot: project.rootPath,
+        loopId,
+        version,
+      });
+    }
+
     const metaNow = readPlanLoopMeta(project.rootPath, loopId);
     if (metaNow) {
       let scope = metaNow.scope ?? defaultPlanScope(brief, "start");
       if (isContinue) {
-        if (continueIntent.focus) {
+        if (
+          continueIntent.scope === "expand_scope" ||
+          continueIntent.scope === "full_revise"
+        ) {
+          scope = defaultPlanScope(message?.trim() || brief, "continue");
+          if (continueIntent.focus) {
+            scope = { ...scope, focus: continueIntent.focus, source: "continue" };
+          }
+        } else if (continueIntent.focus) {
           scope = {
             ...scope,
             focus: continueIntent.focus,
@@ -2169,14 +2807,13 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
             preserve: continueIntent.preserve,
             source: "continue",
           };
-        } else if (continueIntent.scope === "full_revise") {
-          scope = defaultPlanScope(message?.trim() || brief, "continue");
         }
       }
       if (
         !metaNow.scope ||
         scope.focus !== metaNow.scope.focus ||
-        scope.kind !== metaNow.scope.kind
+        scope.kind !== metaNow.scope.kind ||
+        reopenLocks
       ) {
         writePlanLoopMeta(project.rootPath, {
           ...metaNow,
@@ -2204,12 +2841,37 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
       `- preserve: ${scope.preserve.length ? scope.preserve.join(", ") : "(none)"}`,
     ].join("\n");
 
+    const depPack = await this.buildCrossProjectDependencyPrompt({
+      projectRoot: project.rootPath,
+      message: [brief, message ?? ""].filter(Boolean).join("\n"),
+      listProjects: input.listProjects,
+      dataDir: input.dataDir,
+    });
+
+    const siblingPack = buildSiblingInvestigationPack({
+      targetRoot: project.rootPath,
+      brief: desc,
+      listProjects: input.listProjects,
+    });
+    const investigate =
+      Boolean(siblingPack.trim()) || briefWantsSiblingInvestigation(desc);
+
+    const acceptanceLockNote = reopenLocks
+      ? "(Acceptance locks CLEARED for expand/full_revise — Goal/In scope may change; retick before accept.)"
+      : "(Ticked sections are locked unless the operator reopens them.)";
+    const expandH2Note =
+      continueIntent.scope === "expand_scope" ||
+      continueIntent.scope === "full_revise"
+        ? "CRITICAL: Emit ALL nine required H2 section titles even if some bodies are brief stubs. Rewrite Goal/In scope when expanding."
+        : "";
+
     const prompt = `Plan loop ${loopId} — produce version v${version} PLAN.md.
 
 ${conceptual}
 ${modeBlock ? `\n${modeBlock}\n` : ""}
-${acceptanceBlock ? `${acceptanceBlock}\n(Ticked sections are locked unless the operator reopens them.)\n` : ""}
-
+${acceptanceBlock ? `${acceptanceBlock}\n${acceptanceLockNote}\n` : ""}
+${depPack ? `\n${depPack}\n` : ""}
+${siblingPack ? `\n${siblingPack}\n` : ""}
 Brief:
 ${clipPromptSection("brief", brief, 3_000)}
 
@@ -2217,18 +2879,32 @@ ${message?.trim() ? `Operator feedback:\n${clipPromptSection("feedback", message
 ${reviseBlock}
 
 Required H2 sections: Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes.
+CRITICAL: Goal must be 1–3 sentences — never paste the operator brief.
+${expandH2Note}
+${investigate ? "CRITICAL: Investigate sibling absolute paths (read_file) before writing; cite them under Likely areas." : ""}
+When CROSS-PROJECT DEPS / DEPENDENCY INTENT apply, record package/element refs under Likely areas and Handoff notes (e.g. deps: @jam/theme-toggle@1.0.0 from jamroast). Never recommend npm link.
 Return a short rationale then the full plan in a markdown fence. End with PLAN_COMPLETE.`;
 
+    const maxSteps = investigate ? 16 : 10;
     let raw = "";
     try {
-      raw = await runAgent(
+      const live = await runAgentLiveTurn(
         this.ctx.agents.planLoopAgent,
         prompt,
         project.id,
         `plan-loop-${loopId}-v${version}`,
-        { maxSteps: 10, timeoutMs: 240_000 },
+        {
+          maxSteps,
+          timeoutMs: 240_000,
+          onProgress: input.onProgress,
+          abortSignal: input.abortSignal,
+          synthesizeIfNarration: false,
+          statusLabel: "plan generate started",
+        },
       );
+      raw = live.reply;
     } catch (err) {
+      if (err instanceof LiveTurnInterruptedError) throw err;
       const detail = err instanceof Error ? err.message : String(err);
       slog.warn("plan-loop", "generate failed; preserving prior plan if any", {
         loopId,
@@ -2256,26 +2932,76 @@ Return a short rationale then the full plan in a markdown fence. End with PLAN_C
     }
 
     let plan = extractPlanDocument(raw);
+    if (!plan?.trim()) {
+      // One repair turn before fail-closed — text-only agent (no tools).
+      const repairPrompt = `Your previous reply had no extractable PLAN.md. Output ONLY a markdown fence containing the full PLAN.md.
+
+Required H2 titles (exact): Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes.
+Goal: 1–3 sentences summarizing the operator intent (do not paste the brief).
+${siblingPack ? `Cite sibling paths from SIBLING INVESTIGATION under Likely areas.\n\n${siblingPack.slice(0, 3_000)}\n` : ""}
+Operator intent summary: ${clipPromptSection("brief", brief, 800)}
+${message?.trim() ? `Feedback: ${message.trim().slice(0, 800)}\n` : ""}
+End with PLAN_COMPLETE.`;
+      try {
+        raw = await runAgent(
+          this.ctx.agents.planLoopRepairAgent,
+          repairPrompt,
+          project.id,
+          `plan-loop-${loopId}-v${version}-repair`,
+          { maxSteps: 2, timeoutMs: 180_000 },
+        );
+        plan = extractPlanDocument(raw);
+      } catch (err) {
+        slog.warn("plan-loop", "repair generate failed", {
+          loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     if (!plan?.trim() && previousPlan?.trim()) {
       return {
         plan: previousPlan.trim(),
-        notes: "No PLAN.md extracted; kept prior plan.",
+        notes:
+          "Agent returned empty plan; prior kept. Call plan_loop_retry.",
         usedScaffold: true,
       };
     }
     if (!plan?.trim()) {
       return {
-        plan: scaffoldPlanDocument({
+        plan: failurePlanDocument({
           brief,
-          scope,
-          errorDetail: "empty agent plan",
+          errorDetail: "empty agent plan after repair",
         }),
-        notes: "Scaffold — empty agent output",
+        notes:
+          "Failure plan — empty agent output after repair. Call plan_loop_retry.",
         usedScaffold: true,
       };
     }
 
-    const validation = validatePlanDocument(plan);
+    let validation = validatePlanDocument(plan);
+    let mergeNote = "";
+    if (!validation.ok && planDocumentWorthMerging(plan)) {
+      const merged = mergePlanDocumentSections({
+        incoming: plan,
+        prior: previousPlan,
+        title: brief,
+      });
+      const mergedValidation = validatePlanDocument(merged.plan);
+      if (mergedValidation.ok) {
+        plan = merged.plan;
+        validation = mergedValidation;
+        const bits = [
+          merged.filledFromPrior.length
+            ? `from prior: ${merged.filledFromPrior.join(", ")}`
+            : null,
+          merged.filledStub.length
+            ? `stubs: ${merged.filledStub.join(", ")}`
+            : null,
+        ].filter(Boolean);
+        mergeNote = `Merged missing sections (${bits.join("; ") || "ok"}).`;
+      }
+    }
     if (!validation.ok && previousPlan?.trim()) {
       const priorOk = validatePlanDocument(previousPlan);
       if (priorOk.ok) {
@@ -2298,16 +3024,22 @@ Return a short rationale then the full plan in a markdown fence. End with PLAN_C
       };
     }
 
-    const notes = raw
-      .replace(/```[\s\S]*?```/g, "")
-      .replace(/^#\s+Plan[\s\S]*/im, "")
-      .replace(/PLAN_COMPLETE/gi, "")
-      .trim()
-      .slice(0, 1_500);
+    const notes = [
+      mergeNote,
+      raw
+        .replace(/```[\s\S]*?```/g, "")
+        .replace(/^#\s+Plan[\s\S]*/im, "")
+        .replace(/PLAN_COMPLETE/gi, "")
+        .trim()
+        .slice(0, 1_500),
+    ]
+      .filter(Boolean)
+      .join(" ");
 
     return {
       plan,
       notes: notes || `v${version}`,
+      // Merge fills missing H2s but keeps the new Goal/scope — not a scaffold keep-prior.
       usedScaffold: false,
     };
   }
@@ -2393,6 +3125,13 @@ ${historyBlock}`;
             .map((m) => `${m.role.toUpperCase()}: ${m.content.slice(0, 2_000)}`)
             .join("\n\n");
 
+    const depPack = await this.buildCrossProjectDependencyPrompt({
+      projectRoot: project.rootPath,
+      message,
+      listProjects: input.listProjects,
+      dataDir: input.dataDir,
+    });
+
     const prompt = `Project agent chat (agentId=${agentId}).
 Inspect/verify using repo tools and run_command in the project root. Do not start development or phases.
 
@@ -2401,21 +3140,28 @@ ${clipPromptSection("BLUEPRINT.md", blueprint, 6_000)}
 
 ROADMAP (excerpt):
 ${clipPromptSection("ROADMAP.md", roadmap, 3_000)}
-
+${depPack ? `\n${depPack}\n` : ""}
 Recent conversation:
 ${historyBlock}
 
 Operator message:
 ${message.trim()}`;
 
-    const reply = await runAgent(
+    const reply = await runAgentLiveTurn(
       this.ctx.agents.agentChatAgent,
       prompt,
       project.id,
       `agent-${agentId}`,
-      { maxSteps: 24, timeoutMs: 240_000 },
+      {
+        maxSteps: 24,
+        timeoutMs: 240_000,
+        onProgress: input.onProgress,
+        abortSignal: input.abortSignal,
+        synthesizeIfNarration: true,
+        statusLabel: "agent started",
+      },
     );
-    return { reply: reply.trim() || "(empty reply)" };
+    return { reply: reply.reply.trim() || "(empty reply)" };
   }
 
   async startResearch(input: StartResearchInput): Promise<RunStage> {
@@ -2496,9 +3242,9 @@ Form / engagement honesty (Change Intent has an interaction contract — mandato
       : `
 Research date (authoritative): ${researchDate} — put \`Date: ${researchDate}\` near the top of RESEARCH.md.
 `;
-    const brandResearchNote = isBrandThemingAsk(
-      `${intent.title}\n${intent.goal}\n${description}`,
-    )
+    const brandResearchNote =
+      isBrandThemingAsk(`${intent.title}\n${intent.goal}\n${description}`) &&
+      !isThemeWiringAsk(`${intent.title}\n${intent.goal}\n${description}`)
       ? `
 Brand / theming research (mandatory when Change Intent is brand/theming):
 - Prefer sibling **consumed** logo paths (Header / shell \`img\` / \`next/image\` → usually \`public/images/logo.svg\`).
@@ -2550,8 +3296,39 @@ CRITICAL theme contract (theme_modes):
 - ThemeToggle (or equivalent) must set documentElement data-theme — not only a .light class that never receives tokens.
 - Body/chrome must use var(--background)/var(--foreground) (or equivalent semantic vars), not hard-coded --color-dark-* that ignore the toggle.
 - Cite DESIGN_PACK.theme.requirements and lightTokensCss when present.
+- **Mounted ≠ visible:** playground (or app) CSS that consumes package shell components must \`@source "../src/**/*.{ts,tsx}"\` (or equivalent) **or** prove built CSS contains ThemeToggle color/size utilities (\`text-text-secondary\`, \`h-9\`, …). Import-order alone (\`@import "tailwindcss"\` first) is **insufficient**.
 `
         : "";
+    const antiAuditThemeNote = formatAntiAuditThemeDeliveryNote({
+      description: phase.description,
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+      designShellOrThemeAccepted: designAcceptance?.features?.some(
+        (f) =>
+          f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
+      ),
+    });
+    const elementsResearchNote = phasePackForResearch?.elements?.length
+      ? `
+CRITICAL shared elements (DESIGN_PACK.elements):
+${phasePackForResearch.elements
+  .map((e) => {
+    const npm = e.npmPackage
+      ? ` — prefer \`pnpm add ${e.npmPackage}@${e.npmVersion ?? "*"}\` from SlopControl private registry (never npm link)`
+      : e.hasCode
+        ? ` from \`${e.codePath ?? "design/elements/.../src"}\` (prefer TS/JS)`
+        : ` per \`${e.specPath ?? "SPEC.md"}\` + mock`;
+    return `- Mount ${e.id}@${e.version}${npm} at ${(e.mountHints ?? ["host"]).join("/")}`;
+  })
+  .join("\n")}
+- Do not invent a competing day/night (or other) control when an element id is listed.
+`
+      : "";
+    const crossDepResearchPack = await this.buildCrossProjectDependencyPrompt({
+      projectRoot: project.rootPath,
+      message: description,
+      listProjects: input.listProjects,
+    });
     const acceptanceResearchNote = designAcceptance?.features?.some((f) => f.accepted)
       ? `
 Design-loop acceptance (authoritative scope for this phase):
@@ -2559,19 +3336,21 @@ ${acceptanceBlock}
 - RESEARCH must figure out HOW to implement every IN SCOPE feature (concrete files, mounts, token paths).
 - Do NOT expand into OUT OF SCOPE features; treat them as mustNot.
 - If applied_shell is in scope, plan portal/dashboard UI fidelity to the accepted mock frames — not palette-only.
-- Obey DESIGN_PACK.json logos/tokens/contentPillars/scope/theme; do not invent a competing mark.
+- Obey DESIGN_PACK.json logos/tokens/contentPillars/scope/theme/elements; do not invent a competing mark or control.
 - If conceptual model scope.kind is component/flow, File Changes must stay within focusPaths/focus — do not expand to full site shell.
-${themeResearchNote}${designPackBlock ? `\n${designPackBlock}\n` : ""}${boundMockBlock ? `\n${boundMockBlock}\n` : ""}
+${themeResearchNote}${elementsResearchNote}${crossDepResearchPack ? `\n${crossDepResearchPack}\n` : ""}${designPackBlock ? `\n${designPackBlock}\n` : ""}${boundMockBlock ? `\n${boundMockBlock}\n` : ""}
 `
-      : [designPackBlock, boundMockBlock].filter(Boolean).join("\n\n")
-        ? `\n${themeResearchNote}${[designPackBlock, boundMockBlock].filter(Boolean).join("\n\n")}\n`
-        : "";
+      : [designPackBlock, boundMockBlock, crossDepResearchPack].filter(Boolean).join("\n\n")
+        ? `\n${themeResearchNote}${elementsResearchNote}${[crossDepResearchPack, designPackBlock, boundMockBlock].filter(Boolean).join("\n\n")}\n`
+        : crossDepResearchPack
+          ? `\n${crossDepResearchPack}\n`
+          : "";
     const prompt = `Change request:
 ${clipPromptSection("change-request", description, 4_000)}
 
 ${intentBlock}
 ${planResearchNote}${acceptanceResearchNote}${adjacentPack ? `${adjacentPack}\n` : ""}${siblingBrandPack ? `${siblingBrandPack}\n` : ""}Phase id: ${phase.id}
-${engagementHonesty}${brandResearchNote}
+${engagementHonesty}${brandResearchNote}${antiAuditThemeNote}
 Existing blueprint (excerpt — full file at .slopcontrol/BLUEPRINT.md; prefer Live decisions):
 ${clipBlueprintForPrompt(blueprint || "", 6_000)}
 
@@ -2735,7 +3514,13 @@ Phase id: ${phase.id}`;
     }
 
     onStage?.("drafting");
-    return this.draftPhase({ project, phase, run, onStage });
+    return this.draftPhase({
+      project,
+      phase,
+      run,
+      onStage,
+      listProjects: input.listProjects,
+    });
   }
 
   async draftPhase(input: {
@@ -2743,6 +3528,7 @@ Phase id: ${phase.id}`;
     phase: Phase;
     run: Run;
     onStage?: (stage: RunStage) => void;
+    listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
   }): Promise<RunStage> {
     const { project, phase, run, onStage } = input;
     onStage?.("drafting");
@@ -2777,9 +3563,12 @@ Phase id: ${phase.id}`;
     );
     const intentBlock = formatChangeIntentPromptBlock(intent);
     const adjacentPack = buildAdjacentPhaseContextPack(project.rootPath, 5);
+    const intentDesignText = `${intent.title}\n${intent.goal}\n${phase.description}`;
+    const brandDesignAsk =
+      isBrandThemingAsk(intentDesignText) && !isThemeWiringAsk(intentDesignText);
     const designRoutingNote =
       intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
-        ? isBrandThemingAsk(`${intent.title}\n${intent.goal}\n${phase.description}`)
+        ? brandDesignAsk
           ? `
 Design routing (brand/theming ask — override backend mislabel):
 - Near the top of PHASE.md include \`Requires design pass: yes\`.
@@ -2793,7 +3582,7 @@ Design routing (Change Intent changeKind=${intent.changeKind}):
 - Do NOT add ## Brand or ## Assets unless the operator explicitly asked for a visual/brand change.
 - Put behaviour/state tables under Scope / Success Criteria — not as design-asset briefs.
 `
-        : isBrandThemingAsk(`${intent.title}\n${intent.goal}\n${phase.description}`)
+        : brandDesignAsk
           ? `
 Design routing (brand/theming):
 - Near the top of PHASE.md include \`Requires design pass: yes\`.
@@ -2801,7 +3590,14 @@ Design routing (brand/theming):
 - Decide shell scope explicitly; do not freeze marketing/portal shells without stating palette-only.
 - Automated Checks: no design-fallback SVGs in public/brand/; wordmarks must not glue words (e.g. JamLight); shells must reference the new lockup.
 `
-          : "";
+          : isThemeWiringAsk(intentDesignText)
+            ? `
+Design routing (theme toggle / data-theme wiring — not a brand identity pass):
+- Near the top of PHASE.md include \`Requires design pass: no\`.
+- If ## Brand / ## Assets appear, mark them Not applicable — do not invent logo briefs.
+- Prove toggle → data-theme → token remaps with Automated Checks (unit tests / vite build), not a design-loop mock.
+`
+            : "";
 
     const draftAcceptance = readPhaseDesignAcceptance(
       project.rootPath,
@@ -2826,12 +3622,42 @@ ${draftPlanBlock ? `\n${draftPlanBlock}\n` : ""}
     const draftThemeNote = packHasThemeModes(draftPhasePack)
       ? `
 CRITICAL theme_modes: Plan File Changes for html[data-theme] light remaps of semantic tokens; ThemeToggle must set data-theme; body/chrome on var(--background)/var(--foreground) — not hard-coded --color-dark-* alone.
+Mounted ≠ visible: Success Criteria must claim the day/night control is **visible**; Automated Checks need mount greps **plus** \`@source\` covering package src **or** vite build + grep built CSS for ThemeToggle utilities — not import-order-only.
 `
       : "";
+    const draftAntiAuditThemeNote = formatAntiAuditThemeDeliveryNote({
+      description: phase.description,
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+      designShellOrThemeAccepted: draftAcceptance?.features?.some(
+        (f) =>
+          f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
+      ),
+    });
     const draftBoundMock = formatPhaseBoundMockPromptBlock({
       projectRoot: project.rootPath,
       phaseId: phase.id,
       maxHtmlChars: 8_000,
+    });
+    const draftElementsNote = draftPhasePack?.elements?.length
+      ? `
+CRITICAL shared elements (DESIGN_PACK.elements):
+${draftPhasePack.elements
+  .map((e) => {
+    const npm = e.npmPackage
+      ? ` — \`pnpm add ${e.npmPackage}@${e.npmVersion ?? "*"}\` after npm_registry_ensure_rc (never npm link)`
+      : e.hasCode
+        ? ` from \`${e.codePath ?? "design/elements"}\``
+        : "";
+    return `- Mount ${e.id}@${e.version}${npm}`;
+  })
+  .join("\n")}
+`
+      : "";
+    const draftCrossDepPack = await this.buildCrossProjectDependencyPrompt({
+      projectRoot: project.rootPath,
+      message: phase.description,
+      listProjects: input.listProjects,
     });
     const draftAcceptanceNote = draftAcceptance?.features?.some((f) => f.accepted)
       ? `
@@ -2839,11 +3665,13 @@ ${draftAcceptanceBlock}
 CRITICAL: Scope, File Changes, Success Criteria, and Automated Checks MUST cover every IN SCOPE feature above.
 Do NOT plan OUT OF SCOPE features. Unticked items are mustNot for this phase.
 File Changes must reference DESIGN_PACK logos/tokens/scope/theme and \`.slopcontrol/phases/${phase.id}/design/mock.html\` — do not invent a competing mark.
-${draftPlanNote}${draftThemeNote}${draftPackBlock ? `\n${draftPackBlock}\n` : ""}${draftBoundMock ? `\n${draftBoundMock}\n` : ""}
+${draftPlanNote}${draftThemeNote}${draftElementsNote}${draftCrossDepPack ? `\n${draftCrossDepPack}\n` : ""}${draftPackBlock ? `\n${draftPackBlock}\n` : ""}${draftBoundMock ? `\n${draftBoundMock}\n` : ""}
 `
-      : [draftPlanNote, draftPackBlock, draftBoundMock].filter(Boolean).join("\n\n")
-        ? `\n${draftPlanNote}${draftThemeNote}${[draftPackBlock, draftBoundMock].filter(Boolean).join("\n\n")}\n`
-        : "";
+      : [draftPlanNote, draftPackBlock, draftBoundMock, draftCrossDepPack].filter(Boolean).join("\n\n")
+        ? `\n${draftPlanNote}${draftThemeNote}${draftElementsNote}${[draftCrossDepPack, draftPackBlock, draftBoundMock].filter(Boolean).join("\n\n")}\n`
+        : draftCrossDepPack
+          ? `\n${draftCrossDepPack}\n`
+          : "";
 
     const buildDraftPrompt = (slim: boolean) => {
       const pack = slim ? "" : adjacentPack ? `${adjacentPack}\n` : "";
@@ -2854,7 +3682,7 @@ Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 
 ${intentBlock}
-${draftAcceptanceNote}${designRoutingNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
+${draftAcceptanceNote}${designRoutingNote}${draftAntiAuditThemeNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
 Do NOT reuse or retitle a prior phase plan (e.g. host.docker.internal / extra_hosts)
 unless RESEARCH explicitly asks for that work. If RESEARCH is about model naming /
 :cloud passthrough / model-resolver, the PHASE must plan that — not networking.
@@ -3082,12 +3910,21 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     }
 
     const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
-    const gate = validatePhaseDocForDev(phaseDoc);
+    const gate = validatePhaseDocForDev(phaseDoc, {
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+    });
     const align = phaseDocAlignsWithResearch(
       phaseDoc,
       research,
       phase.description,
     );
+    const antiAudit = phaseDocRejectsMissingThemeAudit({
+      description: phase.description,
+      phaseDoc,
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+    });
     if (!gate.ok) {
       log(
         project,
@@ -3108,6 +3945,18 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       );
       if (researchLooksSolid(research)) {
         return recoverableDraftFail(align.issues.join("; "));
+      }
+      writePhaseStatus(project.rootPath, phase.id, "blocked");
+      return "failed";
+    }
+    if (!antiAudit.ok) {
+      log(
+        project,
+        run,
+        `PHASE.md review-only audit rejected for missing theme control:\n${antiAudit.issues.join("\n")}`,
+      );
+      if (researchLooksSolid(research)) {
+        return recoverableDraftFail(antiAudit.issues.join("; "));
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
       return "failed";
@@ -3143,7 +3992,10 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
 
     if (decision === "approve") {
       const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
-      const gate = validatePhaseDocForDev(phaseDoc);
+      const gate = validatePhaseDocForDev(phaseDoc, {
+        projectRoot: project.rootPath,
+        phaseId: phase.id,
+      });
       if (!gate.ok) {
         log(
           project,
@@ -3165,6 +4017,21 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           project,
           run,
           `--- Cannot approve: PHASE.md misaligned with Change Intent ---\n${intentAlign.issues.map((i) => `- ${i}`).join("\n")}`,
+        );
+        writePhaseStatus(project.rootPath, phase.id, "in_review");
+        return "in_review";
+      }
+      const antiAudit = phaseDocRejectsMissingThemeAudit({
+        description: phase.description,
+        phaseDoc,
+        projectRoot: project.rootPath,
+        phaseId: phase.id,
+      });
+      if (!antiAudit.ok) {
+        log(
+          project,
+          run,
+          `--- Cannot approve: review-only PHASE rejected for missing theme control ---\n${antiAudit.issues.map((i) => `- ${i}`).join("\n")}`,
         );
         writePhaseStatus(project.rootPath, phase.id, "in_review");
         return "in_review";
@@ -3197,9 +4064,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       { registry: this.ctx.registry },
     );
     const intentBlock = formatChangeIntentPromptBlock(intent);
-    const brandAsk = isBrandThemingAsk(
-      `${intent.title}\n${intent.goal}\n${phase.description}`,
-    );
+    const reviseDesignText = `${intent.title}\n${intent.goal}\n${phase.description}`;
+    const brandAsk =
+      isBrandThemingAsk(reviseDesignText) && !isThemeWiringAsk(reviseDesignText);
     const designRoutingNote =
       intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
         ? brandAsk
@@ -3220,7 +4087,13 @@ Design routing (brand/theming):
 - Keep \`Requires design pass: yes\` and ## Brand / ## Assets.
 - Automated Checks must reject design-fallback SVGs under public/brand/.
 `
-          : "";
+          : isThemeWiringAsk(reviseDesignText)
+            ? `
+Design routing (theme toggle / data-theme wiring — not a brand identity pass):
+- Keep or add \`Requires design pass: no\` near the top of PHASE.md.
+- If ## Brand / ## Assets appear, mark them Not applicable.
+`
+            : "";
     const prompt = `Revise PHASE.md based on this feedback:\n${feedback ?? ""}
 
 ${intentBlock}
@@ -3586,6 +4459,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     signal?: AbortSignal;
     /** When true, run design first if the phase needs it and design is incomplete. */
     autoDesign?: boolean;
+    listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
   }): Promise<{ stage: RunStage; worktreePath?: string; worktreeBranch?: string }> {
     const { project, phase, run, signal, autoDesign } = input;
     const config = readProjectConfig(project.rootPath);
@@ -3745,9 +4619,25 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     const developThemeNote = packHasThemeModes(developPhasePack)
       ? `CRITICAL: Implement DESIGN_PACK.theme — html[data-theme] toggle, light token remaps for --background/--surface/--foreground, body/chrome on semantic vars (not hard-coded --color-dark-* alone).`
       : null;
+    const developElementsNote = developPhasePack?.elements?.length
+      ? `CRITICAL elements: ${developPhasePack.elements
+          .map((e) =>
+            e.npmPackage
+              ? `${e.id} via pnpm add ${e.npmPackage}@${e.npmVersion ?? "*"} (never npm link)`
+              : e.id,
+          )
+          .join("; ")}`
+      : null;
+    const developCrossDepPack = await this.buildCrossProjectDependencyPrompt({
+      projectRoot: project.rootPath,
+      message: phase.description,
+      listProjects: input.listProjects,
+    });
     const designContext = [
       developAcceptance?.features?.length ? developAcceptanceBlock : null,
       developThemeNote,
+      developElementsNote,
+      developCrossDepPack || null,
       developPackBlock || null,
       uiSpecDoc.trim()
         ? clipPromptSection("UI-SPEC.md", uiSpecDoc, 6_000)
@@ -3803,7 +4693,38 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       worktreePresent: true,
       branch: worktree.branch,
     };
-    let lastHandoffDiagnosis: HandoffDiagnosisSnippet | undefined;
+    const priorDiagnosis = readLatestDiagnosisForPhase(
+      project.rootPath,
+      phase.id,
+    );
+    // Re-classify from stored evidence so older blocked diagnoses pick up
+    // long-lived / host-utility tags after classifier updates.
+    const priorRefreshed = priorDiagnosis
+      ? buildFailureDiagnosis({
+          output: priorDiagnosis.evidence || priorDiagnosis.title,
+          firstFailure: priorDiagnosis.failingStep
+            ? {
+                name: priorDiagnosis.failingStep.name,
+                command: priorDiagnosis.failingStep.command,
+                exitCode: priorDiagnosis.failingStep.exitCode,
+                output: priorDiagnosis.evidence,
+              }
+            : undefined,
+          sourcePhaseId: phase.id,
+          sourceRunId: run.id,
+        })
+      : null;
+    let lastHandoffDiagnosis: HandoffDiagnosisSnippet | undefined =
+      priorRefreshed
+        ? {
+            fingerprint: priorRefreshed.fingerprint,
+            title: priorRefreshed.title,
+            class: priorRefreshed.class,
+            operatorActions: priorRefreshed.operatorActions,
+            nextActions: priorRefreshed.nextActions,
+            tags: priorRefreshed.tags,
+          }
+        : undefined;
 
     const persistHandoff = (
       outcome: "complete" | "blocked" | "interrupted",
@@ -4002,22 +4923,15 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             .filter(Boolean)
             .join("\n\n---\n\n");
         } else {
-          const processShell =
-            /Broken Automated Check|incomplete shell compound|shell syntax|line continuation|api-routing-complete-gate|Chat stream hang|class:\*\* process|class=process|post-merge root verify/i.test(
-              appendix,
-            );
-          prompt = processShell
-            ? `Fix the APPENDIX Failure diagnosis. This is a **process** failure (PHASE.md Automated Checks and/or incomplete Ollama OpenAI-compat routing).
-If the diagnosis mentions Automated Checks shell/syntax: FIRST edit \`.slopcontrol/phases/${phase.id}/PHASE.md\` — rewrite the failing check into one complete statement.
-If the diagnosis mentions Stream started hang or api-routing-complete-gate: implement the promised routing files (model-resolver / OLLAMA_BASE_URL / chat route) — do NOT complete on catalogue-only diffs; do NOT force free-tier.
-If the diagnosis mentions post-merge root verify: fix files so project-root tests pass (gitignored artifacts must match the worktree); do not claim DEV_COMPLETE from worktree-only green.
-Then ensure build/tests pass. Before DEV_COMPLETE, append \`## Operator handoff\` to APPENDIX. Print DEV_COMPLETE when success criteria and Automated Checks pass.`
-            : `Fix the implementation using the latest APPENDIX Failure diagnosis.
-Address the **root cause of the failing step first** — do not expand scope or invent bring-up scripts.
-Ensure ## Automated Checks and tests pass. Fix spawn ENOENT-style bugs by splitting command vs args.
-Do NOT burn the session on live API probing or rate-limit waits — edit files and run local Automated Checks.
-Do NOT chase infra bring-up (missing local services) inside the app repo — follow APPENDIX failure class.
-Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Knowledge / Follow-ups) to APPENDIX. Print DEV_COMPLETE when build, tests, and phase success criteria pass.`;
+          // Prefer latest diagnosis over APPENDIX scrape (stale host-utility cards misroute).
+          prompt = buildDevelopCodingRetryPrompt({
+            phaseId: phase.id,
+            title: lastHandoffDiagnosis?.title,
+            nextActions: lastHandoffDiagnosis?.nextActions,
+            class: lastHandoffDiagnosis?.class,
+            tags: lastHandoffDiagnosis?.tags,
+            appendixFallback: appendix,
+          });
           if (appendix.trim()) {
             systemOverride = [
               contextSystem ? `PHASE.md context:\n${phaseDoc.slice(0, 3000)}` : null,
@@ -4233,7 +5147,27 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
         let pushedEnv: string[] = [];
         let checks = await runSuccessChecks(project, phaseDoc, worktree.path, {
           mode: autoMerge ? "build" : "full",
+          phaseId: phase.id,
         });
+        if (!checks.ok && isExit127CommandNotFoundFailure(checks)) {
+          log(
+            project,
+            run,
+            "--- Auto deps-install after exit 127 (force reinstall + recheck) ---",
+          );
+          checks = await runSuccessChecks(project, phaseDoc, worktree.path, {
+            mode: autoMerge ? "build" : "full",
+            forceDepsInstall: true,
+            phaseId: phase.id,
+          });
+          if (checks.ok) {
+            log(
+              project,
+              run,
+              "--- Auto deps-install recovered worktree gate ---",
+            );
+          }
+        }
         log(
           project,
           run,
@@ -4448,23 +5382,37 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
                 project,
                 phaseDoc,
                 project.rootPath,
-                { mode: "verify", forceDepsInstall: true },
+                { mode: "verify", forceDepsInstall: true, phaseId: phase.id },
               );
+              let rootVerify = rootChecks;
+              if (!rootVerify.ok && isExit127CommandNotFoundFailure(rootVerify)) {
+                log(
+                  project,
+                  run,
+                  "--- Auto deps-install after exit 127 (project root) ---",
+                );
+                rootVerify = await runSuccessChecks(
+                  project,
+                  phaseDoc,
+                  project.rootPath,
+                  { mode: "verify", forceDepsInstall: true, phaseId: phase.id },
+                );
+              }
               persistCheckOutput(
                 project,
                 run,
                 `iter${iteration}-root-verify`,
-                rootChecks.output,
-                rootChecks.ok,
+                rootVerify.output,
+                rootVerify.ok,
               );
               log(
                 project,
                 run,
-                `--- Post-merge root verify summary ---\n${rootChecks.summary}`,
+                `--- Post-merge root verify summary ---\n${rootVerify.summary}`,
               );
-              if (!rootChecks.ok) {
+              if (!rootVerify.ok) {
                 lastFailWasPostMergeRootVerify = true;
-                const rootFail = rootChecks.firstFailure;
+                const rootFail = rootVerify.firstFailure;
                 const postMergeStep: SuccessCheckStep = {
                   name: rootFail?.name
                     ? `post-merge-root-verify:${rootFail.name}`
@@ -4476,7 +5424,7 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
                     "Git merge does not copy gitignored files; SlopControl syncs ignored worktree artifacts before this step.",
                     "Do not claim DEV_COMPLETE from worktree-only green — fix so project-root tests pass.",
                     "",
-                    rootFail?.output ?? rootChecks.output,
+                    rootFail?.output ?? rootVerify.output,
                   ].join("\n"),
                 };
                 appendAppendix(
@@ -4497,11 +5445,11 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
                     postMergeStep.output,
                     "Full output is under .slopcontrol/runs/<runId>/checks/.",
                   ].join("\n\n"),
-                  steps: [...(checks.steps ?? []), ...(rootChecks.steps ?? []), postMergeStep],
+                  steps: [...(checks.steps ?? []), ...(rootVerify.steps ?? []), postMergeStep],
                   firstFailure: postMergeStep,
                   summary: buildCheckSummary(
                     false,
-                    [...(checks.steps ?? []), ...(rootChecks.steps ?? []), postMergeStep],
+                    [...(checks.steps ?? []), ...(rootVerify.steps ?? []), postMergeStep],
                     postMergeStep,
                   ),
                 };
@@ -4512,10 +5460,10 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
                   output: [
                     checks.output,
                     mergeResult.message,
-                    rootChecks.output,
+                    rootVerify.output,
                   ].join("\n\n"),
-                  steps: [...(checks.steps ?? []), ...(rootChecks.steps ?? [])],
-                  summary: rootChecks.summary,
+                  steps: [...(checks.steps ?? []), ...(rootVerify.steps ?? [])],
+                  summary: rootVerify.summary,
                 };
               }
             }
@@ -4673,6 +5621,7 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
             nextActions: diagnosis.nextActions,
             fingerprint: diagnosis.fingerprint,
             codingAgentShouldFix: diagnosis.codingAgentShouldFix,
+            tags: diagnosis.tags,
             failingStep: diagnosis.failingStep,
             phaseId: phase.id,
             runId: run.id,
@@ -4685,6 +5634,8 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
           title: diagnosis.title,
           class: diagnosis.class,
           operatorActions: diagnosis.operatorActions,
+          nextActions: diagnosis.nextActions,
+          tags: diagnosis.tags,
         };
         lastDiagnosisCard = formatDiagnosisCard(diagnosis);
         log(
@@ -4856,47 +5807,61 @@ Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Kno
           },
         );
 
-        const supervisorPrompt = `Enrich this Failure diagnosis (do not re-litigate full logs).
-Iteration ${iteration}. Diagnosis streak: ${diagnosisStreak}/${MAX_DIAGNOSIS_STREAK}.
-No-progress: ${noProgressCount}/${MAX_NO_PROGRESS}. Infra strikes: ${infraStrikeCount}/2.
-Plan coverage: ${planProgress.summary}
-
-${lastDiagnosisCard}
-
-PHASE excerpt:
-${phaseDoc.slice(0, 4000)}
-
-Worktree: ${worktree.path}
-${learningsForSupervisor ? `\n${learningsForSupervisor}` : ""}
-
-Respond with:
-## Next actions
-(concise instructions for the coding tool addressing the failing step — or operator actions if infra)
-
-If unrecoverable, include DEV_BLOCKED on its own line.
-Do not invent bring-up scripts for infra. Fix broken Automated Checks in PHASE.md when class=process/shell — edit \`.slopcontrol/phases/<phaseId>/PHASE.md\` before product files.`;
+        const enrichBuilt = buildSupervisorEnrichPrompt({
+          iteration,
+          diagnosisStreak,
+          maxDiagnosisStreak: MAX_DIAGNOSIS_STREAK,
+          noProgressCount,
+          maxNoProgress: MAX_NO_PROGRESS,
+          infraStrikeCount,
+          planCoverageSummary: planProgress.summary,
+          diagnosisCard: lastDiagnosisCard,
+          phaseExcerpt: phaseDoc,
+          worktreePath: worktree.path,
+          runId: run.id,
+          phaseId: phase.id,
+          checkSignal: lastChecksSummary || checks.summary || "",
+          learningsBlock: learningsForSupervisor || undefined,
+          priorNextActions: priorNextActionsFromMemory(memory),
+        });
+        const supervisorPrompt = enrichBuilt.prompt;
+        if (enrichBuilt.clipped) {
+          log(
+            project,
+            run,
+            `--- Supervisor prompt clipped to budget (${enrichBuilt.charCount} chars) ---`,
+          );
+        }
 
         const supervisorTimeoutMs = Number(
           process.env.SLOPCONTROL_SUPERVISOR_MS ?? 90_000,
         );
         let supervisorOutput = "";
         try {
+          // No Mastra thread replay — curated prompt carries continuity.
           supervisorOutput = await runAgent(
             this.ctx.agents.devSupervisorAgent,
             supervisorPrompt,
             project.id,
             run.id,
-            { timeoutMs: supervisorTimeoutMs, maxSteps: 12 },
+            {
+              timeoutMs: supervisorTimeoutMs,
+              maxSteps: 1,
+              memory: false,
+            },
           );
         } catch (error) {
           if (signal?.aborted) return markInterrupted();
           const message =
             error instanceof Error ? error.message : String(error);
           // Keep deterministic diagnosis — do not invent a conflicting retry narrative.
+          const tooLong = isPromptTooLongError(error);
           log(
             project,
             run,
-            `Supervisor timed out/failed (keeping diagnosis): ${message}`,
+            tooLong
+              ? `Supervisor prompt too long (keeping diagnosis): ${message}`
+              : `Supervisor timed out/failed (keeping diagnosis): ${message}`,
           );
           lastErrorHash = currentErrorHash;
           lastErrorCount = currentErrorCount;
@@ -4924,6 +5889,12 @@ Do not invent bring-up scripts for infra. Fix broken Automated Checks in PHASE.m
             phase.id,
             `## Iteration ${iteration} — supervisor enrichment\n\n${supervisorOutput}`,
           );
+          const nextSummary = extractNextActionsSummary(supervisorOutput);
+          const lastMem = memory[memory.length - 1];
+          if (lastMem && nextSummary) {
+            lastMem.nextActionsSummary = nextSummary;
+            writeRunMemory(project.rootPath, run.id, memory);
+          }
         }
         lastErrorHash = currentErrorHash;
         lastErrorCount = currentErrorCount;

@@ -8,9 +8,11 @@ import {
   type AskSession,
 } from "@slopcontrol/types";
 import {
+  ASK_TIMEOUT_RECOVERY_MESSAGE,
   buildAskTaskDescription,
   extractLastTaskBrief,
   formatAskTranscript,
+  isAskAgentTimeoutError,
   writeAskArtifacts,
 } from "./ask-session.js";
 
@@ -136,5 +138,17 @@ More chatter.`,
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("detects ask agent timeout errors and exposes recovery copy", () => {
+    assert.equal(
+      isAskAgentTimeoutError(
+        new Error("Agent Ask timed out after 180000ms"),
+      ),
+      true,
+    );
+    assert.equal(isAskAgentTimeoutError(new Error("boom")), false);
+    assert.match(ASK_TIMEOUT_RECOVERY_MESSAGE, /Ask timed out/i);
+    assert.match(ASK_TIMEOUT_RECOVERY_MESSAGE, /narrower question/i);
   });
 });

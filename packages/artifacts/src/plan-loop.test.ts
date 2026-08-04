@@ -14,6 +14,9 @@ import {
   bindAcceptedPlanLoopToPhase,
   createPlanLoopMeta,
   extractPlanDocument,
+  failurePlanDocument,
+  isPlanLoopFailureOrScaffoldDocument,
+  PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR,
   scaffoldPlanDocument,
   seedPlanLoopAcceptance,
   validatePlanDocument,
@@ -204,6 +207,91 @@ describe("plan-loop", () => {
       },
     });
     assert.equal(validatePlanDocument(s).ok, true);
+  });
+
+  it("rejects accept/bind when usedScaffold or failure plan fingerprints", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-plan-scaffold-"));
+    roots.push(root);
+    const fail = failurePlanDocument({
+      brief: "Theme toggle on landing",
+      errorDetail: "empty agent plan after repair",
+    });
+    assert.equal(isPlanLoopFailureOrScaffoldDocument(fail), true);
+    assert.equal(validatePlanDocument(fail).ok, true);
+
+    const meta = createPlanLoopMeta({
+      projectId: "p1",
+      brief: "Theme toggle on landing",
+    });
+    writePlanLoopMeta(root, meta);
+    writePlanLoopVersion({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      plan: fail,
+      notes: "Failure plan — empty agent output after repair",
+      request: meta.brief,
+      usedScaffold: true,
+      error: "Failure plan — empty agent output after repair",
+    });
+    seedPlanLoopAcceptance({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+    });
+    assert.throws(
+      () =>
+        acceptPlanLoop(root, meta.id, 1, {
+          acceptedFeatureIds: ["goal", "scope", "success"],
+        }),
+      (err: unknown) =>
+        err instanceof Error &&
+        err.message.includes(PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR),
+    );
+
+    // Fingerprint alone (usedScaffold false) still blocks
+    writePlanLoopVersion({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 2,
+      plan: fail,
+      notes: "fail",
+      request: meta.brief,
+      usedScaffold: false,
+    });
+    seedPlanLoopAcceptance({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 2,
+    });
+    assert.throws(
+      () =>
+        acceptPlanLoop(root, meta.id, 2, {
+          acceptedFeatureIds: ["goal", "scope", "success"],
+        }),
+      /plan_loop_retry/,
+    );
+
+    // Force-accepted meta status + bind still rejects
+    writePlanLoopMeta(root, {
+      ...meta,
+      status: "accepted",
+      acceptedVersion: 1,
+      currentVersion: 1,
+      updatedAt: new Date().toISOString(),
+    });
+    mkdirSync(join(root, ".slopcontrol", "phases", "01-theme"), {
+      recursive: true,
+    });
+    assert.throws(
+      () =>
+        bindAcceptedPlanLoopToPhase({
+          projectRoot: root,
+          loopId: meta.id,
+          phaseId: "01-theme",
+        }),
+      /plan_loop_retry/,
+    );
   });
 
   it("fallbackPlanContinueIntentFromText classifies narrow and full", () => {
