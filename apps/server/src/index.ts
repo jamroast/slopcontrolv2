@@ -1,6 +1,6 @@
 import "./load-env.js";
 
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import cors from "cors";
 import express from "express";
@@ -462,6 +462,44 @@ function isNpmRegistryEnvOff(): boolean {
   return v === "0" || v === "false" || v === "off" || v === "no";
 }
 
+/**
+ * Read the last N lines of a file efficiently — reads from the end in chunks
+ * without loading the entire file into memory.
+ */
+function readTailLines(filePath: string, maxLines: number): string {
+  try {
+    const stat = statSync(filePath);
+    if (stat.size === 0) return "";
+    const CHUNK = 8192;
+    const fd = openSync(filePath, "r");
+    try {
+      const buf = Buffer.alloc(CHUNK);
+      let pos = stat.size;
+      let lines: string[] = [];
+      let leftover = "";
+
+      while (pos > 0 && lines.length < maxLines) {
+        const readSize = Math.min(CHUNK, pos);
+        pos -= readSize;
+        readSync(fd, buf, 0, readSize, pos);
+        const chunk = buf.toString("utf-8", 0, readSize) + leftover;
+        const parts = chunk.split("\n");
+        leftover = parts.shift() ?? "";
+        lines = [...parts, ...lines];
+      }
+      if (leftover && lines.length < maxLines) {
+        lines = [leftover, ...lines];
+      }
+      // Return only the last maxLines
+      return lines.slice(-maxLines).join("\n");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
 // ===== Runs list (for dashboard) =====
 
 function buildRunPayload(run: Run) {
@@ -472,7 +510,7 @@ function buildRunPayload(run: Run) {
   let devOutput = "";
   const logPath = join(project.rootPath, ".slopcontrol", "runs", run.id, "log.txt");
   if (existsSync(logPath)) {
-    devOutput = readFileSync(logPath, "utf-8");
+    devOutput = readTailLines(logPath, 500);
   }
 
   // Also read phase doc for review stage
