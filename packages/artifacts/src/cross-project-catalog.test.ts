@@ -116,7 +116,7 @@ describe("cross-project-catalog", () => {
       "use theme-toggle from jamroast",
     );
     assert.equal(el.useElement?.id, "theme-toggle");
-    assert.equal(el.useElement?.fromProject, "burntjam");
+    assert.equal(el.useElement?.fromProject, "jamroast");
     assert.equal(el.forbidNpmLink, true);
 
     const pkg = detectDependencyIntentFromText(

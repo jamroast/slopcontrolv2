@@ -18,12 +18,16 @@ function tmp(name: string): string {
 }
 
 describe("sibling-code-refs", () => {
-  it("briefWantsSiblingInvestigation detects jampress / investigate", () => {
+  it("briefWantsSiblingInvestigation detects investigate language only", () => {
     assert.equal(
       briefWantsSiblingInvestigation("investigate JamPress chat"),
       true,
     );
     assert.equal(briefWantsSiblingInvestigation("add a button"), false);
+    assert.equal(
+      briefWantsSiblingInvestigation("just mention jamroast somehow"),
+      false,
+    );
   });
 
   it("buildSiblingInvestigationPack includes absolute paths and excerpts", () => {

@@ -2374,7 +2374,7 @@ ${message.trim()}`;
       ? formatContinueIntentPromptBlock(continueIntent)
       : "";
 
-    // Chat-driven design share: "pull the theme from jamroast" auto-imports.
+    // Chat-driven design share: "pull the theme from <registered project>" auto-imports.
     // Gate: adopt-theme intent, brand/palette/typography targets, or an explicit path.
     // Do NOT treat inventLogo alone as a share request (avoids self-alias traps).
     if (isContinue && message?.trim()) {
@@ -2882,7 +2882,7 @@ Required H2 sections: Goal, Constraints, In scope, Out of scope, Approach, Likel
 CRITICAL: Goal must be 1–3 sentences — never paste the operator brief.
 ${expandH2Note}
 ${investigate ? "CRITICAL: Investigate sibling absolute paths (read_file) before writing; cite them under Likely areas." : ""}
-When CROSS-PROJECT DEPS / DEPENDENCY INTENT apply, record package/element refs under Likely areas and Handoff notes (e.g. deps: @jam/theme-toggle@1.0.0 from jamroast). Never recommend npm link.
+When CROSS-PROJECT DEPS / DEPENDENCY INTENT apply, record package/element refs under Likely areas and Handoff notes (e.g. deps: @acme/theme-toggle@1.0.0 from SiblingBrand). Never recommend npm link.
 Return a short rationale then the full plan in a markdown fence. End with PLAN_COMPLETE.`;
 
     const maxSteps = investigate ? 16 : 10;
@@ -3249,7 +3249,7 @@ Research date (authoritative): ${researchDate} — put \`Date: ${researchDate}\`
 Brand / theming research (mandatory when Change Intent is brand/theming):
 - Prefer sibling **consumed** logo paths (Header / shell \`img\` / \`next/image\` → usually \`public/images/logo.svg\`).
 - Do NOT treat \`public/brand/*-reuse.svg\` or other tiny tile+circle stubs as the sibling's real mark.
-- Probe family siblings when relevant (e.g. burntjam alongside JamPress).
+- Probe named sibling projects when the operator named them (absolute path or registered name) — do not assume a default brand family.
 - Explicitly decide: palette-only vs palette+shell/theme machinery vs full layout parity — do not silently freeze shells if the operator asked to apply theming.
 `
       : "";

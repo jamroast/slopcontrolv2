@@ -11,16 +11,16 @@ export const DEPENDENCY_INTENT_SYSTEM_PROMPT = `You classify operator messages a
 CRITICAL: Output ONLY a single JSON object. No prose, no markdown fences.
 
 Return ONLY a JSON object with these fields:
-- useElement: optional { id: string, fromProject?: string } — when the operator wants a shared design control (e.g. theme-toggle from jamroast)
-- useNpmPackage: optional { name: string, version?: string, fromProject?: string } — scoped package like @jam/theme-toggle
+- useElement: optional { id: string, fromProject?: string } — when the operator wants a shared design control (e.g. theme-toggle from a registered sibling project)
+- useNpmPackage: optional { name: string, version?: string, fromProject?: string } — scoped package like @acme/theme-toggle
 - useProjectInfra: optional { projectName?: string, rootPath?: string } — reuse packages/elements from a named project (not npm link)
 - forbidNpmLink: boolean — always true
 - notes: string — 1 sentence; if they asked for npm link / pnpm link, say to use the private registry instead
 
 Rules:
-- "use theme-toggle from jamroast" → useElement={id:"theme-toggle", fromProject:"jamroast"} (or burntjam alias)
-- "add @jam/theme-toggle" / "pnpm add @jam/…" → useNpmPackage
-- "reuse packages from jamroast" / "use infra from X" → useProjectInfra
+- "use theme-toggle from MyBrand" → useElement={id:"theme-toggle", fromProject:"MyBrand"} (use the project name as stated; no brand→folder rewrite)
+- "add @jam/theme-toggle" / "pnpm add @…/…" → useNpmPackage
+- "reuse packages from ProjectX" / "use infra from X" → useProjectInfra
 - Never set forbidNpmLink to false. Prefer registry installs over link/file: sibling hacks.
 - Omit fields that do not apply. Empty intent: all optional fields omitted, forbidNpmLink true, notes "".
 `;
@@ -37,7 +37,7 @@ export function shouldClassifyDependencyIntent(text: string): boolean {
   const t = text ?? "";
   return (
     /@(jam|slopcontrol)\//i.test(t) ||
-    /\b(use|from|package|element|jamroast|jam\s*roast|jamlight|jampress|burntjam|registry|pnpm\s+add|npm\s+add|npm\s+link|pnpm\s+link|shared\s+lib|infra(structure)?)\b/i.test(
+    /\b(use|from|package|element|registry|pnpm\s+add|npm\s+add|npm\s+link|pnpm\s+link|shared\s+lib|infra(structure)?)\b/i.test(
       t,
     )
   );

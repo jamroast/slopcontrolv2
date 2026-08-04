@@ -91,10 +91,17 @@ describe("fallbackContinueIntentFromText", () => {
 
   it("detects adopt theme from sibling project", () => {
     const intent = fallbackContinueIntentFromText(
-      "Pull the JamRoast theming from burntjam into this mock",
+      "Pull the theming from MyBrand into this mock",
     );
     assert.equal(intent.adoptTheme, true);
     assert.ok(intent.targets.includes("palette"));
+  });
+
+  it("bare brand mention without adopt/from does not set adoptTheme", () => {
+    const intent = fallbackContinueIntentFromText(
+      "jamroast looks nice but just tweak the hero spacing",
+    );
+    assert.equal(intent.adoptTheme, false);
   });
 
   it("detects full redesign as full_revise", () => {

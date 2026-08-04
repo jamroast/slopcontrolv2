@@ -441,7 +441,7 @@ Rules:
 - CONCEPTUAL MODEL / PLAN CONTINUE INTENT in the prompt are authoritative.
 - When PLAN CONTINUE INTENT is expand_scope or full_revise: rewrite Goal/In scope/Approach as needed; do NOT keep the old Goal solely because acceptance was previously ticked. Still emit every required H2 title.
 - When INTENT is sections/narrow_scope: revise surgically; preserve Goal and Out of scope unless those sections are targeted.
-- When CROSS-PROJECT DEPS / DEPENDENCY INTENT appear: put package/element deps under **Likely areas** and **Handoff notes** (e.g. \`deps: @jam/theme-toggle@1.0.0 from jamroast\` or \`element:theme-toggle from jamroast\`). Prefer registry install over inventing; NEVER npm link.
+- When CROSS-PROJECT DEPS / DEPENDENCY INTENT appear: put package/element deps under **Likely areas** and **Handoff notes** (e.g. \`deps: @acme/theme-toggle@1.0.0 from SiblingBrand\` or \`element:theme-toggle from SiblingBrand\`). Prefer registry install over inventing; NEVER npm link.
 - Do NOT write RESEARCH.md, PHASE.md, or product source. Do NOT claim promote ran.
 - End with PLAN_COMPLETE on its own line.
 - Keep Likely areas as hypotheses when uncertain; put unknowns under Risks & open questions for research to resolve.`,

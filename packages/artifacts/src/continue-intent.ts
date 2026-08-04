@@ -166,11 +166,10 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
     /\b(theme|theming|palette|brand\s*colors?)\b.{0,60}\b(from|of|like|borrow|pull|adopt)\b/i.test(
       t,
     ) ||
-    /\b(pull|adopt|borrow|use)\b.{0,40}\b(theme|theming|palette)\b.{0,60}\b(burntjam|jamroast|jampress|jamlight|sibling|other\s*project)\b/i.test(
+    /\b(pull|adopt|borrow|use)\b.{0,40}\b(theme|theming|palette)\b.{0,60}\b(sibling|other\s*project|[\w.-]+)\b/i.test(
       t,
     ) ||
-    /\bfrom\s+\/Users\/[^/\s]+/i.test(t) ||
-    /\b(burntjam|jamroast|jam\s*roast|jamlight|jam\s*light)\b/i.test(t);
+    /\bfrom\s+\/(?:Users|home|var)\/[^/\s]+/i.test(t);
   const preserveChrome =
     /\b(?:keep|preserve|maintain)\b.{0,60}\b(layout|copy|shell|hero|structure|mock|menu|nav)\b/i.test(
       t,
@@ -311,8 +310,11 @@ export function normalizeContinueIntent(
   const inventLogo = intent.inventLogo || inventFromText;
   const adoptTheme =
     intent.adoptTheme ||
-    (/\b(burntjam|jamroast|jam\s*roast|jamlight|jam\s*light)\b/i.test(t) &&
-      /\b(theme|theming|palette|brand|skin|dark|light)\b/i.test(t));
+    (/\b(theme|theming|palette|brand|skin)\b/i.test(t) &&
+      /\b(from|pull|adopt|borrow)\b/i.test(t) &&
+      (/\b(sibling|other\s*project)\b/i.test(t) ||
+        /\bfrom\s+\/(?:Users|home|var)\//i.test(t) ||
+        /\bfrom\s+[\w.-]{2,}\b/i.test(t)));
 
   const explicitKeepChrome =
     /\b(?:keep|preserve|maintain)\b.{0,60}\b(layout|copy|shell|hero|structure|mock|menu|nav)\b/i.test(

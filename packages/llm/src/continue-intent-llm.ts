@@ -24,7 +24,7 @@ Return ONLY a JSON object with these fields:
 
 Rules:
 - "new logo" / "symbolic mark" / "invent a mark" / "circular logo" / "replace the logos" / "different logo" / "I am unhappy with the logos" / "don't like the current logos" / "change the logo" → inventLogo=true, targets include "logo". Replacing the prior pinned logo is expected. Never assets_only for these. Set preserveChrome=false unless the operator explicitly says keep layout/hero/shell.
-- "pull/adopt theme or theming/design from burntjam|jamroast|jamlight|sibling|other project" → adoptTheme=true, targets include "palette" and usually "landing". Set preserveChrome=false — a new theme is an intentional redesign; do NOT preserve the prior mock's look unless asked.
+- "pull/adopt theme or theming/design from a sibling / other registered project / absolute path" → adoptTheme=true, targets include "palette" and usually "landing". Set preserveChrome=false — a new theme is an intentional redesign; do NOT preserve the prior mock's look unless asked.
 - "align menu/nav with the code" → navAlign=true.
 - "derive icon pack" / "make transparent" / "alpha" → wantsAssetEdit=true (only when NOT asking for a new/different logo).
 - "I like the current look" / "keep the hero" / "do not change layout" → preserveChrome=true. "do not change hero" is NOT a request to change hero.

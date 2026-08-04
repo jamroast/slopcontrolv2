@@ -33,13 +33,11 @@ function writeLogo(root: string, name = "logo.png"): string {
   return file;
 }
 
-test("resolveShareAlias maps jamroast→burntjam and leaves others alone", () => {
-  assert.equal(resolveShareAlias("jamroast"), "burntjam");
-  assert.equal(resolveShareAlias("Jam Roast"), "burntjam");
-  assert.equal(resolveShareAlias("jam_roast"), "burntjam");
-  assert.equal(resolveShareAlias("jampress"), "basic-web-agent");
-  assert.equal(resolveShareAlias("burntjam"), "burntjam");
-  assert.equal(resolveShareAlias("some-other"), "some-other");
+test("resolveShareAlias is identity (trim + collapse whitespace, no brand rewrite)", () => {
+  assert.equal(resolveShareAlias("jamroast"), "jamroast");
+  assert.equal(resolveShareAlias("Jam Roast"), "Jam Roast");
+  assert.equal(resolveShareAlias("  some-other  "), "some-other");
+  assert.equal(resolveShareAlias("Acme  Brand"), "Acme Brand");
 });
 
 test("resolveDesignShareSource: by name via listProjects", () => {
@@ -47,8 +45,8 @@ test("resolveDesignShareSource: by name via listProjects", () => {
   const source = tmpRoot("source-proj");
   const src = resolveDesignShareSource({
     targetRoot: target,
-    fromName: "burntjam",
-    listProjects: () => [{ id: "src-1", name: "BurntJam", rootPath: source }],
+    fromName: "MyBrand",
+    listProjects: () => [{ id: "src-1", name: "MyBrand", rootPath: source }],
   });
   assert.equal(src?.projectId, "src-1");
   assert.equal(src?.rootPath, source);
@@ -56,31 +54,44 @@ test("resolveDesignShareSource: by name via listProjects", () => {
   rmSync(source, { recursive: true, force: true });
 });
 
-test("resolveDesignShareSource: alias jamroast matches registered 'Jam Roast' project by name", () => {
+test("resolveDesignShareSource: registered project name JamRoast matches without folder alias", () => {
   const target = tmpRoot("target");
   const source = tmpRoot("source-proj");
   const src = resolveDesignShareSource({
     targetRoot: target,
-    fromName: "jamroast",
-    listProjects: () => [{ id: "src-2", name: "burntjam", rootPath: source }],
+    fromName: "JamRoast",
+    listProjects: () => [{ id: "src-2", name: "JamRoast", rootPath: source }],
   });
   assert.equal(src?.projectId, "src-2");
+  // Unrelated registered name must not match via alias rewrite
+  const miss = resolveDesignShareSource({
+    targetRoot: target,
+    fromName: "jamroast",
+    listProjects: () => [{ id: "src-x", name: "burntjam", rootPath: source }],
+  });
+  assert.equal(miss, null);
   rmSync(target, { recursive: true, force: true });
   rmSync(source, { recursive: true, force: true });
 });
 
-test("resolveDesignShareSource: by name falls back to sibling dir under target parent", () => {
+test("resolveDesignShareSource: by name falls back to literal sibling dir under target parent", () => {
   const parent = tmpRoot("parent");
-  const target = join(parent, "light-weight-crm-and-invoicing");
-  const source = join(parent, "burntjam");
+  const target = join(parent, "app-a");
+  const source = join(parent, "my-brand");
   mkdirSync(target, { recursive: true });
   mkdirSync(source, { recursive: true });
   const src = resolveDesignShareSource({
     targetRoot: target,
-    fromName: "jamroast",
+    fromName: "my-brand",
     listProjects: () => [],
   });
   assert.equal(src?.rootPath, source);
+  const miss = resolveDesignShareSource({
+    targetRoot: target,
+    fromName: "jamroast",
+    listProjects: () => [],
+  });
+  assert.equal(miss, null);
   rmSync(parent, { recursive: true, force: true });
 });
 
@@ -169,18 +180,24 @@ test("formatSharedDesignPromptBlock returns empty for null import", () => {
   assert.equal(formatSharedDesignPromptBlock(null), "");
 });
 
-test("detectShareSourceFromText: chat mention of 'jamroast' resolves via alias + sibling dir", () => {
+test("detectShareSourceFromText: chat mention of literal sibling dir resolves", () => {
   const parent = tmpRoot("chat");
-  const target = join(parent, "light-weight-crm-and-invoicing");
-  const source = join(parent, "burntjam");
+  const target = join(parent, "app-a");
+  const source = join(parent, "my-brand");
   mkdirSync(target, { recursive: true });
   mkdirSync(source, { recursive: true });
   const src = detectShareSourceFromText({
     targetRoot: target,
-    text: "pull the themeing from the jamroast project and give me a new logo",
+    text: "pull the themeing from the my-brand project and give me a new logo",
   });
   assert.ok(src);
   assert.equal(src!.rootPath, source);
+  // Alias-only name with no matching dir/project → null
+  const miss = detectShareSourceFromText({
+    targetRoot: target,
+    text: "pull the themeing from the jamroast project and give me a new logo",
+  });
+  assert.equal(miss, null);
   rmSync(parent, { recursive: true, force: true });
 });
 
@@ -225,27 +242,27 @@ test("detectShareSourceFromText: no mention returns null", () => {
   rmSync(parent, { recursive: true, force: true });
 });
 
-test("detectShareSourceFromText: jampress on JamPress is self — returns null", () => {
+test("detectShareSourceFromText: naming this project's own folder is self — returns null", () => {
   const parent = tmpRoot("chat-self");
-  const target = join(parent, "basic-web-agent");
+  const target = join(parent, "my-app");
   mkdirSync(target, { recursive: true });
   const src = detectShareSourceFromText({
     targetRoot: target,
-    text: "pull jampress theming into this mock",
+    text: "pull my-app theming into this mock",
   });
   assert.equal(src, null);
   rmSync(parent, { recursive: true, force: true });
 });
 
-test("detectShareSourceFromText: jamlight alias resolves sibling dir", () => {
-  const parent = tmpRoot("chat-jamlight");
-  const target = join(parent, "basic-web-agent");
-  const source = join(parent, "light-weight-crm-and-invoicing");
+test("detectShareSourceFromText: literal sibling dir name resolves (no brand alias)", () => {
+  const parent = tmpRoot("chat-sib");
+  const target = join(parent, "app-a");
+  const source = join(parent, "brand-kit");
   mkdirSync(target, { recursive: true });
   mkdirSync(source, { recursive: true });
   const src = detectShareSourceFromText({
     targetRoot: target,
-    text: "adopt the jamlight palette and dark/light theme",
+    text: "adopt the brand-kit palette and dark/light theme",
   });
   assert.ok(src);
   assert.equal(src!.rootPath, source);

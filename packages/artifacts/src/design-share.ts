@@ -68,20 +68,12 @@ export type ImportedDesignShare = {
   pack?: DesignPack | null;
 };
 
-/** Loop sibling aliases (brand name → folder name) so prose resolves. */
-const SHARE_ALIASES: Record<string, string> = {
-  jamroast: "burntjam",
-  "jam roast": "burntjam",
-  jam_roast: "burntjam",
-  jampress: "basic-web-agent",
-  jamlight: "light-weight-crm-and-invoicing",
-  "jam light": "light-weight-crm-and-invoicing",
-  jam_light: "light-weight-crm-and-invoicing",
-};
-
+/**
+ * Normalize a share/from-project name (trim + collapse whitespace).
+ * No built-in brand→folder aliases — resolve by registered name or literal dir.
+ */
 export function resolveShareAlias(name: string): string {
-  const key = name.trim().toLowerCase();
-  return SHARE_ALIASES[key] ?? name;
+  return name.trim().replace(/\s+/g, " ");
 }
 
 function escapeRegExp(s: string): string {
@@ -112,7 +104,7 @@ function rejectSelfShare(
 
 /**
  * Chat auto-detect: find a shareable source project referenced in operator
- * text (absolute path, brand alias, sibling dir name, or registered name).
+ * text (absolute path, registered name, or literal sibling dir name).
  * Returns null when nothing resolvable is mentioned.
  */
 export function detectShareSourceFromText(opts: {
@@ -139,7 +131,7 @@ export function detectShareSourceFromText(opts: {
       }),
     );
 
-  // 1. Explicit absolute paths (".../Projects/burntjam").
+  // 1. Explicit absolute paths.
   for (const p of extractSiblingProjectPaths(text)) {
     const src = rejectSelfShare(
       opts.targetRoot,
@@ -153,15 +145,7 @@ export function detectShareSourceFromText(opts: {
     if (src) return src;
   }
 
-  // 2. Brand aliases ("jamroast", "jamlight", "jampress").
-  for (const alias of Object.keys(SHARE_ALIASES)) {
-    if (new RegExp(`\\b${escapeRegExp(alias)}\\b`, "i").test(lower)) {
-      const src = tryName(alias);
-      if (src) return src;
-    }
-  }
-
-  // 3. Registered project names / ids.
+  // 2. Registered project names / folder basenames.
   for (const p of opts.listProjects?.() ?? []) {
     const base = basename(p.rootPath.replace(/\/$/, "")).toLowerCase();
     if (base === targetBase) continue;
@@ -175,7 +159,7 @@ export function detectShareSourceFromText(opts: {
     }
   }
 
-  // 4. Sibling dir names under the target's parent folder.
+  // 3. Sibling dir names under the target's parent folder (literal match only).
   const parent = join(opts.targetRoot, "..");
   let siblings: string[] = [];
   try {
@@ -201,8 +185,8 @@ export function detectShareSourceFromText(opts: {
 }
 
 /**
- * Resolve a share source against registered projects (via lookup callback),
- * sibling dirs under the target's parent folder, and aliases.
+ * Resolve a share source against registered projects (via lookup callback)
+ * and literal sibling dirs under the target's parent folder.
  */
 export function resolveDesignShareSource(opts: {
   targetRoot: string;
@@ -243,12 +227,14 @@ export function resolveDesignShareSource(opts: {
   }
   if (!resolved && opts.fromName) {
     const want = resolveShareAlias(opts.fromName).toLowerCase();
-    const byName = projects.find(
-      (x) =>
+    const byName = projects.find((x) => {
+      const base = x.rootPath.split("/").filter(Boolean).pop()?.toLowerCase();
+      return (
         x.name.toLowerCase() === want ||
-        x.rootPath.split("/").filter(Boolean).pop()?.toLowerCase() === want ||
-        x.name.toLowerCase() === opts.fromName!.trim().toLowerCase(),
-    );
+        base === want ||
+        x.name.toLowerCase().replace(/\s+/g, " ") === want
+      );
+    });
     if (byName) {
       resolved = {
         projectId: byName.id,
@@ -256,7 +242,7 @@ export function resolveDesignShareSource(opts: {
         name: byName.name,
       };
     } else {
-      // Sibling dir under target's parent folder.
+      // Literal sibling dir under target's parent folder.
       const parent = join(opts.targetRoot, "..");
       const candidate = join(parent, resolveShareAlias(opts.fromName));
       if (existsSync(candidate)) {

@@ -10,7 +10,7 @@ import {
   statSync,
 } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
-import { resolveShareAlias } from "./design-share.js";
+import { extractSiblingProjectPaths } from "./sibling-brand-refs.js";
 import type { ListProjectsFn } from "./cross-project-catalog.js";
 
 const SKIP_DIRS = new Set([
@@ -30,22 +30,10 @@ const SKIP_DIRS = new Set([
 const SIGNAL_NAME_RE =
   /chat|composer|message|tool|schema|agent|workflow|gather|prompt|ai-sdk|mastra/i;
 
-const FAMILY_DIRS = [
-  "burntjam",
-  "basic-web-agent",
-  "light-weight-crm-and-invoicing",
-  "jamroast-components",
-];
-
 /** True when the brief asks to investigate siblings / learn from other apps. */
 export function briefWantsSiblingInvestigation(text: string): boolean {
   const t = text ?? "";
-  return (
-    /\b(investigate|research\s+this|learn\s+from|look\s+at)\b/i.test(t) ||
-    /\b(jampress|jamroast|jam\s*roast|jamlight|burntjam|basic-web-agent)\b/i.test(
-      t,
-    )
-  );
+  return /\b(investigate|research\s+this|learn\s+from|look\s+at)\b/i.test(t);
 }
 
 function walkSignalFiles(
@@ -66,7 +54,6 @@ function walkSignalFiles(
     if (SKIP_DIRS.has(entry.name)) continue;
     const full = join(dir, entry.name);
     if (entry.isDirectory()) {
-      // Prefer descending into signal-named dirs first by always walking
       walkSignalFiles(root, full, out, maxFiles);
     } else if (entry.isFile()) {
       const rel = relative(root, full).replace(/\\/g, "/");
@@ -103,39 +90,36 @@ function resolveSiblingRoots(opts: {
     if (!found.has(key)) found.set(key, { name, rootPath: root });
   };
 
-  // Named aliases in prose
-  const aliasHits =
-    t.match(
-      /\b(jampress|jam\s*roast|jamroast|jamlight|jam\s*light|burntjam)\b/gi,
-    ) ?? [];
-  for (const raw of aliasHits) {
-    const alias = resolveShareAlias(raw.replace(/\s+/g, " ").trim());
-    add(alias, join(parent, alias));
-    // Also try registered project names
-    for (const p of opts.listProjects?.() ?? []) {
-      if (
-        p.name.toLowerCase().includes(raw.toLowerCase().replace(/\s+/g, "")) ||
-        basename(p.rootPath).toLowerCase() === alias.toLowerCase()
-      ) {
-        add(p.name, p.rootPath);
-      }
-    }
+  // Absolute paths in the brief
+  for (const p of extractSiblingProjectPaths(t)) {
+    add(basename(p), p);
   }
 
-  // Registered projects mentioned by name
+  // Registered projects mentioned by name or folder basename
   for (const p of opts.listProjects?.() ?? []) {
+    const base = basename(p.rootPath.replace(/\/$/, ""));
     const nameRe = new RegExp(
       `\\b${p.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
       "i",
     );
-    if (nameRe.test(t)) add(p.name, p.rootPath);
+    const baseRe = new RegExp(
+      `\\b${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+      "i",
+    );
+    if (nameRe.test(t) || baseRe.test(t)) add(p.name, p.rootPath);
   }
 
-  // Family scan when investigate language present
-  if (briefWantsSiblingInvestigation(t)) {
-    for (const dir of FAMILY_DIRS) {
-      add(dir, join(parent, dir));
+  // Literal sibling dir names under parent mentioned in the brief
+  try {
+    for (const entry of readdirSync(parent)) {
+      if (entry.startsWith(".") || entry.length < 3) continue;
+      const escaped = entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp(`\\b${escaped}\\b`, "i").test(t)) {
+        add(entry, join(parent, entry));
+      }
     }
+  } catch {
+    /* ignore */
   }
 
   return [...found.values()].slice(0, 3);
@@ -183,11 +167,10 @@ export function buildSiblingInvestigationPack(opts: {
     lines.push(`- root: \`${sib.rootPath}\``);
     const signals: string[] = [];
     walkSignalFiles(sib.rootPath, sib.rootPath, signals, 24);
-    // Prefer shallower / chat-heavy paths
     signals.sort((a, b) => {
       const score = (p: string) =>
-        ( /chat/i.test(p) ? 0 : 2) +
-        ( /composer|tool|schema/i.test(p) ? 0 : 1) +
+        (/chat/i.test(p) ? 0 : 2) +
+        (/composer|tool|schema/i.test(p) ? 0 : 1) +
         p.split("/").length;
       return score(a) - score(b);
     });

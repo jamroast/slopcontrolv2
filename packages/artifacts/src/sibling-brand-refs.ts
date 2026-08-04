@@ -119,18 +119,12 @@ export function preferAuthoritativeLogos(
   return merged.slice(0, 6);
 }
 
-/** Default jam-family sibling dirs under the same Projects parent. */
-export const DEFAULT_FAMILY_SIBLING_NAMES = [
-  "burntjam",
-  "basic-web-agent",
-  "light-weight-crm-and-invoicing",
-];
+/** No built-in jam-family sibling dirs — callers may pass explicit names. */
+export const DEFAULT_FAMILY_SIBLING_NAMES: string[] = [];
 
-/** True when operator text asks about brand / theming / content / CRM family. */
+/** True when operator text asks about brand / theming / logo / landing. */
 export function descriptionMentionsBrandTheming(description: string): boolean {
-  return /them(?:e|ing)|brand|logo|content|landing|jampress|jam\s*roast|burntjam|basic-web-agent|crm|light-weight-crm|invoicing/i.test(
-    description ?? "",
-  );
+  return /them(?:e|ing)|brand|logo|content|landing/i.test(description ?? "");
 }
 
 export function projectTokenCandidates(root: string): string[] {
@@ -240,7 +234,8 @@ export function buildProjectBrandRefPack(opts: {
 
 /**
  * Build a research prompt block for sibling brand references named in the
- * operator ask (and optional family siblings like burntjam).
+ * operator ask (absolute paths, literal sibling folder names, or optional
+ * explicit familySiblingNames).
  */
 export function buildSiblingBrandRefPack(opts: {
   projectRoot: string;
@@ -258,16 +253,39 @@ export function buildSiblingBrandRefPack(opts: {
   const family = opts.familySiblingNames ?? DEFAULT_FAMILY_SIBLING_NAMES;
   const roots = new Set<string>(extractSiblingProjectPaths(opts.description));
   const parent = dirname(opts.projectRoot);
-  const theming = descriptionMentionsBrandTheming(opts.description);
+  const desc = opts.description ?? "";
+  const theming = descriptionMentionsBrandTheming(desc);
+
+  // Explicit familySiblingNames only (empty by default — no jam soft bias).
   for (const name of family) {
     const candidate = join(parent, name);
-    if (existsSync(candidate) && candidate !== opts.projectRoot) {
-      // Only auto-add family siblings when description mentions brand/theming
-      // or names the sibling / JamPress / jam family.
-      if (theming) {
+    if (
+      existsSync(candidate) &&
+      candidate !== opts.projectRoot &&
+      theming
+    ) {
+      roots.add(candidate);
+    }
+  }
+
+  // Literal sibling folder names mentioned in the brief.
+  try {
+    for (const entry of readdirSync(parent)) {
+      if (entry.startsWith(".") || entry.length < 3) continue;
+      const candidate = join(parent, entry);
+      if (candidate === opts.projectRoot) continue;
+      try {
+        if (!statSync(candidate).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      const escaped = entry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (new RegExp(`\\b${escaped}\\b`, "i").test(desc)) {
         roots.add(candidate);
       }
     }
+  } catch {
+    /* ignore */
   }
 
   if (roots.size === 0) return "";
@@ -298,10 +316,19 @@ export function buildSiblingBrandRefPack(opts: {
     } else {
       blocks.push("- (no authoritative logo path resolved — inspect Header yourself)");
     }
-    const fallbacks = [
-      join(root, "public", "brand", "jampress-logo-reuse.svg"),
-      join(root, "public", "brand", "jampress-mark-reuse.svg"),
-    ].filter((p) => existsSync(p));
+    const brandDir = join(root, "public", "brand");
+    const fallbacks: string[] = [];
+    if (existsSync(brandDir)) {
+      try {
+        for (const name of readdirSync(brandDir)) {
+          if (!/-reuse\.svg$/i.test(name)) continue;
+          const p = join(brandDir, name);
+          if (isDesignFallbackBrandPath(p)) fallbacks.push(p);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
     if (fallbacks.length) {
       blocks.push("Non-authoritative fallbacks (ignore as mark reference):");
       for (const p of fallbacks) blocks.push(`- \`${p}\``);

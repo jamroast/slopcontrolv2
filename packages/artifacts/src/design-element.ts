@@ -364,32 +364,13 @@ export function resolveDesignElement(
   const local = tryLib(projectElementsRoot(opts.targetRoot), opts.version);
   if (local) return local;
 
-  // 3. Brand aliases — scan sibling project libs named in common aliases
-  for (const alias of [
-    "jamroast",
-    "jamlight",
-    "jampress",
-    "burntjam",
-    "light-weight-crm-and-invoicing",
-    "basic-web-agent",
-  ]) {
-    const root = resolveProjectRootByName(
-      alias,
-      opts.targetRoot,
-      opts.listProjects,
-    );
-    if (!root || root === opts.targetRoot) continue;
-    const hit = tryLib(projectElementsRoot(root), opts.version);
-    if (hit) return hit;
-  }
-
-  // 4. Global registry
+  // 3. Global registry
   if (dataDir) {
     const reg = tryLib(registryElementsRoot(dataDir), opts.version);
     if (reg) return reg;
   }
 
-  // 5. Federated scan of registered projects
+  // 4. Federated scan of registered projects
   for (const p of opts.listProjects?.() ?? []) {
     if (p.rootPath.replace(/\/$/, "") === opts.targetRoot.replace(/\/$/, "")) {
       continue;
@@ -912,7 +893,7 @@ export function bindDesignElementsToPhase(opts: {
   return bound;
 }
 
-/** Detect element import intent from chat (theme-toggle from jamroast). */
+/** Detect element import intent from chat (theme-toggle from sibling project). */
 export function detectElementImportFromText(opts: {
   text: string;
   targetRoot: string;
@@ -938,9 +919,7 @@ export function detectElementImportFromText(opts: {
   }
   const id = elementId || "theme-toggle";
   let origin: string | undefined;
-  const fromMatch = t.match(
-    /\bfrom\s+(jamroast|jamlight|jampress|burntjam|registry|[\w.-]+)/i,
-  );
+  const fromMatch = t.match(/\bfrom\s+(registry|[\w.-]+)/i);
   if (fromMatch?.[1]) {
     const name = fromMatch[1].toLowerCase();
     origin = name === "registry" ? "registry" : `project:${name}`;

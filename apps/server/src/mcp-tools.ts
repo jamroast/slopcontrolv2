@@ -815,7 +815,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_import_design",
       description:
-        "Import theme/logos from another project into this loop (design share). Resolves fromProjectId/fromRootPath/fromName (brand aliases like 'jamroast' map to project folders). Copies logos into the loop and ranks the SHARED DESIGN block above LIVE SITE for palette/logos on continue.",
+        "Import theme/logos from another project into this loop (design share). Resolves fromProjectId/fromRootPath/fromName (registered project name or literal sibling folder). Copies logos into the loop and ranks the SHARED DESIGN block above LIVE SITE for palette/logos on continue.",
       inputSchema: {
         type: "object",
         properties: {
@@ -823,7 +823,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           loopId: { type: "string" },
           fromProjectId: { type: "string", description: "Registered source project id" },
           fromRootPath: { type: "string", description: "Absolute path to source project" },
-          fromName: { type: "string", description: "Source project name or brand alias (e.g. 'jamroast')" },
+          fromName: { type: "string", description: "Source registered project name or sibling folder basename" },
         },
         required: ["projectId", "loopId"],
       },
@@ -1148,7 +1148,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_element_get",
       description:
-        "Resolve and fetch a shared design element (meta, SPEC, mock snippet, hasCode). origin: registry | project:jamroast | omit for resolve order.",
+        "Resolve and fetch a shared design element (meta, SPEC, mock snippet, hasCode). origin: registry | project:<registered-name> | omit for resolve order.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1212,7 +1212,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_element_import",
       description:
-        "Import a resolved shared element into a design loop (pins META.elements + selection). Mock continues must embed it once. origin e.g. project:jamroast or registry.",
+        "Import a resolved shared element into a design loop (pins META.elements + selection). Mock continues must embed it once. origin e.g. project:<registered-name> or registry.",
       inputSchema: {
         type: "object",
         properties: {

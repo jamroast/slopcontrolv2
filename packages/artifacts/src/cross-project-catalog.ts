@@ -159,19 +159,6 @@ export function buildCrossProjectCatalog(opts: {
   });
   for (const p of projects) consider(p);
 
-  // Sibling dirs under parent (even if not in store)
-  const parent = join(opts.targetRoot, "..");
-  for (const alias of [
-    "burntjam",
-    "basic-web-agent",
-    "light-weight-crm-and-invoicing",
-  ]) {
-    const root = join(parent, alias);
-    if (existsSync(root)) {
-      consider({ name: alias, rootPath: root });
-    }
-  }
-
   const npmPackages = opts.dataDir
     ? listNpmRegistryPackages(opts.dataDir)
     : [];
@@ -199,9 +186,7 @@ export function buildCrossProjectCatalog(opts: {
 /** Regex fallback for dependency / linking language. */
 export function detectDependencyIntentFromText(text: string): DependencyIntent {
   const t = text ?? "";
-  const fromMatch = t.match(
-    /\bfrom\s+(jamroast|jam\s*roast|jamlight|jam\s*light|jampress|burntjam|registry|[\w.-]+)/i,
-  );
+  const fromMatch = t.match(/\bfrom\s+(registry|[\w.-]+)/i);
   const fromProject = fromMatch?.[1]
     ? resolveShareAlias(fromMatch[1].replace(/\s+/g, " ").trim())
     : undefined;

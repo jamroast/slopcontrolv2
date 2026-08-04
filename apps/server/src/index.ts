@@ -3691,7 +3691,7 @@ app.post("/projects/:id/design-loops/:loopId/import-design", async (req, res) =>
       loop: meta,
       loopId: meta.id,
       source,
-      hint: "Import from a sibling (e.g. jamroast / jamlight), not this project.",
+      hint: "Import from a registered sibling project (by name or rootPath), not this project.",
     });
     return;
   }
@@ -3930,7 +3930,7 @@ app.post("/projects/:id/design-loops/:loopId/elements/extract", (req, res) => {
         ok: true,
         published: true,
         meta,
-        next: "Import into consumer loops with design_element_import or chat 'use theme-toggle from jamroast'.",
+        next: "Import into consumer loops with design_element_import or chat 'use theme-toggle from <registered-project>'.",
       });
       return;
     }
@@ -3988,7 +3988,7 @@ app.post("/projects/:id/design-loops/:loopId/elements/import", (req, res) => {
   if (!bundle) {
     res.status(404).json({
       error: `Could not resolve element ${elementId}`,
-      hint: "Publish from a brand project first, or pass origin=registry|project:jamroast",
+      hint: "Publish from a brand project first, or pass origin=registry|project:<registered-name>",
     });
     return;
   }
