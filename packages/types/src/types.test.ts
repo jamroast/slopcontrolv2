@@ -67,6 +67,12 @@ describe("@slopcontrol/types", () => {
     assert.equal(develop.action, "start_development");
     assert.equal(develop.autoDesign, true);
 
+    const retryVerify = RunActionSchema.parse({
+      action: "retry_verify",
+      runId: "run-1",
+    });
+    assert.equal(retryVerify.action, "retry_verify");
+
     const preview = RunActionSchema.parse({
       action: "preview_change_intent",
       projectId: "proj-1",

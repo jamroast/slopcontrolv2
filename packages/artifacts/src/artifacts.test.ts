@@ -40,6 +40,9 @@ import {
   automatedCheckReportedFailure,
   isPhaseDocPreamble,
   writeCheckReport,
+  writeVerifyStepsReport,
+  readVerifyStepsReport,
+  assignVerifyStepIds,
   writeDiagnosis,
   phaseNeedsDesign,
   isDesignComplete,
@@ -732,6 +735,54 @@ None.
         ),
         "full check output here\n",
       );
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("writeVerifyStepsReport round-trips and assigns stable ids", () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "slop-verify-steps-"));
+    try {
+      const written = writeVerifyStepsReport(projectRoot, "run-v1", {
+        ok: false,
+        summary: "FAILING STEP: automatedCheck",
+        steps: [
+          { name: "build", exitCode: 0, output: "ok\n" },
+          {
+            name: "automatedCheck",
+            command: "npm test",
+            exitCode: 1,
+            output: "line1\nFAIL\n",
+          },
+          {
+            name: "automatedCheck",
+            command: "grep foo",
+            exitCode: 0,
+            output: "ok\n",
+          },
+        ],
+        firstFailure: {
+          name: "automatedCheck",
+          command: "npm test",
+          exitCode: 1,
+          output: "line1\nFAIL\n",
+        },
+      });
+      assert.equal(written.ok, false);
+      assert.deepEqual(
+        written.steps.map((s) => s.id),
+        ["build", "automatedcheck", "automatedcheck-2"],
+      );
+      assert.equal(written.firstFailure?.id, "automatedcheck");
+      assert.equal(written.firstFailure?.exitCode, 1);
+      const read = readVerifyStepsReport(projectRoot, "run-v1");
+      assert.ok(read);
+      assert.equal(read!.firstFailure?.id, "automatedcheck");
+      assert.equal(read!.steps.length, 3);
+      assert.deepEqual(assignVerifyStepIds([{ name: "A" }, { name: "A" }]), [
+        "a",
+        "a-2",
+      ]);
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }

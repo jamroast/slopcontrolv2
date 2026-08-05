@@ -617,7 +617,19 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "get_run",
       description:
-        "Get a run by id (stage, phase, log tail metadata, diagnosis, operator_suggestions).",
+        "Get a run by id (stage, phase, log tail metadata, diagnosis with failingStep.stepId, operator_suggestions, verify_steps / verify_first_failure when develop verify has run).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+        },
+        required: ["runId"],
+      },
+    },
+    {
+      name: "get_run_steps",
+      description:
+        "List structured develop verify steps for a run (id, name, command, exitCode, ok, outputExcerpt) plus firstFailure. Prefer this over scraping logs after a blocked/failed develop verify. Diagnose, then call retry_verify (full suite) or retry_development (coding+verify+merge).",
       inputSchema: {
         type: "object",
         properties: {
@@ -703,7 +715,20 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     },
     {
       name: "retry_development",
-      description: "Retry development for a blocked/interrupted/failed run.",
+      description:
+        "Retry development for a blocked/interrupted/failed run (coding + verify + merge). For re-running Automated Checks only after a diagnose pass, use retry_verify instead.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+        },
+        required: ["runId"],
+      },
+    },
+    {
+      name: "retry_verify",
+      description:
+        "Re-run the full develop verify suite in the phase worktree (no coding agent, no merge). Allowed when stage is blocked/failed/interrupted. Returns ok, firstFailure, stepsSummary, and steps. Use get_run_steps to inspect; use retry_development when coding or merge is needed.",
       inputSchema: {
         type: "object",
         properties: {
@@ -715,7 +740,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_start",
       description:
-        "Start a chat-driven look-and-feel loop: generates self-contained mock HTML (no product edits). Returns loopId + html + transcript + conceptualModel (scope/theme). Optional scope narrows the conceptual model (e.g. component+chat.composer). If usedScaffold/timeout, call design_loop_retry. Iterate with design_loop_continue, freeze with design_loop_accept, then implement_design.",
+        "Start a chat-driven look-and-feel loop: generates self-contained mock HTML (no product edits). Returns loopId + html + transcript + conceptualModel (scope/theme). Optional scope narrows the conceptual model (e.g. component+chat.composer). Briefs that ask to pull current/existing theming or design concepts seed PRIOR_DESIGN from the latest accepted/implemented loop (or phase design) and ground v1 on that mock — prefer design_loop_continue when iterating the same dirty loop. If usedScaffold/timeout, call design_loop_retry. Iterate with design_loop_continue, freeze with design_loop_accept, then implement_design.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1776,6 +1801,20 @@ export function createSlopcontrolMcpServer(
       });
     }
 
+    if (name === "get_run_steps") {
+      return wrap(async () => {
+        const runId = String(args.runId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/runs/${encodeURIComponent(runId)}/steps`,
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
     if (name === "get_phase_status") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -1883,6 +1922,21 @@ export function createSlopcontrolMcpServer(
             runId: args.runId,
           }),
         });
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "retry_verify") {
+      return wrap(async () => {
+        const runId = String(args.runId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/runs/${encodeURIComponent(runId)}/retry-verify`,
+          { method: "POST", headers: { "Content-Type": "application/json" } },
+        );
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

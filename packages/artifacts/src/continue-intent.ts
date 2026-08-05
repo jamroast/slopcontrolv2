@@ -57,6 +57,11 @@ export const ContinueIntentSchema = z.object({
   inventLogo: z.boolean().default(false),
   /** Operator asked to pull palette/theme from a sibling project. */
   adoptTheme: z.boolean().default(false),
+  /**
+   * Operator asked to reuse this project's existing theming/design pack
+   * (fresh loop after a dirty one, or "pull current theming").
+   */
+  reuseProjectDesign: z.boolean().default(false),
   /** Align topbar nav with live code. */
   navAlign: z.boolean().default(false),
   /** Operator explicitly asked to keep layout/copy/shell/hero unchanged. */
@@ -77,6 +82,7 @@ export const CONTINUE_INTENT_DEFAULT: ContinueIntent = {
   wantsAssetEdit: false,
   inventLogo: false,
   adoptTheme: false,
+  reuseProjectDesign: false,
   navAlign: false,
   preserveChrome: true,
   notes: "",
@@ -90,6 +96,7 @@ export const CONTINUE_INTENT_DEFAULT: ContinueIntent = {
 export function continueIntentAllowsRedesign(intent: ContinueIntent): boolean {
   return (
     intent.adoptTheme ||
+    intent.reuseProjectDesign ||
     intent.inventLogo ||
     intent.scope === "adopt_theme" ||
     intent.scope === "logo_invent" ||
@@ -162,14 +169,18 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
       t,
     );
   const inventLogo = textSignalsInventLogo(t);
+  const reuseProjectDesign = textSignalsReuseProjectDesign(t);
+  // Sibling/cross-project only — same-project "current theming" is reuseProjectDesign.
   const adoptTheme =
-    /\b(theme|theming|palette|brand\s*colors?)\b.{0,60}\b(from|of|like|borrow|pull|adopt)\b/i.test(
+    !reuseProjectDesign &&
+    (/\b(theme|theming|palette|brand\s*colors?)\b.{0,60}\b(from|of|like|borrow|pull|adopt)\b.{0,40}\b(sibling|other\s*project|\/(?:Users|home|var)\/)/i.test(
       t,
     ) ||
-    /\b(pull|adopt|borrow|use)\b.{0,40}\b(theme|theming|palette)\b.{0,60}\b(sibling|other\s*project|[\w.-]+)\b/i.test(
-      t,
-    ) ||
-    /\bfrom\s+\/(?:Users|home|var)\/[^/\s]+/i.test(t);
+      /\b(pull|adopt|borrow|use)\b.{0,40}\b(theme|theming|palette)\b.{0,60}\b(sibling|other\s*project)\b/i.test(
+        t,
+      ) ||
+      /\bfrom\s+\/(?:Users|home|var)\/[^/\s]+/i.test(t) ||
+      /\b(theme|theming|palette)\b.{0,40}\bfrom\s+[\w.-]{2,}\b/i.test(t));
   const preserveChrome =
     /\b(?:keep|preserve|maintain)\b.{0,60}\b(layout|copy|shell|hero|structure|mock|menu|nav)\b/i.test(
       t,
@@ -201,7 +212,7 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
     if (p.re.test(positiveScan)) targets.add(p.id);
   }
   if (inventLogo) targets.add("logo");
-  if (adoptTheme) targets.add("palette");
+  if (adoptTheme || reuseProjectDesign) targets.add("palette");
   if (navAlign) targets.add("nav");
 
   const wantsFull =
@@ -210,21 +221,29 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
     );
 
   let scope: ContinueIntentScope = "sections";
-  if (wantsFull && !preserveChrome && !navAlign) scope = "full_revise";
+  if (wantsFull && !preserveChrome && !navAlign && !reuseProjectDesign)
+    scope = "full_revise";
   else if (navAlign && !inventLogo) scope = "nav_align";
-  else if (inventLogo && !adoptTheme && targets.size <= 1) scope = "logo_invent";
-  else if (adoptTheme && !inventLogo && targets.size <= 1) scope = "adopt_theme";
+  else if (inventLogo && !adoptTheme && !reuseProjectDesign && targets.size <= 1)
+    scope = "logo_invent";
+  else if (
+    (adoptTheme || reuseProjectDesign) &&
+    !inventLogo &&
+    targets.size <= 2
+  )
+    scope = "adopt_theme";
   else if (
     wantsAssetEdit &&
     !inventLogo &&
     (targets.size === 0 || preserveChrome)
   )
     scope = "assets_only";
-  else if (inventLogo || adoptTheme) scope = "sections";
+  else if (inventLogo || adoptTheme || reuseProjectDesign) scope = "sections";
 
   // Theme/logo redesign: preserveChrome only when operator explicitly said keep.
   // Narrow asset/nav continues default to preserving chrome.
-  const redesign = inventLogo || adoptTheme || scope === "full_revise";
+  const redesign =
+    inventLogo || adoptTheme || reuseProjectDesign || scope === "full_revise";
   const preserve =
     preserveChrome ||
     (!redesign && (scope === "assets_only" || scope === "nav_align"));
@@ -264,12 +283,36 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
       wantsAssetEdit,
       inventLogo,
       adoptTheme,
+      reuseProjectDesign,
       navAlign,
       preserveChrome: preserve,
       notes: "",
       designScope,
     }),
     t,
+  );
+}
+
+/**
+ * True when operator asks to reuse this project's existing theming / design pack
+ * (not a named sibling). Used on design_loop_start briefs and continues.
+ */
+export function textSignalsReuseProjectDesign(text: string): boolean {
+  const t = text ?? "";
+  return (
+    /\b(current|existing|prior|previous)\b.{0,48}\b(theming|theme|design\s*(pack|concepts?|system|tokens?)|tokens|palette)\b/i.test(
+      t,
+    ) ||
+    /\b(theming|theme|design\s*(pack|concepts?|system)|tokens|palette)\b.{0,48}\b(current|existing|already\s+(?:have|in\s+place|designed)|we\s+have|in\s+place)\b/i.test(
+      t,
+    ) ||
+    /\b(pull\s+out|pull\s+in|reuse|use)\b.{0,40}\b(the\s+)?(current|existing|prior)\b.{0,40}\b(theming|theme|design)\b/i.test(
+      t,
+    ) ||
+    /\b(use|reuse|pull)\b.{0,40}\b(design\s*pack|DESIGN_PACK|what\s+we\s+already\s+have)\b/i.test(
+      t,
+    ) ||
+    /\bexisting\s+design\s+concepts?\b/i.test(t)
   );
 }
 
@@ -308,13 +351,17 @@ export function normalizeContinueIntent(
   const t = text ?? "";
   const inventFromText = textSignalsInventLogo(t);
   const inventLogo = intent.inventLogo || inventFromText;
+  const reuseFromText = textSignalsReuseProjectDesign(t);
+  const reuseProjectDesign = intent.reuseProjectDesign || reuseFromText;
   const adoptTheme =
-    intent.adoptTheme ||
-    (/\b(theme|theming|palette|brand|skin)\b/i.test(t) &&
-      /\b(from|pull|adopt|borrow)\b/i.test(t) &&
-      (/\b(sibling|other\s*project)\b/i.test(t) ||
-        /\bfrom\s+\/(?:Users|home|var)\//i.test(t) ||
-        /\bfrom\s+[\w.-]{2,}\b/i.test(t)));
+    !reuseProjectDesign &&
+    (intent.adoptTheme ||
+      (/\b(theme|theming|palette|brand|skin)\b/i.test(t) &&
+        /\b(from|pull|adopt|borrow)\b/i.test(t) &&
+        (/\b(sibling|other\s*project)\b/i.test(t) ||
+          /\bfrom\s+\/(?:Users|home|var)\//i.test(t) ||
+          (/\bfrom\s+[\w.-]{2,}\b/i.test(t) &&
+            !/\bfrom\s+(the\s+)?(current|existing|prior)\b/i.test(t)))));
 
   const explicitKeepChrome =
     /\b(?:keep|preserve|maintain)\b.{0,60}\b(layout|copy|shell|hero|structure|mock|menu|nav)\b/i.test(
@@ -327,6 +374,7 @@ export function normalizeContinueIntent(
   const redesign =
     inventLogo ||
     adoptTheme ||
+    reuseProjectDesign ||
     intent.scope === "full_revise" ||
     intent.scope === "logo_invent" ||
     intent.scope === "adopt_theme";
@@ -334,20 +382,30 @@ export function normalizeContinueIntent(
   let scope = intent.scope;
   if (inventLogo && scope === "assets_only") {
     scope =
-      inventLogo && !adoptTheme && intent.targets.every((x) => x === "logo")
+      inventLogo &&
+      !adoptTheme &&
+      !reuseProjectDesign &&
+      intent.targets.every((x) => x === "logo")
         ? "logo_invent"
         : "sections";
   }
-  if (inventLogo && !adoptTheme && scope === "sections") {
+  if (inventLogo && !adoptTheme && !reuseProjectDesign && scope === "sections") {
     const onlyLogo =
       intent.targets.length === 0 ||
       intent.targets.every((x) => x === "logo");
     if (onlyLogo) scope = "logo_invent";
   }
+  if (
+    reuseProjectDesign &&
+    !inventLogo &&
+    (scope === "full_revise" || scope === "sections")
+  ) {
+    scope = "adopt_theme";
+  }
 
   const targets = new Set(intent.targets);
   if (inventLogo) targets.add("logo");
-  if (adoptTheme) targets.add("palette");
+  if (adoptTheme || reuseProjectDesign) targets.add("palette");
 
   const preserveChrome = redesign
     ? explicitKeepChrome
@@ -359,6 +417,7 @@ export function normalizeContinueIntent(
     targets: [...targets],
     inventLogo,
     adoptTheme,
+    reuseProjectDesign,
     preserveChrome,
     // Invent/replace is not an alpha/icon-pack edit path.
     wantsAssetEdit: inventLogo ? false : intent.wantsAssetEdit,
@@ -393,6 +452,11 @@ export function formatContinueIntentPromptBlock(
   if (intent.adoptTheme) {
     lines.push(
       "- ADOPT THEME: apply sibling palette/token excerpts (incl. dark/light ladders) over prior mock tokens; LIVE SITE stays authoritative for nav/routes/screen copy only.",
+    );
+  }
+  if (intent.reuseProjectDesign) {
+    lines.push(
+      "- REUSE PROJECT DESIGN: apply this project's prior DESIGN_PACK / phase design tokens and mock (PRIOR DESIGN). Do not invent a new palette; revise from that mock. LIVE SITE wins only for nav/routes/screen copy.",
     );
   }
   if (intent.targets.length) {

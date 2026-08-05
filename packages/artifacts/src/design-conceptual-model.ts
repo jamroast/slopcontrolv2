@@ -303,6 +303,29 @@ export function applyContinueIntentToScope(
   if (intent.scope === "full_revise") {
     return defaultProductScope("continue");
   }
+  // Logo / icon / asset-only continues narrow to component focus so acceptance
+  // ticks reset outside logo (V5-after-V2) and research stays delta-scoped.
+  if (
+    intent.scope === "assets_only" ||
+    intent.scope === "logo_invent" ||
+    intent.inventLogo ||
+    (intent.wantsAssetEdit && intent.preserveChrome)
+  ) {
+    const focus = intent.targets.includes("palette")
+      ? "palette"
+      : intent.targets.includes("typography")
+        ? "typography"
+        : "logo";
+    return DesignScopeSchema.parse({
+      kind: "component",
+      focus,
+      focusPaths: [],
+      preserve: ["chrome", "layout", "nav", "shell", "copy", "content", "palette"].filter(
+        (p) => p !== focus,
+      ),
+      source: "continue",
+    });
+  }
   if (intent.targets.includes("chat") && intent.preserveChrome) {
     return DesignScopeSchema.parse({
       kind: "component",
@@ -714,9 +737,7 @@ export function packHasThemeModes(pack: {
   inScope?: string[];
   shell?: string[];
 } | null | undefined): boolean {
-  return Boolean(
-    pack?.theme ||
-      pack?.inScope?.includes("theme_modes") ||
-      pack?.shell?.some((s) => /dark.*light|light.*dark|theme toggle/i.test(s)),
-  );
+  // Theme work is in scope only when the accept checklist / delta says so.
+  // Inherited dual-theme mock HTML or shell notes must not widen a logo-only pass.
+  return Boolean(pack?.inScope?.includes("theme_modes"));
 }

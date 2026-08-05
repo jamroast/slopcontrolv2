@@ -55,11 +55,39 @@ type RunListItem = {
   updated_at: string;
   total_duration?: string;
   total_duration_ms?: number | null;
+  failure_summary?: string | null;
   stage_timings?: Array<{
     stage: string;
     duration: string;
     duration_ms: number | null;
   }>;
+};
+
+type RunDiagnosis = {
+  audience?: string;
+  class?: string;
+  title?: string;
+  rootCause?: string;
+  evidence?: string;
+  nextActions?: string;
+  operatorActions?: string[];
+  codingAgentShouldFix?: boolean;
+  fingerprint?: string;
+  failingStep?: {
+    name?: string;
+    command?: string;
+    exitCode?: number;
+    stepId?: string;
+  };
+};
+
+type VerifyStep = {
+  id: string;
+  name: string;
+  command?: string;
+  exitCode: number;
+  ok: boolean;
+  outputExcerpt?: string;
 };
 
 export function Dashboard() {
@@ -81,6 +109,12 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [active, setActive] = useState(false);
+  const [diagnosis, setDiagnosis] = useState<RunDiagnosis | null>(null);
+  const [verifySteps, setVerifySteps] = useState<VerifyStep[]>([]);
+  const [verifyFirstFailureId, setVerifyFirstFailureId] = useState<
+    string | null
+  >(null);
+  const [failureSummary, setFailureSummary] = useState<string | null>(null);
   const [stageTimings, setStageTimings] = useState<
     Array<{ stage: string; duration: string }>
   >([]);
@@ -146,8 +180,47 @@ export function Dashboard() {
     setCurrentPhase(null);
     setPhaseDoc("");
     setLog("");
+    setDiagnosis(null);
+    setVerifySteps([]);
+    setVerifyFirstFailureId(null);
+    setFailureSummary(null);
     setBlueprintStatus(null);
   }, [selectedProjectId]);
+
+  async function loadRunDetails(runId: string) {
+    try {
+      const data = await api<{
+        stage?: string;
+        diagnosis?: RunDiagnosis | null;
+        failure_summary?: string | null;
+        operator_suggestions?: { actions?: string[] } | null;
+        stage_timings?: Array<{ stage: string; duration: string }>;
+        total_duration?: string;
+        verify_steps?: VerifyStep[] | null;
+        verify_first_failure?: { id?: string } | null;
+      }>(`/runs/${runId}`);
+      if (data.stage) {
+        setCurrentRun((prev) =>
+          prev ? { ...prev, stage: data.stage as string } : prev,
+        );
+      }
+      setDiagnosis(data.diagnosis ?? null);
+      setVerifySteps(data.verify_steps ?? []);
+      setVerifyFirstFailureId(data.verify_first_failure?.id ?? null);
+      setFailureSummary(data.failure_summary ?? null);
+      if (data.total_duration) setTotalDuration(data.total_duration);
+      if (data.stage_timings) {
+        setStageTimings(
+          data.stage_timings.map((t) => ({
+            stage: t.stage,
+            duration: t.duration,
+          })),
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 
   useEffect(() => {
     if (!currentRun) return;
@@ -219,6 +292,10 @@ export function Dashboard() {
           setPhaseDoc(data.phaseDoc);
         })
         .catch(() => undefined);
+    }
+
+    if (currentRun.stage === "failed" || currentRun.stage === "blocked") {
+      void loadRunDetails(currentRun.id);
     }
 
     void refreshProjectRuns(currentRun.projectId).catch(() => undefined);
@@ -594,11 +671,17 @@ export function Dashboard() {
                             : null,
                         );
                         setLog("");
+                        setDiagnosis(null);
+                        setFailureSummary(run.failure_summary ?? null);
+                        void loadRunDetails(run.id);
                       }}
                     >
                       {run.phase_id ?? run.id.slice(0, 8)} — {run.stage}
                       {run.total_duration && run.total_duration !== "—"
                         ? ` (${run.total_duration})`
+                        : ""}
+                      {run.failure_summary
+                        ? ` — ${run.failure_summary.slice(0, 80)}`
                         : ""}
                     </button>
                   </li>
@@ -774,6 +857,96 @@ export function Dashboard() {
               ) : null}
             </p>
           )}
+          {(diagnosis || failureSummary) && (
+            <div className="diagnosis">
+              <h3>Failure diagnosis</h3>
+              {diagnosis ? (
+                <>
+                  <p>
+                    <strong>{diagnosis.title ?? "Failure"}</strong>
+                    {diagnosis.class ? (
+                      <>
+                        {" "}
+                        <code>{diagnosis.class}</code>
+                      </>
+                    ) : null}
+                    {diagnosis.audience ? (
+                      <> · audience={diagnosis.audience}</>
+                    ) : null}
+                  </p>
+                  {diagnosis.rootCause ? <p>{diagnosis.rootCause}</p> : null}
+                  {diagnosis.nextActions ? (
+                    <p>
+                      <em>Next:</em> {diagnosis.nextActions}
+                    </p>
+                  ) : null}
+                  {diagnosis.operatorActions &&
+                  diagnosis.operatorActions.length > 0 ? (
+                    <ol>
+                      {diagnosis.operatorActions.map((a) => (
+                        <li key={a.slice(0, 80)}>{a}</li>
+                      ))}
+                    </ol>
+                  ) : null}
+                  {diagnosis.evidence ? (
+                    <pre className="diagnosis-evidence">
+                      {diagnosis.evidence.slice(0, 1200)}
+                    </pre>
+                  ) : null}
+                </>
+              ) : (
+                <p>{failureSummary}</p>
+              )}
+              {verifySteps.length > 0 ? (
+                <div className="verify-steps">
+                  <h4>Verify steps</h4>
+                  <ol>
+                    {verifySteps.map((s) => {
+                      const highlight =
+                        s.id === verifyFirstFailureId ||
+                        (!s.ok &&
+                          s.id ===
+                            (diagnosis?.failingStep?.stepId ??
+                              verifyFirstFailureId));
+                      return (
+                        <li
+                          key={s.id}
+                          style={
+                            highlight
+                              ? { fontWeight: 600, color: "var(--danger, #b33)" }
+                              : undefined
+                          }
+                        >
+                          <code>{s.id}</code> {s.name}
+                          {s.command ? (
+                            <>
+                              {" "}
+                              — <code>{s.command.slice(0, 80)}</code>
+                            </>
+                          ) : null}{" "}
+                          (exit {s.exitCode}
+                          {s.ok ? "" : ", fail"})
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </div>
+              ) : null}
+            </div>
+          )}
+          {verifySteps.length > 0 && !(diagnosis || failureSummary) ? (
+            <div className="diagnosis">
+              <h3>Verify steps</h3>
+              <ol>
+                {verifySteps.map((s) => (
+                  <li key={s.id}>
+                    <code>{s.id}</code> {s.name} (exit {s.exitCode}
+                    {s.ok ? "" : ", fail"})
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
           {currentPhase && (
             <p>
               Phase <code>{currentPhase.id}</code>: {currentPhase.description}

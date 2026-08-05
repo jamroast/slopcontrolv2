@@ -8,7 +8,7 @@ Planning-driven agent orchestration built on Mastra. TypeScript monorepo.
    - **Empty folder (greenfield):** requires `intent` (“what are we building?”). Returns `needs_intent` if omitted. Creates blueprint/roadmap from the idea and `git init` if needed.
    - **Nested under another git repo:** SlopControl requires a **dedicated** `.git` in the project folder (toplevel must equal the project root). If the folder only sits inside a parent repo, open/develop initializes a nested repo there — it will not attach worktrees or merges to the parent.
 2. **Start change** — creates the next ordered phase folder (`01-slug`, `02-slug`, …) with research → `PHASE.md` review. Optional `dependsOn: ["01-…"]` blocks **development** until those phases are `complete`.
-3. **Develop** — coding tools run in a **checked-out git worktree** under `~/.slopcontrol/worktrees/<projectId>/<phaseId>` on branch `slop/<phaseId>`. **One active develop job per project** (`start_development` / `retry_development`); a second call returns `409 development_in_progress` while the bg job is live. Failed / blocked / interrupted / complete runs do **not** hold the lock — another phase can start develop immediately after.
+3. **Develop** — coding tools run in a **checked-out git worktree** under `~/.slopcontrol/worktrees/<projectId>/<phaseId>` on branch `slop/<phaseId>`. **One active develop job per project** (`start_development` / `retry_development` / `retry_verify`); a second call returns `409 development_in_progress` while the job is live. Failed / blocked / interrupted / complete runs do **not** hold the lock — another phase can start develop immediately after.
 4. **Runs are project-scoped** — list via `GET /projects/:id/runs` (never a global dump).
 
 ## Packages
@@ -24,16 +24,23 @@ Planning-driven agent orchestration built on Mastra. TypeScript monorepo.
 
 - `@slopcontrol/server` — Express REST/SSE + MCP
 - `@slopcontrol/web` — Next.js test UI
-- `@slopcontrol/cli` — `slopcontrol` stack CLI (`up` / `down` / `status` / `init`)
+- `@slopcontrol/cli` — `slopcontrol` stack CLI (`up` / `down` / `logs` / `status` / `init`)
 
 ## Quick start
 
 ```bash
 pnpm install
 pnpm build
-pnpm slopcontrol -- up    # coding engine (OpenCode :4096) + Express server (:3020)
-# Ctrl+C or: pnpm slopcontrol -- down
+pnpm slopcontrol -- up -d       # start detached (server :3020); logs → ~/.slopcontrol/cli/logs/
+pnpm slopcontrol -- logs -f     # tail stack logs (or: logs -f --up to start if needed)
+# stop: pnpm slopcontrol -- down
 pnpm slopcontrol -- status
+```
+
+Foreground (stream to terminal + log files; Ctrl+C stops managed processes):
+
+```bash
+pnpm slopcontrol -- up
 ```
 
 Stack config: [`slopcontrol.yaml`](slopcontrol.yaml) at the repo root (or walk-up / `~/.slopcontrol/slopcontrol.yaml`). Run `pnpm slopcontrol -- init` to write a default file. Coding engine is `coding.engine` (default `opencode`). Optional web UI: set `web.enabled: true` in the YAML, or `pnpm dev:web`.
@@ -97,14 +104,15 @@ pnpm mcp:stdio
 - `list_agents` / `get_agent` — list or fetch agent chat sessions for a project
 - `start_change` — new ordered phase directly (`projectId`, `description`) without an ask conversation
 - `plan_loop_start` / `plan_loop_continue` / `plan_loop_accept` / `plan_loop_promote` — chat-driven **plan** sessions (structured `PLAN.md` under `.slopcontrol/plan-loops/`). Iterate like design loops; tick `ACCEPTANCE` (goal/scope/approach/areas/success/risks); accept compiles `PLAN_PACK.json`; promote binds to a phase and starts research with the plan as an authoritative contract (does **not** skip RESEARCH.md). Prefer this over thin `ask` → `promote_ask` Task briefs for multi-turn planning. Also: `plan_loop_get`, `plan_loop_acceptance`, `plan_loop_retry`, `plan_loop_versions`, `plan_loop_discard`, `list_plan_loops`.
-- `design_loop_start` / `design_loop_continue` / `design_loop_accept` / `implement_design` — chat-driven look-and-feel mocks (HTML under `.slopcontrol/design-loops/`). **Accept freezes a feature checklist** (`ACCEPTANCE.json`: palette, logo, type, applied_shell, theme_modes, …) that research/draft must plan; unticked items are out of scope. After implement, `design_loop_continue` reopens the same loop for v2+; accept again, then `implement_design` (omit `phaseId` if the prior phase is complete so a new research pass starts).
+- `design_loop_start` / `design_loop_continue` / `design_loop_accept` / `implement_design` — chat-driven look-and-feel mocks (HTML under `.slopcontrol/design-loops/`). **Accept freezes a feature checklist** (`ACCEPTANCE.json`: palette, logo, type, applied_shell, theme_modes, …) that research/draft must plan; unticked items are out of scope. After implement, `design_loop_continue` reopens the same loop for v2+; accept again, then `implement_design` (omit `phaseId` if the prior phase is complete so a new research pass starts). **Extension delta:** after a prior implement, logo/icon/`assets_only` continues clear out-of-focus ticks and research/develop use only the newly accepted features (vs `lastImplementedFeatureIds`); re-tick prior screens/theme only when you want a broader redo. New phases take the current `REQUEST.md` + delta labels, not the original loop brief.
 - **Conceptual model** — durable scope + theme contract on the loop (`META.scope` + `DESIGN_PACK.json`): `kind` (`product`|`shell`|`screen`|`component`|`flow`), `focus` (e.g. `chat.composer`, `theme`), `preserve[]`, and structured `theme` (`data-theme` mechanism, dark/light CSS, requirements). Chat can narrow (“only the chat form”) or widen (“whole site”); start accepts optional `scope` override. Returned as `conceptualModel` on start/continue/get/accept/implement. Acceptance seeds and mock prompts follow the scope (component loops do not auto-require full shell).
 - Theme contract: mocks with dark/light toggle compile `theme.lightTokensCss` into the pack and phase `tokens.css`; research/develop must wire `html[data-theme]` (not an unused `.light` class). `implement_design` may return `themeContractWarning` when product CSS lacks light remaps (warn posture).
 - `design_loop_acceptance` — save checklist ticks without freezing the loop
 - `design_loop_pin` / `design_loop_unpin` / `design_loop_concepts` — pin authoritative concept/asset per slot (logo/palette/…); list candidates + selections. Continues prefer pinned / true RGBA over inventing a new mark.
 - `design_loop_versions` / `design_loop_discard` — version tree (`parentVersion`, active|invalid); soft-discard bad tips (rewinds tip to parent). `design_loop_continue` accepts optional `baseVersion` to fork from an active ancestor.
 - Design-loop continues are **LLM-classified** (`classification` role → `glm-5.2:cloud` by default; falls back to `planning` if unbound) into a structured intent (`scope`, `targets`, `inventLogo`, `adoptTheme`, `navAlign`, `preserveChrome`, optional `designScope` patch); drift gating uses those targets, not regex order. Regex classification remains the offline/test fallback (`fallbackContinueIntentFromText`). Dissatisfaction (“unhappy with the logos” / replace / different) sets `inventLogo` — the prior logo pin is unpinned for that turn, `generate_image` may run with `inventNew=true`, and the final mock is **not** force-patched back to the old pin.
-- **Sibling theme share:** chat/`import-design` pulls palette + dual-theme tokens from a **named** sibling (registered project name, folder basename, or absolute path). There are no built-in brand→folder aliases. Self-import is rejected/ignored. When SHARED DESIGN is active it outranks LIVE SITE for palette/tokens/logos; LIVE SITE keeps nav/routes/screen copy. Token excerpts include `.dark`/`.light` ladders, not only `:root`.
+- **Sibling theme share:** chat/`import-design` pulls palette + dual-theme tokens from a **named** sibling (registered project name, folder basename, or absolute path). There are no built-in brand→folder aliases. Accidental self-`SHARED_FROM` is ignored. When SHARED DESIGN is active it outranks LIVE SITE for palette/tokens/logos; LIVE SITE keeps nav/routes/screen copy. Token excerpts include `.dark`/`.light` ladders, not only `:root`.
+- **Prior project design (fresh loop):** if a loop got dirty, start a **new** `design_loop_start` and ask to pull the **current/existing theming** / design pack / design concepts. SlopControl seeds `PRIOR_DESIGN.json` from the latest accepted/implemented loop in the same project (else phase `design/tokens.css` + mock), copies logos, and grounds v1 on that prior mock — it does **not** invent a new palette. Prefer `design_loop_continue` on the same loop when you are still iterating that thread; use a fresh loop + prior seed when you want a clean transcript grounded on the existing theming document.
 - **Example recovery (JamPress loop `1511ce7f-…`):** rebuild/restart the SlopControl server, then `design_loop_continue` asking to invent new logos **and** adopt theme from a registered sibling (or MCP `import-design` with `fromName` / `fromRootPath`). Prior self-`SHARED_FROM` is ignored automatically; re-import overwrites with a real sibling.
 - **Shared design elements (A+B+C):** versioned controls under `.slopcontrol/elements/<id>/vN/` (project library) and optionally `~/.slopcontrol/shared-elements/` (global registry). Each element has `ELEMENT.json`, `SPEC.md`, `mock.html`, optional `tokens.css` + `src/` TS/JS. Author in a central brand project → `design_element_extract` / `design_element_publish` (set `publishToRegistry` for B). Consume in apps via `design_element_import` or chat (“use theme-toggle from &lt;registered-project&gt;”). Accept freezes `DESIGN_PACK.elements[]`; implement binds `design/elements/` and research must mount by id (prefer `src/` when `hasCode`). Competing day/night toggles while `theme-toggle` is pinned are rejected as drift. Also: `list_design_elements`, `design_element_get`.
 - **Private npm registry (Verdaccio):** SlopControl auto-starts a full private registry at `http://127.0.0.1:4873` under `~/.slopcontrol/npm-registry/` (disable with `SLOPCONTROL_NPM_REGISTRY=0`; port via `SLOPCONTROL_NPM_REGISTRY_PORT`). Scopes `@jam/*` and `@slopcontrol/*` are private (no uplink); other packages proxy to npmjs. MCP/HTTP: `npm_registry_status` / `start` / `stop` / `ensure_rc` / `list` / `publish`. After `design_element_publish_npm`, consumers run `npm_registry_ensure_rc` then `pnpm add @jam/<element>`. Orthogonal to monorepos — separate project folders still work. Prefer not committing generated `.npmrc` auth tokens. **Never use `npm link` / `pnpm link`** between sibling projects — the private registry is the supported install path.
@@ -127,6 +135,8 @@ pnpm mcp:stdio
 - `list_conflicts` — unmerged paths in the project root (`projectId`)
 - `resolve_conflicts` — resolve conflicts (`projectId`, optional `strategy`=`auto|phase|ours|theirs`, optional `phaseId` / `paths`)
 - `get_health`
+- `get_run_steps` — structured develop verify steps (`id` / name / command / exit / excerpt) + `firstFailure` for a run (also on `get_run` as `verify_steps` / `verify_first_failure`). Prefer this over scraping logs when diagnose-then-act after a blocked develop verify.
+- `retry_verify` — re-run the **full** Automated Checks / success-check suite in the phase worktree (**no** coding agent, **no** merge). Allowed when stage is `blocked` / `failed` / `interrupted`. Returns `{ ok, firstFailure, stepsSummary, steps }`. Use after diagnosing a step; use `retry_development` when coding or merge is still needed.
 - `preview_change_intent` — dry-run Change Intent (`uiMount`, `changeKind`, engagement, interaction contract); optional PHASE alignment; set `heuristicOnly: true` to skip the planning LLM
 - `reconcile_blueprint` — rebuild Live decisions (verified vs claimed via repo probes); **defaults to `dryRun: true`**
 - `audit_ui_gates` — Intent preview + PHASE align + dry-run reconcile pass/fail (read-only); optional `heuristicOnly`
@@ -247,8 +257,8 @@ Optional project config (`.slopcontrol/config.json`):
 
 When develop fails on **env/infra** (missing keys, services down, LLM quota), diagnosis is persisted to `.slopcontrol/runs/<runId>/diagnosis.json` with `audience: "operator"` and concrete `operatorActions`. MCP tools:
 
-- `get_run` / `get_phase_status` / `get_operator_suggestions` — surface actions to the human (e.g. set a valid LLM key)
-- `start_development` / `retry_development` — control plane next to suggestions
+- `get_run` / `get_run_steps` / `get_phase_status` / `get_operator_suggestions` — surface actions and per-step verify failures to the human (e.g. set a valid LLM key)
+- `start_development` / `retry_verify` / `retry_development` — control plane next to suggestions (`retry_verify` = checks only; `retry_development` = coding + verify + merge)
 
 Coding agents must **not** invent worktree-only product fixes for these failures.
 

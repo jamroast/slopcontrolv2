@@ -158,7 +158,12 @@ export type FailureDiagnosis = {
   /** Classifier tags (e.g. long-lived, host-utility) for retry routing. */
   tags?: string[];
   learning?: LearningCandidate;
-  failingStep?: { name: string; command?: string; exitCode: number };
+  failingStep?: {
+    name: string;
+    command?: string;
+    exitCode: number;
+    stepId?: string;
+  };
 };
 
 /**
@@ -810,6 +815,8 @@ export function classifyVerifyFailure(
 export function buildFailureDiagnosis(input: {
   output: string;
   firstFailure?: VerifyFailureStep;
+  /** Stable id matching verify_steps[].id when already assigned. */
+  failingStepId?: string;
   sourcePhaseId?: string;
   sourceRunId?: string;
 }): FailureDiagnosis {
@@ -846,6 +853,16 @@ export function buildFailureDiagnosis(input: {
     .digest("hex")
     .slice(0, 16);
 
+  const stepId =
+    input.failingStepId?.trim() ||
+    (step
+      ? step.name
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "")
+          .slice(0, 64) || "step"
+      : undefined);
+
   return {
     class: classified.class,
     confidence: classified.confidence,
@@ -860,7 +877,12 @@ export function buildFailureDiagnosis(input: {
     tags: classified.tags,
     learning: classified.learning,
     failingStep: step
-      ? { name: step.name, command: step.command, exitCode: step.exitCode }
+      ? {
+          name: step.name,
+          command: step.command,
+          exitCode: step.exitCode,
+          stepId,
+        }
       : undefined,
   };
 }

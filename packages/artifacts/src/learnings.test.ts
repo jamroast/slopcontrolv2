@@ -445,6 +445,21 @@ describe("buildFailureDiagnosis", () => {
     assert.equal(d.confidence, "high");
     assert.ok(d.fingerprint.length >= 8);
     assert.match(d.rootCause, /automatedCheck/);
+    assert.equal(d.failingStep?.stepId, "automatedcheck");
+  });
+
+  it("honors failingStepId from verify_steps report", () => {
+    const d = buildFailureDiagnosis({
+      output: "FAIL",
+      firstFailure: {
+        name: "automatedCheck",
+        command: "npm test",
+        exitCode: 1,
+        output: "FAIL\n",
+      },
+      failingStepId: "automatedcheck-2",
+    });
+    assert.equal(d.failingStep?.stepId, "automatedcheck-2");
   });
 });
 

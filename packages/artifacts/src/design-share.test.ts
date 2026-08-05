@@ -11,8 +11,19 @@ import {
   importDesignShareIntoLoop,
   readSharedDesignImport,
   formatSharedDesignPromptBlock,
+  pickProjectPriorDesign,
+  importProjectPriorDesignIntoLoop,
+  readProjectPriorDesignImport,
+  formatProjectPriorDesignPromptBlock,
 } from "./design-share.js";
-import { designLoopDir, designLoopAssetsDir } from "./design-loop.js";
+import {
+  designLoopDir,
+  designLoopAssetsDir,
+  writeDesignLoopMeta,
+  writeDesignLoopVersion,
+} from "./design-loop.js";
+import { writeDesignLoopPack } from "./design-pack.js";
+import { existsSync } from "node:fs";
 
 function tmpRoot(name: string): string {
   const base = mkdtempSync(join(tmpdir(), `sc-share-${name}-`));
@@ -305,5 +316,141 @@ test("readSharedDesignImport ignores prior self-import on disk", () => {
     "utf-8",
   );
   assert.equal(readSharedDesignImport(root, loopId), null);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("pickProjectPriorDesign prefers implemented loop excluding current; seeds PRIOR_DESIGN", () => {
+  const root = tmpRoot("prior-loop");
+  const oldLoop = "loop-old";
+  const newLoop = "loop-new";
+  const now = new Date().toISOString();
+  writeDesignLoopMeta(root, {
+    id: oldLoop,
+    projectId: "proj-1",
+    brief: "prior system",
+    status: "implemented",
+    currentVersion: 2,
+    acceptedVersion: 2,
+    createdAt: now,
+    updatedAt: now,
+  });
+  writeDesignLoopVersion({
+    projectRoot: root,
+    loopId: oldLoop,
+    version: 2,
+    html: `<html><style>:root{--brand-orange:#E8430A}</style><body>Kitchen Sink</body></html>`,
+    notes: "v2",
+    request: "prior",
+  });
+  mkdirSync(designLoopAssetsDir(root, oldLoop), { recursive: true });
+  writeFileSync(
+    join(designLoopAssetsDir(root, oldLoop), "mark.png"),
+    Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+  );
+  writeDesignLoopPack(root, oldLoop, {
+    name: "prior",
+    version: 1,
+    loopId: oldLoop,
+    projectId: "proj-1",
+    sourceMockVersion: 2,
+    tokens: ":root { --brand-orange: #E8430A; --background: #0A0A0A; }",
+    logos: [],
+    typography: ["Space Grotesk"],
+    shell: [],
+    contentPillars: [],
+    inScope: ["palette"],
+    mustNot: [],
+    mockPath: `.slopcontrol/design-loops/${oldLoop}/v2/mock.html`,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  // Empty new loop meta so exclude works
+  writeDesignLoopMeta(root, {
+    id: newLoop,
+    projectId: "proj-1",
+    brief: "pull current theming",
+    status: "open",
+    currentVersion: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  const prior = pickProjectPriorDesign(root, { excludeLoopId: newLoop });
+  assert.ok(prior);
+  assert.equal(prior!.kind, "loop");
+  assert.equal(prior!.loopId, oldLoop);
+  assert.match(prior!.tokensCss, /--brand-orange/);
+  assert.ok(prior!.mockHtml?.includes("Kitchen Sink"));
+
+  const imported = importProjectPriorDesignIntoLoop({
+    projectRoot: root,
+    loopId: newLoop,
+    prior: prior!,
+  });
+  assert.ok(existsSync(join(designLoopDir(root, newLoop), "PRIOR_DESIGN.json")));
+  assert.ok(imported.copiedAssets.includes("mark.png"));
+  assert.ok(
+    existsSync(join(designLoopAssetsDir(root, newLoop), "mark.png")),
+  );
+  const readBack = readProjectPriorDesignImport(root, newLoop);
+  assert.ok(readBack);
+  assert.equal(readBack!.sourceLoopId, oldLoop);
+  const block = formatProjectPriorDesignPromptBlock(readBack);
+  assert.match(block, /PRIOR DESIGN/);
+  assert.match(block, /--brand-orange/);
+
+  // Self SHARED_FROM still ignored
+  writeFileSync(
+    join(designLoopDir(root, newLoop), "SHARED_FROM.json"),
+    JSON.stringify({
+      source: { rootPath: root, name: "self" },
+      loopId: newLoop,
+      importedAt: now,
+      tokensCss: ":root{}",
+      copiedAssets: [],
+      logoAssetPaths: [],
+    }),
+    "utf-8",
+  );
+  assert.equal(readSharedDesignImport(root, newLoop), null);
+
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("pickProjectPriorDesign falls back to phase design when no accepted loop", () => {
+  const root = tmpRoot("prior-phase");
+  const designDir = join(root, ".slopcontrol", "phases", "05-theme", "design");
+  mkdirSync(designDir, { recursive: true });
+  writeFileSync(
+    join(designDir, "tokens.css"),
+    ":root { --brand-orange: #E8430A; }\n",
+    "utf-8",
+  );
+  writeFileSync(
+    join(designDir, "mock.html"),
+    "<html><body>Phase mock</body></html>\n",
+    "utf-8",
+  );
+  mkdirSync(join(designDir, "assets"), { recursive: true });
+  writeFileSync(
+    join(designDir, "assets", "logo.svg"),
+    "<svg></svg>\n",
+    "utf-8",
+  );
+
+  const prior = pickProjectPriorDesign(root, { excludeLoopId: "any" });
+  assert.ok(prior);
+  assert.equal(prior!.kind, "phase");
+  assert.equal(prior!.phaseId, "05-theme");
+  assert.match(prior!.tokensCss, /--brand-orange/);
+  assert.ok(prior!.mockHtml?.includes("Phase mock"));
+  assert.ok(prior!.logoFiles.some((p) => p.endsWith("logo.svg")));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("pickProjectPriorDesign returns null when nothing prior", () => {
+  const root = tmpRoot("prior-empty");
+  assert.equal(pickProjectPriorDesign(root), null);
   rmSync(root, { recursive: true, force: true });
 });

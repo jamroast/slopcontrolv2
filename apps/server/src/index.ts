@@ -11,6 +11,7 @@ import {
   appendRunLog,
   readDiagnosis,
   readLatestDiagnosisForPhase,
+  readVerifyStepsReport,
   probeMastraDbFile,
   phaseNeedsDesign,
   isDesignComplete,
@@ -132,6 +133,8 @@ import {
   summarizePlanConceptualModel,
   phaseDescriptionFromPlanPack,
   defaultPlanScope,
+  phaseDescriptionFromDesignAccept,
+  resolveDesignImplementInScope,
 } from "@slopcontrol/artifacts";
 import {
   checkoutProjectBranch,
@@ -417,6 +420,132 @@ function rejectIfDevelopInProgress(
   return true;
 }
 
+const RETRY_VERIFY_STAGES = new Set(["blocked", "failed", "interrupted"]);
+
+/** Re-run develop verify suite only (no coding / merge). Awaits completion. */
+async function executeRetryVerify(
+  runId: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const run = store.getRun(runId);
+  if (!run) {
+    return { status: 404, body: { error: "Run not found" } };
+  }
+  const project = store.getProject(run.projectId);
+  const phase = store.getPhase(run.phaseId);
+  if (!project || !phase) {
+    return { status: 404, body: { error: "Project or phase not found" } };
+  }
+  if (!RETRY_VERIFY_STAGES.has(run.stage)) {
+    return {
+      status: 409,
+      body: {
+        error: "retry_verify_not_allowed",
+        message:
+          "retry_verify is only allowed when the run stage is blocked, failed, or interrupted.",
+        stage: run.stage,
+      },
+    };
+  }
+  const unmet = unmetPhaseDependencies(phase, store.listPhases(project.id));
+  if (unmet.length > 0) {
+    return {
+      status: 409,
+      body: {
+        error: "Phase dependencies are not complete",
+        unmet,
+        dependsOn: phase.dependsOn ?? [],
+      },
+    };
+  }
+  const blockingRunId = developLock.getLiveClaim(project.id);
+  if (blockingRunId) {
+    const blocking = store.getRun(blockingRunId);
+    return {
+      status: 409,
+      body: {
+        error: "development_in_progress",
+        message:
+          "Another develop job is already running for this project. Wait for it to finish or stop_run, then retry.",
+        blockingRunId,
+        blockingPhaseId: blocking?.phaseId,
+        blockingStage: blocking?.stage,
+      },
+    };
+  }
+  const claim = developLock.tryClaim(project.id, run.id);
+  if (!claim.ok) {
+    const blocking = store.getRun(claim.blockingRunId);
+    return {
+      status: 409,
+      body: {
+        error: "development_in_progress",
+        message:
+          "Another develop job is already running for this project. Wait for it to finish or stop_run, then retry.",
+        blockingRunId: claim.blockingRunId,
+        blockingPhaseId: blocking?.phaseId,
+        blockingStage: blocking?.stage,
+      },
+    };
+  }
+
+  touchRunStage(run.id, "developing");
+  updatePhaseStatus(phase.id, "developing");
+  activeRuns.add(run.id);
+  const ac = new AbortController();
+  abortControllers.set(run.id, ac);
+
+  try {
+    const { orchestrator } = getRuntime(project.rootPath);
+    const result = await orchestrator.retryVerify({
+      project,
+      phase: store.getPhase(phase.id) ?? phase,
+      run: store.getRun(run.id) ?? run,
+      signal: ac.signal,
+    });
+    const latestPhase = store.getPhase(phase.id);
+    if (latestPhase) {
+      latestPhase.worktreePath = result.worktreePath;
+      latestPhase.worktreeBranch = result.worktreeBranch;
+      latestPhase.updatedAt = new Date().toISOString();
+      store.updatePhase(latestPhase);
+    }
+    touchRunStage(run.id, result.stage);
+    updatePhaseStatus(
+      phase.id,
+      result.stage === "blocked"
+        ? "blocked"
+        : result.stage === "interrupted"
+          ? "interrupted"
+          : "developing",
+    );
+    const steps = readVerifyStepsReport(project.rootPath, run.id);
+    return {
+      status: 200,
+      body: {
+        runId: run.id,
+        ok: result.ok,
+        stage: result.stage,
+        firstFailure: result.firstFailure ?? null,
+        stepsSummary: result.stepsSummary,
+        steps: steps?.steps ?? null,
+        accepted: true,
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    touchRunStage(run.id, "failed");
+    updatePhaseStatus(phase.id, "failed");
+    return {
+      status: 500,
+      body: { error: "retry_verify_failed", message, runId: run.id },
+    };
+  } finally {
+    activeRuns.delete(run.id);
+    abortControllers.delete(run.id);
+    developLock.release(project.id, run.id);
+  }
+}
+
 app.get("/health", async (_req, res) => {
   const dataDir = defaultDataDir();
   const mastraPath = join(dataDir, "mastra.db");
@@ -525,6 +654,7 @@ function buildRunPayload(run: Run) {
   const handoff =
     readRunHandoff(project.rootPath, run.id) ??
     (phase ? readLatestHandoffForPhase(project.rootPath, phase.id) : null);
+  const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
 
   return {
     id: run.id,
@@ -557,6 +687,9 @@ function buildRunPayload(run: Run) {
     researchRunning: activeRuns.has(run.id),
     devRunning: activeRuns.has(run.id),
     diagnosis,
+    failure_summary: diagnosis
+      ? `${diagnosis.title}${diagnosis.rootCause ? `: ${diagnosis.rootCause.slice(0, 240)}` : ""}`
+      : null,
     handoff: handoffSummary(handoff),
     operator_suggestions: diagnosis
       ? {
@@ -567,6 +700,16 @@ function buildRunPayload(run: Run) {
           codingAgentShouldFix: diagnosis.codingAgentShouldFix,
         }
       : null,
+    verify_steps: verifySteps?.steps ?? null,
+    verify_first_failure: verifySteps?.firstFailure
+      ? {
+          id: verifySteps.firstFailure.id,
+          name: verifySteps.firstFailure.name,
+          exitCode: verifySteps.firstFailure.exitCode,
+          command: verifySteps.firstFailure.command,
+        }
+      : null,
+    verify_ok: verifySteps ? verifySteps.ok : null,
   };
 }
 
@@ -4256,9 +4399,29 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
 
   const createdPhase = !phase;
   if (!phase) {
+    const acceptance = readDesignLoopAcceptance(project.rootPath, meta.id);
+    const acceptedIds =
+      acceptance?.features.filter((f) => f.accepted).map((f) => f.id) ?? [];
+    const { inScope } = resolveDesignImplementInScope({
+      acceptedFeatureIds: acceptedIds,
+      lastImplementedFeatureIds: meta.lastImplementedFeatureIds,
+    });
+    const version = meta.acceptedVersion ?? meta.currentVersion;
+    const request = readDesignLoopRequest(project.rootPath, meta.id, version);
+    const isExtensionImplement = Boolean(
+      meta.lastImplementedVersion != null ||
+        (meta.lastImplementedFeatureIds?.length ?? 0) > 0,
+    );
+    const description = phaseDescriptionFromDesignAccept({
+      request,
+      briefFallback: meta.brief,
+      inScopeIds: inScope,
+      features: acceptance?.features,
+      isExtensionImplement,
+    });
     phase = store.createPhase({
       projectId: project.id,
-      description: meta.brief,
+      description,
       rootPath: project.rootPath,
       dependsOn,
     });
@@ -4286,13 +4449,14 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
       const ac = new AbortController();
       abortControllers.set(run.id, ac);
       const { orchestrator } = getRuntime(project.rootPath);
+      const researchDescription = phase.description;
       void (async () => {
         try {
           const stage = await orchestrator.startResearch({
             project,
             phase: phase!,
             run: run!,
-            description: meta.brief,
+            description: researchDescription,
             listProjects: () => store.listProjects(),
             onStage: (s) => touchRunStage(run!.id, s),
           });
@@ -5016,6 +5180,38 @@ app.get("/runs/:id", (req, res) => {
     ...payload,
     active: activeRuns.has(run.id),
   });
+});
+
+app.get("/runs/:id/steps", (req, res) => {
+  const run = store.getRun(req.params.id);
+  if (!run) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  const project = store.getProject(run.projectId);
+  if (!project) {
+    res.status(404).json({ error: "Project not found for run" });
+    return;
+  }
+  const report = readVerifyStepsReport(project.rootPath, run.id);
+  if (!report) {
+    res.status(404).json({ error: "No verify steps for this run" });
+    return;
+  }
+  res.json({
+    runId: run.id,
+    stage: run.stage,
+    ok: report.ok,
+    steps: report.steps,
+    firstFailure: report.firstFailure ?? null,
+    summary: report.summary,
+    updatedAt: report.updatedAt,
+  });
+});
+
+app.post("/runs/:id/retry-verify", async (req, res) => {
+  const result = await executeRetryVerify(req.params.id);
+  res.status(result.status).json(result.body);
 });
 
 app.get("/projects/:projectId/phases/:phaseId/status", (req, res) => {
@@ -5760,6 +5956,12 @@ app.post("/runs", async (req, res) => {
         stage: "developing",
         accepted: true,
       });
+      return;
+    }
+
+    if (action.action === "retry_verify") {
+      const result = await executeRetryVerify(action.runId);
+      res.status(result.status).json(result.body);
       return;
     }
 

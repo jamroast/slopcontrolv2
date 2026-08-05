@@ -17,6 +17,7 @@ import {
   readDesignLoopNotes,
   readDesignLoopRequest,
   readDesignLoopTranscript,
+  resolveDesignImplementInScope,
   type DesignLoopAcceptance,
   type DesignLoopMeta,
 } from "./design-loop.js";
@@ -55,6 +56,11 @@ export type DesignPack = {
   contentPillars: string[];
   /** Accepted feature ids. */
   inScope: string[];
+  /**
+   * Feature ids shipped on a prior implement — contextual must-not redo unless
+   * also listed in inScope for this accept.
+   */
+  alreadyApplied?: string[];
   /** Explicit must-nots for research/develop. */
   mustNot: string[];
   /** Path to full mock HTML (loop or phase). */
@@ -241,25 +247,26 @@ export function compileDesignPackFromAccept(opts: {
     name: a.name,
     path: `.slopcontrol/design-loops/${opts.loopId}/assets/${a.name}`,
   }));
-  const inScope = opts.acceptance.features
+  const acceptedIds = opts.acceptance.features
     .filter((f) => f.accepted)
     .map((f) => f.id);
-  // Ensure theme_modes is listed when theme contract exists and was accepted
-  if (
-    theme &&
-    opts.acceptance.features.some(
-      (f) => f.id === "theme_modes" && f.accepted,
-    ) &&
-    !inScope.includes("theme_modes")
-  ) {
-    inScope.push("theme_modes");
-  }
+  const { inScope, alreadyApplied } = resolveDesignImplementInScope({
+    acceptedFeatureIds: acceptedIds,
+    lastImplementedFeatureIds: meta.lastImplementedFeatureIds,
+  });
   const now = new Date().toISOString();
   const name =
     meta.brief.trim().slice(0, 80) ||
     `design-loop-${opts.loopId.slice(0, 8)}`;
 
   const elements = getDesignLoopElements(meta);
+
+  const alreadyAppliedMustNots = alreadyApplied
+    .filter((id) => !inScope.includes(id))
+    .map(
+      (id) =>
+        `ALREADY APPLIED — do not re-implement ${id} (shipped on a prior design implement); only change it if explicitly inScope`,
+    );
 
   return {
     name,
@@ -278,8 +285,10 @@ export function compileDesignPackFromAccept(opts: {
       html,
     }),
     inScope,
+    alreadyApplied: alreadyApplied.length ? alreadyApplied : undefined,
     mustNot: [
       ...buildMustNot(opts.acceptance, logos, scope),
+      ...alreadyAppliedMustNots,
       ...elements.map(
         (e) =>
           `Do not invent a competing control for shared element ${e.id}@${e.version} — mount the pinned element`,
@@ -287,7 +296,8 @@ export function compileDesignPackFromAccept(opts: {
     ].slice(0, 32),
     mockPath: `.slopcontrol/design-loops/${opts.loopId}/v${opts.version}/mock.html`,
     scope: { ...scope, source: "accept" },
-    theme,
+    // Theme contract only authoritative when theme_modes is in this implement delta.
+    theme: inScope.includes("theme_modes") ? theme : undefined,
     elements: elements.length ? elements : undefined,
     createdAt: now,
     updatedAt: now,
@@ -397,19 +407,25 @@ export function formatDesignPackPromptBlock(
   pack: DesignPack | null | undefined,
 ): string {
   if (!pack) return "";
+  const themeInScope = pack.inScope.includes("theme_modes");
   const lines: string[] = [
     `Design pack / conceptual model (authoritative — cite this; mock.html is visual proof):`,
     `- name: ${pack.name}`,
     `- pack version: ${pack.version} (from design-loop ${pack.loopId} mock v${pack.sourceMockVersion})`,
     `- mock: \`${pack.mockPath}\``,
-    `- inScope: ${pack.inScope.length ? pack.inScope.join(", ") : "(none)"}`,
-    "",
+    `- inScope (this phase only): ${pack.inScope.length ? pack.inScope.join(", ") : "(none)"}`,
   ];
+  if (pack.alreadyApplied?.length) {
+    lines.push(
+      `- alreadyApplied (prior implement — do not redo unless also inScope): ${pack.alreadyApplied.join(", ")}`,
+    );
+  }
+  lines.push("");
   if (pack.scope) {
     lines.push(
       formatConceptualModelPromptBlock({
         scope: pack.scope,
-        theme: pack.theme,
+        theme: themeInScope ? pack.theme : undefined,
         inScope: pack.inScope,
         mustNot: pack.mustNot,
       }),
@@ -423,7 +439,7 @@ export function formatDesignPackPromptBlock(
     "```",
     "",
   );
-  if (pack.theme?.lightTokensCss?.trim()) {
+  if (themeInScope && pack.theme?.lightTokensCss?.trim()) {
     lines.push(
       "### theme.lightTokensCss (must implement under html[data-theme=light])",
       "```css",

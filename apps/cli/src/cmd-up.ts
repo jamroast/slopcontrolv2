@@ -1,7 +1,9 @@
 import { loadConfig } from "./config.js";
 import { resolveCodingEngine } from "./engines.js";
 import { loadSlopcontrolEnv } from "./load-env.js";
+import { cliLogsDir } from "./log-store.js";
 import {
+  detachRunningServices,
   ensureService,
   persistStack,
   stopManagedServices,
@@ -10,18 +12,48 @@ import {
 } from "./process-manager.js";
 import type { ManagedService } from "./process-manager.js";
 
-export async function cmdUp(cwd: string = process.cwd()): Promise<void> {
+export type CmdUpOptions = {
+  /** Start services and exit; leave processes running (use `slopcontrol logs -f`). */
+  detach?: boolean;
+  /** Suppress console tee (still write log files). Useful when starting from `logs --up`. */
+  quietConsole?: boolean;
+  cwd?: string;
+};
+
+function parseUpArgs(argv: string[]): CmdUpOptions {
+  const opts: CmdUpOptions = {};
+  for (const a of argv) {
+    if (a === "-d" || a === "--detach") opts.detach = true;
+    else if (a === "-q" || a === "--quiet") opts.quietConsole = true;
+  }
+  return opts;
+}
+
+export async function cmdUp(
+  cwdOrOpts: string | CmdUpOptions = process.cwd(),
+  argv: string[] = [],
+): Promise<void> {
+  const fromArgv = parseUpArgs(argv);
+  const base: CmdUpOptions =
+    typeof cwdOrOpts === "string" ? { cwd: cwdOrOpts } : { ...cwdOrOpts };
+  const opts: CmdUpOptions = { ...base, ...fromArgv };
+  const cwd = opts.cwd ?? process.cwd();
+  const detach = Boolean(opts.detach);
+  const quietConsole = Boolean(opts.quietConsole);
+
   const { path, config, rootDir } = loadConfig(cwd);
-  console.log(`Using config ${path}`);
+  if (!quietConsole) console.log(`Using config ${path}`);
 
   const { loaded } = loadSlopcontrolEnv({ rootDir });
-  for (const envPath of loaded) {
-    console.log(`Loaded env ${envPath}`);
-  }
-  if (loaded.length === 0) {
-    console.log(
-      "No .env files loaded (checked rootDir/.env, cwd/.env, ~/.slopcontrol/.env)",
-    );
+  if (!quietConsole) {
+    for (const envPath of loaded) {
+      console.log(`Loaded env ${envPath}`);
+    }
+    if (loaded.length === 0) {
+      console.log(
+        "No .env files loaded (checked rootDir/.env, cwd/.env, ~/.slopcontrol/.env)",
+      );
+    }
   }
 
   const codingMode = config.coding.mode ?? "per_project";
@@ -44,12 +76,17 @@ export async function cmdUp(cwd: string = process.cwd()): Promise<void> {
         isHealthy: coding.isHealthy,
         skipIfHealthy: true,
       };
-      services.push(await ensureService(codingSpec));
+      services.push(
+        await ensureService(codingSpec, { quietConsole, detach }),
+      );
       codingHealthNote = `  coding  ${coding.healthUrl} (${coding.engineId}, shared)`;
-    } else {
+    } else if (!quietConsole) {
       console.log(
         "coding.mode=per_project — OpenCode daemons start lazily per project (ports 4100+)",
       );
+      codingHealthNote =
+        "  coding  per_project (lazy OpenCode per projectId; SLOPCONTROL_CODING_MODE=per_project)";
+    } else {
       codingHealthNote =
         "  coding  per_project (lazy OpenCode per projectId; SLOPCONTROL_CODING_MODE=per_project)";
     }
@@ -69,7 +106,7 @@ export async function cmdUp(cwd: string = process.cwd()): Promise<void> {
       healthMode: "http-ok",
       skipIfHealthy: true,
     };
-    services.push(await ensureService(serverSpec));
+    services.push(await ensureService(serverSpec, { quietConsole, detach }));
 
     const web = config.web;
     if (web?.enabled) {
@@ -83,10 +120,27 @@ export async function cmdUp(cwd: string = process.cwd()): Promise<void> {
         healthMode: "http-ok",
         skipIfHealthy: true,
       };
-      services.push(await ensureService(webSpec));
+      services.push(await ensureService(webSpec, { quietConsole, detach }));
     }
 
     persistStack({ configPath: path, rootDir }, services);
+
+    if (detach) {
+      detachRunningServices(services);
+      console.log("");
+      console.log("Stack started in background (detached).");
+      console.log(`  info  ${config.server.health.http}`);
+      console.log(codingHealthNote);
+      if (web?.enabled) {
+        console.log(`  web     ${web.health.http}`);
+      }
+      console.log(`  logs   ${cliLogsDir()}`);
+      console.log("");
+      console.log("Follow logs:  slopcontrol logs -f");
+      console.log("Stop stack:   slopcontrol down");
+      return;
+    }
+
     console.log("");
     console.log("Stack is up. Press Ctrl+C to stop managed processes.");
     console.log(`  server  ${config.server.health.http}`);
@@ -94,11 +148,14 @@ export async function cmdUp(cwd: string = process.cwd()): Promise<void> {
     if (web?.enabled) {
       console.log(`  web     ${web.health.http}`);
     }
+    console.log(`  logs   ${cliLogsDir()}  (also: slopcontrol logs -f)`);
     console.log("");
 
     const sig = await waitForSignal();
     console.log(`\nReceived ${sig}; shutting down…`);
   } finally {
-    await stopManagedServices(services);
+    if (!detach) {
+      await stopManagedServices(services);
+    }
   }
 }

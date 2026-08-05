@@ -1,5 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import { checkHttpHealth, waitForHealth, type HealthMode } from "./health.js";
+import {
+  appendServiceLog,
+  resetServiceLog,
+  serviceLogPath,
+  ensureCliLogsDir,
+} from "./log-store.js";
 import {
   clearPidFile,
   isProcessAlive,
@@ -32,17 +39,51 @@ export interface RunningService {
   healthMode: HealthMode;
 }
 
-function prefixLine(label: string, line: string, stream: "stdout" | "stderr"): void {
+export type EnsureServiceOpts = {
+  /** Suppress console tee (still write log files). */
+  quietConsole?: boolean;
+  /** Truncate service log before spawn (default true). */
+  resetLog?: boolean;
+  /**
+   * Redirect child stdio to the log file and detach so the CLI can exit
+   * without closing pipes (required for `up -d`).
+   */
+  detach?: boolean;
+};
+
+function prefixLine(
+  label: string,
+  line: string,
+  stream: "stdout" | "stderr",
+  opts?: { serviceId?: string; quietConsole?: boolean },
+): void {
+  const prefixed = `[${label}] ${line}`;
+  if (opts?.serviceId) {
+    try {
+      appendServiceLog(opts.serviceId, prefixed);
+    } catch {
+      /* best-effort log file */
+    }
+  }
+  if (opts?.quietConsole) return;
   const out = stream === "stderr" ? process.stderr : process.stdout;
-  out.write(`[${label}] ${line}\n`);
+  out.write(`${prefixed}\n`);
 }
 
-function attachLogs(label: string, child: ChildProcess): void {
+function attachLogs(
+  serviceId: string,
+  label: string,
+  child: ChildProcess,
+  opts?: { quietConsole?: boolean },
+): void {
   const pipe = (chunk: Buffer, stream: "stdout" | "stderr") => {
     const text = chunk.toString("utf-8");
     for (const line of text.split(/\r?\n/)) {
       if (line.length === 0) continue;
-      prefixLine(label, line, stream);
+      prefixLine(label, line, stream, {
+        serviceId,
+        quietConsole: opts?.quietConsole,
+      });
     }
   };
   child.stdout?.on("data", (c: Buffer) => pipe(c, "stdout"));
@@ -51,13 +92,17 @@ function attachLogs(label: string, child: ChildProcess): void {
 
 export async function ensureService(
   spec: ManagedService,
+  opts?: EnsureServiceOpts,
 ): Promise<RunningService> {
   const already = spec.isHealthy
     ? await spec.isHealthy()
     : await checkHttpHealth(spec.healthUrl, spec.healthMode);
 
   if (already && spec.skipIfHealthy !== false) {
-    prefixLine(spec.label, `already healthy at ${spec.healthUrl}`, "stdout");
+    prefixLine(spec.label, `already healthy at ${spec.healthUrl}`, "stdout", {
+      serviceId: spec.id,
+      quietConsole: opts?.quietConsole,
+    });
     return {
       id: spec.id,
       label: spec.label,
@@ -70,26 +115,58 @@ export async function ensureService(
   const [cmd, ...args] = spec.command;
   if (!cmd) throw new Error(`Empty command for service ${spec.id}`);
 
+  if (opts?.resetLog !== false) {
+    try {
+      resetServiceLog(spec.id);
+    } catch {
+      /* ignore */
+    }
+  }
+
   prefixLine(
     spec.label,
     `starting: ${spec.command.map((c) => (/\s/.test(c) ? JSON.stringify(c) : c)).join(" ")}`,
     "stdout",
+    { serviceId: spec.id, quietConsole: opts?.quietConsole },
   );
 
-  const child = spawn(cmd, args, {
-    cwd: spec.cwd,
-    env: spec.env,
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: process.platform !== "win32",
-  });
+  const detach = Boolean(opts?.detach);
+  let logFd: number | undefined;
+  let child: ChildProcess;
 
-  attachLogs(spec.label, child);
+  if (detach) {
+    ensureCliLogsDir();
+    logFd = openSync(serviceLogPath(spec.id), "a");
+    child = spawn(cmd, args, {
+      cwd: spec.cwd,
+      env: spec.env,
+      stdio: ["ignore", logFd, logFd],
+      detached: process.platform !== "win32",
+    });
+    try {
+      closeSync(logFd);
+    } catch {
+      /* ignore */
+    }
+    logFd = undefined;
+  } else {
+    child = spawn(cmd, args, {
+      cwd: spec.cwd,
+      env: spec.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    attachLogs(spec.id, spec.label, child, {
+      quietConsole: opts?.quietConsole,
+    });
+  }
 
   child.on("exit", (code, signal) => {
     prefixLine(
       spec.label,
       `exited code=${code ?? "null"} signal=${signal ?? "null"}`,
       "stderr",
+      { serviceId: spec.id, quietConsole: opts?.quietConsole },
     );
   });
 
@@ -102,7 +179,10 @@ export async function ensureService(
     label: spec.label,
     timeoutMs: 90_000,
   });
-  prefixLine(spec.label, `healthy at ${spec.healthUrl}`, "stdout");
+  prefixLine(spec.label, `healthy at ${spec.healthUrl}`, "stdout", {
+    serviceId: spec.id,
+    quietConsole: opts?.quietConsole,
+  });
 
   return {
     id: spec.id,
@@ -113,6 +193,18 @@ export async function ensureService(
     healthUrl: spec.healthUrl,
     healthMode: spec.healthMode,
   };
+}
+
+/** Detach spawned children so the CLI can exit without killing them. */
+export function detachRunningServices(services: RunningService[]): void {
+  for (const s of services) {
+    if (!s.child || s.external) continue;
+    try {
+      s.child.unref();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 export function persistStack(
@@ -145,7 +237,9 @@ export async function stopManagedServices(
 ): Promise<void> {
   for (const s of [...services].reverse()) {
     if (s.external || !s.pid) continue;
-    prefixLine(s.label, `stopping pid=${s.pid}`, "stdout");
+    prefixLine(s.label, `stopping pid=${s.pid}`, "stdout", {
+      serviceId: s.id,
+    });
     stopProcess(s.pid, "SIGTERM");
   }
   // brief grace then SIGKILL
@@ -153,7 +247,9 @@ export async function stopManagedServices(
   for (const s of [...services].reverse()) {
     if (s.external || !s.pid) continue;
     if (isProcessAlive(s.pid)) {
-      prefixLine(s.label, `force-kill pid=${s.pid}`, "stderr");
+      prefixLine(s.label, `force-kill pid=${s.pid}`, "stderr", {
+        serviceId: s.id,
+      });
       stopProcess(s.pid, "SIGKILL");
     }
   }

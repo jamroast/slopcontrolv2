@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { cmdDown } from "./cmd-down.js";
 import { cmdInit } from "./cmd-init.js";
+import { cmdLogs } from "./cmd-logs.js";
 import { cmdStatus } from "./cmd-status.js";
 import { cmdUp } from "./cmd-up.js";
 
@@ -8,7 +9,10 @@ const HELP = `slopcontrol — run the SlopControl stack (server + coding engine)
 
 Usage:
   slopcontrol init              Write slopcontrol.yaml in the current directory
-  slopcontrol up                Start coding engine then server (stream logs)
+  slopcontrol up [-d]           Start coding engine then server (stream logs)
+  slopcontrol up -d             Start detached; leave processes running
+  slopcontrol logs [-f] [svc]   Show / follow ~/.slopcontrol/cli/logs/<svc>.log
+  slopcontrol logs -f --up      Start detached if needed, then follow logs
   slopcontrol down              Stop processes tracked in ~/.slopcontrol/cli/stack.pid.json
   slopcontrol status            Health + PID status for configured services
   slopcontrol help              Show this help
@@ -21,13 +25,19 @@ async function main(): Promise<void> {
   // Tolerate accidental `--` from nested pnpm forwarding
   while (raw[0] === "--") raw.shift();
   const cmd = raw[0]?.trim() || "help";
+  const rest = raw.slice(1);
 
   switch (cmd) {
     case "init":
       cmdInit();
       break;
     case "up":
-      await cmdUp();
+      await cmdUp(process.cwd(), rest);
+      break;
+    case "logs":
+    case "log":
+    case "tail":
+      await cmdLogs(rest);
       break;
     case "down":
       await cmdDown();

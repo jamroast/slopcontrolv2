@@ -27,6 +27,7 @@ describe("continue-intent-llm", () => {
   it("system prompt documents logo/theme/nav intent rules", () => {
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("inventLogo"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("adoptTheme"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("reuseProjectDesign"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("navAlign"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("logo_invent"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("unhappy with the logos"));

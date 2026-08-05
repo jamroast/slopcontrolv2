@@ -10,6 +10,7 @@ import {
   continueIntentMayTouchNav,
   continueIntentMayTouchShell,
   fallbackContinueIntentFromText,
+  textSignalsReuseProjectDesign,
 } from "./continue-intent.js";
 
 describe("continue-intent schema", () => {
@@ -19,6 +20,7 @@ describe("continue-intent schema", () => {
     assert.equal(intent.wantsAssetEdit, false);
     assert.equal(intent.inventLogo, false);
     assert.equal(intent.adoptTheme, false);
+    assert.equal(intent.reuseProjectDesign, false);
     assert.equal(intent.navAlign, false);
     assert.equal(intent.preserveChrome, false);
     assert.equal(intent.notes, "");
@@ -94,7 +96,27 @@ describe("fallbackContinueIntentFromText", () => {
       "Pull the theming from MyBrand into this mock",
     );
     assert.equal(intent.adoptTheme, true);
+    assert.equal(intent.reuseProjectDesign, false);
     assert.ok(intent.targets.includes("palette"));
+  });
+
+  it("detects reuse of this project's current theming (not sibling)", () => {
+    const ask =
+      "Please can you pull out the current theming and generate me a mock landing page and dashboard using the current theming and design concepts";
+    assert.equal(textSignalsReuseProjectDesign(ask), true);
+    const intent = fallbackContinueIntentFromText(ask);
+    assert.equal(intent.reuseProjectDesign, true);
+    assert.equal(intent.adoptTheme, false);
+    assert.ok(intent.targets.includes("palette"));
+    assert.equal(intent.scope, "adopt_theme");
+  });
+
+  it("existing design concepts signals reuseProjectDesign", () => {
+    const intent = fallbackContinueIntentFromText(
+      "Use the existing design concepts and design pack for a new landing mock",
+    );
+    assert.equal(intent.reuseProjectDesign, true);
+    assert.equal(intent.adoptTheme, false);
   });
 
   it("bare brand mention without adopt/from does not set adoptTheme", () => {
@@ -192,6 +214,10 @@ describe("continue-intent allow gates", () => {
   it("token churn allowed for adoptTheme or palette/tokens target", () => {
     assert.equal(
       continueIntentAllowsTokenChurn({ ...base, adoptTheme: true }),
+      true,
+    );
+    assert.equal(
+      continueIntentAllowsRedesign({ ...base, reuseProjectDesign: true }),
       true,
     );
     assert.equal(

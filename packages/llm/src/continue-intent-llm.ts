@@ -17,6 +17,7 @@ Return ONLY a JSON object with these fields:
 - wantsAssetEdit: boolean — true when icon pack / alpha / transparency / resize image edits are requested
 - inventLogo: boolean — true when the operator asks for a NEW logo/mark/symbol (invent or adopt a new asset)
 - adoptTheme: boolean — true when the operator asks to pull palette/theme/branding from another project/sibling
+- reuseProjectDesign: boolean — true when the operator asks to reuse THIS project's existing/current theming, design pack, or design concepts (not a named sibling)
 - navAlign: boolean — true when the operator asks to align menus/nav with what exists in code
 - preserveChrome: boolean — true when the operator explicitly says keep/do not change layout, hero, shell, copy, or nav
 - notes: string — 1 sentence summary of what should change
@@ -25,11 +26,12 @@ Return ONLY a JSON object with these fields:
 Rules:
 - "new logo" / "symbolic mark" / "invent a mark" / "circular logo" / "replace the logos" / "different logo" / "I am unhappy with the logos" / "don't like the current logos" / "change the logo" → inventLogo=true, targets include "logo". Replacing the prior pinned logo is expected. Never assets_only for these. Set preserveChrome=false unless the operator explicitly says keep layout/hero/shell.
 - "pull/adopt theme or theming/design from a sibling / other registered project / absolute path" → adoptTheme=true, targets include "palette" and usually "landing". Set preserveChrome=false — a new theme is an intentional redesign; do NOT preserve the prior mock's look unless asked.
+- "pull out / use the current theming" / "existing theming" / "existing design concepts" / "use the design pack" / "what we already have" (same project, no sibling named) → reuseProjectDesign=true, adoptTheme=false, targets include "palette". Set preserveChrome=false; ground the mock on the prior project design.
 - "align menu/nav with the code" → navAlign=true.
 - "derive icon pack" / "make transparent" / "alpha" → wantsAssetEdit=true (only when NOT asking for a new/different logo).
 - "I like the current look" / "keep the hero" / "do not change layout" → preserveChrome=true. "do not change hero" is NOT a request to change hero.
 - scope picks the dominant intent: full_revise only for explicit redesign/start-over; nav_align for menu sync; assets_only when only media edits requested (never when inventLogo); logo_invent/adopt_theme when that dominates; otherwise sections.
-- When inventLogo or adoptTheme is true, prefer preserveChrome=false. Fingerprint drift must not veto an intentional theme/logo redesign.
+- When inventLogo, adoptTheme, or reuseProjectDesign is true, prefer preserveChrome=false. Fingerprint drift must not veto an intentional theme/logo redesign.
 - "only/just the chat form|composer|bubble" → designScope={kind:"component", focus:"chat.composer", preserve:["chrome","palette","logo","nav","shell"]}.
 - "dark and light / theme toggle" without full redesign → designScope={kind:"shell", focus:"theme", preserve:["logo","content"]}.
 `;

@@ -8,6 +8,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   PhaseStatusSchema,
@@ -993,7 +994,13 @@ export type PersistedDiagnosis = {
   codingAgentShouldFix: boolean;
   /** Classifier tags for coding-retry routing (long-lived, host-utility, …). */
   tags?: string[];
-  failingStep?: { name: string; command?: string; exitCode: number };
+  failingStep?: {
+    name: string;
+    command?: string;
+    exitCode: number;
+    /** Stable id matching verify_steps[].id when present. */
+    stepId?: string;
+  };
   phaseId?: string;
   runId?: string;
   updatedAt: string;
@@ -1095,6 +1102,149 @@ export function writeCheckReport(
   return stamped;
 }
 
+/** One Automated Checks / verify step for MCP / dashboard. */
+export type VerifyStepReport = {
+  id: string;
+  name: string;
+  command?: string;
+  exitCode: number;
+  ok: boolean;
+  outputExcerpt: string;
+};
+
+export type VerifyStepsReport = {
+  ok: boolean;
+  updatedAt: string;
+  steps: VerifyStepReport[];
+  firstFailure?: VerifyStepReport;
+  summary: string;
+};
+
+export function verifyStepsReportPath(
+  projectRoot: string,
+  runId: string,
+): string {
+  return join(runChecksDir(projectRoot, runId), "verify-steps.json");
+}
+
+function slugVerifyStepId(name: string): string {
+  return (
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 64) || "step"
+  );
+}
+
+/** Assign stable unique ids from step names (suffix -2, -3 on collision). */
+export function assignVerifyStepIds(
+  steps: Array<{ name: string }>,
+): string[] {
+  const seen = new Map<string, number>();
+  return steps.map((s) => {
+    const base = slugVerifyStepId(s.name);
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return n === 1 ? base : `${base}-${n}`;
+  });
+}
+
+/**
+ * Persist structured SuccessCheck steps under
+ * `.slopcontrol/runs/<runId>/checks/verify-steps.json`.
+ */
+export function writeVerifyStepsReport(
+  projectRoot: string,
+  runId: string,
+  result: {
+    ok: boolean;
+    summary?: string;
+    steps: Array<{
+      name: string;
+      command?: string;
+      exitCode: number;
+      output?: string;
+    }>;
+    firstFailure?: {
+      name: string;
+      command?: string;
+      exitCode: number;
+      output?: string;
+    } | null;
+  },
+): VerifyStepsReport {
+  const dir = runChecksDir(projectRoot, runId);
+  mkdirSync(dir, { recursive: true });
+  const ids = assignVerifyStepIds(result.steps);
+  const steps: VerifyStepReport[] = result.steps.map((s, i) => ({
+    id: ids[i]!,
+    name: s.name,
+    command: s.command,
+    exitCode: s.exitCode,
+    ok: s.exitCode === 0,
+    outputExcerpt: redactSecrets(lastLinesForExcerpt(s.output ?? "", 40)),
+  }));
+  let firstFailure: VerifyStepReport | undefined;
+  if (result.firstFailure) {
+    const idx = result.steps.findIndex(
+      (s) =>
+        s.name === result.firstFailure!.name &&
+        s.exitCode === result.firstFailure!.exitCode &&
+        (s.command ?? "") === (result.firstFailure!.command ?? ""),
+    );
+    firstFailure =
+      idx >= 0
+        ? steps[idx]
+        : {
+            id: slugVerifyStepId(result.firstFailure.name),
+            name: result.firstFailure.name,
+            command: result.firstFailure.command,
+            exitCode: result.firstFailure.exitCode,
+            ok: false,
+            outputExcerpt: redactSecrets(
+              lastLinesForExcerpt(result.firstFailure.output ?? "", 40),
+            ),
+          };
+  } else {
+    firstFailure = steps.find((s) => !s.ok);
+  }
+  const report: VerifyStepsReport = {
+    ok: result.ok,
+    updatedAt: new Date().toISOString(),
+    steps,
+    firstFailure,
+    summary: (result.summary ?? "").trim() || (result.ok ? "Verify OK" : "Verify failed"),
+  };
+  const latest = verifyStepsReportPath(projectRoot, runId);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const stamped = join(dir, `${stamp}-verify-steps.json`);
+  const body = `${JSON.stringify(report, null, 2)}\n`;
+  writeFileSync(latest, body, "utf-8");
+  writeFileSync(stamped, body, "utf-8");
+  return report;
+}
+
+function lastLinesForExcerpt(text: string, n: number): string {
+  const lines = (text ?? "").replace(/\r\n/g, "\n").split("\n");
+  return lines.slice(-n).join("\n").slice(0, 4_000);
+}
+
+export function readVerifyStepsReport(
+  projectRoot: string,
+  runId: string,
+): VerifyStepsReport | null {
+  const path = verifyStepsReportPath(projectRoot, runId);
+  if (!existsSync(path)) return null;
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf-8")) as VerifyStepsReport;
+    if (!raw || !Array.isArray(raw.steps)) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
 export function writeDiagnosis(
   projectRoot: string,
   runId: string,
@@ -1119,6 +1269,62 @@ export function writeDiagnosis(
     );
   }
   return path;
+}
+
+/**
+ * Structured diagnosis for research/draft process failures (Change Intent
+ * reject, empty research, needs_intent, etc.) — same shape as develop failures
+ * so get_run / get_phase_status / dashboard can show it.
+ */
+export function buildPlanningFailureDiagnosis(opts: {
+  stage: "research" | "draft";
+  title: string;
+  detail: string;
+  phaseId: string;
+  runId: string;
+  /** Stable class tag for fingerprint (e.g. change-intent, empty-research). */
+  kind?: string;
+  operatorActions?: string[];
+}): PersistedDiagnosis {
+  const detail = (opts.detail ?? "").trim() || "(no detail)";
+  const kind =
+    opts.kind?.trim() ||
+    (opts.stage === "draft" ? "draft-failed" : "research-failed");
+  const fingerprint = createHash("sha256")
+    .update(`planning:${opts.stage}:${kind}:${detail.slice(0, 400)}`)
+    .digest("hex")
+    .slice(0, 16);
+  const defaultActions =
+    opts.stage === "draft"
+      ? [
+          "Retry draft after fixing PHASE.md Success Criteria / Automated Checks to match Change Intent (engagement mounts need fill+submit proof; live AI SDK static tool parts need type: tool-<name> / parseToolResult / extractActiveForm — not only tool-invocation fixtures).",
+          "Inspect get_run.dev_output / diagnosis.evidence for the exact gate issues.",
+        ]
+      : [
+          "Retry research with a clearer change description / intent, or open_project with a non-empty intent if BLUEPRINT is missing.",
+          "Inspect get_run.dev_output / diagnosis.evidence for the research failure detail.",
+        ];
+  return {
+    audience: "coding",
+    operatorActions: opts.operatorActions?.length
+      ? opts.operatorActions
+      : defaultActions,
+    class: "process",
+    confidence: "high",
+    title: opts.title.slice(0, 160),
+    rootCause: detail.slice(0, 2_000),
+    evidence: detail.slice(0, 4_000),
+    nextActions:
+      opts.stage === "draft"
+        ? "Retry draft (research intact)."
+        : "Retry research or fix bootstrap intent.",
+    fingerprint: `planning-${kind}-${fingerprint}`,
+    codingAgentShouldFix: true,
+    tags: ["planning", opts.stage, kind],
+    phaseId: opts.phaseId,
+    runId: opts.runId,
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 export function readDiagnosis(

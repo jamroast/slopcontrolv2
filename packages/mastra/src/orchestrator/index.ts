@@ -87,12 +87,15 @@ import {
   resolveProjectEnv,
   writeResolvedEnvToWorktree,
   writeDiagnosis,
+  buildPlanningFailureDiagnosis,
   readDiagnosis,
   readLatestDiagnosisForPhase,
   clearPhaseDiagnosis,
   clearRunDiagnosis,
   writeBlueprint,
   writeCheckReport,
+  writeVerifyStepsReport,
+  readVerifyStepsReport,
   tearDownComposeInDir,
   tearDownAllProjectWorktreeCompose,
   freePublishedHostPorts,
@@ -137,6 +140,7 @@ import {
   CONTINUE_INTENT_DEFAULT,
   fallbackContinueIntentFromText,
   normalizeContinueIntent,
+  textSignalsReuseProjectDesign,
   continueIntentAllowsLogoSwap,
   formatContinueIntentPromptBlock,
   readSharedDesignImport,
@@ -144,6 +148,10 @@ import {
   detectShareSourceFromText,
   readShareableDesign,
   importDesignShareIntoLoop,
+  pickProjectPriorDesign,
+  importProjectPriorDesignIntoLoop,
+  readProjectPriorDesignImport,
+  formatProjectPriorDesignPromptBlock,
   extractSiblingProjectPaths,
   unpinDesignLoopSelection,
   pinDesignLoopLogoAsset,
@@ -462,9 +470,20 @@ function persistCheckOutput(
   name: string,
   output: string,
   ok?: boolean,
+  checks?: SuccessCheckResult,
 ): string {
   const path = writeCheckReport(project.rootPath, run.id, name, output);
   log(project, run, `--- Check report written: ${path} ---`);
+  if (checks?.steps?.length) {
+    const report = writeVerifyStepsReport(project.rootPath, run.id, checks);
+    log(
+      project,
+      run,
+      `--- Verify steps written (${report.steps.length} steps, ok=${report.ok})${
+        report.firstFailure ? ` firstFailure=${report.firstFailure.id}` : ""
+      } ---`,
+    );
+  }
   slog.info("orchestrator", `check report ${name}`, {
     projectId: project.id,
     runId: run.id,
@@ -2132,11 +2151,18 @@ ${message.trim()}`;
       }
       continueIntent = normalizeContinueIntent(continueIntent, continueText);
     } else {
-      continueIntent = {
-        ...CONTINUE_INTENT_DEFAULT,
-        scope: "full_revise",
-        preserveChrome: false,
-      };
+      const startText = brief || desc;
+      // Fresh loop that asks for this project's existing theming — classify reuse
+      // instead of inventing a blank full_revise palette.
+      if (textSignalsReuseProjectDesign(startText)) {
+        continueIntent = fallbackContinueIntentFromText(startText);
+      } else {
+        continueIntent = {
+          ...CONTINUE_INTENT_DEFAULT,
+          scope: "full_revise",
+          preserveChrome: false,
+        };
+      }
     }
 
     // Conceptual model scope: classify on start; patch on continue from intent/chat.
@@ -2253,6 +2279,49 @@ ${message.trim()}`;
 
     // Deterministic icon-pack derive + patch before any agent rewrite.
     let workingPreviousHtml = previousHtml;
+    // Seed same-project prior design when operator asks to reuse current theming.
+    // Sibling SHARED_FROM stays separate; PRIOR_DESIGN.json is the intentional self path.
+    let priorDesignImport = readProjectPriorDesignImport(project.rootPath, loopId);
+    const wantsPriorDesign =
+      continueIntent.reuseProjectDesign ||
+      textSignalsReuseProjectDesign(isContinue ? continueText : brief || desc);
+    if (wantsPriorDesign && !priorDesignImport) {
+      try {
+        const prior = pickProjectPriorDesign(project.rootPath, {
+          excludeLoopId: loopId,
+        });
+        if (prior) {
+          priorDesignImport = importProjectPriorDesignIntoLoop({
+            projectRoot: project.rootPath,
+            loopId,
+            prior,
+          });
+          slog.info("design-loop", "seeded prior project design", {
+            loopId,
+            kind: prior.kind,
+            sourceLoopId: prior.loopId,
+            sourcePhaseId: prior.phaseId,
+            hasMock: Boolean(prior.mockHtml?.trim()),
+            tokenChars: prior.tokensCss.length,
+          });
+        } else {
+          slog.warn("design-loop", "reuseProjectDesign but no prior design found", {
+            loopId,
+          });
+        }
+      } catch (err) {
+        slog.warn("design-loop", "prior project design seed failed", {
+          loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (
+      !workingPreviousHtml?.trim() &&
+      priorDesignImport?.mockHtml?.trim()
+    ) {
+      workingPreviousHtml = priorDesignImport.mockHtml;
+    }
     let assetPatchNotes = "";
     const wantsIconPack =
       continueIntent.wantsAssetEdit &&
@@ -2370,25 +2439,29 @@ ${message.trim()}`;
       designLoopNeedsMediaTools(brief, message) || continueIntent.inventLogo;
     const needsEdit =
       designLoopAskNeedsImageEdit(desc) && !continueIntent.inventLogo;
-    const modeBlock = isContinue
-      ? formatContinueIntentPromptBlock(continueIntent)
-      : "";
+    const modeBlock =
+      isContinue || continueIntent.reuseProjectDesign
+        ? formatContinueIntentPromptBlock(continueIntent)
+        : "";
 
-    // Chat-driven design share: "pull the theme from <registered project>" auto-imports.
-    // Gate: adopt-theme intent, brand/palette/typography targets, or an explicit path.
-    // Do NOT treat inventLogo alone as a share request (avoids self-alias traps).
-    if (isContinue && message?.trim()) {
-      const mentionsPath = extractSiblingProjectPaths(message).length > 0;
+    // Chat-driven sibling design share: "pull the theme from <registered project>".
+    // Runs on start and continue. Same-project reuse uses PRIOR_DESIGN (above).
+    // Sibling wins for SHARED_FROM only when a resolvable other project is named.
+    const shareText = (isContinue ? message : brief || desc)?.trim() ?? "";
+    let siblingShareImported = false;
+    if (shareText && !continueIntent.reuseProjectDesign) {
+      const mentionsPath = extractSiblingProjectPaths(shareText).length > 0;
       const wantsSharedDesign =
         continueIntent.adoptTheme ||
         mentionsPath ||
-        continueIntent.targets.some((t) =>
-          ["palette", "tokens", "typography", "brand"].includes(t),
-        );
+        (!wantsPriorDesign &&
+          continueIntent.targets.some((t) =>
+            ["palette", "tokens", "typography", "brand"].includes(t),
+          ));
       if (wantsSharedDesign) {
         const detected = detectShareSourceFromText({
           targetRoot: project.rootPath,
-          text: message,
+          text: shareText,
           listProjects: input.listProjects,
           findProjectByRootPath: input.findProjectByRootPath,
         });
@@ -2401,6 +2474,7 @@ ${message.trim()}`;
                 loopId,
                 share,
               });
+              siblingShareImported = true;
               slog.info("design-loop", "auto-imported shared design from chat", {
                 loopId,
                 from: detected.name ?? detected.rootPath,
@@ -2425,10 +2499,19 @@ ${message.trim()}`;
       }
     }
 
-    // Cross-project design share: SHARED DESIGN outranks LIVE SITE for palette/logos.
+    // Cross-project SHARED DESIGN outranks LIVE SITE; PRIOR DESIGN same for same-project reuse.
     const sharedImport = readSharedDesignImport(project.rootPath, loopId);
     const sharedDesignBlock = formatSharedDesignPromptBlock(sharedImport);
-    const sharedDesignActive = Boolean(sharedDesignBlock) || continueIntent.adoptTheme;
+    // When sibling was just imported, prefer SHARED; otherwise expose PRIOR DESIGN.
+    const priorDesignBlock =
+      siblingShareImported || sharedDesignBlock
+        ? ""
+        : formatProjectPriorDesignPromptBlock(priorDesignImport);
+    const sharedDesignActive =
+      Boolean(sharedDesignBlock) ||
+      Boolean(priorDesignBlock) ||
+      continueIntent.adoptTheme ||
+      continueIntent.reuseProjectDesign;
     siteInventoryBlock = formatLiveSiteInventoryPromptBlock(siteInventory, 6_500, {
       sharedDesignActive,
     });
@@ -2436,6 +2519,12 @@ ${message.trim()}`;
       slog.info("design-loop", "shared design import active", {
         loopId,
         from: sharedImport?.source.name ?? sharedImport?.source.rootPath,
+      });
+    } else if (priorDesignBlock) {
+      slog.info("design-loop", "prior project design active", {
+        loopId,
+        kind: priorDesignImport?.kind,
+        sourceLoopId: priorDesignImport?.sourceLoopId,
       });
     }
 
@@ -2518,9 +2607,13 @@ ${message.trim()}`;
       forMock: true,
     });
 
-    const authorityCritical = sharedDesignActive
+    const authorityCritical = sharedDesignBlock
       ? "CRITICAL: SHARED DESIGN (or adopt-theme sibling excerpts) is authoritative for palette, tokens, dual theme, and logos. LIVE SITE is authoritative for nav labels/hrefs, routes, and extracted screen copy only — do not invent menu items or purple/cream palettes. For screens with extracted headings/columns/fields/buttons, use that copy verbatim."
-      : "CRITICAL: LIVE SITE inventory below is authoritative for nav labels/hrefs, routes, tokens, logos, and extracted screen copy / entity fields. Do not invent menu items. For screens with extracted headings/columns/fields/buttons, use that copy verbatim — do not lorem-ipsum. Invent content only for routes with no extraction. Sibling cues are secondary.";
+      : priorDesignBlock
+        ? "CRITICAL: PRIOR DESIGN (this project's existing theming / DESIGN_PACK) is authoritative for palette, tokens, dual theme, and logos. Revise from the prior mock when provided. LIVE SITE is authoritative for nav labels/hrefs, routes, and extracted screen copy only — do not invent a new purple/cream palette."
+        : sharedDesignActive
+          ? "CRITICAL: Shared/prior design authority applies for palette and tokens. LIVE SITE wins for nav/routes/screen copy only."
+          : "CRITICAL: LIVE SITE inventory below is authoritative for nav labels/hrefs, routes, tokens, logos, and extracted screen copy / entity fields. Do not invent menu items. For screens with extracted headings/columns/fields/buttons, use that copy verbatim — do not lorem-ipsum. Invent content only for routes with no extraction. Sibling cues are secondary.";
 
     const prompt = `Design loop ${loopId} — produce version v${version} mock HTML.
 
@@ -2532,12 +2625,14 @@ ${needsEdit
   ? "Operator asked for an IMAGE EDIT (alpha/icon pack/resize). Call make_transparent / derive_icon_pack / resize_image — do NOT generate_image. Prefer pinned / true RGBA sources."
   : continueIntent.inventLogo
     ? "Operator asked for a NEW logo. Call generate_image with inventNew=true, embed the new relativePath, then pin_logo that filename. Do not reuse the superseded pin."
-    : "When inventing a new mark, call generate_image with inventNew=true if a logo was previously pinned. For stock photos use search_images / import_image. For look critique use review_look."}
+    : continueIntent.reuseProjectDesign
+      ? "Operator asked to reuse this project's existing theming. Prefer PRIOR DESIGN tokens/logos and revise from the prior mock — do not invent a new brand system."
+      : "When inventing a new mark, call generate_image with inventNew=true if a logo was previously pinned. For stock photos use search_images / import_image. For look critique use review_look."}
 Otherwise prefer writing the mock with few or zero tool calls.
 
 ${selectionsBlock}
 
-${sharedDesignBlock ? `${sharedDesignBlock}\n` : ""}${elementsBlock ? `${elementsBlock}\n` : ""}${siteInventoryBlock ? `${siteInventoryBlock}\n` : ""}
+${sharedDesignBlock ? `${sharedDesignBlock}\n` : ""}${priorDesignBlock ? `${priorDesignBlock}\n` : ""}${elementsBlock ? `${elementsBlock}\n` : ""}${siteInventoryBlock ? `${siteInventoryBlock}\n` : ""}
 Brief:
 ${clipPromptSection("brief", brief, 3_000)}
 
@@ -3192,6 +3287,21 @@ ${message.trim()}`;
             run,
             `ERROR: ${opened.message ?? "needs_intent — provide a non-empty description/intent"}`,
           );
+          writeDiagnosis(
+            project.rootPath,
+            run.id,
+            buildPlanningFailureDiagnosis({
+              stage: "research",
+              title: "Research failed: needs intent",
+              detail:
+                opened.message ??
+                "needs_intent — provide a non-empty description/intent",
+              phaseId: phase.id,
+              runId: run.id,
+              kind: "needs-intent",
+            }),
+            phase.id,
+          );
           return "failed";
         }
         log(
@@ -3204,6 +3314,19 @@ ${message.trim()}`;
         const opened = await this.openProject({ project });
         if (opened.blueprintStatus === "needs_intent") {
           log(project, run, `ERROR: ${opened.message ?? "needs_intent"}`);
+          writeDiagnosis(
+            project.rootPath,
+            run.id,
+            buildPlanningFailureDiagnosis({
+              stage: "research",
+              title: "Research failed: needs intent",
+              detail: opened.message ?? "needs_intent",
+              phaseId: phase.id,
+              runId: run.id,
+              kind: "needs-intent",
+            }),
+            phase.id,
+          );
           return "failed";
         }
       }
@@ -3275,16 +3398,17 @@ ${planContractBlock}
       project.rootPath,
       phase.id,
     );
-    const acceptanceBlock = formatAcceptancePromptBlock(designAcceptance);
-    const designPackBlock = formatDesignPackPromptBlock(
-      readPhaseDesignPack(project.rootPath, phase.id),
-    );
+    const phasePackForResearch = readPhaseDesignPack(project.rootPath, phase.id);
+    const acceptanceBlock = formatAcceptancePromptBlock(designAcceptance, {
+      inScopeIds: phasePackForResearch?.inScope,
+      alreadyAppliedIds: phasePackForResearch?.alreadyApplied,
+    });
+    const designPackBlock = formatDesignPackPromptBlock(phasePackForResearch);
     const boundMockBlock = formatPhaseBoundMockPromptBlock({
       projectRoot: project.rootPath,
       phaseId: phase.id,
       maxHtmlChars: 10_000,
     });
-    const phasePackForResearch = readPhaseDesignPack(project.rootPath, phase.id);
     const themeResearchNote =
       packHasThemeModes(phasePackForResearch) ||
       designAcceptance?.features?.some(
@@ -3510,6 +3634,19 @@ Phase id: ${phase.id}`;
         phaseId: phase.id,
         runId: run.id,
       });
+      writeDiagnosis(
+        project.rootPath,
+        run.id,
+        buildPlanningFailureDiagnosis({
+          stage: "research",
+          title: "Research failed: empty RESEARCH.md",
+          detail: "Research resolve produced an empty document.",
+          phaseId: phase.id,
+          runId: run.id,
+          kind: "empty-research",
+        }),
+        phase.id,
+      );
       return "failed";
     }
 
@@ -3603,8 +3740,11 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       project.rootPath,
       phase.id,
     );
-    const draftAcceptanceBlock = formatAcceptancePromptBlock(draftAcceptance);
     const draftPhasePack = readPhaseDesignPack(project.rootPath, phase.id);
+    const draftAcceptanceBlock = formatAcceptancePromptBlock(draftAcceptance, {
+      inScopeIds: draftPhasePack?.inScope,
+      alreadyAppliedIds: draftPhasePack?.alreadyApplied,
+    });
     const draftPackBlock = formatDesignPackPromptBlock(draftPhasePack);
     const draftPlanBlock = formatPhaseBoundPlanPromptBlock({
       projectRoot: project.rootPath,
@@ -3715,6 +3855,23 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
           `${reason}\n--- Engagement Change Intent: refusing Intent-breaking scaffold; fail closed (retry draft) ---`,
         );
         writePhaseStatus(project.rootPath, phase.id, "draft");
+        writeDiagnosis(
+          project.rootPath,
+          run.id,
+          buildPlanningFailureDiagnosis({
+            stage: "draft",
+            title: "Draft rejected: engagement Change Intent (no scaffold)",
+            detail: `${reason}\nRefusing Intent-breaking scaffold for interaction mount=${intent.interaction.mount}.`,
+            phaseId: phase.id,
+            runId: run.id,
+            kind: "change-intent-scaffold-refused",
+            operatorActions: [
+              "Retry draft so Success Criteria / Automated Checks prove fill+submit at the locked mount and live AI SDK static tool-part name resolution (type: tool-<name> / parseToolResult / extractActiveForm).",
+              "Do not rely on summary-chip-only or tool-invocation+toolName fixtures.",
+            ],
+          }),
+          phase.id,
+        );
         return "failed";
       }
       const scaffolded = scaffoldPhaseDoc({
@@ -3728,14 +3885,43 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
       writePhaseDoc(project.rootPath, phase.id, scaffolded);
     };
 
-    const recoverableDraftFail = (detail: string): RunStage => {
+    const recoverableDraftFail = (
+      detail: string,
+      opts?: { title?: string; kind?: string },
+    ): RunStage => {
       log(
         project,
         run,
         `ERROR drafting PHASE.md (research intact). Handoff: retry draft.\n${detail}`,
       );
       writePhaseStatus(project.rootPath, phase.id, "draft");
+      const kind =
+        opts?.kind ??
+        (/change intent|tool-<|parseToolResult|extractActiveForm|uiMount/i.test(
+          detail,
+        )
+          ? "change-intent"
+          : "draft-failed");
+      writeDiagnosis(
+        project.rootPath,
+        run.id,
+        buildPlanningFailureDiagnosis({
+          stage: "draft",
+          title: opts?.title ?? "Draft rejected",
+          detail,
+          phaseId: phase.id,
+          runId: run.id,
+          kind,
+        }),
+        phase.id,
+      );
       return "failed";
+    };
+
+    const intentIssuesForDoc = (doc: string): string[] => {
+      if (!doc?.trim()) return [];
+      const align = phaseDocAlignsWithChangeIntent(doc, intent);
+      return align.ok ? [] : align.issues;
     };
 
     let output: string | null = null;
@@ -3802,34 +3988,46 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         research,
       });
 
+      let intentIssues =
+        resolved.source !== "none" && resolved.gate.ok
+          ? intentIssuesForDoc(resolved.doc)
+          : [];
+
       const needsRepair =
         !resolved.gate.ok ||
         resolved.source === "none" ||
-        (resolved.alignIssues?.length ?? 0) > 0;
+        (resolved.alignIssues?.length ?? 0) > 0 ||
+        intentIssues.length > 0;
 
       if (needsRepair) {
         const alignBlock =
           resolved.alignIssues && resolved.alignIssues.length > 0
             ? `Research alignment issues:\n${resolved.alignIssues.map((i) => `- ${i}`).join("\n")}\n`
             : "";
-        slog.warn("planning", "PHASE.md failed structure/alignment gate; retrying once", {
+        const intentBlockRepair =
+          intentIssues.length > 0
+            ? `Change Intent alignment issues (MUST fix in ## Success Criteria and ## Automated Checks — not only File Changes / Known limitations):\n${intentIssues.map((i) => `- ${i}`).join("\n")}\n`
+            : "";
+        slog.warn("planning", "PHASE.md failed structure/alignment/intent gate; retrying once", {
           projectId: project.id,
           phaseId: phase.id,
           issues: resolved.gate.issues,
           alignIssues: resolved.alignIssues,
+          intentIssues,
           source: resolved.source,
           path: resolved.path,
         });
-        const repairPrompt = `Your previous PHASE.md was invalid (chat preamble, missing sections, or wrong-phase content).
+        const repairPrompt = `Your previous PHASE.md was invalid (chat preamble, missing sections, wrong-phase content, or Change Intent misalignment).
 Issues:
 ${resolved.gate.issues.map((i) => `- ${i}`).join("\n")}
-${alignBlock}
+${alignBlock}${intentBlockRepair}
 ${formatChangeIntentPromptBlock(intent)}
 Rewrite the FULL PHASE.md starting with # Title — output ONLY the markdown document (no "here is what changed").
 If you use write_file, path must be exactly: ${canonicalPath}
 Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence, no curl with API keys), ## Blueprint Deltas.
 Base Scope/File Changes ONLY on the RESEARCH below — do not copy a prior phase's host-routing plan.
 Obey Change Intent uiMount / interaction contract — do not substitute chips for a fillable mount.
+When Change Intent has an engagement interaction: ## Success Criteria and ## Automated Checks MUST prove fill+submit at the locked mount AND live AI SDK static tool-part name resolution (type: "tool-<name>" / parseToolResult / extractActiveForm) — not only tool-invocation + toolName fixtures. Put those proofs in Success Criteria / Automated Checks, not only in File Changes or Known limitations.
 End with PHASE_COMPLETE.
 
 Description:
@@ -3855,6 +4053,10 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
             description: phase.description,
             research,
           });
+          intentIssues =
+            resolved.source !== "none" && resolved.gate.ok
+              ? intentIssuesForDoc(resolved.doc)
+              : [];
         } catch (repairError) {
           repairThrew = true;
           const repairDetail = formatLlmErrorForLog(repairError);
@@ -3874,13 +4076,29 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           const stillBad =
             !resolved.gate.ok ||
             resolved.source === "none" ||
-            (resolved.alignIssues?.length ?? 0) > 0;
+            (resolved.alignIssues?.length ?? 0) > 0 ||
+            intentIssues.length > 0;
 
           if (stillBad) {
+            if (intentIssues.length > 0 && researchLooksSolid(research)) {
+              // Prefer fail-closed with diagnosis over Intent-breaking scaffold.
+              return recoverableDraftFail(
+                [
+                  ...resolved.gate.issues,
+                  ...(resolved.alignIssues ?? []),
+                  ...intentIssues,
+                ].join("; "),
+                {
+                  title: "Draft rejected: Change Intent",
+                  kind: "change-intent",
+                },
+              );
+            }
             const scaffolded = finishWithScaffold(
               `PHASE.md still invalid after repair (${[
                 ...resolved.gate.issues,
                 ...(resolved.alignIssues ?? []),
+                ...intentIssues,
               ].join("; ")}). Using scaffold so review can proceed.`,
             );
             if (scaffolded === "failed") return scaffolded;
@@ -3932,9 +4150,25 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         `PHASE.md still invalid after scaffold:\n${gate.issues.join("\n")}`,
       );
       if (researchLooksSolid(research)) {
-        return recoverableDraftFail(gate.issues.join("; "));
+        return recoverableDraftFail(gate.issues.join("; "), {
+          title: "Draft rejected: PHASE structure",
+          kind: "phase-structure",
+        });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
+      writeDiagnosis(
+        project.rootPath,
+        run.id,
+        buildPlanningFailureDiagnosis({
+          stage: "draft",
+          title: "Draft blocked: PHASE structure",
+          detail: gate.issues.join("; "),
+          phaseId: phase.id,
+          runId: run.id,
+          kind: "phase-structure-blocked",
+        }),
+        phase.id,
+      );
       return "failed";
     }
     if (!align.ok) {
@@ -3944,9 +4178,25 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         `PHASE.md still misaligned with RESEARCH after scaffold:\n${align.issues.join("\n")}`,
       );
       if (researchLooksSolid(research)) {
-        return recoverableDraftFail(align.issues.join("; "));
+        return recoverableDraftFail(align.issues.join("; "), {
+          title: "Draft rejected: RESEARCH alignment",
+          kind: "research-align",
+        });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
+      writeDiagnosis(
+        project.rootPath,
+        run.id,
+        buildPlanningFailureDiagnosis({
+          stage: "draft",
+          title: "Draft blocked: RESEARCH alignment",
+          detail: align.issues.join("; "),
+          phaseId: phase.id,
+          runId: run.id,
+          kind: "research-align-blocked",
+        }),
+        phase.id,
+      );
       return "failed";
     }
     if (!antiAudit.ok) {
@@ -3956,9 +4206,25 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         `PHASE.md review-only audit rejected for missing theme control:\n${antiAudit.issues.join("\n")}`,
       );
       if (researchLooksSolid(research)) {
-        return recoverableDraftFail(antiAudit.issues.join("; "));
+        return recoverableDraftFail(antiAudit.issues.join("; "), {
+          title: "Draft rejected: theme audit",
+          kind: "theme-audit",
+        });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
+      writeDiagnosis(
+        project.rootPath,
+        run.id,
+        buildPlanningFailureDiagnosis({
+          stage: "draft",
+          title: "Draft blocked: theme audit",
+          detail: antiAudit.issues.join("; "),
+          phaseId: phase.id,
+          runId: run.id,
+          kind: "theme-audit-blocked",
+        }),
+        phase.id,
+      );
       return "failed";
     }
     const intentAlign = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
@@ -3969,9 +4235,25 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         `PHASE.md misaligned with Change Intent uiMount=${intent.uiMount}:\n${intentAlign.issues.join("\n")}`,
       );
       if (researchLooksSolid(research)) {
-        return recoverableDraftFail(intentAlign.issues.join("; "));
+        return recoverableDraftFail(intentAlign.issues.join("; "), {
+          title: "Draft rejected: Change Intent",
+          kind: "change-intent",
+        });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
+      writeDiagnosis(
+        project.rootPath,
+        run.id,
+        buildPlanningFailureDiagnosis({
+          stage: "draft",
+          title: "Draft blocked: Change Intent",
+          detail: intentAlign.issues.join("; "),
+          phaseId: phase.id,
+          runId: run.id,
+          kind: "change-intent-blocked",
+        }),
+        phase.id,
+      );
       return "failed";
     }
 
@@ -4612,9 +4894,14 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       project.rootPath,
       phase.id,
     );
-    const developAcceptanceBlock =
-      formatAcceptancePromptBlock(developAcceptance);
     const developPhasePack = readPhaseDesignPack(project.rootPath, phase.id);
+    const developAcceptanceBlock = formatAcceptancePromptBlock(
+      developAcceptance,
+      {
+        inScopeIds: developPhasePack?.inScope,
+        alreadyAppliedIds: developPhasePack?.alreadyApplied,
+      },
+    );
     const developPackBlock = formatDesignPackPromptBlock(developPhasePack);
     const developThemeNote = packHasThemeModes(developPhasePack)
       ? `CRITICAL: Implement DESIGN_PACK.theme — html[data-theme] toggle, light token remaps for --background/--surface/--foreground, body/chrome on semantic vars (not hard-coded --color-dark-* alone).`
@@ -5404,6 +5691,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                 `iter${iteration}-root-verify`,
                 rootVerify.output,
                 rootVerify.ok,
+                rootVerify,
               );
               log(
                 project,
@@ -5533,6 +5821,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             `iter${iteration}-success`,
             checks.output,
             true,
+            checks,
           );
           log(project, run, checks.output);
           if (autoMerge && config.removeWorktreeOnComplete !== false) {
@@ -5594,6 +5883,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           `iter${iteration}-failed`,
           checks.output,
           false,
+          checks,
         );
         log(
           project,
@@ -5601,9 +5891,11 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           `SUCCESS CHECKS FAILED — diagnosis summary:\n${checks.summary}`,
         );
 
+        const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
         const diagnosis = buildFailureDiagnosis({
           output: checks.summary || checks.output,
           firstFailure: checks.firstFailure,
+          failingStepId: verifySteps?.firstFailure?.id,
           sourcePhaseId: phase.id,
           sourceRunId: run.id,
         });
@@ -5922,6 +6214,178 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         worktreeBranch: worktree.branch,
       },
     );
+  }
+
+  /**
+   * Re-run the full success-check suite in the phase worktree (no coding, no merge).
+   * Persists verify-steps.json + diagnosis on failure; clears diagnosis on success.
+   */
+  async retryVerify(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    signal?: AbortSignal;
+  }): Promise<{
+    stage: RunStage;
+    ok: boolean;
+    firstFailure?: {
+      id?: string;
+      name: string;
+      command?: string;
+      exitCode: number;
+    };
+    stepsSummary: string;
+    worktreePath?: string;
+    worktreeBranch?: string;
+  }> {
+    const { project, phase, run, signal } = input;
+    const config = readProjectConfig(project.rootPath);
+
+    log(project, run, "--- retry_verify: re-running success checks (no coding) ---");
+    writePhaseStatus(project.rootPath, phase.id, "developing");
+
+    const worktree = ensurePhaseWorktree({
+      projectRoot: project.rootPath,
+      projectId: project.id,
+      phaseId: phase.id,
+      dataDir: this.ctx.dataDir,
+      syncPaths: config.worktreeSyncPaths,
+    });
+    log(
+      project,
+      run,
+      `--- Worktree ready: ${worktree.path} (branch ${worktree.branch}) ---`,
+    );
+
+    {
+      const projectEnv = resolveProjectEnv({
+        projectRoot: project.rootPath,
+        config,
+      });
+      const llm = await resolveLlmTestEnvWithProbe({
+        projectRoot: project.rootPath,
+        config,
+      });
+      writeResolvedEnvToWorktree({
+        worktreePath: worktree.path,
+        env: { ...projectEnv.env, ...llm.env },
+      });
+      applyWorktreeComposeIsolation({
+        worktreePath: worktree.path,
+        phaseId: phase.id,
+      });
+    }
+
+    if (signal?.aborted) {
+      writePhaseStatus(project.rootPath, phase.id, "interrupted");
+      return {
+        stage: "interrupted",
+        ok: false,
+        stepsSummary: "retry_verify aborted",
+        worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+      };
+    }
+
+    const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+    let checks = await runSuccessChecks(project, phaseDoc, worktree.path, {
+      mode: "full",
+      phaseId: phase.id,
+    });
+    if (!checks.ok && isExit127CommandNotFoundFailure(checks)) {
+      log(project, run, "--- Auto deps-install after exit 127 (retry_verify) ---");
+      checks = await runSuccessChecks(project, phaseDoc, worktree.path, {
+        mode: "full",
+        forceDepsInstall: true,
+        phaseId: phase.id,
+      });
+    }
+
+    persistCheckOutput(
+      project,
+      run,
+      "retry-verify",
+      checks.output,
+      checks.ok,
+      checks,
+    );
+    log(project, run, `--- retry_verify summary ---\n${checks.summary}`);
+
+    const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
+
+    if (checks.ok) {
+      clearRunDiagnosis(project.rootPath, run.id, phase.id);
+      log(
+        project,
+        run,
+        "--- VERIFY_OK (retry_verify) — call retry_development to merge/complete ---",
+      );
+      writePhaseStatus(project.rootPath, phase.id, "interrupted");
+      return {
+        stage: "interrupted",
+        ok: true,
+        stepsSummary: checks.summary || "Verify OK",
+        worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+      };
+    }
+
+    const diagnosis = buildFailureDiagnosis({
+      output: checks.summary || checks.output,
+      firstFailure: checks.firstFailure,
+      failingStepId: verifySteps?.firstFailure?.id,
+      sourcePhaseId: phase.id,
+      sourceRunId: run.id,
+    });
+    writeDiagnosis(
+      project.rootPath,
+      run.id,
+      {
+        audience: diagnosis.audience,
+        operatorActions: diagnosis.operatorActions,
+        class: diagnosis.class,
+        confidence: diagnosis.confidence,
+        title: diagnosis.title,
+        rootCause: diagnosis.rootCause,
+        evidence: diagnosis.evidence,
+        nextActions: diagnosis.nextActions,
+        fingerprint: diagnosis.fingerprint,
+        codingAgentShouldFix: diagnosis.codingAgentShouldFix,
+        tags: diagnosis.tags,
+        failingStep: diagnosis.failingStep,
+        phaseId: phase.id,
+        runId: run.id,
+        updatedAt: new Date().toISOString(),
+      },
+      phase.id,
+    );
+    log(
+      project,
+      run,
+      `--- Failure diagnosis: ${diagnosis.class} (${diagnosis.confidence}) — ${diagnosis.title} ---`,
+    );
+    writePhaseStatus(project.rootPath, phase.id, "blocked");
+    return {
+      stage: "blocked",
+      ok: false,
+      firstFailure: verifySteps?.firstFailure
+        ? {
+            id: verifySteps.firstFailure.id,
+            name: verifySteps.firstFailure.name,
+            command: verifySteps.firstFailure.command,
+            exitCode: verifySteps.firstFailure.exitCode,
+          }
+        : checks.firstFailure
+          ? {
+              name: checks.firstFailure.name,
+              command: checks.firstFailure.command,
+              exitCode: checks.firstFailure.exitCode,
+            }
+          : undefined,
+      stepsSummary: checks.summary || "Verify failed",
+      worktreePath: worktree.path,
+      worktreeBranch: worktree.branch,
+    };
   }
 }
 

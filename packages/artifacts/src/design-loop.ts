@@ -31,6 +31,12 @@ export type DesignLoopMeta = {
   askId?: string;
   currentVersion: number;
   acceptedVersion?: number;
+  /**
+   * Features shipped via the last successful implement_design bind.
+   * Used so a logo-only extension accept does not re-open prior screens/theme.
+   */
+  lastImplementedVersion?: number;
+  lastImplementedFeatureIds?: string[];
   lastError?: DesignLoopLastError;
   /** Dynamic conceptual-model scope frame (product / shell / screen / component / flow). */
   scope?: import("./design-conceptual-model.js").DesignScope;
@@ -301,6 +307,129 @@ export function extractFeaturesFromMockHtml(
   return features;
 }
 
+function slugDesignFocus(focus: string): string {
+  return (
+    focus
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_|_$/g, "")
+      .slice(0, 40) || "element"
+  );
+}
+
+/**
+ * Feature ids that remain eligible to keep `accepted: true` on a narrow
+ * continue (component/logo/icon). `null` means preserve all prior ticks.
+ */
+export function preservableAcceptedFeatureIdsForScope(
+  scope: import("./design-conceptual-model.js").DesignScope | null | undefined,
+): Set<string> | null {
+  if (!scope) return null;
+  if (scope.kind === "product") return null;
+  const slug = slugDesignFocus(scope.focus);
+  const keep = new Set<string>([`focus_${slug}`]);
+  if (scope.kind === "component" || scope.kind === "flow") {
+    if (/logo|mark|icon/i.test(scope.focus)) keep.add("logo");
+    if (/palette|token|color/i.test(scope.focus)) keep.add("palette");
+    if (/type|typograph|font/i.test(scope.focus)) keep.add("type");
+    if (/chat|composer/i.test(scope.focus)) {
+      keep.add("focus_chat");
+      keep.add("focus_chat_composer");
+    }
+    return keep;
+  }
+  if (scope.kind === "shell") {
+    keep.add("applied_shell");
+    if (/theme/i.test(scope.focus)) keep.add("theme_modes");
+    if (/logo|mark|icon/i.test(scope.focus)) keep.add("logo");
+    if (/palette|token|color/i.test(scope.focus)) keep.add("palette");
+    if (/nav|menubar/i.test(scope.focus)) keep.add("applied_shell");
+    return keep;
+  }
+  if (scope.kind === "screen") {
+    keep.add(`screen_${slug}`);
+    return keep;
+  }
+  return null;
+}
+
+/** Whether this conceptual scope should clear prior acceptance ticks outside focus. */
+export function shouldResetAcceptanceTicksOutsideScope(
+  scope: import("./design-conceptual-model.js").DesignScope | null | undefined,
+): boolean {
+  return preservableAcceptedFeatureIdsForScope(scope) != null;
+}
+
+/**
+ * Resolve research/develop inScope from current ticks + last implemented set.
+ * Trusts current ticks after narrow-continue reset; strips preserved prior ticks
+ * only when every prior id is still ticked and at least one new id was added
+ * (JamPress V5 failure mode without tick reset).
+ */
+export function resolveDesignImplementInScope(opts: {
+  acceptedFeatureIds: string[];
+  lastImplementedFeatureIds?: string[] | null;
+}): { inScope: string[]; alreadyApplied: string[] } {
+  const accepted = [
+    ...new Set(opts.acceptedFeatureIds.map((id) => String(id).trim()).filter(Boolean)),
+  ];
+  const last = [
+    ...new Set(
+      (opts.lastImplementedFeatureIds ?? [])
+        .map((id) => String(id).trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (last.length === 0) {
+    return { inScope: accepted, alreadyApplied: [] };
+  }
+  const lastSet = new Set(last);
+  const newOnly = accepted.filter((id) => !lastSet.has(id));
+  const allPriorStillTicked = last.every((id) => accepted.includes(id));
+  if (allPriorStillTicked && newOnly.length > 0) {
+    return { inScope: newOnly, alreadyApplied: last };
+  }
+  return { inScope: accepted, alreadyApplied: last };
+}
+
+/** Phase description for implement_design → research after a design accept. */
+export function phaseDescriptionFromDesignAccept(opts: {
+  request?: string | null;
+  briefFallback: string;
+  inScopeIds: string[];
+  features?: DesignLoopAcceptanceFeature[];
+  /** When true, prefer request + delta labels over the original loop brief. */
+  isExtensionImplement?: boolean;
+}): string {
+  const labelFor = (id: string): string => {
+    const hit = opts.features?.find((f) => f.id === id);
+    return hit?.label?.trim() || id;
+  };
+  const request = (opts.request ?? "").trim();
+  const brief = opts.briefFallback.trim();
+  const scopeLines = opts.inScopeIds.map((id) => `- ${id}: ${labelFor(id)}`);
+  if (opts.isExtensionImplement) {
+    const head =
+      request ||
+      (opts.inScopeIds.length
+        ? `Implement accepted design extension: ${opts.inScopeIds.join(", ")}`
+        : brief);
+    const parts = [
+      head.slice(0, 800),
+      "",
+      "In scope for this implement (delta vs prior applied design):",
+      ...(scopeLines.length ? scopeLines : ["- (none)"]),
+    ];
+    return parts.join("\n").slice(0, 4_000);
+  }
+  if (request && request !== brief) {
+    return [request.slice(0, 800), "", brief.slice(0, 1_200)]
+      .join("\n")
+      .slice(0, 4_000);
+  }
+  return brief.slice(0, 4_000);
+}
+
 /** Merge proposed features with prior ticks (preserve accepted when id matches). */
 export function mergeAcceptanceFeatures(
   proposed: DesignLoopAcceptanceFeature[],
@@ -308,6 +437,12 @@ export function mergeAcceptanceFeatures(
   opts?: {
     scope?: import("./design-conceptual-model.js").DesignScope | null;
     includeThemeModes?: boolean;
+    /**
+     * When set, only these feature ids may keep prior `accepted: true`.
+     * Others are listed but forced to `accepted: false`. Matching scope
+     * fallbacks are defaulted to accepted for a ready logo-only accept.
+     */
+    preserveAcceptedIds?: Set<string> | null;
   },
 ): DesignLoopAcceptanceFeature[] {
   // Lazy import avoids circular init with conceptual-model helpers.
@@ -319,7 +454,20 @@ export function mergeAcceptanceFeatures(
   const fallbacks = fallbackFeaturesForScope(scope, {
     includeThemeModes: opts?.includeThemeModes,
   });
+  const preserve = opts?.preserveAcceptedIds ?? null;
   const priorMap = new Map((prior ?? []).map((f) => [f.id, f.accepted]));
+  const resolveAccepted = (id: string, fallbackAccepted: boolean): boolean => {
+    if (!preserve) {
+      return priorMap.has(id) ? Boolean(priorMap.get(id)) : fallbackAccepted;
+    }
+    if (preserve.has(id)) {
+      // Prefer prior tick when present; otherwise default in-scope to true so
+      // a logo-only continue is ready to accept without re-ticking.
+      if (priorMap.has(id)) return Boolean(priorMap.get(id));
+      return true;
+    }
+    return false;
+  };
   const base =
     proposed.length > 0
       ? proposed
@@ -327,12 +475,15 @@ export function mergeAcceptanceFeatures(
   const seen = new Set(base.map((f) => f.id));
   const merged = base.map((f) => ({
     ...f,
-    accepted: priorMap.has(f.id) ? Boolean(priorMap.get(f.id)) : f.accepted,
+    accepted: resolveAccepted(f.id, f.accepted),
   }));
   // Keep prior-only ids that were ticked (operator custom) when still relevant
   for (const f of prior ?? []) {
     if (seen.has(f.id)) continue;
-    merged.push({ ...f });
+    merged.push({
+      ...f,
+      accepted: resolveAccepted(f.id, f.accepted),
+    });
     seen.add(f.id);
   }
   // Ensure scope fallbacks exist when mock had partial sections
@@ -341,7 +492,7 @@ export function mergeAcceptanceFeatures(
     if (merged.some((x) => x.id === fb.id)) continue;
     merged.push({
       ...fb,
-      accepted: priorMap.has(fb.id) ? Boolean(priorMap.get(fb.id)) : false,
+      accepted: resolveAccepted(fb.id, false),
     });
     seen.add(fb.id);
   }
@@ -352,7 +503,7 @@ export function mergeAcceptanceFeatures(
       if (seen.has(fb.id)) continue;
       merged.push({
         ...fb,
-        accepted: priorMap.has(fb.id) ? Boolean(priorMap.get(fb.id)) : false,
+        accepted: resolveAccepted(fb.id, false),
       });
       seen.add(fb.id);
     }
@@ -394,13 +545,19 @@ export function writeDesignLoopAcceptance(
 
 /**
  * Seed/refresh ACCEPTANCE.json from mock HTML after start/continue/retry.
- * Preserves prior ticks by feature id. Scope-aware fallbacks + theme_modes.
+ * Preserves prior ticks by feature id unless the loop conceptual scope is
+ * narrow (component/logo/…), in which case out-of-focus prior ticks are cleared.
  */
 export function seedDesignLoopAcceptanceFromHtml(opts: {
   projectRoot: string;
   loopId: string;
   version: number;
   html: string;
+  /**
+   * When true, clear prior ticks outside the current conceptual scope.
+   * Defaults to true when META.scope is component/flow/shell/screen.
+   */
+  resetOutsideScope?: boolean;
 }): DesignLoopAcceptance {
   const prior = readDesignLoopAcceptance(opts.projectRoot, opts.loopId);
   const meta = readDesignLoopMeta(opts.projectRoot, opts.loopId);
@@ -418,9 +575,15 @@ export function seedDesignLoopAcceptanceFromHtml(opts: {
       accepted: false,
     });
   }
+  const reset =
+    opts.resetOutsideScope ?? shouldResetAcceptanceTicksOutsideScope(scope);
+  const preserveAcceptedIds = reset
+    ? preservableAcceptedFeatureIdsForScope(scope)
+    : null;
   const features = mergeAcceptanceFeatures(extracted, prior?.features, {
     scope,
     includeThemeModes: Boolean(theme),
+    preserveAcceptedIds,
   });
   const acceptance: DesignLoopAcceptance = {
     version: opts.version,
@@ -491,21 +654,47 @@ export function readPhaseDesignAcceptance(
 /** Prompt block for research / draft / develop. */
 export function formatAcceptancePromptBlock(
   acceptance: DesignLoopAcceptance | null | undefined,
+  opts?: {
+    /** Feature ids treated as the implement change set (delta). */
+    inScopeIds?: string[] | null;
+    /** Previously shipped feature ids — do not re-plan unless also inScope. */
+    alreadyAppliedIds?: string[] | null;
+  },
 ): string {
   if (!acceptance?.features?.length) {
     return `Design-loop acceptance checklist: (missing — operator must accept features before implement)`;
   }
-  const yes = acceptance.features.filter((f) => f.accepted);
-  const no = acceptance.features.filter((f) => !f.accepted);
+  const inScopeSet =
+    opts?.inScopeIds != null
+      ? new Set(opts.inScopeIds)
+      : new Set(
+          acceptance.features.filter((f) => f.accepted).map((f) => f.id),
+        );
+  const alreadySet = new Set(opts?.alreadyAppliedIds ?? []);
+  const yes = acceptance.features.filter((f) => inScopeSet.has(f.id));
+  const applied = acceptance.features.filter(
+    (f) => alreadySet.has(f.id) && !inScopeSet.has(f.id),
+  );
+  const no = acceptance.features.filter(
+    (f) => !inScopeSet.has(f.id) && !alreadySet.has(f.id),
+  );
   const lines = [
     `Design-loop acceptance checklist (v${acceptance.version}${acceptance.acceptedAt ? `, accepted ${acceptance.acceptedAt}` : ""}):`,
-    `IN SCOPE (must plan File Changes / Success Criteria / Automated Checks for each):`,
+    `IN SCOPE (must plan File Changes / Success Criteria / Automated Checks for each — delta for this phase only):`,
     ...(yes.length
       ? yes.map((f) => `- [x] ${f.id}: ${f.label}`)
       : ["- (none — invalid)"]),
+  ];
+  if (applied.length) {
+    lines.push(
+      `ALREADY APPLIED (prior implement — do not re-theme / re-land / re-shell unless also IN SCOPE):`,
+      ...applied.map((f) => `- [~] ${f.id}: ${f.label}`),
+    );
+  }
+  lines.push(
     `OUT OF SCOPE (mustNot — do not expand into this phase):`,
     ...(no.length ? no.map((f) => `- [ ] ${f.id}: ${f.label}`) : ["- (none)"]),
-  ];
+  );
   return lines.join("\n");
 }
 
@@ -634,8 +823,9 @@ export function formatPhaseBoundMockPromptBlock(opts: {
 
   const relMock = `.slopcontrol/phases/${opts.phaseId}/design/mock.html`;
   const parts: string[] = [
-    `Accepted design-loop mock (authoritative visual contract):`,
-    `- Full mock: \`${relMock}\` — RESEARCH must cite this path and plan File Changes against it.`,
+    `Accepted design-loop mock (authoritative visual reference for IN-SCOPE features only):`,
+    `- Full mock: \`${relMock}\` — RESEARCH must cite this path and plan File Changes against **accepted checklist items only** (see acceptance / DESIGN_PACK.inScope).`,
+    `- Do NOT re-implement already-applied screens/theme/shell from a prior design implement unless those features are IN SCOPE for this phase.`,
     `- Do NOT invent a competing logo/mark metaphor when assets exist under \`.slopcontrol/phases/${opts.phaseId}/design/assets/\`.`,
     `- Mount accepted assets (or copy into public/) rather than drawing a new monogram.`,
     "",
@@ -1189,10 +1379,12 @@ export function uiSpecFromDesignLoopMock(opts: {
     : "- (none)";
   const hasPalette = accepted.some((f) => f.id === "palette");
   const hasType = accepted.some((f) => f.id === "type");
-  const hasLogo = accepted.some((f) => f.id === "logo");
+  const hasLogo = accepted.some(
+    (f) => f.id === "logo" || f.id === "focus_logo" || /^focus_.*logo/i.test(f.id),
+  );
   const hasShell = accepted.some((f) => f.id === "applied_shell");
-  const hasTheme =
-    accepted.some((f) => f.id === "theme_modes") || Boolean(opts.theme);
+  // Theme is IN SCOPE only when ticked — inherited dual-theme mock HTML must not widen.
+  const hasTheme = accepted.some((f) => f.id === "theme_modes");
   const scope = opts.scope;
   const theme = opts.theme;
 
@@ -1327,6 +1519,8 @@ export function bindAcceptedDesignLoopToPhase(opts: {
   version: number;
   mockPath: string;
   uiSpecPath: string;
+  inScope: string[];
+  alreadyApplied: string[];
 } {
   const meta = readDesignLoopMeta(opts.projectRoot, opts.loopId);
   if (!meta) throw new Error(`Design loop not found: ${opts.loopId}`);
@@ -1349,6 +1543,23 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     );
   }
 
+  const acceptedIds = acceptance.features
+    .filter((f) => f.accepted)
+    .map((f) => f.id);
+  const { inScope, alreadyApplied } = resolveDesignImplementInScope({
+    acceptedFeatureIds: acceptedIds,
+    lastImplementedFeatureIds: meta.lastImplementedFeatureIds,
+  });
+  const inScopeSet = new Set(inScope);
+  /** Phase checklist reflects implement delta (not preserved prior ticks). */
+  const phaseAcceptance: DesignLoopAcceptance = {
+    ...acceptance,
+    features: acceptance.features.map((f) => ({
+      ...f,
+      accepted: inScopeSet.has(f.id),
+    })),
+  };
+
   const designDir = join(
     opts.projectRoot,
     SLOP_DIR,
@@ -1361,7 +1572,7 @@ export function bindAcceptedDesignLoopToPhase(opts: {
   writeFileSync(mockPath, `${html.trim()}\n`, "utf-8");
   writeFileSync(
     join(designDir, "ACCEPTANCE.json"),
-    `${JSON.stringify(acceptance, null, 2)}\n`,
+    `${JSON.stringify(phaseAcceptance, null, 2)}\n`,
     "utf-8",
   );
 
@@ -1387,18 +1598,31 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     extractThemeContractFromHtml,
   } = requireDesignPack("./design-conceptual-model.js") as typeof import("./design-conceptual-model.js");
   const scope = getDesignLoopScope(meta);
+  const request =
+    readDesignLoopRequest(opts.projectRoot, opts.loopId, version) ?? meta.brief;
   const theme = extractThemeContractFromHtml(html, {
-    request: meta.brief,
+    request,
     notes,
   });
+  const isExtensionImplement = Boolean(
+    meta.lastImplementedVersion != null ||
+      (meta.lastImplementedFeatureIds?.length ?? 0) > 0,
+  );
+  const uiSpecBrief = phaseDescriptionFromDesignAccept({
+    request,
+    briefFallback: meta.brief,
+    inScopeIds: inScope,
+    features: acceptance.features,
+    isExtensionImplement,
+  });
   const uiSpec = uiSpecFromDesignLoopMock({
-    brief: meta.brief,
+    brief: uiSpecBrief,
     loopId: opts.loopId,
     version,
     notes: notes ?? undefined,
-    acceptance,
+    acceptance: phaseAcceptance,
     scope,
-    theme,
+    theme: inScopeSet.has("theme_modes") ? theme : null,
   });
   const uiSpecFile = join(
     opts.projectRoot,
@@ -1453,15 +1677,13 @@ export function bindAcceptedDesignLoopToPhase(opts: {
   try {
     const { copyDesignPackToPhase, compileAndWriteDesignPackOnAccept } =
       requireDesignPack("./design-pack.js") as typeof import("./design-pack.js");
-    // Ensure pack exists (loops accepted before this feature).
-    if (!existsSync(join(designLoopDir(opts.projectRoot, opts.loopId), "DESIGN_PACK.json"))) {
-      compileAndWriteDesignPackOnAccept({
-        projectRoot: opts.projectRoot,
-        loopId: opts.loopId,
-        version,
-        acceptance,
-      });
-    }
+    // Always recompile so extension accepts get delta inScope vs lastImplemented.
+    compileAndWriteDesignPackOnAccept({
+      projectRoot: opts.projectRoot,
+      loopId: opts.loopId,
+      version,
+      acceptance,
+    });
     copyDesignPackToPhase({
       projectRoot: opts.projectRoot,
       loopId: opts.loopId,
@@ -1484,10 +1706,15 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     /* elements optional */
   }
 
+  const shippedIds = [
+    ...new Set([...(meta.lastImplementedFeatureIds ?? []), ...inScope]),
+  ];
   const next: DesignLoopMeta = {
     ...meta,
     status: "implemented",
     phaseId: opts.phaseId,
+    lastImplementedVersion: version,
+    lastImplementedFeatureIds: shippedIds,
     updatedAt: new Date().toISOString(),
   };
   writeDesignLoopMeta(opts.projectRoot, next);
@@ -1497,5 +1724,7 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     version,
     mockPath,
     uiSpecPath: uiSpecFile,
+    inScope,
+    alreadyApplied,
   };
 }
