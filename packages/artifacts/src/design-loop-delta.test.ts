@@ -142,6 +142,8 @@ describe("design-loop delta scope (V2 full → V5 logo extension)", () => {
       inventLogoCount: 1,
       adoptTheme: false,
       reuseProjectDesign: false,
+      freshDesign: false,
+      replaceDesignFacets: [],
       adoptChrome: false,
       navAlign: false,
       preserveChrome: true,

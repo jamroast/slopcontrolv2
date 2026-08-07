@@ -169,3 +169,52 @@ describe("continue-intent-llm", () => {
     assert.equal(intent.preserveChrome, true);
   });
 });
+
+describe("continue-intent-llm facet overrides", () => {
+  it("system prompt documents inherit-by-default + facet override rules", () => {
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("freshDesign"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("replaceDesignFacets"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("INHERIT BY DEFAULT"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("clean slate"));
+  });
+
+  it("schema round-trips facet fields from LLM JSON", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "sections",
+        replaceDesignFacets: ["theme", "graphics"],
+        freshDesign: false,
+        notes: "new theme + graphics, keep logo",
+      }),
+    );
+    assert.deepEqual([...intent.replaceDesignFacets].sort(), [
+      "graphics",
+      "theme",
+    ]);
+    assert.equal(intent.freshDesign, false);
+  });
+
+  it("freshDesign from LLM expands to all facets in normalize", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "full_revise",
+        freshDesign: true,
+        notes: "rebrand from scratch",
+      }),
+    );
+    assert.deepEqual([...intent.replaceDesignFacets].sort(), [
+      "graphics",
+      "layout",
+      "logo",
+      "theme",
+    ]);
+  });
+
+  it("omitted facet fields default to full inherit", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({ scope: "full_revise", notes: "new dashboard mock" }),
+    );
+    assert.equal(intent.freshDesign, false);
+    assert.deepEqual(intent.replaceDesignFacets, []);
+  });
+});

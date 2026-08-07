@@ -512,3 +512,106 @@ describe("inventLogoCount", () => {
     assert.match(one, /pin_logo that filename/);
   });
 });
+
+describe("design facet inheritance", () => {
+  it("schema defaults: nothing replaced, no clean slate", () => {
+    const intent = ContinueIntentSchema.parse({ scope: "sections" });
+    assert.equal(intent.freshDesign, false);
+    assert.deepEqual(intent.replaceDesignFacets, []);
+    assert.deepEqual(CONTINUE_INTENT_DEFAULT.replaceDesignFacets, []);
+    assert.equal(CONTINUE_INTENT_DEFAULT.freshDesign, false);
+  });
+
+  it("normalize: inventLogo carves out the logo facet", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "logo_invent",
+        inventLogo: true,
+        targets: ["logo"],
+      }),
+    );
+    assert.ok(intent.replaceDesignFacets.includes("logo"));
+    assert.equal(intent.freshDesign, false);
+    // Other facets still inherit.
+    assert.ok(!intent.replaceDesignFacets.includes("theme"));
+    assert.ok(!intent.replaceDesignFacets.includes("graphics"));
+  });
+
+  it("normalize: freshDesign expands to all four facets", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({ scope: "full_revise", freshDesign: true }),
+    );
+    assert.deepEqual(
+      [...intent.replaceDesignFacets].sort(),
+      ["graphics", "layout", "logo", "theme"],
+    );
+  });
+
+  it("fallback: plain start brief inherits everything (no facets, no fresh)", () => {
+    const intent = fallbackContinueIntentFromText(
+      "create a new dashboard mock for the app",
+    );
+    assert.equal(intent.freshDesign, false);
+    assert.deepEqual(intent.replaceDesignFacets, []);
+  });
+
+  it("fallback: 'new logo' replaces only the logo", () => {
+    const intent = fallbackContinueIntentFromText(
+      "give me a new logo for the site",
+    );
+    assert.equal(intent.inventLogo, true);
+    assert.ok(intent.replaceDesignFacets.includes("logo"));
+    assert.ok(!intent.replaceDesignFacets.includes("theme"));
+    assert.equal(intent.freshDesign, false);
+  });
+
+  it("fallback: 'new theme and graphics' keeps logo and layout", () => {
+    const intent = fallbackContinueIntentFromText(
+      "I want a new theme and new graphics for the landing page",
+    );
+    assert.ok(intent.replaceDesignFacets.includes("theme"));
+    assert.ok(intent.replaceDesignFacets.includes("graphics"));
+    assert.ok(!intent.replaceDesignFacets.includes("logo"));
+    assert.ok(!intent.replaceDesignFacets.includes("layout"));
+    assert.equal(intent.freshDesign, false);
+  });
+
+  it("fallback: rebrand / from scratch signals a full clean slate", () => {
+    for (const text of [
+      "rebrand — completely new look, start over",
+      "scrap the current design, from scratch",
+      "complete redesign of the whole site",
+    ]) {
+      const intent = fallbackContinueIntentFromText(text);
+      assert.equal(intent.freshDesign, true, text);
+      assert.deepEqual(
+        [...intent.replaceDesignFacets].sort(),
+        ["graphics", "layout", "logo", "theme"],
+        text,
+      );
+    }
+  });
+
+  it("prompt block describes facet carve-outs", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "sections",
+        replaceDesignFacets: ["theme", "graphics"],
+      }),
+    );
+    const block = formatContinueIntentPromptBlock(intent);
+    assert.match(block, /REPLACE ONLY: theme, graphics/);
+    const fresh = formatContinueIntentPromptBlock(
+      normalizeContinueIntentStructured(
+        ContinueIntentSchema.parse({ scope: "full_revise", freshDesign: true }),
+      ),
+    );
+    assert.match(fresh, /FRESH DESIGN/);
+    // Plain inherit (no facets, no fresh) adds no carve-out lines.
+    const plain = formatContinueIntentPromptBlock(
+      ContinueIntentSchema.parse({ scope: "sections" }),
+    );
+    assert.ok(!/REPLACE ONLY/.test(plain));
+    assert.ok(!/FRESH DESIGN/.test(plain));
+  });
+});

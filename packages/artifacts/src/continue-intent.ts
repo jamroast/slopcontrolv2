@@ -37,6 +37,21 @@ export const ContinueIntentTargetSchema = z.enum([
 ]);
 export type ContinueIntentTarget = z.infer<typeof ContinueIntentTargetSchema>;
 
+/**
+ * Design facets a fresh loop can inherit. The operator's intent declares which
+ * facets are being REPLACED; every facet not listed inherits from the
+ * project's current design (prior loop tokens/mock + pinned brand assets).
+ */
+export const DesignFacetSchema = z.enum(["theme", "logo", "graphics", "layout"]);
+export type DesignFacet = z.infer<typeof DesignFacetSchema>;
+
+export const ALL_DESIGN_FACETS: DesignFacet[] = [
+  "theme",
+  "logo",
+  "graphics",
+  "layout",
+];
+
 /** Optional conceptual-model scope patch from continue classification. */
 export const DesignScopePatchSchema = z
   .object({
@@ -89,9 +104,23 @@ export const ContinueIntentSchema = z.object({
   adoptTheme: z.boolean().default(false),
   /**
    * Operator asked to reuse this project's existing theming/design pack
-   * (fresh loop after a dirty one, or "pull current theming").
+   * (fresh loop after a dirty one, or "pull current theming"). Note: fresh
+   * loops INHERIT the current design by default — this flag is the express
+   * ask; freshDesign / replaceDesignFacets are the override.
    */
   reuseProjectDesign: z.boolean().default(false),
+  /**
+   * Express clean-slate ask ("rebrand", "brand new look", "from scratch",
+   * "complete redesign"): NOTHING inherits — theme, logo, graphics, and mock
+   * layout are all replaced. Default false: inherit unless expressly told.
+   */
+  freshDesign: z.boolean().default(false),
+  /**
+   * Facets the operator expressly wants REPLACED on this loop (new theme, new
+   * logo, new graphics, new layout). Everything NOT listed inherits from the
+   * project's current design. freshDesign implies all four.
+   */
+  replaceDesignFacets: z.array(DesignFacetSchema).default([]),
   /**
    * Sibling project name / folder / path as stated when adoptTheme is true
    * (e.g. "jamroast-components"). Resolver uses this; do not regex-scan chat.
@@ -125,6 +154,8 @@ export const CONTINUE_INTENT_DEFAULT: ContinueIntent = {
   inventLogoCount: 1,
   adoptTheme: false,
   reuseProjectDesign: false,
+  freshDesign: false,
+  replaceDesignFacets: [],
   shareFrom: undefined,
   adoptChrome: false,
   navAlign: false,
@@ -174,6 +205,14 @@ export function continueIntentAllowsRedesign(intent: ContinueIntent): boolean {
     intent.scope === "logo_invent" ||
     intent.scope === "full_revise"
   );
+}
+
+/** True when the operator's intent replaces the given facet (else it inherits). */
+export function continueIntentReplacesFacet(
+  intent: ContinueIntent,
+  facet: DesignFacet,
+): boolean {
+  return intent.replaceDesignFacets.includes(facet);
 }
 
 export function continueIntentAllowsTokenChurn(intent: ContinueIntent): boolean {
@@ -413,6 +452,8 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
       inventLogoCount: inventLogo ? extractInventLogoCountFromText(t) : 1,
       adoptTheme,
       reuseProjectDesign,
+      freshDesign: textSignalsFreshDesign(t),
+      replaceDesignFacets: extractReplaceDesignFacetsFromText(t),
       shareFrom,
       adoptChrome,
       navAlign,
@@ -450,6 +491,69 @@ export function textSignalsMenubarContentAlign(text: string): boolean {
         t,
       ))
   );
+}
+
+/**
+ * Express clean-slate ask for THIS project — rebrand / brand new look /
+ * complete redesign / from scratch. Default-inherit means only explicit
+ * "start over" language sets this; vague "new page" briefs do not.
+ */
+export function textSignalsFreshDesign(text: string): boolean {
+  const t = text ?? "";
+  return (
+    /\brebrand\b/i.test(t) ||
+    /\bbrand\s+new\s+(?:look|design|theme|identity|brand)\b/i.test(t) ||
+    /\bnew\s+brand\s+identity\b/i.test(t) ||
+    /\bclean\s+slate\b/i.test(t) ||
+    /\bfrom\s+scratch\b/i.test(t) ||
+    /\bstart\s+over\b/i.test(t) ||
+    /\bcomplete(?:ly)?\s+(?:redesign|re-?design|overhaul)\b/i.test(t) ||
+    /\b(?:total|full|complete)\s+(?:redesign|overhaul)\b/i.test(t) ||
+    /\b(?:scrap|ditch|drop|replace)\b.{0,40}\b(?:current|existing|prior)\b.{0,40}\b(?:design|theme|theming|brand)\b/i.test(
+      t,
+    )
+  );
+}
+
+/**
+ * Offline facet extraction: which design facets the operator expressly wants
+ * replaced. Conservative — inherit-by-default means we only carve out a facet
+ * on explicit replacement language. (Logo is handled via inventLogo in
+ * normalize; graphics/layout/theme patterns here.)
+ */
+export function extractReplaceDesignFacetsFromText(text: string): DesignFacet[] {
+  const t = text ?? "";
+  const facets = new Set<DesignFacet>();
+  if (textSignalsFreshDesign(t)) return [...ALL_DESIGN_FACETS];
+  if (textSignalsInventLogo(t)) facets.add("logo");
+  if (
+    /\b(?:new|different|fresh|replace|redo|change|updated?)\b.{0,40}\b(?:theme|theming|palettes?|colo(?:u)?r\s*scheme|colo(?:u)?rs?|typography|tokens?)\b/i.test(
+      t,
+    ) ||
+    /\b(?:theme|theming|palettes?|colo(?:u)?r\s*scheme|typography|tokens?)\b.{0,40}\b(?:new|different|fresh|replace|redo)\b/i.test(
+      t,
+    )
+  ) {
+    facets.add("theme");
+  }
+  if (
+    /\b(?:new|different|fresh|replace|regenerate)\b.{0,40}\b(?:graphics?|images?|illustrations?|photos?|artwork|hero\s+(?:image|art|graphic)s?)\b/i.test(
+      t,
+    ) ||
+    /\b(?:graphics?|images?|illustrations?|artwork)\b.{0,40}\b(?:new|different|fresh|replace|regenerate)\b/i.test(
+      t,
+    )
+  ) {
+    facets.add("graphics");
+  }
+  if (
+    /\b(?:new|different|fresh|replace|redo|change)\b.{0,30}\blayout\b/i.test(t) ||
+    /\blayout\b.{0,30}\b(?:new|different|fresh|replace|redo)\b/i.test(t) ||
+    /\b(?:new|different)\s+(?:page\s+)?structure\b/i.test(t)
+  ) {
+    facets.add("layout");
+  }
+  return [...facets];
 }
 
 /**
@@ -579,6 +683,14 @@ export function normalizeContinueIntentStructured(
   }
   const wantsAssetEdit = assetOps.length > 0;
   const reuseProjectDesign = intent.reuseProjectDesign;
+  // Facet derivation: express clean-slate replaces everything; an express
+  // new-logo ask carves out the logo facet. Everything else inherits.
+  const facetSet = new Set<DesignFacet>(intent.replaceDesignFacets ?? []);
+  if (intent.freshDesign) {
+    for (const f of ALL_DESIGN_FACETS) facetSet.add(f);
+  }
+  if (inventLogo) facetSet.add("logo");
+  const replaceDesignFacets = [...facetSet];
   const adoptTheme = !reuseProjectDesign && intent.adoptTheme;
   const adoptChrome = Boolean(intent.adoptChrome);
   const menubarLayout =
@@ -677,6 +789,7 @@ export function normalizeContinueIntentStructured(
     wantsAssetEdit,
     adoptTheme,
     reuseProjectDesign,
+    replaceDesignFacets,
     adoptChrome,
     shareFrom,
     navAlign: menubarLayout ? false : intent.navAlign,
@@ -757,6 +870,15 @@ export function formatContinueIntentPromptBlock(
   if (intent.reuseProjectDesign) {
     lines.push(
       "- REUSE PROJECT DESIGN: apply this project's prior DESIGN_PACK / phase design tokens and mock (PRIOR DESIGN). Do not invent a new palette; revise from that mock. LIVE SITE wins only for nav/routes/screen copy.",
+    );
+  }
+  if (intent.freshDesign) {
+    lines.push(
+      "- FRESH DESIGN: operator expressly asked for a clean slate — do NOT reuse prior theme, mock, logo, or graphics. Invent a new design system.",
+    );
+  } else if (intent.replaceDesignFacets.length) {
+    lines.push(
+      `- REPLACE ONLY: ${intent.replaceDesignFacets.join(", ")} — every other facet (theme, logo, graphics, layout) inherits from the project's current design/brand assets. Do not redesign what was not asked for.`,
     );
   }
   if (intent.targets.length) {

@@ -2567,9 +2567,14 @@ ${message.trim()}`;
     // siteInventoryBlock rebuilt after share import (authority depends on SHARED).
     let siteInventoryBlock = formatLiveSiteInventoryPromptBlock(siteInventory);
 
-    // Brand assets ALWAYS carry: pinned assets from the latest accepted/
+    // Facet carve-outs from the operator's intent: what is being REPLACED on
+    // this loop. Everything else inherits by default.
+    const excludeFacets = continueIntent.replaceDesignFacets;
+
+    // Brand assets carry BY DEFAULT: pinned assets from the latest accepted/
     // implemented loop seed every fresh loop (strict — pins only, accepted
-    // loops only). Independent of the reuseProjectDesign intent gate.
+    // loops only). The intent's replaceDesignFacets carve out the logo pin
+    // ("new logo") and/or non-logo graphics ("new graphics").
     let brandAssetsImport = readProjectBrandAssetsImport(
       project.rootPath,
       loopId,
@@ -2584,11 +2589,13 @@ ${message.trim()}`;
             projectRoot: project.rootPath,
             loopId,
             brand,
+            excludeFacets,
           });
           slog.info("design-loop", "carried pinned brand assets", {
             loopId,
             sourceLoopId: brand.sourceLoopId,
-            assets: brand.assets,
+            assets: brandAssetsImport.assets,
+            excluded: excludeFacets,
           });
         }
       } catch (err) {
@@ -2602,10 +2609,18 @@ ${message.trim()}`;
 
     // Deterministic icon-pack derive + patch before any agent rewrite.
     let workingPreviousHtml = previousHtml;
-    // Seed same-project prior design when operator asks to reuse current theming.
-    // Sibling SHARED_FROM stays separate; PRIOR_DESIGN.json is the intentional self path.
+    // Same-project prior design (theme tokens + mock + logos) inherits BY
+    // DEFAULT on fresh loops — operators should not have to ask. Overrides:
+    // freshDesign (clean slate) skips it entirely; replaceDesignFacets carve
+    // out theme/layout/logo; an explicit sibling adoption takes precedence
+    // (SHARED DESIGN outranks PRIOR DESIGN below).
     let priorDesignImport = readProjectPriorDesignImport(project.rootPath, loopId);
-    const wantsPriorDesign = continueIntent.reuseProjectDesign;
+    const siblingIntent = Boolean(
+      continueIntent.adoptTheme ||
+        continueIntent.adoptChrome ||
+        continueIntent.shareFrom?.trim(),
+    );
+    const wantsPriorDesign = !continueIntent.freshDesign && !siblingIntent;
     if (wantsPriorDesign && !priorDesignImport) {
       try {
         const prior = pickProjectPriorDesign(project.rootPath, {
@@ -2616,17 +2631,19 @@ ${message.trim()}`;
             projectRoot: project.rootPath,
             loopId,
             prior,
+            excludeFacets,
           });
           slog.info("design-loop", "seeded prior project design", {
             loopId,
             kind: prior.kind,
             sourceLoopId: prior.loopId,
             sourcePhaseId: prior.phaseId,
-            hasMock: Boolean(prior.mockHtml?.trim()),
-            tokenChars: prior.tokensCss.length,
+            hasMock: Boolean(priorDesignImport.mockHtml?.trim()),
+            tokenChars: priorDesignImport.tokensCss.length,
+            excluded: excludeFacets,
           });
         } else {
-          slog.warn("design-loop", "reuseProjectDesign but no prior design found", {
+          slog.info("design-loop", "no prior design found to inherit", {
             loopId,
           });
         }
@@ -2636,6 +2653,16 @@ ${message.trim()}`;
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    }
+    // Facet filters can hollow out an import (e.g. only logos were available
+    // and "logo" is being replaced) — treat an empty record as no import.
+    if (
+      priorDesignImport &&
+      !priorDesignImport.tokensCss.trim() &&
+      !priorDesignImport.mockHtml?.trim() &&
+      !priorDesignImport.logoAssetPaths.length
+    ) {
+      priorDesignImport = null;
     }
     if (
       !workingPreviousHtml?.trim() &&
@@ -2870,6 +2897,8 @@ ${message.trim()}`;
     const modeBlock =
       isContinue ||
       continueIntent.reuseProjectDesign ||
+      continueIntent.freshDesign ||
+      continueIntent.replaceDesignFacets.length > 0 ||
       continueIntent.adoptTheme ||
       continueIntent.adoptChrome ||
       continueIntent.inventLogo
@@ -2878,9 +2907,11 @@ ${message.trim()}`;
 
     // Sibling share: gated by structured adoptTheme / adoptChrome / shareFrom / absolute path.
     // Resolver may match registered names; intent is never inferred from palette alone.
+    // (reuseProjectDesign no longer gates this out — same-project inherit is the
+    // default, and an explicit sibling adoption takes precedence over it.)
     const shareText = (isContinue ? message : brief || desc)?.trim() ?? "";
     let siblingShareImported = false;
-    if (shareText && !continueIntent.reuseProjectDesign) {
+    if (shareText) {
       const mentionsPath = extractSiblingProjectPaths(shareText).length > 0;
       const wantsSharedDesign =
         continueIntent.adoptTheme ||
@@ -2957,6 +2988,7 @@ ${message.trim()}`;
     const sharedDesignActive =
       Boolean(sharedDesignBlock) ||
       Boolean(priorDesignBlock) ||
+      Boolean(brandAssetsImport?.assets.length) ||
       continueIntent.adoptTheme ||
       continueIntent.adoptChrome ||
       continueIntent.reuseProjectDesign;
@@ -3195,8 +3227,8 @@ ${needsEdit
     ? `Operator asked for ${inventCount} NEW logo variants. Call generate_image with inventNew=true exactly ${inventCount} times (distinct styles/filenames), embed a logo-card / Concept grid of all of them, and do NOT pin_logo — operator will choose later.`
     : continueIntent.inventLogo
     ? "Operator asked for a NEW logo. Call generate_image with inventNew=true, embed the new relativePath, then pin_logo that filename. Do not reuse the superseded pin."
-    : continueIntent.reuseProjectDesign
-      ? "Operator asked to reuse this project's existing theming. Prefer PRIOR DESIGN tokens/logos and revise from the prior mock — do not invent a new brand system."
+    : priorDesignImport || brandAssetsImport?.assets.length
+      ? "This loop inherits the project's current design (PRIOR DESIGN / BRAND ASSETS above — no express reuse ask needed). Prefer those tokens/logos and revise from the prior mock — do not invent a new brand system. Replace ONLY what the operator's intent carved out."
       : "When inventing a new mark, call generate_image with inventNew=true if a logo was previously pinned. For stock photos use search_images / import_image. For look critique use review_look."}
 Otherwise prefer writing the mock with few or zero tool calls.
 
