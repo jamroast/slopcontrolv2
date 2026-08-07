@@ -714,3 +714,261 @@ test("brand carry: import never overwrites an existing logo pin", () => {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function seedPriorLoopFixture(root: string, oldLoop: string, newLoop: string): void {
+  const now = new Date().toISOString();
+  writeDesignLoopMeta(root, {
+    id: oldLoop,
+    projectId: "proj-1",
+    brief: "prior system",
+    status: "implemented",
+    currentVersion: 2,
+    acceptedVersion: 2,
+    createdAt: now,
+    updatedAt: now,
+  });
+  writeDesignLoopVersion({
+    projectRoot: root,
+    loopId: oldLoop,
+    version: 2,
+    html: `<html><style>:root{--brand-orange:#E8430A}</style><body>Kitchen Sink</body></html>`,
+    notes: "v2",
+    request: "prior",
+  });
+  mkdirSync(designLoopAssetsDir(root, oldLoop), { recursive: true });
+  writeFileSync(
+    join(designLoopAssetsDir(root, oldLoop), "mark.png"),
+    Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+  );
+  writeDesignLoopPack(root, oldLoop, {
+    name: "prior",
+    version: 1,
+    loopId: oldLoop,
+    projectId: "proj-1",
+    sourceMockVersion: 2,
+    tokens: ":root { --brand-orange: #E8430A; --background: #0A0A0A; }",
+    logos: [],
+    typography: ["Space Grotesk"],
+    shell: [],
+    contentPillars: [],
+    inScope: ["palette"],
+    mustNot: [],
+    mockPath: `.slopcontrol/design-loops/${oldLoop}/v2/mock.html`,
+    createdAt: now,
+    updatedAt: now,
+  });
+  writeDesignLoopMeta(root, {
+    id: newLoop,
+    projectId: "proj-1",
+    brief: "fresh loop",
+    status: "open",
+    currentVersion: 0,
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+test("prior import rewrites inherited mock asset refs to the new loop", () => {
+  const root = tmpRoot("prior-rewrite");
+  try {
+    const oldLoop = "loop-old";
+    const newLoop = "loop-new";
+    // Source loop holds an icon (picked up as a logoFile) and a pinned logo
+    // that arrives via the brand-asset carry instead of prior.logoFiles.
+    mkdirSync(designLoopAssetsDir(root, oldLoop), { recursive: true });
+    writeFileSync(
+      join(designLoopAssetsDir(root, oldLoop), "icon-192.png"),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+    // Brand carry runs before the prior import in the fresh-loop flow —
+    // simulate by pre-placing the logo in the new loop's assets dir.
+    mkdirSync(designLoopAssetsDir(root, newLoop), { recursive: true });
+    writeFileSync(
+      join(designLoopAssetsDir(root, newLoop), "brand-logo.png"),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+    const mockHtml = `<html><body>
+<img src=".slopcontrol/design-loops/${oldLoop}/assets/icon-192.png">
+<img src="./.slopcontrol/design-loops/${oldLoop}/assets/brand-logo.png">
+<img src=".slopcontrol/design-loops/${oldLoop}/assets/not-carried.png">
+</body></html>`;
+    const out = importProjectPriorDesignIntoLoop({
+      projectRoot: root,
+      loopId: newLoop,
+      prior: {
+        kind: "loop",
+        loopId: oldLoop,
+        version: 2,
+        pack: null,
+        tokensCss: ":root{--brand-orange:#E8430A}",
+        logoFiles: [join(designLoopAssetsDir(root, oldLoop), "icon-192.png")],
+        mockHtml,
+      },
+    });
+    // Copied by this import → rewritten to the new loop.
+    assert.ok(
+      out.mockHtml?.includes(
+        `.slopcontrol/design-loops/${newLoop}/assets/icon-192.png`,
+      ),
+    );
+    // Carried by the brand-asset import (pre-existing in new assets) → rewritten.
+    assert.ok(
+      out.mockHtml?.includes(
+        `.slopcontrol/design-loops/${newLoop}/assets/brand-logo.png`,
+      ),
+    );
+    // Not present in the new loop → left pointing at the source loop.
+    assert.ok(
+      out.mockHtml?.includes(
+        `.slopcontrol/design-loops/${oldLoop}/assets/not-carried.png`,
+      ),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("facet filter: theme/layout/logo exclusions carve the prior-design import", () => {
+  const root = tmpRoot("prior-facets");
+  try {
+    seedPriorLoopFixture(root, "loop-old", "loop-new");
+    const prior = pickProjectPriorDesign(root, { excludeLoopId: "loop-new" });
+    assert.ok(prior);
+
+    // "new theme" → tokens + pack dropped, mock + logos still inherit.
+    const themeOut = importProjectPriorDesignIntoLoop({
+      projectRoot: root,
+      loopId: "loop-new",
+      prior: prior!,
+      excludeFacets: ["theme"],
+    });
+    assert.equal(themeOut.tokensCss, "");
+    assert.equal(themeOut.pack, null);
+    assert.ok(themeOut.mockHtml?.includes("Kitchen Sink"));
+    assert.deepEqual(themeOut.copiedAssets, ["mark.png"]);
+
+    // "new layout" → prior mock dropped, tokens still inherit.
+    const layoutOut = importProjectPriorDesignIntoLoop({
+      projectRoot: root,
+      loopId: "loop-new",
+      prior: prior!,
+      excludeFacets: ["layout"],
+    });
+    assert.equal(layoutOut.mockHtml, undefined);
+    assert.match(layoutOut.tokensCss, /--brand-orange/);
+
+    // "new logo" → logo files skipped.
+    const logoOut = importProjectPriorDesignIntoLoop({
+      projectRoot: root,
+      loopId: "loop-new",
+      prior: prior!,
+      excludeFacets: ["logo"],
+    });
+    assert.deepEqual(logoOut.copiedAssets, []);
+    assert.deepEqual(logoOut.logoAssetPaths, []);
+    assert.match(logoOut.tokensCss, /--brand-orange/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("facet filter: excluding every facet writes no PRIOR_DESIGN record", () => {
+  const root = tmpRoot("prior-facets-all");
+  try {
+    seedPriorLoopFixture(root, "loop-old", "loop-new");
+    const prior = pickProjectPriorDesign(root, { excludeLoopId: "loop-new" });
+    assert.ok(prior);
+    const out = importProjectPriorDesignIntoLoop({
+      projectRoot: root,
+      loopId: "loop-new",
+      prior: prior!,
+      excludeFacets: ["theme", "logo", "graphics", "layout"],
+    });
+    assert.equal(out.tokensCss, "");
+    assert.equal(out.mockHtml, undefined);
+    assert.deepEqual(out.logoAssetPaths, []);
+    assert.equal(readProjectPriorDesignImport(root, "loop-new"), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("facet filter: brand carry drops logo pin on 'new logo', graphics on 'new graphics'", () => {
+  const root = tmpRoot("brand-facets");
+  try {
+    writeAcceptedLoopWithAssets(root, "loop-old");
+    // Pin the logo AND a pinned graphic (hero art).
+    writeFileSync(
+      join(designLoopAssetsDir(root, "loop-old"), "hero-art.png"),
+      Buffer.from([0x89, 0x51]),
+    );
+    replaceDesignLoopSelections({
+      projectRoot: root,
+      loopId: "loop-old",
+      selections: [
+        {
+          slot: "logo",
+          conceptId: "mark",
+          label: "mark.png",
+          asset: "mark.png",
+          pinnedAt: new Date().toISOString(),
+        },
+        {
+          slot: "graphic",
+          conceptId: "hero-art",
+          label: "hero-art.png",
+          asset: "hero-art.png",
+          pinnedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    writeDesignLoopMeta(root, {
+      id: "loop-new",
+      projectId: "proj-1",
+      brief: "new dashboard",
+      status: "open",
+      currentVersion: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const brand = pickProjectBrandAssets(root, { excludeLoopId: "loop-new" });
+    assert.ok(brand);
+    assert.deepEqual(brand!.assets, ["hero-art.png", "mark.png"]);
+
+    // "new logo" → mark.png stays behind, hero art carries, no pin seeded.
+    const noLogo = importProjectBrandAssetsIntoLoop({
+      projectRoot: root,
+      loopId: "loop-new",
+      brand: brand!,
+      excludeFacets: ["logo"],
+    });
+    assert.deepEqual(noLogo.assets, ["hero-art.png"]);
+    assert.equal(noLogo.logoAsset, undefined);
+    assert.equal(
+      readDesignLoopSelections(root, "loop-new").some((s) => s.slot === "logo"),
+      false,
+    );
+
+    // "new graphics" → logo pin still carries, hero art stays behind.
+    const noGraphics = importProjectBrandAssetsIntoLoop({
+      projectRoot: root,
+      loopId: "loop-new",
+      brand: brand!,
+      excludeFacets: ["graphics"],
+    });
+    assert.deepEqual(noGraphics.assets, ["mark.png"]);
+    assert.equal(noGraphics.logoAsset, "mark.png");
+
+    // Both replaced → nothing carries, no record.
+    const none = importProjectBrandAssetsIntoLoop({
+      projectRoot: root,
+      loopId: "loop-new-2",
+      brand: brand!,
+      excludeFacets: ["logo", "graphics"],
+    });
+    assert.deepEqual(none.assets, []);
+    assert.equal(readProjectBrandAssetsImport(root, "loop-new-2"), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

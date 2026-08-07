@@ -15,6 +15,7 @@ import {
   appendDesignLoopTranscript,
   bindAcceptedDesignLoopToPhase,
   createDesignLoopMeta,
+  designLoopAssetsDir,
   extractFeaturesFromMockHtml,
   extractHtmlDocument,
   extractTokensCssFromHtml,
@@ -298,6 +299,57 @@ describe("design-loop", () => {
     );
     assert.match(out, /https:\/\/example\.com\/x\.png/);
     assert.match(out, /src="\/other\/path\.png"/);
+  });
+
+  it("writeDesignLoopVersion normalizes foreign-loop asset refs to held files", () => {
+    const root = mkdtempSync(join(tmpdir(), "dl-normalize-"));
+    roots.push(root);
+    const loopId = "loop-new";
+    const foreign = "11111111-2222-4333-8444-555555555555";
+    mkdirSync(designLoopAssetsDir(root, loopId), { recursive: true });
+    writeFileSync(join(designLoopAssetsDir(root, loopId), "logo.png"), "x");
+    const { htmlPath } = writeDesignLoopVersion({
+      projectRoot: root,
+      loopId,
+      version: 1,
+      html: `<html><body>
+<img src=".slopcontrol/design-loops/${foreign}/assets/logo.png">
+<img src="./.slopcontrol/design-loops/${foreign}/assets/not-held.png">
+<img src=".slopcontrol/design-loops/${loopId}/assets/already-own.png">
+</body></html>`,
+    });
+    const stored = readFileSync(htmlPath, "utf-8");
+    // Held file → repointed at this loop's own copy.
+    assert.ok(
+      stored.includes(`.slopcontrol/design-loops/${loopId}/assets/logo.png`),
+    );
+    // Unheld file → left pointing at the source loop (serve-time resolves it).
+    assert.ok(
+      stored.includes(`.slopcontrol/design-loops/${foreign}/assets/not-held.png`),
+    );
+    // Already-own ref → untouched even though the file is absent.
+    assert.ok(
+      stored.includes(`.slopcontrol/design-loops/${loopId}/assets/already-own.png`),
+    );
+  });
+
+  it("rewriteDesignLoopAssetUrls rewrites foreign-loop paths from inherited mocks", () => {
+    const sourceLoop = "11111111-2222-4333-8444-555555555555";
+    const currentLoop = "99999999-8888-4777-a666-555555555555";
+    const html = `<img src=".slopcontrol/design-loops/${sourceLoop}/assets/logo.png">
+<img src="./.slopcontrol/design-loops/${currentLoop}/assets/own.png">`;
+    const out = rewriteDesignLoopAssetUrls(html, {
+      projectId: "proj-1",
+      loopId: currentLoop,
+    });
+    assert.match(
+      out,
+      /src="\/projects\/proj-1\/design-loops\/11111111-2222-4333-8444-555555555555\/assets\/logo\.png"/,
+    );
+    assert.match(
+      out,
+      /src="\/projects\/proj-1\/design-loops\/99999999-8888-4777-a666-555555555555\/assets\/own\.png"/,
+    );
   });
 
   it("rewriteDesignLoopAssetUrls leaves unrelated URLs alone and supports assetBase", () => {

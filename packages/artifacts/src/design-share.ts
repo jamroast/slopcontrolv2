@@ -16,6 +16,7 @@ import {
   designLoopAssetsDir,
   designLoopDir,
   listDesignLoops,
+  normalizeDesignLoopMockAssetRefs,
   readDesignLoopMeta,
   readDesignLoopMockHtml,
   type DesignLoopMeta,
@@ -36,6 +37,7 @@ import {
   readDesignLoopSelections,
   replaceDesignLoopSelections,
 } from "./design-loop-selections.js";
+import type { DesignFacet } from "./continue-intent.js";
 
 export type DesignShareSourceRef =
   | { kind: "projectId"; value: string }
@@ -827,19 +829,26 @@ export function readProjectPriorDesignImport(
 /**
  * Seed a loop from this project's prior design. Writes PRIOR_DESIGN.json
  * (distinct from SHARED_FROM so accidental self-share ignore stays valid).
+ *
+ * excludeFacets carve out what the operator is replacing: "theme" drops the
+ * token pack, "layout" drops the prior mock, "logo" skips logo files. When
+ * everything is excluded nothing is written (the loop starts clean).
  */
 export function importProjectPriorDesignIntoLoop(opts: {
   projectRoot: string;
   loopId: string;
   prior: ProjectPriorDesign;
+  excludeFacets?: DesignFacet[];
 }): ImportedProjectPriorDesign {
+  const exclude = new Set(opts.excludeFacets ?? []);
   const assetsDir = designLoopAssetsDir(opts.projectRoot, opts.loopId);
   mkdirSync(assetsDir, { recursive: true });
   mkdirSync(designLoopDir(opts.projectRoot, opts.loopId), { recursive: true });
 
   const copiedAssets: string[] = [];
   const logoAssetPaths: string[] = [];
-  for (const abs of opts.prior.logoFiles) {
+  const logoFiles = exclude.has("logo") ? [] : opts.prior.logoFiles;
+  for (const abs of logoFiles) {
     if (isDesignFallbackBrandPath(abs)) continue;
     const name = basename(abs);
     const dest = join(assetsDir, name);
@@ -854,6 +863,17 @@ export function importProjectPriorDesignIntoLoop(opts: {
     }
   }
 
+  const tokensCss = exclude.has("theme") ? "" : opts.prior.tokensCss;
+  const mockHtml = exclude.has("layout") ? undefined : opts.prior.mockHtml;
+  const pack = exclude.has("theme") ? null : opts.prior.pack;
+
+  // Point inherited mock asset refs at this loop's own copies. The source
+  // mock references .slopcontrol/design-loops/<sourceLoop>/assets/<name>;
+  // brand-asset carry (which runs before this import) may already have landed
+  // files (e.g. the pinned logo) that never appear in prior.logoFiles — the
+  // shared normalizer keys off what exists in this loop's assets dir. Refs to
+  // files we do not hold are left untouched (the source loop's servable route
+  // still resolves them).
   const imported: ImportedProjectPriorDesign = {
     kind: opts.prior.kind,
     sourceLoopId: opts.prior.loopId,
@@ -861,12 +881,22 @@ export function importProjectPriorDesignIntoLoop(opts: {
     version: opts.prior.version,
     loopId: opts.loopId,
     importedAt: new Date().toISOString(),
-    tokensCss: opts.prior.tokensCss,
+    tokensCss,
     copiedAssets,
     logoAssetPaths,
-    mockHtml: opts.prior.mockHtml?.slice(0, 120_000),
-    pack: opts.prior.pack,
+    mockHtml: mockHtml
+      ? normalizeDesignLoopMockAssetRefs({
+          projectRoot: opts.projectRoot,
+          loopId: opts.loopId,
+          html: mockHtml,
+        }).slice(0, 120_000)
+      : undefined,
+    pack,
   };
+  // Nothing survived the facet filter → no PRIOR_DESIGN record at all.
+  if (!tokensCss.trim() && !imported.mockHtml && !logoAssetPaths.length) {
+    return imported;
+  }
   writeFileSync(
     priorDesignPath(opts.projectRoot, opts.loopId),
     `${JSON.stringify(imported, null, 2)}\n`,
@@ -995,12 +1025,18 @@ export function readProjectBrandAssetsImport(
  * BRAND_ASSETS.json, and re-pin the logo selection so the new loop starts
  * with the operator's mark already pinned (edit chains + mock generator see
  * it from turn one). The pin is only seeded when the loop has no logo pin.
+ *
+ * excludeFacets carve out what the operator is replacing: "logo" drops the
+ * pinned mark (a new one is coming), "graphics" drops non-logo pinned assets.
+ * When nothing survives, no record is written.
  */
 export function importProjectBrandAssetsIntoLoop(opts: {
   projectRoot: string;
   loopId: string;
   brand: ProjectBrandAssets;
+  excludeFacets?: DesignFacet[];
 }): ImportedProjectBrandAssets {
+  const exclude = new Set(opts.excludeFacets ?? []);
   const sourceAssetsDir = designLoopAssetsDir(
     opts.projectRoot,
     opts.brand.sourceLoopId,
@@ -1009,8 +1045,14 @@ export function importProjectBrandAssetsIntoLoop(opts: {
   mkdirSync(assetsDir, { recursive: true });
   mkdirSync(designLoopDir(opts.projectRoot, opts.loopId), { recursive: true });
 
+  const keepLogo = !exclude.has("logo");
+  const keepGraphics = !exclude.has("graphics");
+  const wanted = opts.brand.assets.filter((name) =>
+    name === opts.brand.logoAsset ? keepLogo : keepGraphics,
+  );
+
   const copied: string[] = [];
-  for (const name of opts.brand.assets) {
+  for (const name of wanted) {
     try {
       copyFileSync(join(sourceAssetsDir, name), join(assetsDir, name));
       copied.push(name);
@@ -1026,10 +1068,14 @@ export function importProjectBrandAssetsIntoLoop(opts: {
     importedAt: new Date().toISOString(),
     assets: copied,
     logoAsset:
-      opts.brand.logoAsset && copied.includes(opts.brand.logoAsset)
+      keepLogo && opts.brand.logoAsset && copied.includes(opts.brand.logoAsset)
         ? opts.brand.logoAsset
         : undefined,
   };
+  if (!copied.length) {
+    // Facet filter excluded everything — the loop starts with no brand assets.
+    return imported;
+  }
   writeFileSync(
     brandAssetsPath(opts.projectRoot, opts.loopId),
     `${JSON.stringify(imported, null, 2)}\n`,

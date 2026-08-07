@@ -220,17 +220,46 @@ export function rewriteDesignLoopAssetUrls(
   const loopId = opts.loopId.trim();
   if (!loopId) return html;
   const base = (opts.assetBase ?? "").replace(/\/$/, "");
-  const escaped = loopId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Match .slopcontrol/design-loops/<loopId>/assets/<file> with optional ./ or leading /
-  const re = new RegExp(
-    `(?:\\./|\\/)?(?:\\.slopcontrol\\/design-loops\\/${escaped}\\/assets\\/)([^\\s"'<>?#+]+)`,
-    "gi",
-  );
-  return html.replace(re, (_full, file: string) => {
+  // Match .slopcontrol/design-loops/<loopId>/assets/<file> with optional ./ or
+  // leading /. Any loop id is accepted: inherited mocks legitimately reference
+  // a source loop's assets, and every loop has its own servable route, so the
+  // rewrite preserves the loop id found in the path.
+  const re =
+    /(?:\.\/|\/)?(?:\.slopcontrol\/design-loops\/([^\s"'<>?#+/]+)\/assets\/)([^\s"'<>?#+]+)/gi;
+  return html.replace(re, (_full, srcLoopId: string, file: string) => {
     const name = basename(String(file).split("?")[0] ?? "");
     if (!name || name.includes("..")) return _full;
-    const path = designLoopHttpAssetPath(opts.projectId, loopId, name);
+    const path = designLoopHttpAssetPath(opts.projectId, srcLoopId, name);
     return `${base}${path}`;
+  });
+}
+
+/**
+ * Normalize stored-mock asset refs to this loop's own assets dir. Inherited or
+ * generated mocks can carry `.slopcontrol/design-loops/<otherLoop>/assets/<name>`
+ * refs; when this loop already holds a file with the same name (brand-asset
+ * carry, prior-design import), repoint the ref to this loop's copy. Refs to
+ * files this loop does not hold are left untouched — the serve-time rewrite
+ * still resolves them via the source loop's route.
+ */
+export function normalizeDesignLoopMockAssetRefs(opts: {
+  projectRoot: string;
+  loopId: string;
+  html: string;
+}): string {
+  const html = opts.html;
+  if (!html?.trim()) return html;
+  const loopId = opts.loopId.trim();
+  if (!loopId) return html;
+  const assetsDir = designLoopAssetsDir(opts.projectRoot, loopId);
+  const re =
+    /(?:\.\/)?\.slopcontrol\/design-loops\/([^\s"'<>?#+/]+)\/assets\/([^\s"'<>?#+]+)/gi;
+  return html.replace(re, (full, srcLoopId: string, file: string) => {
+    if (srcLoopId === loopId) return full;
+    const name = basename(String(file).split("?")[0] ?? "");
+    if (!name || name.includes("..")) return full;
+    if (!existsSync(join(assetsDir, name))) return full;
+    return `.slopcontrol/design-loops/${loopId}/assets/${name}`;
   });
 }
 
@@ -945,7 +974,12 @@ export function writeDesignLoopVersion(opts: {
   const notesPath = join(dir, "NOTES.md");
   const requestPath = join(dir, "REQUEST.md");
   const metaPath = join(dir, "META.json");
-  writeFileSync(htmlPath, `${opts.html.trim()}\n`, "utf-8");
+  const html = normalizeDesignLoopMockAssetRefs({
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    html: opts.html,
+  });
+  writeFileSync(htmlPath, `${html.trim()}\n`, "utf-8");
   writeFileSync(
     notesPath,
     `# Design loop v${opts.version}\n\n${(opts.notes ?? "").trim() || "(no notes)"}\n`,
