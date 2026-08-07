@@ -7,6 +7,7 @@ import {
   resolveShareAlias,
   resolveDesignShareSource,
   detectShareSourceFromText,
+  textMentionsProjectName,
   readShareableDesign,
   importDesignShareIntoLoop,
   readSharedDesignImport,
@@ -178,13 +179,34 @@ test("formatSharedDesignPromptBlock ranks above live site and includes tokens + 
     tokensCss: ":root{ --brand-primary:#c8552e; }",
     copiedAssets: ["logo.png"],
     logoAssetPaths: [".slopcontrol/design-loops/dl_1/assets/logo.png"],
+    pack: {
+      name: "burntjam",
+      version: 1,
+      loopId: "src",
+      projectId: "p",
+      sourceMockVersion: 1,
+      tokens: "",
+      logos: [],
+      typography: [],
+      shell: [
+        "Menubar: content-max inner; logo+nav left; auth/theme right.",
+      ],
+      contentPillars: [],
+      inScope: [],
+      mustNot: [],
+      mockPath: "",
+      createdAt: "2026-08-02T09:00:00.000Z",
+      updatedAt: "2026-08-02T09:00:00.000Z",
+    },
   });
   assert.match(block, /SHARED DESIGN/);
   assert.match(block, /authoritative for palette/);
+  assert.match(block, /shell chrome/);
   assert.match(block, /LIVE SITE wins only for nav/);
   assert.match(block, /burntjam/);
   assert.match(block, /--brand-primary:#c8552e/);
   assert.match(block, /assets\/logo\.png/);
+  assert.match(block, /Menubar: content-max/);
 });
 
 test("formatSharedDesignPromptBlock returns empty for null import", () => {
@@ -277,6 +299,82 @@ test("detectShareSourceFromText: literal sibling dir name resolves (no brand ali
   });
   assert.ok(src);
   assert.equal(src!.rootPath, source);
+  rmSync(parent, { recursive: true, force: true });
+});
+
+test("textMentionsProjectName: hyphen is part of the identifier (not a word boundary)", () => {
+  assert.equal(textMentionsProjectName("use jamroast-components", "jamroast"), false);
+  assert.equal(
+    textMentionsProjectName("use jamroast-components", "jamroast-components"),
+    true,
+  );
+  assert.equal(textMentionsProjectName("from the JamRoast project", "JamRoast"), true);
+  assert.equal(textMentionsProjectName("from the JamRoast project", "jamroast"), true);
+});
+
+test("detectShareSourceFromText: jamroast-components beats JamRoast prefix (regression)", () => {
+  const target = tmpRoot("jp-target");
+  const burntjam = tmpRoot("burntjam");
+  const components = tmpRoot("jamroast-components");
+  const src = detectShareSourceFromText({
+    targetRoot: target,
+    text: "please can you pull in the theming and design standards from the jamroast-components project and apply them to this mockup",
+    // JamRoast listed first — old \\b matcher returned this incorrectly.
+    listProjects: () => [
+      { id: "jamroast", name: "JamRoast", rootPath: burntjam },
+      {
+        id: "components",
+        name: "jamroast-components",
+        rootPath: components,
+      },
+    ],
+  });
+  assert.ok(src);
+  assert.equal(src!.projectId, "components");
+  assert.equal(src!.rootPath, components);
+  rmSync(target, { recursive: true, force: true });
+  rmSync(burntjam, { recursive: true, force: true });
+  rmSync(components, { recursive: true, force: true });
+});
+
+test("detectShareSourceFromText: bare JamRoast still resolves when only that is named", () => {
+  const target = tmpRoot("jp-target2");
+  const burntjam = tmpRoot("burntjam2");
+  const components = tmpRoot("jamroast-components2");
+  const src = detectShareSourceFromText({
+    targetRoot: target,
+    text: "pull the theming from the JamRoast project",
+    listProjects: () => [
+      { id: "jamroast", name: "JamRoast", rootPath: burntjam },
+      {
+        id: "components",
+        name: "jamroast-components",
+        rootPath: components,
+      },
+    ],
+  });
+  assert.ok(src);
+  assert.equal(src!.projectId, "jamroast");
+  assert.equal(src!.rootPath, burntjam);
+  rmSync(target, { recursive: true, force: true });
+  rmSync(burntjam, { recursive: true, force: true });
+  rmSync(components, { recursive: true, force: true });
+});
+
+test("detectShareSourceFromText: longest sibling dir wins (brand-kit over brand)", () => {
+  const parent = tmpRoot("chat-long");
+  const target = join(parent, "app-a");
+  const brand = join(parent, "brand");
+  const brandKit = join(parent, "brand-kit");
+  mkdirSync(target, { recursive: true });
+  mkdirSync(brand, { recursive: true });
+  mkdirSync(brandKit, { recursive: true });
+  const src = detectShareSourceFromText({
+    targetRoot: target,
+    text: "adopt the brand-kit palette",
+  });
+  assert.ok(src);
+  assert.equal(src!.rootPath, brandKit);
   rmSync(parent, { recursive: true, force: true });
 });
 

@@ -181,6 +181,27 @@ describe("design-loop", () => {
     }), /IN SCOPE/);
   });
 
+  it("uiSpecFromDesignLoopMock quotes content-aligned menubar shell contract", () => {
+    const spec = uiSpecFromDesignLoopMock({
+      brief: "shell layout",
+      loopId: "loop-shell",
+      version: 2,
+      acceptance: {
+        version: 2,
+        features: [
+          { id: "applied_shell", label: "Shell", accepted: true },
+        ],
+      },
+      shellNotes: [
+        "Menubar: center an inner bar at max-width: var(--content-max) matching page content (not full-bleed flex children).",
+        "Menubar slots: logo + primary nav left; auth / theme (and optional view switcher) right within the inner bar.",
+      ],
+    });
+    assert.match(spec, /Shell layout contract/);
+    assert.match(spec, /content-max/);
+    assert.match(spec, /logo \+ primary nav left/i);
+  });
+
   it("uiSpecFromDesignLoopMock requires visibility/@source when togglePresent", () => {
     const spec = uiSpecFromDesignLoopMock({
       brief: "day/night theme toggle",

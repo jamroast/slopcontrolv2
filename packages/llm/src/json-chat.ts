@@ -1,6 +1,9 @@
 import type { LlmEndpoint } from "@slopcontrol/types";
 import { resolveEndpointSecrets } from "./secrets.js";
 
+/** Default wall-clock for classification-style JSON chat (cloud models need headroom). */
+export const CHAT_JSON_DEFAULT_TIMEOUT_MS = 90_000;
+
 export interface ChatJsonOptions {
   endpoint: LlmEndpoint;
   modelId?: string;
@@ -9,10 +12,16 @@ export interface ChatJsonOptions {
   timeoutMs?: number;
   temperature?: number;
   /**
-   * Extra attempts after the first when content is empty or not valid JSON
-   * (default 2 → 3 tries total).
+   * Extra attempts after the first when content is empty, not valid JSON,
+   * or the request timed out (default 2 → 3 tries total).
    */
   emptyContentRetries?: number;
+  /**
+   * Completion budget override. Reasoning models (e.g. glm cloud) spend tokens
+   * on chain-of-thought before the JSON answer; callers with large structured
+   * outputs should raise this well above the 1024 default.
+   */
+  maxTokens?: number;
 }
 
 export interface ChatJsonResult {
@@ -63,14 +72,39 @@ export function extractChatMessageText(message: ChatMessage | undefined): string
   return "";
 }
 
-function isRetryableChatJsonError(message: string): boolean {
-  return /empty content|parse failed/i.test(message);
+/** True when fetch was aborted by our timeout (or equivalent AbortError). */
+export function isChatJsonTimeoutError(
+  err: unknown,
+  message?: string,
+): boolean {
+  const msg =
+    message ??
+    (err instanceof Error ? err.message : err != null ? String(err) : "");
+  const name = err instanceof Error ? err.name : "";
+  return (
+    name === "AbortError" ||
+    /operation was aborted/i.test(msg) ||
+    /JSON chat timed out after/i.test(msg)
+  );
+}
+
+export function isRetryableChatJsonError(message: string, err?: unknown): boolean {
+  return (
+    /empty content|parse failed/i.test(message) ||
+    isChatJsonTimeoutError(err, message)
+  );
+}
+
+function timeoutError(timeoutMs: number, attempt: number, maxAttempts: number): Error {
+  return new Error(
+    `JSON chat timed out after ${timeoutMs}ms (attempt ${attempt}/${maxAttempts})`,
+  );
 }
 
 /**
  * OpenAI-compatible JSON chat. Prefer `response_format: json_object` for
  * openai-chat; otherwise strip fences and parse.
- * Retries on empty content or invalid JSON (prose refusals / chatter).
+ * Retries on empty content, invalid JSON, or client timeout abort.
  */
 export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
   const endpoint = resolveEndpointSecrets(opts.endpoint);
@@ -88,7 +122,8 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
   }
 
   const useJsonObject = endpoint.apiType === "openai-chat";
-  const timeoutMs = opts.timeoutMs ?? endpoint.timeoutMs ?? 15_000;
+  const timeoutMs =
+    opts.timeoutMs ?? endpoint.timeoutMs ?? CHAT_JSON_DEFAULT_TIMEOUT_MS;
   const maxAttempts = 1 + Math.max(0, opts.emptyContentRetries ?? 2);
   let lastError: Error | null = null;
 
@@ -102,7 +137,7 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
         { role: "user", content: userContent },
       ],
       temperature: opts.temperature ?? 0,
-      max_tokens: endpoint.defaultParams?.maxTokens ?? 1024,
+      max_tokens: opts.maxTokens ?? endpoint.defaultParams?.maxTokens ?? 1024,
     };
     // Keep json_object while retrying parse/prose failures. Drop it only on the
     // final attempt (some models return empty when response_format is forced).
@@ -150,9 +185,14 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
       }
       return { text, parsed, modelId };
     } catch (err) {
+      if (isChatJsonTimeoutError(err)) {
+        lastError = timeoutError(timeoutMs, attempt, maxAttempts);
+        if (attempt < maxAttempts) continue;
+        throw lastError;
+      }
       const e = err instanceof Error ? err : new Error(String(err));
       lastError = e;
-      if (attempt < maxAttempts && isRetryableChatJsonError(e.message)) {
+      if (attempt < maxAttempts && isRetryableChatJsonError(e.message, e)) {
         continue;
       }
       throw e;

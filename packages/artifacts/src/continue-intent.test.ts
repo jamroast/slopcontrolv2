@@ -9,7 +9,12 @@ import {
   continueIntentMayTouchHero,
   continueIntentMayTouchNav,
   continueIntentMayTouchShell,
+  detectDesignAssetOpsFromText,
+  extractInventLogoCountFromText,
   fallbackContinueIntentFromText,
+  formatContinueIntentPromptBlock,
+  normalizeContinueIntentStructured,
+  textSignalsMenubarContentAlign,
   textSignalsReuseProjectDesign,
 } from "./continue-intent.js";
 
@@ -18,12 +23,62 @@ describe("continue-intent schema", () => {
     const intent = ContinueIntentSchema.parse({ scope: "sections" });
     assert.deepEqual(intent.targets, []);
     assert.equal(intent.wantsAssetEdit, false);
+    assert.deepEqual(intent.assetOps, []);
     assert.equal(intent.inventLogo, false);
+    assert.equal(intent.inventLogoCount, 1);
     assert.equal(intent.adoptTheme, false);
     assert.equal(intent.reuseProjectDesign, false);
+    assert.equal(intent.adoptChrome, false);
     assert.equal(intent.navAlign, false);
     assert.equal(intent.preserveChrome, false);
     assert.equal(intent.notes, "");
+  });
+
+  it("detectDesignAssetOpsFromText orders transparent before icon pack", () => {
+    assert.deepEqual(
+      detectDesignAssetOpsFromText(
+        "cut out the logo with alpha channel and make an icon pack",
+      ),
+      ["make_transparent", "derive_icon_pack"],
+    );
+    assert.deepEqual(
+      detectDesignAssetOpsFromText("regenerate the icon pack only"),
+      ["derive_icon_pack"],
+    );
+  });
+
+  it("detectDesignAssetOpsFromText prefers circular_mask for circular cut-out", () => {
+    assert.deepEqual(
+      detectDesignAssetOpsFromText("cut out the circular logo."),
+      ["circular_mask"],
+    );
+  });
+
+  it("detectDesignAssetOpsFromText chains chroma + circular + pack", () => {
+    assert.deepEqual(
+      detectDesignAssetOpsFromText(
+        "cut out the circular logo with an alpha channel and create an icon pack",
+      ),
+      ["make_transparent", "circular_mask", "derive_icon_pack"],
+    );
+  });
+
+  it("coerces inventLogoCount 0/null to 1 (LLM often sends 0 when not inventing)", () => {
+    assert.equal(
+      ContinueIntentSchema.parse({ scope: "sections", inventLogoCount: 0 })
+        .inventLogoCount,
+      1,
+    );
+    assert.equal(
+      ContinueIntentSchema.parse({ scope: "sections", inventLogoCount: null })
+        .inventLogoCount,
+      1,
+    );
+    assert.equal(
+      ContinueIntentSchema.parse({ scope: "sections", inventLogoCount: 99 })
+        .inventLogoCount,
+      12,
+    );
   });
 
   it("rejects unknown scope and targets", () => {
@@ -47,6 +102,51 @@ describe("fallbackContinueIntentFromText", () => {
     );
     assert.equal(intent.wantsAssetEdit, true);
     assert.equal(intent.scope, "assets_only");
+    assert.ok(intent.assetOps.includes("make_transparent"));
+    assert.ok(intent.assetOps.includes("derive_icon_pack"));
+  });
+
+  it("JamPress cut-out + alpha + icon pack is asset recipe, not invent", () => {
+    const ask =
+      "Perfect, thanks. I need you to please cut out the logo. A the moment the logo has a black background that is appearing on the light mode. This creates a black square, please cut out the circular logo from the image and produce and update logo with an alpha channel. I need you to also create an icon pack that can be used by the browser as an icon using this newly updated logo";
+    const intent = fallbackContinueIntentFromText(ask);
+    assert.equal(intent.inventLogo, false);
+    assert.equal(intent.wantsAssetEdit, true);
+    assert.deepEqual(intent.assetOps, [
+      "make_transparent",
+      "circular_mask",
+      "derive_icon_pack",
+    ]);
+    assert.equal(intent.scope, "assets_only");
+  });
+
+  it("soft change-the-logo alone still invents", () => {
+    const intent = fallbackContinueIntentFromText("Please change the logo");
+    assert.equal(intent.inventLogo, true);
+    assert.equal(intent.wantsAssetEdit, false);
+    assert.deepEqual(intent.assetOps, []);
+  });
+
+  it("normalize prefers asset recipe over invent when both are set", () => {
+    // Edit-first when both present (compound ask safety).
+    const editFirst = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "logo_invent",
+        targets: ["logo"],
+        inventLogo: true,
+        wantsAssetEdit: true,
+        assetOps: ["make_transparent", "derive_icon_pack"],
+        preserveChrome: false,
+        notes: "",
+      }),
+    );
+    assert.equal(editFirst.inventLogo, false);
+    assert.deepEqual(editFirst.assetOps, [
+      "make_transparent",
+      "derive_icon_pack",
+    ]);
+    assert.equal(editFirst.wantsAssetEdit, true);
+    assert.equal(editFirst.scope, "assets_only");
   });
 
   it("does not treat 'do not change hero' as a hero target", () => {
@@ -65,6 +165,19 @@ describe("fallbackContinueIntentFromText", () => {
     assert.equal(intent.navAlign, true);
     assert.equal(intent.scope, "nav_align");
     assert.ok(intent.targets.includes("nav"));
+  });
+
+  it("classifies centre menubar with page content as shell layout, not navAlign", () => {
+    const ask =
+      "That is looking good, but what we really need is to centre the menu bar contents for the landing page over the contents in the page, make sure they use the same width as the contents on the page. Please also make the logo and menu items left align and the sign in and day night toggle right align";
+    assert.equal(textSignalsMenubarContentAlign(ask), true);
+    const intent = fallbackContinueIntentFromText(ask);
+    assert.equal(intent.navAlign, false);
+    assert.ok(intent.targets.includes("shell"));
+    assert.ok(intent.targets.includes("layout"));
+    assert.notEqual(intent.scope, "nav_align");
+    assert.equal(intent.designScope?.kind, "shell");
+    assert.equal(intent.designScope?.focus, "menubar");
   });
 
   it("detects new symbolic logo", () => {
@@ -126,6 +239,27 @@ describe("fallbackContinueIntentFromText", () => {
     assert.equal(intent.adoptTheme, false);
   });
 
+  it("offline fallback: using jamroast-components sets adoptTheme + shareFrom", () => {
+    const intent = fallbackContinueIntentFromText(
+      "Please create a new mock using jamroast-components and show landing and dashboard",
+    );
+    assert.equal(intent.adoptTheme, true);
+    assert.equal(intent.shareFrom, "jamroast-components");
+    assert.ok(intent.targets.includes("landing"));
+    assert.ok(intent.targets.includes("dashboard"));
+  });
+
+  it("structured normalize does not OR inventLogo from text", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "sections",
+        inventLogo: false,
+        notes: "I am unhappy with the logos",
+      }),
+    );
+    assert.equal(intent.inventLogo, false);
+  });
+
   it("detects full redesign as full_revise", () => {
     const intent = fallbackContinueIntentFromText(
       "Redesign the whole landing from scratch",
@@ -155,6 +289,10 @@ describe("continue-intent eval fixture (real operator asks)", () => {
     {
       ask: "That looks good, the menu items do not align with what exists today. Could you please align with what we have today in the code",
       expect: { scope: "nav_align", navAlign: true },
+    },
+    {
+      ask: "centre the menu bar contents for the landing page over the contents in the page, make sure they use the same width as the contents on the page",
+      expect: { navAlign: false, scope: "sections" },
     },
     {
       ask: "Keep the v7 layout. Derive icon pack. But please align the menu items with what is in place today",
@@ -234,6 +372,18 @@ describe("continue-intent allow gates", () => {
       continueIntentMayTouchNav({ ...base, targets: ["dashboard"] }),
       true,
     );
+    assert.equal(
+      continueIntentMayTouchNav({ ...base, targets: ["shell"] }),
+      true,
+    );
+    assert.equal(
+      continueIntentMayTouchNav({ ...base, targets: ["layout"] }),
+      true,
+    );
+    assert.equal(
+      continueIntentMayTouchNav({ ...base, adoptChrome: true }),
+      true,
+    );
     assert.equal(continueIntentMayTouchNav(base), false);
   });
 
@@ -249,6 +399,10 @@ describe("continue-intent allow gates", () => {
     assert.equal(continueIntentAllowsRedesign({ ...base, adoptTheme: true }), true);
     assert.equal(continueIntentAllowsRedesign({ ...base, inventLogo: true }), true);
     assert.equal(
+      continueIntentAllowsRedesign({ ...base, adoptChrome: true }),
+      true,
+    );
+    assert.equal(
       continueIntentAllowsRedesign({ ...base, scope: "adopt_theme" }),
       true,
     );
@@ -257,6 +411,17 @@ describe("continue-intent allow gates", () => {
       true,
     );
     assert.equal(continueIntentAllowsRedesign(base), false);
+  });
+
+  it("fallback look-and-feel from sibling sets adoptChrome", () => {
+    const intent = fallbackContinueIntentFromText(
+      "use the look and feel from jamroast-components including menubar and theme toggle",
+    );
+    assert.equal(intent.adoptTheme, true);
+    assert.equal(intent.adoptChrome, true);
+    assert.ok(intent.targets.includes("shell"));
+    assert.ok(intent.targets.includes("layout"));
+    assert.equal(intent.preserveChrome, false);
   });
 
   it("fallback theme+logo ask sets preserveChrome false", () => {
@@ -272,9 +437,78 @@ describe("continue-intent allow gates", () => {
   it("shell touch allowed for shell/dashboard targets", () => {
     assert.equal(continueIntentMayTouchShell({ ...base, targets: ["shell"] }), true);
     assert.equal(
+      continueIntentMayTouchShell({ ...base, targets: ["layout"] }),
+      true,
+    );
+    assert.equal(
       continueIntentMayTouchShell({ ...base, targets: ["dashboard"] }),
       true,
     );
+    assert.equal(
+      continueIntentMayTouchShell({ ...base, adoptChrome: true }),
+      true,
+    );
     assert.equal(continueIntentMayTouchShell(base), false);
+  });
+});
+
+describe("inventLogoCount", () => {
+  it("extractInventLogoCountFromText reads generate N different logos", () => {
+    assert.equal(
+      extractInventLogoCountFromText(
+        "Please generate 7 different logos using different styles, rustic, modern, etc",
+      ),
+      7,
+    );
+    assert.equal(extractInventLogoCountFromText("make 5 circular marks"), 5);
+    assert.equal(extractInventLogoCountFromText("design a new logo"), 1);
+  });
+
+  it("fallback invent with count sets inventLogoCount", () => {
+    const intent = fallbackContinueIntentFromText(
+      "I now need you to please design a new logo. Please make it circular and symbolic. Please generate 7 different logos using different styles",
+    );
+    assert.equal(intent.inventLogo, true);
+    assert.equal(intent.inventLogoCount, 7);
+  });
+
+  it("normalize forces inventLogoCount to 1 when not inventing", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "sections",
+        inventLogo: false,
+        inventLogoCount: 7,
+        preserveChrome: true,
+        notes: "",
+      }),
+    );
+    assert.equal(intent.inventLogoCount, 1);
+  });
+
+  it("formatContinueIntentPromptBlock multi vs singular invent", () => {
+    const multi = formatContinueIntentPromptBlock(
+      ContinueIntentSchema.parse({
+        scope: "logo_invent",
+        inventLogo: true,
+        inventLogoCount: 7,
+        targets: ["logo"],
+        preserveChrome: false,
+        notes: "",
+      }),
+    );
+    assert.match(multi, /NEW LOGO VARIANTS \(7\)/);
+    assert.match(multi, /Do NOT call pin_logo/);
+    const one = formatContinueIntentPromptBlock(
+      ContinueIntentSchema.parse({
+        scope: "logo_invent",
+        inventLogo: true,
+        inventLogoCount: 1,
+        targets: ["logo"],
+        preserveChrome: false,
+        notes: "",
+      }),
+    );
+    assert.match(one, /NEW LOGO:/);
+    assert.match(one, /pin_logo that filename/);
   });
 });

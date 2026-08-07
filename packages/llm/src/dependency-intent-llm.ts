@@ -1,6 +1,6 @@
 import {
   DependencyIntentSchema,
-  detectDependencyIntentFromText,
+  normalizeDependencyIntentElements,
   type DependencyIntent,
 } from "@slopcontrol/artifacts";
 import type { LlmEndpoint } from "@slopcontrol/types";
@@ -11,16 +11,22 @@ export const DEPENDENCY_INTENT_SYSTEM_PROMPT = `You classify operator messages a
 CRITICAL: Output ONLY a single JSON object. No prose, no markdown fences.
 
 Return ONLY a JSON object with these fields:
-- useElement: optional { id: string, fromProject?: string } — when the operator wants a shared design control (e.g. theme-toggle from a registered sibling project)
-- useNpmPackage: optional { name: string, version?: string, fromProject?: string } — scoped package like @acme/theme-toggle
+- useElements: optional array of { id: string, fromProject?: string } — ALL named shared design elements (e.g. menubar, theme-toggle, sign-in, dashboard-shell, dashboard-sidebar, user-pill, view-switcher)
+- useElement: optional { id: string, fromProject?: string } — legacy singular; if you set useElements, also set useElement to the first item
+- importAllElementsFrom: optional string — sibling/registry project name when the operator wants ALL published elements from that project (e.g. "import the elements from jamroast-components")
+- useNpmPackage: optional { name: string, version?: string, fromProject?: string } — scoped package like @jam/theme-toggle
 - useProjectInfra: optional { projectName?: string, rootPath?: string } — reuse packages/elements from a named project (not npm link)
 - forbidNpmLink: boolean — always true
 - notes: string — 1 sentence; if they asked for npm link / pnpm link, say to use the private registry instead
 
 Rules:
-- "use theme-toggle from MyBrand" → useElement={id:"theme-toggle", fromProject:"MyBrand"} (use the project name as stated; no brand→folder rewrite)
+- "use theme-toggle from MyBrand" → useElements=[{id:"theme-toggle", fromProject:"MyBrand"}], useElement=same
+- Listed ids (menubar, theme-toggle, sign-in, …) → include EVERY listed id in useElements (do NOT collapse to theme-toggle only)
+- "import the elements from jamroast-components" / "import the design components from X" / "pull in the elements from X" → importAllElementsFrom="jamroast-components" (or X as stated). Do NOT reduce this to theme-toggle-only.
 - "add @jam/theme-toggle" / "pnpm add @…/…" → useNpmPackage
 - "reuse packages from ProjectX" / "use infra from X" → useProjectInfra
+- "using jamroast-components" / "mock with X-components" without element language → useProjectInfra with projectName set
+- "look and feel" / "match chrome" / "same menubar and theme toggle" from a named sibling → useElements for each named control (at least theme-toggle + menubar when both implied), importAllElementsFrom when they say elements/components plural, AND useProjectInfra with that projectName
 - Never set forbidNpmLink to false. Prefer registry installs over link/file: sibling hacks.
 - Omit fields that do not apply. Empty intent: all optional fields omitted, forbidNpmLink true, notes "".
 `;
@@ -32,7 +38,10 @@ export interface ClassifyDependencyIntentViaLlmOptions {
   timeoutMs?: number;
 }
 
-/** True when the message likely mentions cross-project deps / linking. */
+/**
+ * @deprecated No longer used as a pre-gate — classification always runs when text is present.
+ * Kept for tests that assert historical linking language cues.
+ */
 export function shouldClassifyDependencyIntent(text: string): boolean {
   const t = text ?? "";
   return (
@@ -45,7 +54,7 @@ export function shouldClassifyDependencyIntent(text: string): boolean {
 
 /**
  * Classification-role JSON → DependencyIntent.
- * Callers should catch and fall back to detectDependencyIntentFromText.
+ * Success path: LLM JSON only (no regex merge). Callers catch → detectDependencyIntentFromText.
  */
 export async function classifyDependencyIntentViaLlm(
   opts: ClassifyDependencyIntentViaLlmOptions,
@@ -59,7 +68,7 @@ export async function classifyDependencyIntentViaLlm(
       "",
       opts.message.slice(0, 4_000),
     ].join("\n"),
-    timeoutMs: opts.timeoutMs ?? 12_000,
+    timeoutMs: opts.timeoutMs ?? 90_000,
     temperature: 0,
   });
 
@@ -67,16 +76,18 @@ export async function classifyDependencyIntentViaLlm(
     typeof parsed === "object" && parsed != null
       ? (parsed as Record<string, unknown>)
       : {};
+
   const intent = DependencyIntentSchema.parse({
     ...raw,
     forbidNpmLink: true,
   });
-  const fallback = detectDependencyIntentFromText(opts.message);
+
+  // Normalize: ensure useElements populated from useElement and vice versa.
+  const els = normalizeDependencyIntentElements(intent);
   return DependencyIntentSchema.parse({
-    useElement: intent.useElement ?? fallback.useElement,
-    useNpmPackage: intent.useNpmPackage ?? fallback.useNpmPackage,
-    useProjectInfra: intent.useProjectInfra ?? fallback.useProjectInfra,
+    ...intent,
+    useElements: els,
+    useElement: els[0] ?? intent.useElement,
     forbidNpmLink: true,
-    notes: intent.notes?.trim() || fallback.notes,
   });
 }

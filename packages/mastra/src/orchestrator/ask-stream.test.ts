@@ -4,12 +4,15 @@ import {
   askProgressFromStreamChunk,
   askProgressLine,
   clipAskProgress,
+  decideNarrationSynthesis,
   formatAskWorkingStub,
+  hasSubstantiveReplyMarkers,
   isAskNarrationOnlyReply,
   isLiveTurnInterruptedError,
   LiveTurnInterruptedError,
   summarizeToolArgs,
   summarizeToolResult,
+  type NarrationJudgeFn,
 } from "./ask-stream.js";
 
 describe("ask-stream helpers", () => {
@@ -98,5 +101,167 @@ describe("ask-stream helpers", () => {
       "read_file path=a",
     );
     assert.equal(askProgressLine({ type: "text", text: "hi" }), null);
+  });
+});
+
+describe("decideNarrationSynthesis", () => {
+  const narrationReply =
+    "Let me investigate both issues.I'll start by exploring.Now let me check the styles:";
+
+  it("synthesizes on heuristic alone when no judge is bound", async () => {
+    const decision = await decideNarrationSynthesis({
+      reply: narrationReply,
+      toolCallCount: 3,
+      synthesizeIfNarration: true,
+    });
+    assert.equal(decision.synthesize, true);
+    assert.equal(decision.judgeOverrode, false);
+  });
+
+  it("judge deny path skips synthesis", async () => {
+    const judgeFn: NarrationJudgeFn = async () => ({
+      narrationOnly: false,
+      reason: "Reply names the failing file and line.",
+    });
+    const decision = await decideNarrationSynthesis({
+      reply: narrationReply,
+      toolCallCount: 3,
+      synthesizeIfNarration: true,
+      judgeFn,
+    });
+    assert.equal(decision.synthesize, false);
+    assert.equal(decision.judgeOverrode, true);
+    assert.match(decision.judgeReason ?? "", /failing file/);
+  });
+
+  it("judge confirm keeps synthesis", async () => {
+    const judgeFn: NarrationJudgeFn = async () => ({
+      narrationOnly: true,
+      reason: "Pure progress chatter, no findings.",
+    });
+    const decision = await decideNarrationSynthesis({
+      reply: narrationReply,
+      toolCallCount: 3,
+      synthesizeIfNarration: true,
+      judgeFn,
+    });
+    assert.equal(decision.synthesize, true);
+    assert.equal(decision.judgeOverrode, false);
+  });
+
+  it("judge throw → synthesis proceeds (current behavior)", async () => {
+    const judgeFn: NarrationJudgeFn = async () => {
+      throw new Error("endpoint down");
+    };
+    const decision = await decideNarrationSynthesis({
+      reply: narrationReply,
+      toolCallCount: 3,
+      synthesizeIfNarration: true,
+      judgeFn,
+    });
+    assert.equal(decision.synthesize, true);
+    assert.equal(decision.judgeOverrode, false);
+  });
+
+  it("never calls the judge when the heuristic does not flag narration", async () => {
+    let judgeCalls = 0;
+    const judgeFn: NarrationJudgeFn = async () => {
+      judgeCalls += 1;
+      return { narrationOnly: true, reason: "x" };
+    };
+    const substantive =
+      "## Root cause\n\nThemeToggle is mounted in `menubar.tsx` but playground CSS lacks `@source`.";
+    const decision = await decideNarrationSynthesis({
+      reply: substantive,
+      toolCallCount: 3,
+      synthesizeIfNarration: true,
+      judgeFn,
+    });
+    assert.equal(decision.synthesize, false);
+    assert.equal(judgeCalls, 0);
+  });
+
+  it("never synthesizes without tool calls or when disabled", async () => {
+    const noTools = await decideNarrationSynthesis({
+      reply: narrationReply,
+      toolCallCount: 0,
+      synthesizeIfNarration: true,
+      judgeFn: async () => ({ narrationOnly: true, reason: "x" }),
+    });
+    assert.equal(noTools.synthesize, false);
+
+    const disabled = await decideNarrationSynthesis({
+      reply: narrationReply,
+      toolCallCount: 5,
+      synthesizeIfNarration: false,
+      judgeFn: async () => ({ narrationOnly: true, reason: "x" }),
+    });
+    assert.equal(disabled.synthesize, false);
+  });
+
+  // Regression: 2026-08-06 ask turn — a step-exhausted agent's concatenated
+  // working monologue (1 367 chars, many "Let me check") blew the heuristic
+  // length caps, so the raw stub was persisted as the final answer.
+  const longMonologue = Array.from(
+    { length: 6 },
+    (_, i) =>
+      `Investigation step ${i + 1} revealed more context about the installed package layout, its exported types, and how the lockfile resolves the dependency during a clean docker build. Let me check the next file to confirm what is actually resolved at runtime in this environment.`,
+  ).join(" ");
+
+  it("judge rescues a heuristic miss on long unfinished monologue", async () => {
+    assert.equal(isAskNarrationOnlyReply(longMonologue), false);
+    assert.equal(hasSubstantiveReplyMarkers(longMonologue), false);
+    let judgeCalls = 0;
+    const judgeFn: NarrationJudgeFn = async () => {
+      judgeCalls += 1;
+      return { narrationOnly: true, reason: "Unfinished investigation chatter." };
+    };
+    const decision = await decideNarrationSynthesis({
+      reply: longMonologue,
+      toolCallCount: 20,
+      synthesizeIfNarration: true,
+      judgeFn,
+    });
+    assert.equal(judgeCalls, 1);
+    assert.equal(decision.synthesize, true);
+    assert.equal(decision.heuristicFlagged, false);
+    assert.equal(decision.judgeOverrode, false);
+  });
+
+  it("judge can confirm a long heuristic-miss reply as substantive", async () => {
+    const judgeFn: NarrationJudgeFn = async () => ({
+      narrationOnly: false,
+      reason: "Contains real findings.",
+    });
+    const decision = await decideNarrationSynthesis({
+      reply: longMonologue,
+      toolCallCount: 20,
+      synthesizeIfNarration: true,
+      judgeFn,
+    });
+    assert.equal(decision.synthesize, false);
+    assert.equal(decision.judgeOverrode, false);
+  });
+
+  it("heuristic miss without judge keeps prior no-synthesis behavior", async () => {
+    const decision = await decideNarrationSynthesis({
+      reply: longMonologue,
+      toolCallCount: 20,
+      synthesizeIfNarration: true,
+    });
+    assert.equal(decision.synthesize, false);
+  });
+
+  it("heuristic miss + judge error fails closed (no synthesis)", async () => {
+    const judgeFn: NarrationJudgeFn = async () => {
+      throw new Error("endpoint down");
+    };
+    const decision = await decideNarrationSynthesis({
+      reply: longMonologue,
+      toolCallCount: 20,
+      synthesizeIfNarration: true,
+      judgeFn,
+    });
+    assert.equal(decision.synthesize, false);
   });
 });

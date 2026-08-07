@@ -487,7 +487,7 @@ The dynamic forms for the chat are working. As I go through the process the chat
     assert.equal(backend.interaction, undefined);
   });
 
-  it("finalizeChangeIntent: other + needsInteraction true without form cues gets no interaction", () => {
+  it("finalizeChangeIntent: other trusts LLM needsInteraction (no description regex veto)", () => {
     const themeDesc =
       "Audit the existing light/dark theme toggle on the landing page and fix ThemeToggle / data-theme wiring.";
     const theme = finalizeChangeIntent(
@@ -496,14 +496,29 @@ The dynamic forms for the chat are working. As I go through the process the chat
         goal: "Verify ThemeToggle drives landing components via data-theme.",
         uiMount: "page",
         changeKind: "other",
-        needsInteraction: true, // model mistake — clickable toggle ≠ fill/submit
+        needsInteraction: false,
+        themeWiringOnly: true,
+        brandTheming: false,
       }),
       { description: themeDesc },
     );
     assert.equal(theme.changeKind, "other");
     assert.equal(theme.uiMount, "page");
+    assert.equal(theme.themeWiringOnly, true);
     assert.equal(theme.interaction, undefined);
-    assert.ok(!theme.mustNot.some((m) => /fill\/submit/i.test(m)));
+
+    const mistaken = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "Audit light/dark theme toggle on landing page",
+        goal: "Verify ThemeToggle drives landing components via data-theme.",
+        uiMount: "page",
+        changeKind: "other",
+        needsInteraction: true,
+      }),
+      { description: themeDesc },
+    );
+    // Success path trusts structured needsInteraction — no regex veto.
+    assert.ok(mistaken.interaction);
   });
 
   it("theme toggle heuristic extract is other without interaction", () => {

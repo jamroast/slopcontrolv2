@@ -20,7 +20,6 @@ import {
   writeDesignLoopVersion,
 } from "./design-loop.js";
 import {
-  classifyDesignScopeFromText,
   checkThemeContractInProject,
   extractThemeContractFromHtml,
   extractThemeTokenBlocks,
@@ -85,23 +84,6 @@ describe("design-conceptual-model", () => {
     assert.ok(theme!.requirements.length >= 3);
   });
 
-  it("classifyDesignScopeFromText: chat form → component", () => {
-    const scope = classifyDesignScopeFromText(
-      "Please work only on the chat form in the agent panel",
-    );
-    assert.equal(scope.kind, "component");
-    assert.match(scope.focus, /form|chat/i);
-    assert.ok(scope.preserve.includes("palette") || scope.preserve.includes("chrome"));
-  });
-
-  it("classifyDesignScopeFromText: theme toggle → shell", () => {
-    const scope = classifyDesignScopeFromText(
-      "Add dark and light theme toggle on the menubar",
-    );
-    assert.equal(scope.kind, "shell");
-    assert.match(scope.focus, /theme|menubar/i);
-  });
-
   it("fallbackFeaturesForScope differs for component vs product", () => {
     const product = fallbackFeaturesForScope(
       { kind: "product", focus: "site", focusPaths: [], preserve: [], source: "start" },
@@ -143,6 +125,13 @@ describe("design-conceptual-model", () => {
     const meta = createDesignLoopMeta({
       projectId: "p1",
       brief: "Dark and light mode on the shell",
+      scope: {
+        kind: "shell",
+        focus: "theme",
+        focusPaths: [],
+        preserve: ["logo", "content"],
+        source: "start",
+      },
     });
     assert.equal(meta.scope?.kind, "shell");
     writeDesignLoopMeta(root, meta);

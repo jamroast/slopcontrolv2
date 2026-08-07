@@ -166,25 +166,25 @@ export type FailureDiagnosis = {
   };
 };
 
+export type ClassifyVerifyFailureOpts = {
+  sourcePhaseId?: string;
+  sourceRunId?: string;
+  stepName?: string;
+  command?: string;
+  exitCode?: number;
+};
+
 /**
- * Classify verify/check failure text into infra vs product vs env/model/process.
- *
- * Prefer calling with the **first failing step** output (via buildFailureDiagnosis),
- * not a truncated whole-run blob — incidental dotenv tips must not become `env`.
+ * Deterministic fast-path: self-evident signals (missing host utility, our
+ * own CHECK_TIMEOUT marker, exit-127 / missing node bin) that never need an
+ * LLM. Returns null when the failure needs semantic classification.
  */
-export function classifyVerifyFailure(
+export function matchDeterministicFailureFastPath(
   output: string,
-  opts?: {
-    sourcePhaseId?: string;
-    sourceRunId?: string;
-    stepName?: string;
-    command?: string;
-    exitCode?: number;
-  },
-): ClassifiedFailure {
+  opts?: ClassifyVerifyFailureOpts,
+): ClassifiedFailure | null {
   const text = output ?? "";
   const stepCtx = [opts?.stepName ?? "", opts?.command ?? "", text].join("\n");
-  const lower = stepCtx.toLowerCase();
 
   // Host OS utilities (e.g. GNU timeout on macOS) — not cured by pnpm install
   const missingCmd = classifyMissingCommand(stepCtx, {
@@ -246,6 +246,25 @@ export function classifyVerifyFailure(
       },
     );
   }
+
+  return null;
+}
+
+/**
+ * Classify verify/check failure text into infra vs product vs env/model/process.
+ *
+ * Prefer calling with the **first failing step** output (via buildFailureDiagnosis),
+ * not a truncated whole-run blob — incidental dotenv tips must not become `env`.
+ */
+export function classifyVerifyFailure(
+  output: string,
+  opts?: ClassifyVerifyFailureOpts,
+): ClassifiedFailure {
+  const fastPath = matchDeterministicFailureFastPath(output, opts);
+  if (fastPath) return fastPath;
+  const text = output ?? "";
+  const stepCtx = [opts?.stepName ?? "", opts?.command ?? "", text].join("\n");
+  const lower = stepCtx.toLowerCase();
 
   // Unresolved packages (Vitest/Vite/Node) — stale or incomplete node_modules
   if (
@@ -808,30 +827,220 @@ export function classifyVerifyFailure(
   };
 }
 
-/**
- * Build a durable diagnosis card from the first failing verify step.
- * This is the primary signal for the diagnose-then-act loop.
- */
-export function buildFailureDiagnosis(input: {
+export type BuildFailureDiagnosisInput = {
   output: string;
   firstFailure?: VerifyFailureStep;
   /** Stable id matching verify_steps[].id when already assigned. */
   failingStepId?: string;
   sourcePhaseId?: string;
   sourceRunId?: string;
-}): FailureDiagnosis {
-  const step = input.firstFailure;
-  const classifyText = step
-    ? [step.name, step.command ?? "", step.output].join("\n")
-    : input.output;
+};
 
-  const classified = classifyVerifyFailure(classifyText, {
+/**
+ * Deterministic facts extracted from the failing step (regex parsing, not
+ * decision logic). Passed to the LLM classifier so it judges from facts +
+ * text instead of raw blobs.
+ */
+export type FailureClassificationSignals = {
+  missingCommandKind: MissingCommandKind | null;
+  missingCommand: string | null;
+  checkTimeout: boolean;
+  exitCode: number | null;
+  httpStatus: number | null;
+  connectionRefused: boolean;
+};
+
+export function extractFailureSignals(
+  output: string,
+  opts?: ClassifyVerifyFailureOpts,
+): FailureClassificationSignals {
+  const text = output ?? "";
+  const stepCtx = [opts?.stepName ?? "", opts?.command ?? "", text].join("\n");
+  const missing = classifyMissingCommand(stepCtx, {
+    exitCode: opts?.exitCode,
+    stepName: opts?.stepName,
+  });
+  const http = stepCtx.match(/\bHTTP\s+(\d{3})\b/i);
+  return {
+    missingCommandKind: missing.command ? missing.kind : null,
+    missingCommand: missing.command,
+    checkTimeout: /CHECK_TIMEOUT\b/i.test(stepCtx),
+    exitCode: opts?.exitCode ?? null,
+    httpStatus: http?.[1] ? Number.parseInt(http[1], 10) : null,
+    connectionRefused: /econnrefused|connection refused/i.test(stepCtx),
+  };
+}
+
+/** Structural shape of an LLM classification result (mirrors @slopcontrol/llm). */
+export type LlmFailureClassification = {
+  class?: string;
+  confidence?: string;
+  summary?: string;
+  tags?: string[];
+  codingAgentShouldFix?: boolean;
+  audience?: string;
+  operatorActions?: string[];
+  lesson?: string;
+};
+
+/**
+ * Injected LLM classifier. artifacts does NOT depend on @slopcontrol/llm —
+ * the orchestrator binds classifyVerifyFailureViaLlm to endpoint/model.
+ */
+export type ClassifyVerifyFailureFn = (input: {
+  output: string;
+  stepName?: string;
+  command?: string;
+  exitCode?: number;
+  signals: FailureClassificationSignals;
+}) => Promise<LlmFailureClassification>;
+
+const FAILURE_CLASS_SET: ReadonlySet<string> = new Set([
+  "infra",
+  "product",
+  "process",
+  "model",
+  "env",
+  "unknown",
+]);
+
+/** Map an LLM classification into a ClassifiedFailure (sanitized). */
+export function mergeLlmFailureClassification(
+  llm: LlmFailureClassification,
+  opts?: { sourcePhaseId?: string; sourceRunId?: string; evidence?: string },
+): ClassifiedFailure {
+  const rawClass = (llm.class ?? "").trim().toLowerCase();
+  const kind = (
+    FAILURE_CLASS_SET.has(rawClass) ? rawClass : "unknown"
+  ) as FailureClass;
+  const codingAgentShouldFix =
+    typeof llm.codingAgentShouldFix === "boolean"
+      ? llm.codingAgentShouldFix
+      : llm.audience === "operator"
+        ? false
+        : true;
+  const confidence =
+    llm.confidence === "high" || llm.confidence === "medium"
+      ? llm.confidence
+      : "low";
+  const summary =
+    typeof llm.summary === "string" && llm.summary.trim()
+      ? llm.summary.trim()
+      : "LLM-classified verify failure";
+  const tags = [
+    ...new Set(
+      (llm.tags ?? [])
+        .filter((t): t is string => typeof t === "string" && t.trim().length > 0)
+        .map((t) => t.trim()),
+    ),
+    "llm",
+  ];
+  const llmActions = (llm.operatorActions ?? []).filter(
+    (a): a is string => typeof a === "string" && a.trim().length > 0,
+  );
+  const lesson =
+    typeof llm.lesson === "string" && llm.lesson.trim()
+      ? llm.lesson.trim()
+      : `Verify failure classified as ${kind} by the LLM classifier; address the root cause in the summary before re-running.`;
+  const built = build(failureClassToLearningKind(kind), confidence, summary, tags, {
+    codingAgentShouldFix,
+    lesson,
+    evidence: opts?.evidence,
+    opts: { sourcePhaseId: opts?.sourcePhaseId, sourceRunId: opts?.sourceRunId },
+    // Force [] when coding should fix; undefined (→ class defaults) when the
+    // operator audience came without concrete actions.
+    operatorActions: codingAgentShouldFix
+      ? []
+      : llmActions.length > 0
+        ? llmActions
+        : undefined,
+  });
+  return kind === "unknown" ? { ...built, class: "unknown" } : built;
+}
+
+function classifyOptsFor(
+  input: BuildFailureDiagnosisInput,
+): ClassifyVerifyFailureOpts {
+  const step = input.firstFailure;
+  return {
     sourcePhaseId: input.sourcePhaseId,
     sourceRunId: input.sourceRunId,
     stepName: step?.name,
     command: step?.command,
     exitCode: step?.exitCode,
-  });
+  };
+}
+
+function classifyTextFor(input: BuildFailureDiagnosisInput): string {
+  const step = input.firstFailure;
+  return step
+    ? [step.name, step.command ?? "", step.output].join("\n")
+    : input.output;
+}
+
+/**
+ * Build a durable diagnosis card from the first failing verify step.
+ * This is the primary signal for the diagnose-then-act loop.
+ */
+export function buildFailureDiagnosis(
+  input: BuildFailureDiagnosisInput,
+): FailureDiagnosis {
+  const classified = classifyVerifyFailure(
+    classifyTextFor(input),
+    classifyOptsFor(input),
+  );
+  return toFailureDiagnosis(classified, input);
+}
+
+/**
+ * LLM-first variant: deterministic fast-path → injected LLM classifier →
+ * regex-tree fallback. Byte-identical to buildFailureDiagnosis when no
+ * classifyFn is supplied, and identical to sync output (plus an
+ * "llm-fallback" tag) when the classifier throws.
+ */
+export async function buildFailureDiagnosisAsync(
+  input: BuildFailureDiagnosisInput,
+  opts?: { classifyFn?: ClassifyVerifyFailureFn },
+): Promise<FailureDiagnosis> {
+  const classifyText = classifyTextFor(input);
+  const classifyOpts = classifyOptsFor(input);
+
+  const fastPath = matchDeterministicFailureFastPath(classifyText, classifyOpts);
+  if (fastPath) return toFailureDiagnosis(fastPath, input);
+
+  if (opts?.classifyFn) {
+    const step = input.firstFailure;
+    try {
+      const llm = await opts.classifyFn({
+        output: classifyText,
+        stepName: step?.name,
+        command: step?.command,
+        exitCode: step?.exitCode,
+        signals: extractFailureSignals(classifyText, classifyOpts),
+      });
+      const merged = mergeLlmFailureClassification(llm, {
+        sourcePhaseId: input.sourcePhaseId,
+        sourceRunId: input.sourceRunId,
+        evidence: redactSecrets(
+          lastLines(step?.output ?? input.output, 40),
+        ).slice(-800),
+      });
+      return toFailureDiagnosis(merged, input);
+    } catch {
+      const fallback = classifyVerifyFailure(classifyText, classifyOpts);
+      fallback.tags = [...fallback.tags, "llm-fallback"];
+      return toFailureDiagnosis(fallback, input);
+    }
+  }
+
+  return buildFailureDiagnosis(input);
+}
+
+function toFailureDiagnosis(
+  classified: ClassifiedFailure,
+  input: BuildFailureDiagnosisInput,
+): FailureDiagnosis {
+  const step = input.firstFailure;
 
   const evidence = redactSecrets(lastLines(step?.output ?? input.output, 40));
   const rootCause = step

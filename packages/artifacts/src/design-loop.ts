@@ -1189,12 +1189,10 @@ export function createDesignLoopMeta(opts: {
   scope?: import("./design-conceptual-model.js").DesignScope;
 }): DesignLoopMeta {
   const now = new Date().toISOString();
-  const { classifyDesignScopeFromText, defaultProductScope } =
+  const { defaultProductScope } =
     requireDesignPack("./design-conceptual-model.js") as typeof import("./design-conceptual-model.js");
-  const scope =
-    opts.scope ??
-    classifyDesignScopeFromText(opts.brief, { source: "start" }) ??
-    defaultProductScope("start");
+  // Scope refined after LLM continue-intent in designLoopGenerate.
+  const scope = opts.scope ?? defaultProductScope("start");
   return {
     id: randomUUID(),
     projectId: opts.projectId,
@@ -1367,6 +1365,8 @@ export function uiSpecFromDesignLoopMock(opts: {
   acceptance?: DesignLoopAcceptance | null;
   scope?: import("./design-conceptual-model.js").DesignScope | null;
   theme?: import("./design-conceptual-model.js").ThemeContract | null;
+  /** Concrete DESIGN_PACK.shell bullets (menubar content-max, slots, …). */
+  shellNotes?: string[] | null;
 }): string {
   const features = opts.acceptance?.features ?? [];
   const accepted = features.filter((f) => f.accepted);
@@ -1481,7 +1481,23 @@ ${themeSection}
 
 ${
   hasShell
-    ? `IN SCOPE (applied_shell). Implement the structure and hierarchy shown in the accepted mock's applied frames (\`.slopcontrol/design-loops/${opts.loopId}/v${opts.version}/mock.html\`, also \`design/mock.html\`). Match header/nav/main/footer regions and spacing intent for those frames. Do not invent a competing shell.`
+    ? `IN SCOPE (applied_shell). Implement the structure and hierarchy shown in the accepted mock's applied frames (\`.slopcontrol/design-loops/${opts.loopId}/v${opts.version}/mock.html\`, also \`design/mock.html\`). Match header/nav/main/footer regions and spacing intent for those frames. Do not invent a competing shell.
+${
+  (opts.shellNotes ?? []).filter((s) =>
+    /menubar|content-max|shell|nav\s*slot|inner bar/i.test(s),
+  ).length
+    ? `
+### Shell layout contract (from accepted mock — implement + prove in Automated Checks)
+
+${(opts.shellNotes ?? [])
+  .filter((s) => /menubar|content-max|shell|nav\s*slot|inner bar|dashboard|theme toggle/i.test(s))
+  .map((s) => `- ${s}`)
+  .join("\n")}
+
+File Changes must update the product Menubar (or equivalent shell) to match — e.g. centered inner bar at \`var(--content-max)\`, left logo+nav / right auth+theme — not only add a view-switcher prop. When shell notes distinguish landing vs dashboard: landing stays content-max; dashboard uses a full-viewport-width bar and a viewport-filling shell (\`min-height: calc(100vh - var(--bar-h))\`, sidebar + main like jamroast \`DashboardShell\`). Automated Checks must grep for \`--content-max\` (or equivalent) on the landing/menubar path and Menubar/JampressMenubar mount in playground App **or** product layout shell.
+`
+    : ""
+}`
     : "OUT OF SCOPE (applied_shell not accepted). Do **not** rebuild portal/dashboard chrome from the mock frames. Brand/token/logo work may still proceed if those features are accepted."
 }
 
@@ -1615,6 +1631,15 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     features: acceptance.features,
     isExtensionImplement,
   });
+  let shellNotes: string[] = [];
+  try {
+    const { extractShellNotes } = requireDesignPack(
+      "./design-pack.js",
+    ) as typeof import("./design-pack.js");
+    shellNotes = extractShellNotes(html, request, notes ?? "");
+  } catch {
+    shellNotes = [];
+  }
   const uiSpec = uiSpecFromDesignLoopMock({
     brief: uiSpecBrief,
     loopId: opts.loopId,
@@ -1623,6 +1648,7 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     acceptance: phaseAcceptance,
     scope,
     theme: inScopeSet.has("theme_modes") ? theme : null,
+    shellNotes,
   });
   const uiSpecFile = join(
     opts.projectRoot,

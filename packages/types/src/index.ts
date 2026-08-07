@@ -199,6 +199,27 @@ export const AskMessageSchema = z.object({
 
 export type AskMessage = z.infer<typeof AskMessageSchema>;
 
+/** Shared chat message for design-loop / plan-loop (Ask parity). */
+export const LoopChatMessageMetaSchema = z
+  .object({
+    kind: z.enum(["working", "final", "system"]).optional(),
+    version: z.number().int().positive().optional(),
+    assets: z.array(z.string()).optional(),
+    ops: z.array(z.string()).optional(),
+  })
+  .optional();
+
+export type LoopChatMessageMeta = z.infer<typeof LoopChatMessageMetaSchema>;
+
+export const LoopChatMessageSchema = z.object({
+  role: AskMessageRoleSchema,
+  content: z.string().min(1),
+  at: z.string().datetime(),
+  meta: LoopChatMessageMetaSchema,
+});
+
+export type LoopChatMessage = z.infer<typeof LoopChatMessageSchema>;
+
 export const AskStatusSchema = z.enum(["open", "promoted", "archived"]);
 
 export type AskStatus = z.infer<typeof AskStatusSchema>;
@@ -396,6 +417,77 @@ export function formatDurationMs(ms: number | undefined | null): string {
   return `${h}h ${rm}m`;
 }
 
+export const BuildToolchainSpecSchema = z.object({
+  /**
+   * Open-ended ecosystem id: "node-pnpm" | "node-npm" ship as defaults;
+   * anything else ("rust-cargo", "python-uv", ...) is LLM-resolved per project.
+   */
+  kind: z.string().min(1),
+  buildCmd: z.array(z.string().min(1)).optional(),
+  installCmd: z.array(z.string().min(1)).optional(),
+  frozenInstallCmd: z.array(z.string().min(1)).optional(),
+  /** {bump} placeholder → patch|minor|major. */
+  bumpVersionCmd: z.array(z.string().min(1)).optional(),
+  /** {registryUrl} placeholder → target registry URL. */
+  publishCmd: z.array(z.string().min(1)).optional(),
+  /** {dep} placeholder → name@^version. */
+  consumeUpdateCmd: z.array(z.string().min(1)).optional(),
+  lockfiles: z.array(z.string().min(1)).default([]),
+  registryEnvKeys: z.array(z.string().min(1)).default([]),
+});
+
+export type BuildToolchainSpec = z.infer<typeof BuildToolchainSpecSchema>;
+
+/**
+ * One build-process change proposed by the LLM configurator (or Hermes).
+ * Structured + allowlisted so the deterministic apply layer can validate
+ * before touching disk. `edit_json.set` uses dot-path keys ("scripts.build").
+ */
+export const BuildProcessConfigChangeSchema = z.discriminatedUnion("op", [
+  z.object({
+    op: z.literal("write_file"),
+    path: z.string().min(1),
+    content: z.string(),
+    rationale: z.string().default(""),
+  }),
+  z.object({
+    op: z.literal("edit_json"),
+    path: z.string().min(1),
+    set: z.record(z.string(), z.unknown()),
+    rationale: z.string().default(""),
+  }),
+  z.object({
+    op: z.literal("replace_section"),
+    path: z.string().min(1),
+    markerStart: z.string().min(1),
+    markerEnd: z.string().min(1),
+    content: z.string(),
+    rationale: z.string().default(""),
+  }),
+  z.object({
+    op: z.literal("run_command"),
+    command: z.array(z.string().min(1)).min(1),
+    rationale: z.string().default(""),
+  }),
+]);
+
+export type BuildProcessConfigChange = z.infer<
+  typeof BuildProcessConfigChangeSchema
+>;
+
+/** LLM configurator output: resolved toolchain + proposed changes. */
+export const BuildProcessConfigResultSchema = z.object({
+  toolchain: BuildToolchainSpecSchema,
+  gaps: z.array(z.string()).default([]),
+  changes: z.array(BuildProcessConfigChangeSchema).default([]),
+  notes: z.string().default(""),
+  confidence: z.enum(["low", "medium", "high"]),
+});
+
+export type BuildProcessConfigResult = z.infer<
+  typeof BuildProcessConfigResultSchema
+>;
+
 export const ProjectConfigSchema = z.object({
   buildCommand: z.string().default("npm run build"),
   testCommand: z.string().default("npm test"),
@@ -496,6 +588,17 @@ export const ProjectConfigSchema = z.object({
    * Set false to skip even when UI-SPEC/Assets exist.
    */
   enableDesignPass: z.boolean().default(true),
+  /**
+   * Resolved build toolchain (commands as data) for this project.
+   * Written by the build-process configurator (LLM) or manual override;
+   * consumed by publish / propagate / docker / CI surfaces.
+   */
+  toolchain: BuildToolchainSpecSchema.optional(),
+  /**
+   * True when this project is a shared component/design library whose
+   * changes should auto-publish to the registry after phases complete.
+   */
+  componentLibrary: z.boolean().default(false),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;

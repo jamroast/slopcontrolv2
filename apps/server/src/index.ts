@@ -16,6 +16,7 @@ import {
   phaseNeedsDesign,
   isDesignComplete,
   readProjectConfig,
+  resolveProjectToolchain,
   readUiSpec,
   readRunHandoff,
   readLatestHandoffForPhase,
@@ -83,6 +84,7 @@ import {
   publishDesignElement,
   extractAndPublishDesignElementFromLoop,
   extractDesignElementFromMock,
+  listExtractableDesignElementsFromLoop,
   importDesignElementIntoLoop,
   readDesignLoopElements,
   formatDesignElementsPromptBlock,
@@ -91,6 +93,8 @@ import {
   ensureNpmRegistryLayout,
   ensureProjectNpmrc,
   listNpmRegistryPackages,
+  npmRegistryEnvValues,
+  npmRegistryPackageFreshness,
   readNpmRegistryMeta,
   prepareDesignElementNpmPackage,
   recordDesignElementNpmPublish,
@@ -100,7 +104,7 @@ import {
   detectDependencyIntentFromText,
   DesignScopeSchema,
   conceptualModelFromLoop,
-  classifyDesignScopeFromText,
+  defaultProductScope,
   checkThemeContractInProject,
   packHasThemeModes,
   createPlanLoopMeta,
@@ -135,6 +139,7 @@ import {
   defaultPlanScope,
   phaseDescriptionFromDesignAccept,
   resolveDesignImplementInScope,
+  readLoopChatMessages,
 } from "@slopcontrol/artifacts";
 import {
   checkoutProjectBranch,
@@ -150,15 +155,27 @@ import {
   resolveServableDesignAsset,
   reviewDesignLoopLook,
 } from "@slopcontrol/coding-tools";
-import { loadEndpointsConfig } from "@slopcontrol/llm";
+import {
+  classifyDependencyIntentViaLlm,
+  loadEndpointsConfig,
+} from "@slopcontrol/llm";
 import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError } from "@slopcontrol/mastra";
 import {
   bindLiveTurn,
   wantsLiveStream,
   workingStubFromBound,
 } from "./live-turn-http.js";
+import { createLoopChatTurn } from "./loop-chat-http.js";
 import { liveTurns } from "./live-turns.js";
 import { startLiveTurnWatcher } from "./live-turn-watcher.js";
+import {
+  auditProjectBuildProcess,
+  configureProjectBuildProcess,
+  getProjectBuildProcessState,
+  onboardProjectBuildProcess,
+  updateProjectToolchain,
+  verifyProjectBuildProcess,
+} from "./build-process.js";
 import { ObsidianSync } from "@slopcontrol/obsidian";
 import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
@@ -281,6 +298,188 @@ function updatePhaseStatus(phaseId: string, status: string): void {
   phase.status = status as typeof phase.status;
   phase.updatedAt = new Date().toISOString();
   store.updatePhase(phase);
+}
+
+/**
+ * Resolve a design loop for relaunch_design_research.
+ * Prefer loopId; else match meta.phaseId or design/STATUS.md Source line.
+ */
+function resolveDesignLoopForRelaunchResearch(
+  project: { id: string; rootPath: string },
+  opts: { loopId?: string; phaseId?: string },
+):
+  | { ok: true; meta: NonNullable<ReturnType<typeof readDesignLoopMeta>> }
+  | { ok: false; status: number; error: string; hint?: string } {
+  const loopId = opts.loopId?.trim() || "";
+  const phaseId = opts.phaseId?.trim() || "";
+  if (!loopId && !phaseId) {
+    return {
+      ok: false,
+      status: 400,
+      error: "Provide loopId and/or phaseId",
+      hint: "relaunch_design_research",
+    };
+  }
+
+  if (loopId) {
+    const meta = readDesignLoopMeta(project.rootPath, loopId);
+    if (!meta || meta.projectId !== project.id) {
+      return { ok: false, status: 404, error: "Design loop not found" };
+    }
+    return { ok: true, meta };
+  }
+
+  const byPhase = listDesignLoops(project.rootPath).filter(
+    (l) => l.projectId === project.id && l.phaseId === phaseId,
+  );
+  if (byPhase.length === 1) {
+    return { ok: true, meta: byPhase[0]! };
+  }
+  if (byPhase.length > 1) {
+    byPhase.sort((a, b) =>
+      (b.updatedAt || "").localeCompare(a.updatedAt || ""),
+    );
+    return { ok: true, meta: byPhase[0]! };
+  }
+
+  const statusPath = join(
+    project.rootPath,
+    ".slopcontrol",
+    "phases",
+    phaseId,
+    "design",
+    "STATUS.md",
+  );
+  if (existsSync(statusPath)) {
+    try {
+      const status = readFileSync(statusPath, "utf-8");
+      const m = status.match(
+        /Source:\s*design-loop\s+([0-9a-f-]{36})\s+v\d+/i,
+      );
+      if (m?.[1]) {
+        const meta = readDesignLoopMeta(project.rootPath, m[1]);
+        if (meta && meta.projectId === project.id) {
+          return { ok: true, meta };
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return {
+    ok: false,
+    status: 404,
+    error: `No design loop found for phaseId=${phaseId}`,
+    hint: "Pass loopId from list_design_loops, or ensure the phase has design/STATUS.md from implement_design",
+  };
+}
+
+/**
+ * Always create a new phase, bind the accepted/implemented design contract,
+ * and start research. Used by relaunch_design_research (and recoverable
+ * stuck design_complete phases).
+ */
+function startFreshDesignResearchFromLoop(opts: {
+  project: NonNullable<ReturnType<typeof store.getProject>>;
+  meta: NonNullable<ReturnType<typeof readDesignLoopMeta>>;
+  dependsOn?: string[];
+}): {
+  phase: ReturnType<typeof store.createPhase>;
+  bound: ReturnType<typeof bindAcceptedDesignLoopToPhase>;
+  run: ReturnType<typeof store.createRun>;
+} {
+  const { project, meta } = opts;
+  if (meta.status !== "accepted" && meta.status !== "implemented") {
+    throw new Error(
+      `Design loop must be accepted or implemented before relaunch research (status=${meta.status}). Call design_loop_accept first.`,
+    );
+  }
+
+  const acceptance = readDesignLoopAcceptance(project.rootPath, meta.id);
+  const acceptedIds =
+    acceptance?.features.filter((f) => f.accepted).map((f) => f.id) ?? [];
+  if (acceptedIds.length < 1) {
+    throw new Error(
+      `Design loop ${meta.id} has no accepted features — call design_loop_accept with at least one feature ticked`,
+    );
+  }
+
+  const { inScope } = resolveDesignImplementInScope({
+    acceptedFeatureIds: acceptedIds,
+    lastImplementedFeatureIds: meta.lastImplementedFeatureIds,
+  });
+  const version = meta.acceptedVersion ?? meta.currentVersion;
+  const request = readDesignLoopRequest(project.rootPath, meta.id, version);
+  const isExtensionImplement = Boolean(
+    meta.lastImplementedVersion != null ||
+      (meta.lastImplementedFeatureIds?.length ?? 0) > 0,
+  );
+  const description = phaseDescriptionFromDesignAccept({
+    request,
+    briefFallback: meta.brief,
+    inScopeIds: inScope,
+    features: acceptance?.features,
+    isExtensionImplement,
+  });
+
+  const phase = store.createPhase({
+    projectId: project.id,
+    description,
+    rootPath: project.rootPath,
+    dependsOn: opts.dependsOn,
+  });
+
+  const bound = bindAcceptedDesignLoopToPhase({
+    projectRoot: project.rootPath,
+    loopId: meta.id,
+    phaseId: phase.id,
+  });
+
+  const run = store.createRun({ phaseId: phase.id, projectId: project.id });
+  touchRunStage(run.id, "researching");
+  activeRuns.add(run.id);
+  const ac = new AbortController();
+  abortControllers.set(run.id, ac);
+  const { orchestrator } = getRuntime(project.rootPath);
+  const researchDescription = phase.description;
+  void (async () => {
+    try {
+      const stage = await orchestrator.startResearch({
+        project,
+        phase: store.getPhase(phase.id) ?? phase,
+        run: store.getRun(run.id) ?? run,
+        description: researchDescription,
+        listProjects: () => store.listProjects(),
+        onStage: (s) => touchRunStage(run.id, s),
+      });
+      touchRunStage(run.id, stage);
+      updatePhaseStatus(
+        phase.id,
+        stage === "in_review" ? "in_review" : "draft",
+      );
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      log.error("design-loop", "relaunch design research failed", {
+        projectId: project.id,
+        loopId: meta.id,
+        runId: run.id,
+        error: errMsg,
+      });
+      appendRunLog(
+        project.rootPath,
+        run.id,
+        `relaunch_design_research failed: ${errMsg}`,
+      );
+      touchRunStage(run.id, "failed");
+      updatePhaseStatus(phase.id, "draft");
+    } finally {
+      activeRuns.delete(run.id);
+      abortControllers.delete(run.id);
+    }
+  })();
+
+  return { phase, bound, run };
 }
 
 function formatBgErrorDetail(error: unknown, maxChars = 2_000): string {
@@ -750,6 +949,11 @@ app.post("/projects/open", async (req, res) => {
   const name = String(req.body?.name ?? "").trim() || undefined;
   const intent = String(req.body?.intent ?? "").trim() || undefined;
   const forceRefresh = Boolean(req.body?.forceRefresh);
+  const skipBuildOnboarding = Boolean(req.body?.skipBuildOnboarding);
+  const componentLibrary =
+    typeof req.body?.componentLibrary === "boolean"
+      ? (req.body.componentLibrary as boolean)
+      : undefined;
   if (!rootPath) {
     res.status(400).json({ error: "rootPath is required" });
     return;
@@ -774,6 +978,9 @@ app.post("/projects/open", async (req, res) => {
         store.updateProject(stored);
       }
     }
+    if (!skipBuildOnboarding) {
+      kickoffBuildProcessOnboarding(project.id, { componentLibrary });
+    }
     res.json({
       project: store.getProject(project.id),
       ...result,
@@ -790,7 +997,16 @@ app.post("/projects/open", async (req, res) => {
 });
 
 app.get("/projects", (_req, res) => {
-  res.json({ projects: store.listProjects() });
+  res.json({
+    projects: store.listProjects().map((project) => ({
+      ...project,
+      buildProcessConfigured:
+        resolveProjectToolchain({
+          projectRoot: project.rootPath,
+          configured: readProjectConfig(project.rootPath).toolchain ?? null,
+        }).source !== "none",
+    })),
+  });
 });
 
 /**
@@ -812,6 +1028,191 @@ app.patch("/projects/:id", (req, res) => {
   store.updateProject(project);
   log.info("project", "renamed", { projectId: project.id, name });
   res.json({ project });
+});
+
+/**
+ * Build-process state for Hermes: resolved toolchain + recorded evidence.
+ * No LLM call — reads .slopcontrol/config.json + BUILD_PROCESS.json.
+ */
+app.get("/projects/:id/build-process", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const registryMeta = readNpmRegistryMeta(defaultDataDir());
+  res.json(
+    getProjectBuildProcessState({
+      projectRoot: project.rootPath,
+      registryEnv: registryMeta
+        ? npmRegistryEnvValues(registryMeta)
+        : undefined,
+    }),
+  );
+});
+
+/**
+ * Fire-and-forget import-time onboarding. Runs entirely in the background so
+ * registration responds immediately; outcome lands in BUILD_PROCESS.json
+ * (onboarding status) for the state endpoint to surface. Never throws.
+ */
+function kickoffBuildProcessOnboarding(
+  projectId: string,
+  opts?: { componentLibrary?: boolean },
+): void {
+  const project = store.getProject(projectId);
+  if (!project) return;
+  void (async () => {
+    try {
+      const { registry } = getRuntime(project.rootPath);
+      const { endpoint, modelId } =
+        registry.resolveEndpointForRole("classification");
+      const registryMeta = readNpmRegistryMeta(defaultDataDir());
+      const report = await onboardProjectBuildProcess({
+        projectRoot: project.rootPath,
+        endpoint,
+        modelId,
+        registryMeta,
+        componentLibrary: opts?.componentLibrary,
+      });
+      log.info("project", "build-process onboarding finished", {
+        projectId: project.id,
+        status: report.status,
+        toolchain: report.toolchainKind,
+        envFiles: report.envFiles,
+      });
+    } catch (err) {
+      log.error("project", "build-process onboarding crashed", {
+        projectId: project.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  })();
+}
+
+/** LLM audit: resolve toolchain + gaps against the capability checklist. */
+app.post("/projects/:id/build-process/audit", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  try {
+    const { registry } = getRuntime(project.rootPath);
+    const { endpoint, modelId } =
+      registry.resolveEndpointForRole("classification");
+    const report = await auditProjectBuildProcess({
+      projectRoot: project.rootPath,
+      endpoint,
+      modelId,
+    });
+    log.info("project", "build-process audit", {
+      projectId: project.id,
+      confidence: report.result.confidence,
+      gaps: report.result.gaps.length,
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+/** LLM configure: propose → guardrailed apply → persist toolchain. */
+app.post("/projects/:id/build-process/configure", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  try {
+    const { registry } = getRuntime(project.rootPath);
+    const { endpoint, modelId } =
+      registry.resolveEndpointForRole("classification");
+    const runCommands =
+      (req.body as { runCommands?: boolean } | undefined)?.runCommands !==
+      false;
+    const report = await configureProjectBuildProcess({
+      projectRoot: project.rootPath,
+      endpoint,
+      modelId,
+      runCommands,
+    });
+    log.info("project", "build-process configure", {
+      projectId: project.id,
+      applied: report.applied,
+      auditOnly: report.auditOnly,
+      changes: report.changes.filter((c) => c.applied).length,
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+/** Hermes manual override of the resolved toolchain (schema-validated). */
+app.put("/projects/:id/build-process/toolchain", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  try {
+    const body = (req.body ?? {}) as {
+      toolchain?: unknown;
+      componentLibrary?: boolean;
+    };
+    const toolchain = body.toolchain ?? req.body;
+    const out = updateProjectToolchain({
+      projectRoot: project.rootPath,
+      toolchain,
+      componentLibrary:
+        typeof body.componentLibrary === "boolean"
+          ? body.componentLibrary
+          : undefined,
+    });
+    log.info("project", "build-process toolchain manual override", {
+      projectId: project.id,
+      kind: out.toolchain.kind,
+    });
+    res.json(out);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+/**
+ * Post-onboarding smoke check: frozen install + build with the canonical
+ * registry env. Opt-in (Hermes) — installs are too slow for import time.
+ */
+app.post("/projects/:id/build-process/verify", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  try {
+    const registryMeta = readNpmRegistryMeta(defaultDataDir());
+    const report = await verifyProjectBuildProcess({
+      projectRoot: project.rootPath,
+      registryMeta,
+    });
+    log.info("project", "build-process verify", {
+      projectId: project.id,
+      ok: report.ok,
+      steps: report.steps.map((s) => `${s.step}:${s.code}`).join(","),
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 });
 
 /**
@@ -965,11 +1366,19 @@ app.post("/projects/reinit", async (req, res) => {
 app.post("/projects", (req, res) => {
   const name = String(req.body?.name ?? "Untitled Project");
   const rootPath = String(req.body?.rootPath ?? "");
+  const skipBuildOnboarding = Boolean(req.body?.skipBuildOnboarding);
+  const componentLibrary =
+    typeof req.body?.componentLibrary === "boolean"
+      ? (req.body.componentLibrary as boolean)
+      : undefined;
   if (!rootPath) {
     res.status(400).json({ error: "rootPath is required" });
     return;
   }
   const project = store.createProject({ name, rootPath });
+  if (!skipBuildOnboarding) {
+    kickoffBuildProcessOnboarding(project.id, { componentLibrary });
+  }
   res.status(201).json({ project });
 });
 
@@ -1777,6 +2186,7 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
     plan,
     notes,
     transcript: readPlanLoopTranscript(project.rootPath, meta.id),
+    messages: readLoopChatMessages(project.rootPath, "plan", meta.id),
     versionMeta,
     usedScaffold: versionMeta?.usedScaffold ?? false,
     acceptance,
@@ -1829,7 +2239,6 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
     scope,
   });
   writePlanLoopMeta(project.rootPath, meta);
-  appendPlanLoopTranscript(project.rootPath, meta.id, "user", brief);
 
   try {
     const { orchestrator } = getRuntime(project.rootPath);
@@ -1842,11 +2251,20 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
       res,
       stream,
     });
+    const planChat = createLoopChatTurn({
+      projectRoot: project.rootPath,
+      kind: "plan",
+      loopId: meta.id,
+      bound,
+      workingStubFromBound: (b) => workingStubFromBound(b as typeof bound),
+    });
+    planChat.appendUser(brief);
     let plan: string;
     let notes: string;
     let usedScaffold: boolean;
+    let reply: string;
     try {
-      ({ plan, notes, usedScaffold } = await orchestrator.planLoopGenerate({
+      ({ plan, notes, usedScaffold, reply } = await orchestrator.planLoopGenerate({
         project,
         loopId: meta.id,
         brief,
@@ -1854,7 +2272,7 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
         listProjects: () => store.listProjects(),
         dataDir: defaultDataDir(),
         abortSignal: bound.signal,
-        onProgress: bound.onProgress,
+        onProgress: planChat.onProgress,
       }));
     } catch (genErr) {
       if (isLiveTurnInterruptedError(genErr)) {
@@ -1864,16 +2282,13 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
           (genErr as { partialReply?: string }).partialReply ||
           "Plan generate interrupted.";
         const recovery = `${partial}\n\n---\nPlan generate interrupted (${reason}). Call plan_loop_continue or plan_loop_retry with a narrower brief.`;
-        appendPlanLoopTranscript(
-          project.rootPath,
-          meta.id,
-          "assistant",
-          recovery,
-        );
+        planChat.finalizeAssistant(recovery);
         if (stream) {
           bound.completeInterrupted(recovery, {
             loopId: meta.id,
             notes: recovery,
+            reply: recovery,
+            messages: planChat.messages(),
           });
           return;
         }
@@ -1885,6 +2300,8 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
           code: "interrupted",
           loopId: meta.id,
           notes: recovery,
+          reply: recovery,
+          messages: planChat.messages(),
         });
         return;
       }
@@ -1922,18 +2339,16 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
           ? { version, reason: notes, at: new Date().toISOString() }
           : null,
       ) ?? next;
-    appendPlanLoopTranscript(
-      project.rootPath,
-      meta.id,
-      "assistant",
-      `${notes}\n\n\`\`\`markdown\n${plan.slice(0, 4_000)}${plan.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
-    );
+    const operatorReply = reply || notes || `Plan loop v${version} updated.`;
+    const messages = planChat.finalizeAssistant(operatorReply, { version });
     const planStartPayload = {
       loop: next,
       loopId: next.id,
       version,
       plan,
       notes,
+      reply: operatorReply,
+      messages,
       usedScaffold,
       acceptance,
       conceptualModel: summarizePlanConceptualModel({
@@ -2011,7 +2426,6 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
     working.id,
     baseVersion,
   );
-  appendPlanLoopTranscript(project.rootPath, working.id, "user", message);
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const version = allocateNextPlanLoopVersion(
@@ -2026,11 +2440,20 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
       res,
       stream,
     });
+    const planChat = createLoopChatTurn({
+      projectRoot: project.rootPath,
+      kind: "plan",
+      loopId: working.id,
+      bound,
+      workingStubFromBound: (b) => workingStubFromBound(b as typeof bound),
+    });
+    planChat.appendUser(message);
     let plan: string;
     let notes: string;
     let usedScaffold: boolean;
+    let reply: string;
     try {
-      ({ plan, notes, usedScaffold } = await orchestrator.planLoopGenerate({
+      ({ plan, notes, usedScaffold, reply } = await orchestrator.planLoopGenerate({
         project,
         loopId: working.id,
         brief: working.brief,
@@ -2040,7 +2463,7 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
         listProjects: () => store.listProjects(),
         dataDir: defaultDataDir(),
         abortSignal: bound.signal,
-        onProgress: bound.onProgress,
+        onProgress: planChat.onProgress,
       }));
     } catch (genErr) {
       if (isLiveTurnInterruptedError(genErr)) {
@@ -2050,16 +2473,13 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
           (genErr as { partialReply?: string }).partialReply ||
           "Plan continue interrupted.";
         const recovery = `${partial}\n\n---\nPlan continue interrupted (${reason}). Call plan_loop_continue again or plan_loop_retry.`;
-        appendPlanLoopTranscript(
-          project.rootPath,
-          working.id,
-          "assistant",
-          recovery,
-        );
+        planChat.finalizeAssistant(recovery);
         if (stream) {
           bound.completeInterrupted(recovery, {
             loopId: working.id,
             notes: recovery,
+            reply: recovery,
+            messages: planChat.messages(),
           });
           return;
         }
@@ -2071,6 +2491,8 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
           code: "interrupted",
           loopId: working.id,
           notes: recovery,
+          reply: recovery,
+          messages: planChat.messages(),
         });
         return;
       }
@@ -2109,12 +2531,8 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
           ? { version, reason: notes, at: new Date().toISOString() }
           : null,
       ) ?? next;
-    appendPlanLoopTranscript(
-      project.rootPath,
-      working.id,
-      "assistant",
-      `${notes}\n\n\`\`\`markdown\n${plan.slice(0, 4_000)}${plan.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
-    );
+    const operatorReply = reply || notes || `Plan loop v${version} updated.`;
+    const messages = planChat.finalizeAssistant(operatorReply, { version });
     const planContinuePayload = {
       loop: next,
       loopId: next.id,
@@ -2122,6 +2540,8 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
       baseVersion,
       plan,
       notes,
+      reply: operatorReply,
+      messages,
       usedScaffold,
       acceptance,
       conceptualModel: summarizePlanConceptualModel({ meta: next }),
@@ -2464,11 +2884,20 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
       res,
       stream,
     });
+    const planChat = createLoopChatTurn({
+      projectRoot: project.rootPath,
+      kind: "plan",
+      loopId: meta.id,
+      bound,
+      workingStubFromBound: (b) => workingStubFromBound(b as typeof bound),
+    });
+    planChat.appendUser(`Retry v${version}: ${request}`);
     let plan: string;
     let notes: string;
     let usedScaffold: boolean;
+    let reply: string;
     try {
-      ({ plan, notes, usedScaffold } = await orchestrator.planLoopGenerate({
+      ({ plan, notes, usedScaffold, reply } = await orchestrator.planLoopGenerate({
         project,
         loopId: meta.id,
         brief: meta.brief,
@@ -2478,7 +2907,7 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
         listProjects: () => store.listProjects(),
         dataDir: defaultDataDir(),
         abortSignal: bound.signal,
-        onProgress: bound.onProgress,
+        onProgress: planChat.onProgress,
       }));
     } catch (genErr) {
       if (isLiveTurnInterruptedError(genErr)) {
@@ -2488,16 +2917,13 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
           (genErr as { partialReply?: string }).partialReply ||
           "Plan retry interrupted.";
         const recovery = `${partial}\n\n---\nPlan retry interrupted (${reason}). Call plan_loop_retry again.`;
-        appendPlanLoopTranscript(
-          project.rootPath,
-          meta.id,
-          "assistant",
-          recovery,
-        );
+        planChat.finalizeAssistant(recovery);
         if (stream) {
           bound.completeInterrupted(recovery, {
             loopId: meta.id,
             notes: recovery,
+            reply: recovery,
+            messages: planChat.messages(),
           });
           return;
         }
@@ -2509,6 +2935,8 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
           code: "interrupted",
           loopId: meta.id,
           notes: recovery,
+          reply: recovery,
+          messages: planChat.messages(),
         });
         return;
       }
@@ -2539,14 +2967,19 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
           ? { version, reason: notes, at: new Date().toISOString() }
           : null,
       ) ?? meta;
+    const operatorReply = reply || notes || `Plan loop v${version} updated.`;
+    const messages = planChat.finalizeAssistant(operatorReply, { version });
     const retryPayload = {
       loop: next,
       loopId: next.id,
       version,
       plan,
       notes,
+      reply: operatorReply,
+      messages,
       usedScaffold,
       hint: usedScaffold ? "plan_loop_retry" : undefined,
+      transcript: readPlanLoopTranscript(project.rootPath, meta.id),
     };
     if (stream) {
       bound.completeDone(retryPayload);
@@ -2659,6 +3092,7 @@ app.get("/projects/:id/design-loops/:loopId", (req, res) => {
       ? readDesignLoopVersionMeta(project.rootPath, meta.id, version)
       : null;
   const transcript = readDesignLoopTranscript(project.rootPath, meta.id);
+  const messages = readLoopChatMessages(project.rootPath, "design", meta.id);
   let acceptance = readDesignLoopAcceptance(project.rootPath, meta.id);
   // Seed checklist for loops created before ACCEPTANCE.json existed
   if (!acceptance && html?.trim() && Number.isFinite(version) && version > 0) {
@@ -2712,6 +3146,7 @@ app.get("/projects/:id/design-loops/:loopId", (req, res) => {
     html: htmlForApi,
     notes,
     transcript,
+    messages,
     versionMeta,
     usedScaffold: versionMeta?.usedScaffold ?? false,
     acceptance,
@@ -3037,10 +3472,10 @@ app.post("/projects/:id/design-loops", async (req, res) => {
     brief,
     phaseId: phaseId || undefined,
     askId: askId || undefined,
-    scope: scopeOverride ?? classifyDesignScopeFromText(brief, { source: "start" }),
+    // Scope refined after LLM continue-intent in designLoopGenerate.
+    scope: scopeOverride ?? defaultProductScope("start"),
   });
   writeDesignLoopMeta(project.rootPath, meta);
-  appendDesignLoopTranscript(project.rootPath, meta.id, "user", brief);
 
   try {
     const { orchestrator } = getRuntime(project.rootPath);
@@ -3053,11 +3488,20 @@ app.post("/projects/:id/design-loops", async (req, res) => {
       res,
       stream,
     });
+    const designChat = createLoopChatTurn({
+      projectRoot: project.rootPath,
+      kind: "design",
+      loopId: meta.id,
+      bound,
+      workingStubFromBound: (b) => workingStubFromBound(b as typeof bound),
+    });
+    designChat.appendUser(brief);
     let html: string;
     let notes: string;
     let usedScaffold: boolean;
+    let reply: string;
     try {
-      ({ html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
+      ({ html, notes, usedScaffold, reply } = await orchestrator.designLoopGenerate({
         project,
         loopId: meta.id,
         brief,
@@ -3067,7 +3511,7 @@ app.post("/projects/:id/design-loops", async (req, res) => {
           store.findProjectByRootPath(rootPath),
         dataDir: defaultDataDir(),
         abortSignal: bound.signal,
-        onProgress: bound.onProgress,
+        onProgress: designChat.onProgress,
       }));
     } catch (genErr) {
       if (isLiveTurnInterruptedError(genErr)) {
@@ -3077,16 +3521,13 @@ app.post("/projects/:id/design-loops", async (req, res) => {
           (genErr as { partialReply?: string }).partialReply ||
           "Design generate interrupted.";
         const recovery = `${partial}\n\n---\nDesign generate interrupted (${reason}). Call design_loop_continue or design_loop_retry.`;
-        appendDesignLoopTranscript(
-          project.rootPath,
-          meta.id,
-          "assistant",
-          recovery,
-        );
+        designChat.finalizeAssistant(recovery);
         if (stream) {
           bound.completeInterrupted(recovery, {
             loopId: meta.id,
             notes: recovery,
+            reply: recovery,
+            messages: designChat.messages(),
           });
           return;
         }
@@ -3098,6 +3539,8 @@ app.post("/projects/:id/design-loops", async (req, res) => {
           code: "interrupted",
           loopId: meta.id,
           notes: recovery,
+          reply: recovery,
+          messages: designChat.messages(),
         });
         return;
       }
@@ -3143,12 +3586,8 @@ app.post("/projects/:id/design-loops", async (req, res) => {
     } else {
       next = setDesignLoopLastError(project.rootPath, meta.id, null) ?? next;
     }
-    appendDesignLoopTranscript(
-      project.rootPath,
-      meta.id,
-      "assistant",
-      `${notes}\n\n\`\`\`html\n${html.slice(0, 4_000)}${html.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
-    );
+    const operatorReply = reply || notes || `Design loop v${version} updated.`;
+    const messages = designChat.finalizeAssistant(operatorReply, { version });
     const siteInv =
       readLiveSiteInventory(project.rootPath, next.id) ??
       buildLiveSiteInventory(project.rootPath);
@@ -3162,6 +3601,8 @@ app.post("/projects/:id/design-loops", async (req, res) => {
         loopId: next.id,
       }),
       notes,
+      reply: operatorReply,
+      messages,
       usedScaffold,
       acceptance,
       conceptualModel: conceptualModelFromLoop({
@@ -3248,14 +3689,6 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
     working.id,
     baseVersion,
   );
-  appendDesignLoopTranscript(
-    project.rootPath,
-    working.id,
-    "user",
-    baseVersion !== tip
-      ? `${message}\n\n(baseVersion: v${baseVersion})`
-      : message,
-  );
 
   try {
     const { orchestrator } = getRuntime(project.rootPath);
@@ -3271,11 +3704,24 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
       res,
       stream,
     });
+    const designChat = createLoopChatTurn({
+      projectRoot: project.rootPath,
+      kind: "design",
+      loopId: working.id,
+      bound,
+      workingStubFromBound: (b) => workingStubFromBound(b as typeof bound),
+    });
+    designChat.appendUser(
+      baseVersion !== tip
+        ? `${message}\n\n(baseVersion: v${baseVersion})`
+        : message,
+    );
     let html: string;
     let notes: string;
     let usedScaffold: boolean;
+    let reply: string;
     try {
-      ({ html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
+      ({ html, notes, usedScaffold, reply } = await orchestrator.designLoopGenerate({
         project,
         loopId: working.id,
         brief: working.brief,
@@ -3287,7 +3733,7 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
           store.findProjectByRootPath(rootPath),
         dataDir: defaultDataDir(),
         abortSignal: bound.signal,
-        onProgress: bound.onProgress,
+        onProgress: designChat.onProgress,
       }));
     } catch (genErr) {
       if (isLiveTurnInterruptedError(genErr)) {
@@ -3297,16 +3743,13 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
           (genErr as { partialReply?: string }).partialReply ||
           "Design continue interrupted.";
         const recovery = `${partial}\n\n---\nDesign continue interrupted (${reason}). Call design_loop_continue again or design_loop_retry.`;
-        appendDesignLoopTranscript(
-          project.rootPath,
-          working.id,
-          "assistant",
-          recovery,
-        );
+        designChat.finalizeAssistant(recovery);
         if (stream) {
           bound.completeInterrupted(recovery, {
             loopId: working.id,
             notes: recovery,
+            reply: recovery,
+            messages: designChat.messages(),
           });
           return;
         }
@@ -3318,6 +3761,8 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
           code: "interrupted",
           loopId: working.id,
           notes: recovery,
+          reply: recovery,
+          messages: designChat.messages(),
         });
         return;
       }
@@ -3360,12 +3805,10 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
     } else {
       next = setDesignLoopLastError(project.rootPath, working.id, null) ?? next;
     }
-    appendDesignLoopTranscript(
-      project.rootPath,
-      working.id,
-      "assistant",
-      `${notes}\n\n\`\`\`html\n${html.slice(0, 4_000)}${html.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
-    );
+    const operatorReply = reply || notes || `Design loop v${version} updated.`;
+    const messages = designChat.finalizeAssistant(operatorReply, {
+      version,
+    });
     const siteInv =
       readLiveSiteInventory(project.rootPath, next.id) ??
       buildLiveSiteInventory(project.rootPath);
@@ -3380,6 +3823,8 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
         loopId: next.id,
       }),
       notes,
+      reply: operatorReply,
+      messages,
       usedScaffold,
       acceptance,
       conceptualModel: conceptualModelFromLoop({
@@ -3579,13 +4024,6 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
       ? readDesignLoopMockHtml(project.rootPath, meta.id, parentVersion)
       : null;
 
-  appendDesignLoopTranscript(
-    project.rootPath,
-    meta.id,
-    "user",
-    `Retry v${version}${override ? ` (override): ${override}` : ""}`,
-  );
-
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const isFirst = version === 1;
@@ -3597,11 +4035,22 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
       res,
       stream,
     });
+    const designChat = createLoopChatTurn({
+      projectRoot: project.rootPath,
+      kind: "design",
+      loopId: meta.id,
+      bound,
+      workingStubFromBound: (b) => workingStubFromBound(b as typeof bound),
+    });
+    designChat.appendUser(
+      `Retry v${version}${override ? ` (override): ${override}` : ""}`,
+    );
     let html: string;
     let notes: string;
     let usedScaffold: boolean;
+    let reply: string;
     try {
-      ({ html, notes, usedScaffold } = await orchestrator.designLoopGenerate({
+      ({ html, notes, usedScaffold, reply } = await orchestrator.designLoopGenerate({
         project,
         loopId: meta.id,
         brief: isFirst ? requestText : meta.brief,
@@ -3613,7 +4062,7 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
           store.findProjectByRootPath(rootPath),
         dataDir: defaultDataDir(),
         abortSignal: bound.signal,
-        onProgress: bound.onProgress,
+        onProgress: designChat.onProgress,
       }));
     } catch (genErr) {
       if (isLiveTurnInterruptedError(genErr)) {
@@ -3623,16 +4072,13 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
           (genErr as { partialReply?: string }).partialReply ||
           "Design retry interrupted.";
         const recovery = `${partial}\n\n---\nDesign retry interrupted (${reason}). Call design_loop_retry again.`;
-        appendDesignLoopTranscript(
-          project.rootPath,
-          meta.id,
-          "assistant",
-          recovery,
-        );
+        designChat.finalizeAssistant(recovery);
         if (stream) {
           bound.completeInterrupted(recovery, {
             loopId: meta.id,
             notes: recovery,
+            reply: recovery,
+            messages: designChat.messages(),
           });
           return;
         }
@@ -3644,6 +4090,8 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
           code: "interrupted",
           loopId: meta.id,
           notes: recovery,
+          reply: recovery,
+          messages: designChat.messages(),
         });
         return;
       }
@@ -3687,12 +4135,8 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
     } else {
       next = setDesignLoopLastError(project.rootPath, meta.id, null) ?? next;
     }
-    appendDesignLoopTranscript(
-      project.rootPath,
-      meta.id,
-      "assistant",
-      `Retry v${version} result:\n${notes}\n\n\`\`\`html\n${html.slice(0, 4_000)}${html.length > 4_000 ? "\n…(truncated)" : ""}\n\`\`\``,
-    );
+    const operatorReply = reply || notes || `Design loop v${version} updated.`;
+    const messages = designChat.finalizeAssistant(operatorReply, { version });
     const retryPayload = {
       loop: next,
       loopId: next.id,
@@ -3702,6 +4146,8 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
         loopId: next.id,
       }),
       notes,
+      reply: operatorReply,
+      messages,
       usedScaffold,
       acceptance,
       hint: usedScaffold ? "design_loop_retry" : undefined,
@@ -3925,7 +4371,7 @@ app.get("/projects/:id/cross-deps", (req, res) => {
   });
 });
 
-app.post("/projects/:id/resolve-dependency", (req, res) => {
+app.post("/projects/:id/resolve-dependency", async (req, res) => {
   const project = store.getProject(req.params.id);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
@@ -3942,15 +4388,31 @@ app.post("/projects/:id/resolve-dependency", (req, res) => {
     dataDir: defaultDataDir(),
     listProjects: () => store.listProjects(),
   });
+  let intent = body.text
+    ? detectDependencyIntentFromText(body.text)
+    : undefined;
+  if (body.text?.trim()) {
+    try {
+      const { registry } = getRuntime(project.rootPath);
+      const { endpoint, modelId } =
+        registry.resolveEndpointForRole("classification");
+      intent = await classifyDependencyIntentViaLlm({
+        endpoint,
+        modelId,
+        message: body.text,
+        timeoutMs: 90_000,
+      });
+    } catch {
+      /* regex fallback already set */
+    }
+  }
   const resolved = resolveDependencyRecommendation({
     text: body.text,
     elementId: body.elementId,
     packageName: body.packageName,
     fromName: body.fromName,
     catalog,
-    intent: body.text
-      ? detectDependencyIntentFromText(body.text)
-      : undefined,
+    intent,
   });
   res.json({
     projectId: project.id,
@@ -3959,7 +4421,7 @@ app.post("/projects/:id/resolve-dependency", (req, res) => {
     neverNpmLink: true,
     nextActions: [
       "npm_registry_ensure_rc",
-      "design_element_import / list_design_elements",
+      "list_extractable_design_elements / design_element_import / list_design_elements",
       "pnpm add @jam/… (after ensure_rc)",
     ],
   });
@@ -4076,6 +4538,50 @@ app.post("/projects/:id/design-elements/publish", (req, res) => {
   }
 });
 
+app.get(
+  "/projects/:id/design-loops/:loopId/elements/extractable",
+  (req, res) => {
+    const project = store.getProject(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const loopMeta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+    if (!loopMeta || loopMeta.projectId !== project.id) {
+      res.status(404).json({ error: "Design loop not found" });
+      return;
+    }
+    try {
+      const versionRaw = req.query.version;
+      const version =
+        typeof versionRaw === "string" && versionRaw.trim()
+          ? Number(versionRaw)
+          : undefined;
+      const candidates = listExtractableDesignElementsFromLoop({
+        projectRoot: project.rootPath,
+        loopId: loopMeta.id,
+        version:
+          typeof version === "number" && Number.isFinite(version)
+            ? version
+            : undefined,
+      });
+      res.json({
+        ok: true,
+        loopId: loopMeta.id,
+        version: version ?? loopMeta.currentVersion,
+        candidates,
+        next: candidates.length
+          ? "Pick a candidate id, then POST …/elements/extract with { elementId, label? }."
+          : "No extractable regions found. Add data-element markers or known chrome classes (menubar, theme-toggle, …).",
+      });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+);
+
 app.post("/projects/:id/design-loops/:loopId/elements/extract", (req, res) => {
   const project = store.getProject(req.params.id);
   if (!project) {
@@ -4130,6 +4636,7 @@ app.post("/projects/:id/design-loops/:loopId/elements/extract", (req, res) => {
       kind: req.body?.kind,
       label: typeof req.body?.label === "string" ? req.body.label : undefined,
       brief: loopMeta.brief,
+      projectRoot: project.rootPath,
     });
     res.json({ ok: true, published: false, extracted });
   } catch (err) {
@@ -4208,12 +4715,37 @@ app.get("/npm-registry", async (_req, res) => {
       ? ensureNpmRegistryLayout(dataDir)
       : await refreshNpmRegistryStatus(dataDir);
     const st = getNpmRegistryStatus(dataDir);
+    // Component-library freshness: dist newer than the registry tarball means
+    // a publish is owed (catches "edited src, rebuilt, never republished").
+    const libraries = store
+      .listProjects()
+      .map((p) => {
+        try {
+          if (!readProjectConfig(p.rootPath).componentLibrary) return null;
+          const pkgPath = join(p.rootPath, "package.json");
+          if (!existsSync(pkgPath)) return null;
+          const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+            name?: string;
+          };
+          if (!pkg.name) return null;
+          const freshness = npmRegistryPackageFreshness({
+            dataDir,
+            name: pkg.name,
+            distDir: join(p.rootPath, "dist"),
+          });
+          return { projectId: p.id, projectName: p.name, ...freshness };
+        } catch {
+          return null;
+        }
+      })
+      .filter((l): l is NonNullable<typeof l> => l !== null);
     res.json({
       enabled: st.enabled && !isNpmRegistryEnvOff(),
       meta,
       up: meta.status === "up",
       packages: st.packages,
       scopes: meta.scopes,
+      libraries,
     });
   } catch (err) {
     res.status(500).json({
@@ -4352,6 +4884,46 @@ app.post("/projects/:id/design-elements/:elementId/publish-npm", async (req, res
   }
 });
 
+/**
+ * Toolchain-driven library publish: build → bump → publish via the project's
+ * own build system, then propagate to registered consumers. The publish →
+ * consume pipeline for component-library projects (e.g. jamroast-components).
+ */
+app.post("/projects/:id/design-library/publish", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const body = (req.body ?? {}) as {
+    bump?: "patch" | "minor" | "major";
+    propagate?: boolean;
+  };
+  try {
+    const { publishLibraryToRegistry } = await import("./npm-registry.js");
+    const report = await publishLibraryToRegistry({
+      dataDir: defaultDataDir(),
+      packageDir: project.rootPath,
+      bump: body.bump,
+      propagate: body.propagate,
+      projects: store
+        .listProjects()
+        .map((p) => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
+    });
+    log.info("project", "design library published", {
+      projectId: project.id,
+      name: report.name,
+      version: report.version,
+      consumers: report.propagation?.length ?? 0,
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
 app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
   const project = store.getProject(req.params.id);
   if (!project) {
@@ -4393,7 +4965,16 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
 
   // When linked phase is complete (or missing), create a new phase so research
   // can replan from the acceptance checklist. Explicit phaseId forces rebind.
-  if (!phaseIdOverride && phase && phase.status === "complete") {
+  // Also create a new phase after a prior implement on this loop: rebinding the
+  // incomplete prior phase only refreshes design/ artifacts and skips research
+  // (JamPress stuck at design_complete with stale RESEARCH/PHASE).
+  if (
+    !phaseIdOverride &&
+    phase &&
+    (phase.status === "complete" ||
+      meta.lastImplementedVersion != null ||
+      (meta.lastImplementedFeatureIds?.length ?? 0) > 0)
+  ) {
     phase = undefined;
   }
 
@@ -4531,6 +5112,158 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     res.status(400).json({ error: errMsg, loop: meta, loopId: meta.id });
+  }
+});
+
+/**
+ * Relaunch research from an accepted/implemented design loop (recovery when
+ * implement only rebound design/ without spawning research). Always creates a
+ * new phase, rebinds the current accepted mock + pack, and starts research.
+ * Body: { dependsOn?, loopId? } — loopId in path; optional phaseId on
+ * POST /projects/:id/relaunch-design-research to resolve the loop.
+ */
+app.post(
+  "/projects/:id/design-loops/:loopId/relaunch-research",
+  async (req, res) => {
+    const project = store.getProject(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const dependsOn = Array.isArray(req.body?.dependsOn)
+      ? req.body.dependsOn.map(String).filter(Boolean)
+      : undefined;
+    const resolved = resolveDesignLoopForRelaunchResearch(project, {
+      loopId: req.params.loopId,
+    });
+    if (!resolved.ok) {
+      res.status(resolved.status).json({
+        error: resolved.error,
+        hint: resolved.hint,
+      });
+      return;
+    }
+    try {
+      const { phase, bound, run } = startFreshDesignResearchFromLoop({
+        project,
+        meta: resolved.meta,
+        dependsOn,
+      });
+      const implementPack = readDesignLoopPack(project.rootPath, bound.meta.id);
+      let themeContractWarning: string[] | undefined;
+      if (packHasThemeModes(implementPack) && implementPack?.theme) {
+        const check = checkThemeContractInProject({
+          projectRoot: project.rootPath,
+          theme: implementPack.theme,
+        });
+        if (!check.ok) themeContractWarning = check.issues;
+      }
+      res.status(201).json({
+        loop: bound.meta,
+        loopId: bound.meta.id,
+        phase,
+        phaseId: phase.id,
+        version: bound.version,
+        mockPath: bound.mockPath,
+        uiSpecPath: bound.uiSpecPath,
+        run,
+        runId: run.id,
+        createdPhase: true,
+        researchStarted: true,
+        acceptance: readDesignLoopAcceptance(project.rootPath, bound.meta.id),
+        designPack: implementPack,
+        conceptualModel: conceptualModelFromLoop({
+          meta: bound.meta,
+          pack: implementPack,
+          acceptanceInScope: implementPack?.inScope,
+        }),
+        themeContractWarning,
+        priorPhaseId: resolved.meta.phaseId,
+        next: "Research started from the accepted design contract. After review approval, call start_development.",
+      });
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      res.status(400).json({
+        error: errMsg,
+        loop: resolved.meta,
+        loopId: resolved.meta.id,
+        hint: "design_loop_accept",
+      });
+    }
+  },
+);
+
+/** Same as loop relaunch-research, but resolve loop from phaseId and/or loopId. */
+app.post("/projects/:id/relaunch-design-research", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const loopId =
+    typeof req.body?.loopId === "string" ? req.body.loopId.trim() : "";
+  const phaseId =
+    typeof req.body?.phaseId === "string" ? req.body.phaseId.trim() : "";
+  const dependsOn = Array.isArray(req.body?.dependsOn)
+    ? req.body.dependsOn.map(String).filter(Boolean)
+    : undefined;
+  const resolved = resolveDesignLoopForRelaunchResearch(project, {
+    loopId,
+    phaseId,
+  });
+  if (!resolved.ok) {
+    res.status(resolved.status).json({
+      error: resolved.error,
+      hint: resolved.hint,
+    });
+    return;
+  }
+  try {
+    const { phase, bound, run } = startFreshDesignResearchFromLoop({
+      project,
+      meta: resolved.meta,
+      dependsOn,
+    });
+    const implementPack = readDesignLoopPack(project.rootPath, bound.meta.id);
+    let themeContractWarning: string[] | undefined;
+    if (packHasThemeModes(implementPack) && implementPack?.theme) {
+      const check = checkThemeContractInProject({
+        projectRoot: project.rootPath,
+        theme: implementPack.theme,
+      });
+      if (!check.ok) themeContractWarning = check.issues;
+    }
+    res.status(201).json({
+      loop: bound.meta,
+      loopId: bound.meta.id,
+      phase,
+      phaseId: phase.id,
+      version: bound.version,
+      mockPath: bound.mockPath,
+      uiSpecPath: bound.uiSpecPath,
+      run,
+      runId: run.id,
+      createdPhase: true,
+      researchStarted: true,
+      acceptance: readDesignLoopAcceptance(project.rootPath, bound.meta.id),
+      designPack: implementPack,
+      conceptualModel: conceptualModelFromLoop({
+        meta: bound.meta,
+        pack: implementPack,
+        acceptanceInScope: implementPack?.inScope,
+      }),
+      themeContractWarning,
+      priorPhaseId: resolved.meta.phaseId ?? (phaseId || undefined),
+      next: "Research started from the accepted design contract. After review approval, call start_development.",
+    });
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    res.status(400).json({
+      error: errMsg,
+      loop: resolved.meta,
+      loopId: resolved.meta.id,
+      hint: "design_loop_accept",
+    });
   }
 });
 

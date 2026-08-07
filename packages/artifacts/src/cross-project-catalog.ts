@@ -18,13 +18,22 @@ import {
 } from "./npm-registry.js";
 import { resolveShareAlias } from "./design-share.js";
 
+export const DependencyElementRefSchema = z.object({
+  id: z.string().min(1),
+  fromProject: z.string().optional(),
+});
+export type DependencyElementRef = z.infer<typeof DependencyElementRefSchema>;
+
 export const DependencyIntentSchema = z.object({
-  useElement: z
-    .object({
-      id: z.string(),
-      fromProject: z.string().optional(),
-    })
-    .optional(),
+  /** Legacy singular — prefer useElements. Kept as first item when normalizing. */
+  useElement: DependencyElementRefSchema.optional(),
+  /** One or more shared design elements to import. */
+  useElements: z.array(DependencyElementRefSchema).default([]),
+  /**
+   * Import every published element from this sibling/registry project name.
+   * Set when operator says "import the elements from &lt;project&gt;".
+   */
+  importAllElementsFrom: z.string().optional(),
   useNpmPackage: z
     .object({
       name: z.string(),
@@ -43,6 +52,120 @@ export const DependencyIntentSchema = z.object({
   notes: z.string().default(""),
 });
 export type DependencyIntent = z.infer<typeof DependencyIntentSchema>;
+
+/** Known extractable chrome / control ids (list + import detection). */
+export const KNOWN_DESIGN_ELEMENT_IDS = [
+  "theme-toggle",
+  "menubar",
+  "sign-in",
+  "user-pill",
+  "view-switcher",
+  "dashboard-sidebar",
+  "dashboard-shell",
+] as const;
+
+/** Safe defaults when operator says “import the elements” on a landing mock. */
+export const LANDING_CHROME_ELEMENT_IDS = new Set([
+  "menubar",
+  "theme-toggle",
+  "sign-in",
+  "user-pill",
+  "view-switcher",
+]);
+
+export const DASHBOARD_ELEMENT_IDS = new Set([
+  "dashboard-shell",
+  "dashboard-sidebar",
+]);
+
+/** Merge useElement + useElements into a deduped list (useElement first). */
+export function normalizeDependencyIntentElements(
+  intent: DependencyIntent | null | undefined,
+): DependencyElementRef[] {
+  if (!intent) return [];
+  const out: DependencyElementRef[] = [];
+  const push = (ref: DependencyElementRef | undefined) => {
+    const id = ref?.id?.trim().toLowerCase();
+    if (!id) return;
+    if (out.some((e) => e.id === id)) return;
+    out.push({
+      id,
+      fromProject: ref?.fromProject?.trim() || undefined,
+    });
+  };
+  push(intent.useElement);
+  for (const e of intent.useElements ?? []) push(e);
+  return out;
+}
+
+/**
+ * Resolve which element ids to auto-import for a design-loop continue.
+ * `importAllElementsFrom` expands via catalog — landing chrome by default;
+ * dashboard-* only when the message names dashboard or lists those ids.
+ */
+export function listElementsToAutoImport(opts: {
+  intent: DependencyIntent;
+  catalog?: CrossProjectCatalog | null;
+  /** Operator message — used to decide whether dashboard elements are wanted. */
+  message?: string;
+}): DependencyElementRef[] {
+  const fromAll = opts.intent.importAllElementsFrom?.trim();
+  const msg = opts.message ?? "";
+  const wantsDashboard =
+    /\bdashboard\b/i.test(msg) ||
+    normalizeDependencyIntentElements(opts.intent).some((e) =>
+      DASHBOARD_ELEMENT_IDS.has(e.id),
+    );
+
+  if (fromAll && opts.catalog) {
+    const want = resolveShareAlias(fromAll).toLowerCase();
+    const hits = opts.catalog.elements.filter((e) => {
+      const pn = (e.projectName ?? "").toLowerCase();
+      const origin = (e.origin ?? "").toLowerCase();
+      return (
+        pn === want ||
+        pn === fromAll.toLowerCase() ||
+        origin === `project:${want}` ||
+        origin === `project:${fromAll.toLowerCase()}`
+      );
+    });
+    const byId = new Map<string, DependencyElementRef>();
+    for (const e of hits) {
+      if (e.origin === "local") continue;
+      // Bulk import: skip dashboard chrome unless explicitly requested.
+      if (
+        DASHBOARD_ELEMENT_IDS.has(e.id) &&
+        !wantsDashboard
+      ) {
+        continue;
+      }
+      // Prefer known landing chrome; still allow other non-dashboard ids.
+      if (
+        !LANDING_CHROME_ELEMENT_IDS.has(e.id) &&
+        !DASHBOARD_ELEMENT_IDS.has(e.id) &&
+        !wantsDashboard
+      ) {
+        // keep unknown non-dashboard (e.g. future controls)
+      }
+      if (!byId.has(e.id)) {
+        byId.set(e.id, {
+          id: e.id,
+          fromProject: e.projectName || fromAll,
+        });
+      }
+    }
+    if (byId.size) {
+      return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+    }
+  }
+
+  return normalizeDependencyIntentElements(opts.intent)
+    .filter((e) => wantsDashboard || !DASHBOARD_ELEMENT_IDS.has(e.id))
+    .map((e) => ({
+      ...e,
+      fromProject: e.fromProject || fromAll || undefined,
+    }));
+}
 
 export type CatalogProjectSummary = {
   id?: string;
@@ -186,20 +309,52 @@ export function buildCrossProjectCatalog(opts: {
 /** Regex fallback for dependency / linking language. */
 export function detectDependencyIntentFromText(text: string): DependencyIntent {
   const t = text ?? "";
-  const fromMatch = t.match(/\bfrom\s+(registry|[\w.-]+)/i);
+  const fromMatch = t.match(
+    /\bfrom\s+(?:the\s+)?(?:project\s+)?(registry|[\w.-]+)/i,
+  );
   const fromProject = fromMatch?.[1]
     ? resolveShareAlias(fromMatch[1].replace(/\s+/g, " ").trim())
     : undefined;
 
-  const elementMatch =
-    t.match(
-      /\b(?:use|import|pin|adopt|pull)\b.{0,40}\b(theme-toggle|[\w-]+-toggle|[\w-]+-control|[\w-]+-element)\b/i,
-    ) || t.match(/\belement[:\s]+([\w-]+)\b/i);
-  const useElement = elementMatch?.[1]
-    ? { id: elementMatch[1].toLowerCase(), fromProject }
-    : /\b(theme\s*toggle|day\s*\/\s*night\s*button)\b/i.test(t)
-      ? { id: "theme-toggle", fromProject }
-      : undefined;
+  const bulkMatch = t.match(
+    /\b(?:import|pull|use|adopt|pin)\b[\s\S]{0,100}?\b(?:the\s+)?(?:shared\s+)?(?:design\s+)?(?:elements|components)\b[\s\S]{0,60}?\bfrom\s+(?:the\s+)?(?:project\s+)?([\w.-]+)/i,
+  );
+  const importAllElementsFrom = bulkMatch?.[1]
+    ? resolveShareAlias(bulkMatch[1].replace(/\s+/g, " ").trim())
+    : undefined;
+
+  const useElements: DependencyElementRef[] = [];
+  const pushEl = (id: string) => {
+    const slug = id.trim().toLowerCase();
+    if (!slug || useElements.some((e) => e.id === slug)) return;
+    useElements.push({
+      id: slug,
+      fromProject: fromProject || importAllElementsFrom,
+    });
+  };
+
+  for (const id of KNOWN_DESIGN_ELEMENT_IDS) {
+    if (new RegExp(`\\b${id.replace(/-/g, "[-\\s]?")}\\b`, "i").test(t)) {
+      pushEl(id);
+    }
+  }
+  // Generic *-toggle / *-control / *-element (excluding already known)
+  for (const m of t.matchAll(
+    /\b(?:use|import|pin|adopt|pull)\b.{0,60}\b([\w-]+(?:-toggle|-control|-element))\b/gi,
+  )) {
+    if (m[1]) pushEl(m[1]);
+  }
+  for (const m of t.matchAll(/\belement[:\s]+([\w-]+)\b/gi)) {
+    if (m[1]) pushEl(m[1]);
+  }
+  if (
+    !useElements.some((e) => e.id === "theme-toggle") &&
+    /\b(theme\s*toggle|day\s*\/\s*night\s*button)\b/i.test(t)
+  ) {
+    pushEl("theme-toggle");
+  }
+
+  const useElement = useElements[0];
 
   const pkgMatch =
     t.match(/@(jam|slopcontrol)\/([\w.-]+)(?:@([\w.^~*-]+))?/i) ||
@@ -228,17 +383,24 @@ export function detectDependencyIntentFromText(text: string): DependencyIntent {
   }
 
   const infra =
-    /\b(reuse|use|borrow|pull)\b.{0,50}\b(infra|infrastructure|packages?|shared\s+lib|components?)\b.{0,40}\bfrom\b/i.test(
+    /\b(reuse|use|borrow|pull)\b.{0,50}\b(infra|infrastructure|packages?|shared\s+lib)\b.{0,40}\bfrom\b/i.test(
       t,
     ) ||
     (Boolean(fromProject) &&
-      /\b(infra|infrastructure|packages?|shared)\b/i.test(t));
+      /\b(infra|infrastructure|packages?|shared)\b/i.test(t) &&
+      !importAllElementsFrom);
   const useProjectInfra =
     infra && fromProject
       ? { projectName: fromProject }
-      : fromProject && !useElement && !useNpmPackage
+      : fromProject &&
+          !useElement &&
+          !useNpmPackage &&
+          !importAllElementsFrom &&
+          useElements.length === 0
         ? { projectName: fromProject }
-        : undefined;
+        : importAllElementsFrom && !useNpmPackage
+          ? { projectName: importAllElementsFrom }
+          : undefined;
 
   const mentionsLink = /\bnpm\s+link\b|\bpnpm\s+link\b|\byarn\s+link\b|\blink:/i.test(
     t,
@@ -246,6 +408,8 @@ export function detectDependencyIntentFromText(text: string): DependencyIntent {
 
   return DependencyIntentSchema.parse({
     useElement,
+    useElements,
+    importAllElementsFrom,
     useNpmPackage,
     useProjectInfra,
     forbidNpmLink: true,
@@ -259,8 +423,10 @@ export function formatDependencyIntentPromptBlock(
   intent: DependencyIntent | null | undefined,
 ): string {
   if (!intent) return "";
+  const els = normalizeDependencyIntentElements(intent);
   const has =
-    intent.useElement ||
+    els.length > 0 ||
+    intent.importAllElementsFrom ||
     intent.useNpmPackage ||
     intent.useProjectInfra ||
     intent.notes;
@@ -270,13 +436,16 @@ export function formatDependencyIntentPromptBlock(
     "",
     "CRITICAL: Do NOT recommend `npm link`, `pnpm link`, `yarn link`, or `file:`/`link:` installs into a sibling project's node_modules. Prefer SlopControl private registry (`npm_registry_ensure_rc` then `pnpm add @jam/…`).",
   ];
-  if (intent.useElement) {
+  if (intent.importAllElementsFrom) {
     lines.push(
-      `- Use design element \`${intent.useElement.id}\`${
-        intent.useElement.fromProject
-          ? ` from project/alias \`${intent.useElement.fromProject}\``
-          : ""
-      } (MCP: design_element_import / list_design_elements).`,
+      `- Import ALL published design elements from \`${intent.importAllElementsFrom}\` (orchestrator auto-imports; apply pinned SHARED ELEMENTS to the mock).`,
+    );
+  }
+  for (const el of els) {
+    lines.push(
+      `- Use design element \`${el.id}\`${
+        el.fromProject ? ` from project/alias \`${el.fromProject}\`` : ""
+      } (auto-imported into the loop; embed in mock).`,
     );
   }
   if (intent.useNpmPackage) {
@@ -355,15 +524,26 @@ export function formatAskDependencyTaskBriefNudge(
   intent: DependencyIntent | null | undefined,
 ): string {
   if (!intent) return "";
-  if (!intent.useElement && !intent.useNpmPackage && !intent.useProjectInfra) {
+  const els = normalizeDependencyIntentElements(intent);
+  if (
+    !els.length &&
+    !intent.importAllElementsFrom &&
+    !intent.useNpmPackage &&
+    !intent.useProjectInfra
+  ) {
     return "";
   }
   const lines = [
     "When writing ## Task brief, include dependency bullets when relevant:",
   ];
-  if (intent.useElement) {
+  if (intent.importAllElementsFrom) {
     lines.push(
-      `- Element: ${intent.useElement.id}${intent.useElement.fromProject ? ` (from ${intent.useElement.fromProject})` : ""}`,
+      `- Import all elements from: ${intent.importAllElementsFrom}`,
+    );
+  }
+  for (const el of els) {
+    lines.push(
+      `- Element: ${el.id}${el.fromProject ? ` (from ${el.fromProject})` : ""}`,
     );
   }
   if (intent.useNpmPackage) {
@@ -432,17 +612,19 @@ export function resolveDependencyRecommendation(opts: {
       "Call npm_registry_ensure_rc on the consumer project before any pnpm add of @jam/@slopcontrol packages.",
   });
 
-  if (intent.useElement) {
-    const hit = opts.catalog.elements.find(
-      (e) => e.id === intent.useElement!.id,
-    );
+  const toImport = listElementsToAutoImport({
+    intent,
+    catalog: opts.catalog,
+  });
+  for (const el of toImport) {
+    const hit = opts.catalog.elements.find((e) => e.id === el.id);
     recommended.push({
       action: "import_element",
       detail: hit
         ? `design_element_import elementId=${hit.id} (latest v${hit.latestVersion} via ${hit.origin})`
-        : `design_element_import elementId=${intent.useElement.id} (resolve from sibling/registry)`,
-      elementId: intent.useElement.id,
-      from: intent.useElement.fromProject,
+        : `design_element_import elementId=${el.id} (resolve from sibling/registry)`,
+      elementId: el.id,
+      from: el.fromProject,
       packageName: hit?.npmPackage,
       version: hit?.npmVersion,
     });
@@ -475,7 +657,8 @@ export function resolveDependencyRecommendation(opts: {
   }
 
   if (
-    !intent.useElement &&
+    !toImport.length &&
+    !intent.importAllElementsFrom &&
     !intent.useNpmPackage &&
     !intent.useProjectInfra
   ) {

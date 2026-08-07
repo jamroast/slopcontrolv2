@@ -28,8 +28,8 @@ import {
   readChangeIntent,
   reconcileBlueprintDecisions,
   extractLiveDecisions,
-  isBrandThemingAsk,
-  isThemeWiringAsk,
+  changeIntentIsBrandTheming,
+  changeIntentIsThemeWiringOnly,
   isNotApplicableDesignSection,
 } from "./change-intent.js";
 import type { ChangeIntent } from "./change-intent.js";
@@ -73,11 +73,16 @@ export * from "./continue-intent.js";
 export * from "./design-share.js";
 export * from "./design-element.js";
 export * from "./npm-registry.js";
+export * from "./build-toolchain.js";
+export * from "./build-process-config.js";
+export * from "./ci-workflows.js";
+export * from "./library-propagate.js";
 export * from "./cross-project-catalog.js";
 export * from "./sibling-code-refs.js";
 export * from "./plan-loop.js";
 export * from "./plan-pack.js";
 export * from "./plan-continue-intent.js";
+export * from "./loop-chat.js";
 export { loadDotEnvFile } from "./dotenv.js";
 
 export function slopcontrolRoot(projectRoot: string): string {
@@ -332,6 +337,36 @@ export function writeRoadmap(projectRoot: string, content: string): void {
   );
 }
 
+/** Roadmap titles must stay single-line table cells: collapse whitespace,
+ * neutralize pipes, and cap runaway raw descriptions. */
+export function sanitizeRoadmapTitle(title: string): string {
+  const t = (title ?? "")
+    .replace(/\|/g, "/")
+    .replace(/\s+/g, " ")
+    .trim();
+  return t.length > 160 ? `${t.slice(0, 159)}…` : t;
+}
+
+/**
+ * Rows written before title sanitization broke across lines, leaving orphan
+ * fragments (" | accepted | — |" and bare text). Once the table body starts,
+ * only pipe-rows and heading lines are valid — drop the rest.
+ */
+export function dropBrokenRoadmapRowFragments(content: string): string {
+  const lines = content.split("\n");
+  const out: string[] = [];
+  let inTable = false;
+  for (const line of lines) {
+    if (line.startsWith("|")) {
+      inTable = true;
+      out.push(line);
+    } else if (!inTable || /^\s*#/.test(line)) {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}
+
 export function upsertRoadmapEntry(
   projectRoot: string,
   phaseId: string,
@@ -341,7 +376,7 @@ export function upsertRoadmapEntry(
 ): void {
   const depsLabel = dependsOn.length > 0 ? dependsOn.join(", ") : "—";
   const existing = readRoadmap(projectRoot);
-  const line = `| ${phaseId} | ${title.replace(/\|/g, "/")} | ${status} | ${depsLabel} |`;
+  const line = `| ${phaseId} | ${sanitizeRoadmapTitle(title)} | ${status} | ${depsLabel} |`;
   const header =
     "# Roadmap\n\n| Phase | Title | Status | Depends on |\n|-------|-------|--------|------------|\n";
 
@@ -350,7 +385,7 @@ export function upsertRoadmapEntry(
     return;
   }
 
-  const lines = existing.split("\n");
+  const lines = dropBrokenRoadmapRowFragments(existing).split("\n");
   const rowRe = new RegExp(
     `^\\|\\s*${phaseId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\|`,
   );
@@ -787,11 +822,8 @@ export function phaseNeedsDesign(
   const forcedVisual = phaseForcesVisualDesign(phaseDoc);
   const intent = readChangeIntent(projectRoot, phaseId);
   const kind = intent?.changeKind;
-  const intentText = [intent?.title, intent?.goal, intent?.rawDescription]
-    .filter(Boolean)
-    .join("\n");
-  const brandAsk = isBrandThemingAsk(intentText);
-  const themeWiringOnly = isThemeWiringAsk(intentText);
+  const brandAsk = intent ? changeIntentIsBrandTheming(intent) : false;
+  const themeWiringOnly = intent ? changeIntentIsThemeWiringOnly(intent) : false;
 
   // Brand identity / apply sibling theming needs design (even if mislabeled
   // backend). Theme toggle / data-theme wiring alone does not.
@@ -1443,6 +1475,8 @@ import {
   createDefaultCheckRegistry,
 } from "./check-runners.js";
 import { validateRuntimeClaimProofs } from "./claim-vs-proof.js";
+import { readPhaseDesignAcceptance } from "./design-loop.js";
+import { readPhaseDesignPack } from "./design-pack.js";
 
 /**
  * Extract runnable check bodies from PHASE.md `## Automated Checks`.
@@ -1745,6 +1779,10 @@ export function resolvePhaseDocFromAgentTurn(opts: {
     priority: number;
   }> = [];
   const alignRejections: string[] = [];
+  const claimOpts = {
+    projectRoot: opts.projectRoot,
+    phaseId: opts.phaseId,
+  };
 
   const pathPriority = (path: string): number => {
     if (path === canonical) return 0; // prefer canonical
@@ -1814,7 +1852,7 @@ export function resolvePhaseDocFromAgentTurn(opts: {
     if (!acceptsContent(candidate.doc)) {
       continue;
     }
-    const gate = validatePhaseDocForDev(candidate.doc);
+    const gate = validatePhaseDocForDev(candidate.doc, claimOpts);
     if (gate.ok) {
       return {
         doc: candidate.doc,
@@ -1831,7 +1869,7 @@ export function resolvePhaseDocFromAgentTurn(opts: {
       doc: fallback.doc,
       source: fallback.source,
       path: fallback.path,
-      gate: validatePhaseDocForDev(fallback.doc),
+      gate: validatePhaseDocForDev(fallback.doc, claimOpts),
     };
   }
 
@@ -1839,7 +1877,7 @@ export function resolvePhaseDocFromAgentTurn(opts: {
   return {
     doc: "",
     source: "none",
-    gate: validatePhaseDocForDev(""),
+    gate: validatePhaseDocForDev("", claimOpts),
     ...(alignIssues.length > 0 ? { alignIssues } : {}),
   };
 }
@@ -2086,36 +2124,88 @@ export function scaffoldPhaseDoc(opts: {
   testCommand?: string;
   /** When set with interaction, prefer failing closed in the orchestrator instead. */
   intent?: ChangeIntent | null;
+  /** When set, design-bound shell/theme acceptance drives shell scaffold checks. */
+  projectRoot?: string;
 }): string {
   const clipped = clipPhaseDescriptionForScaffold(opts.description);
   const title =
     clipped.split(/\r?\n/).find((l) => l.trim().length > 0)?.trim().slice(0, 80) ||
     opts.phaseId;
-  const researchExcerpt = (opts.research ?? "").trim().slice(0, 1200);
   const testCmd = opts.testCommand?.trim() || "npm test";
   const engagement = Boolean(
     opts.intent?.interaction && opts.intent.interaction.mount !== "n/a",
   );
-  const brand = Boolean(
-    opts.intent &&
-      (opts.intent.changeKind === "other" || !opts.intent.changeKind) &&
-      isBrandThemingAsk(
-        `${opts.intent.title}\n${opts.intent.goal}\n${opts.description}`,
+
+  const acceptance =
+    opts.projectRoot != null
+      ? readPhaseDesignAcceptance(opts.projectRoot, opts.phaseId)
+      : null;
+  const pack =
+    opts.projectRoot != null
+      ? readPhaseDesignPack(opts.projectRoot, opts.phaseId)
+      : null;
+  const designShellOrTheme = Boolean(
+    acceptance?.features.some(
+      (f) =>
+        f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
+    ) ||
+      pack?.inScope?.includes("theme_modes") ||
+      pack?.inScope?.includes("applied_shell"),
+  );
+  const contentAlignedShell = Boolean(
+    pack?.inScope?.includes("applied_shell") &&
+      pack.shell?.some((s) =>
+        /content-max|menubar__inner|inner bar|Landing menubar/i.test(s),
       ),
   );
+  const designBoundShell = designShellOrTheme || contentAlignedShell;
+
+  // Do not paste research dumps into Scope for design-bound scaffolds — they
+  // re-trigger claim-vs-proof ThemeToggle/content-max without matching checks.
+  const researchExcerpt = designBoundShell
+    ? ""
+    : (opts.research ?? "").trim().slice(0, 1200);
+
+  const brand = Boolean(
+    !designBoundShell &&
+      opts.intent &&
+      (opts.intent.changeKind === "other" || !opts.intent.changeKind) &&
+      changeIntentIsBrandTheming(opts.intent),
+  );
   const mount = opts.intent?.interaction?.mount ?? opts.intent?.uiMount ?? "n/a";
+
   const successBlock = engagement
     ? `- Fillable UI at locked mount (${mount}) with enabled input and submit
 - Automated Checks prove fill+submit (incl. live AI SDK \`type: tool-<name>\` name resolution via parseToolResult / extractActiveForm)
 - Manual smoke of the reported failure path succeeds when applicable`
-    : brand
-      ? `- Brand tokens / logos applied; no SlopControl tile+circle fallback SVGs under public/brand/
+    : designBoundShell
+      ? `- ThemeToggle mounted in shell menubar and visible (utilities / tokens resolve)
+- Menubar/JampressMenubar mounted in playground App **or** product layout shell (marketing/portal)
+- Landing/content-max menubar inner bar uses \`var(--content-max)\` when applied_shell requires it
+- Build succeeds (\`pnpm build\` / \`next build\` / \`vite build\` as applicable)`
+      : brand
+        ? `- Brand tokens / logos applied; no SlopControl tile+circle fallback SVGs under public/brand/
 - Shells reference the new lockup (not unused orphan files only)
 - Token names match family or PHASE documents intentional remaps
 - Manual visual smoke vs sibling brand (JamPress / family) when applicable`
-      : `- Change is implemented and builds
+        : `- Change is implemented and builds
 - Automated Checks pass
 - Manual smoke of the reported failure path succeeds when applicable`;
+
+  const shellChecksBlock = `\`\`\`bash
+${testCmd}
+\`\`\`
+
+Structural (design shell — mount + content-max + visibility):
+
+\`\`\`bash
+grep -n '<ThemeToggle' src/components/layout/jampress-menubar.tsx src/components/shell/menubar.tsx 2>/dev/null | head -1 || grep -rn '<ThemeToggle' src --include='*menubar*' | head -1 || exit 1
+grep -nE '--content-max|maxWidth.*content-max|max-w-\\[var\\(--content-max\\)\\]' src/components/layout/jampress-menubar.tsx src/components/shell/menubar.tsx 2>/dev/null | head -1 || grep -rnE '--content-max|maxWidth.*content-max' src --include='*menubar*' | head -1 || exit 1
+grep -n 'JampressMenubar\\|<Menubar' src/components/layout/marketing-shell.tsx src/components/layout/portal-shell.tsx playground/src/App.tsx 2>/dev/null | head -1 || grep -rn 'JampressMenubar\\|<Menubar' src/components/layout playground/src --include='*.tsx' | head -1 || exit 1
+pnpm build || npm run build || npx next build || pnpm exec vite build || exit 1
+grep -qE 'text-text-secondary|--text-secondary' src/app/globals.css node_modules/@jamroast/components/dist/styles/*.css playground/src/index.css 2>/dev/null || exit 1
+\`\`\``;
+
   const checksBlock = engagement
     ? `\`\`\`bash
 ${testCmd}
@@ -2126,8 +2216,10 @@ Structural (engagement — live tool-part shape, not chip-only):
 \`\`\`bash
 grep -qE 'parseToolResult|extractActiveForm|tool-' . || exit 1
 \`\`\``
-    : brand
-      ? `\`\`\`bash
+    : designBoundShell
+      ? shellChecksBlock
+      : brand
+        ? `\`\`\`bash
 ${testCmd}
 \`\`\`
 
@@ -2138,13 +2230,12 @@ Structural (brand — reject design fallbacks + glued wordmarks):
 ! grep -RqlE '<circle[^>]+r="72".*<text' public/brand 2>/dev/null || exit 1
 ! grep -RqlE '>JamLight<|>JamPress<' public/brand 2>/dev/null || exit 1
 \`\`\``
-      : `\`\`\`bash
+        : `\`\`\`bash
 ${testCmd}
 \`\`\``;
 
-  const requiresDesign = brand
-    ? "Requires design pass: yes\n\n"
-    : "";
+  const requiresDesign =
+    brand || designBoundShell ? "Requires design pass: yes\n\n" : "";
 
   return `# Phase ${opts.phaseId}: ${title}
 
@@ -2155,7 +2246,9 @@ ${clipped || "Investigate and fix per the phase description."}
 ${
   researchExcerpt
     ? `### Research notes\n\n${researchExcerpt}\n`
-    : "Investigate and fix per the phase description. Research was thin; re-check the codebase during implementation.\n"
+    : designBoundShell
+      ? "Implement accepted design shell/theme contract (DESIGN_PACK / mock). Do not invent competing chrome.\n"
+      : "Investigate and fix per the phase description. Research was thin; re-check the codebase during implementation.\n"
 }
 
 ${

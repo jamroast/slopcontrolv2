@@ -29,6 +29,9 @@ import {
   writePhaseStatus,
   writeResearch,
   writeRoadmap,
+  upsertRoadmapEntry,
+  sanitizeRoadmapTitle,
+  dropBrokenRoadmapRowFragments,
   isProjectEmpty,
   isThinResearch,
   extractChangeIntent,
@@ -1081,6 +1084,94 @@ None.
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("upsertRoadmapEntry sanitizes multi-line titles and cleans broken fragments", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-roadmap-up-"));
+    try {
+      // Legacy corruption: a raw multi-line description written as a row title
+      // breaks the table into orphan fragments per status transition.
+      writeRoadmap(
+        root,
+        [
+          "# Roadmap",
+          "",
+          "| Phase | Title | Status | Depends on |",
+          "|-------|-------|--------|------------|",
+          "| 01-sample | Good phase | complete | — |",
+          "| 60-thing | ## Operator request",
+          "",
+          "",
+          "The npm run manager -- up is failing. Here are the logs",
+          " | in_review | — |",
+          "",
+          "The npm run manager -- up is failing. Here are the logs",
+          " | draft | — |",
+          "",
+        ].join("\n"),
+      );
+
+      upsertRoadmapEntry(
+        root,
+        "61-next",
+        "## Operator request\n\n\nNow the navbar is correct but the logo is gone | fix it",
+        "complete",
+      );
+
+      const out = readRoadmap(root);
+      assert.match(out, /\| 01-sample \| Good phase \| complete \| — \|/);
+      assert.match(out, /\| 61-next \|/);
+      // Title collapsed to one line, pipes neutralized.
+      assert.match(
+        out,
+        /\| 61-next \| ## Operator request Now the navbar is correct but the logo is gone \/ fix it \| complete \| — \|/,
+      );
+      // Broken fragments and blank gaps swept.
+      assert.equal(out.includes("in_review"), false);
+      assert.equal(out.includes("draft"), false);
+      const bodyLines = out.trimEnd().split("\n").slice(2);
+      assert.equal(bodyLines.every((l) => l.trim() !== ""), true);
+      // Legacy broken first line of phase 60 remains a single row cell (it is
+      // still a valid pipe-row); its fragments are gone.
+      assert.match(out, /\| 60-thing \| ## Operator request\n/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("sanitizeRoadmapTitle collapses whitespace and caps length", () => {
+    assert.equal(
+      sanitizeRoadmapTitle("line one\n\nline   two | three"),
+      "line one line two / three",
+    );
+    const long = sanitizeRoadmapTitle(` ${"x".repeat(300)} `);
+    assert.equal(long.length, 160);
+    assert.match(long, /…$/);
+  });
+
+  it("dropBrokenRoadmapRowFragments keeps headings and valid rows", () => {
+    const cleaned = dropBrokenRoadmapRowFragments(
+      [
+        "# Roadmap",
+        "",
+        "| Phase | Title | Status |",
+        "| 01-a | ok | complete |",
+        "",
+        "stray prose from a broken title",
+        " | accepted | — |",
+        "| 02-b | ok2 | draft |",
+      ].join("\n"),
+    );
+    assert.equal(
+      cleaned,
+      [
+        "# Roadmap",
+        "",
+        "| Phase | Title | Status |",
+        "| 01-a | ok | complete |",
+        "| 02-b | ok2 | draft |",
+      ].join("\n"),
+    );
   });
 
   it("phaseNeedsDesign detects Brand/Assets/UI-SPEC and DESIGN_COMPLETE", () => {

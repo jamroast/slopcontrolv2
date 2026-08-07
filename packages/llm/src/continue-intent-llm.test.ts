@@ -1,33 +1,26 @@
 import assert from "node:assert/strict";
-import { describe, it, mock } from "node:test";
+import { describe, it } from "node:test";
 import {
   ContinueIntentSchema,
-  fallbackContinueIntentFromText,
-  normalizeContinueIntent,
+  normalizeContinueIntentStructured,
 } from "@slopcontrol/artifacts";
 import { CONTINUE_INTENT_SYSTEM_PROMPT } from "./continue-intent-llm.js";
 
-/**
- * Mirrors the post-chatJson validation + fallback merge inside
- * classifyContinueIntentViaLlm. (chatJson itself is covered in json-chat tests.)
- */
-function mergeValidated(message: string, parsed: unknown) {
-  const intent = ContinueIntentSchema.parse(parsed);
-  // Same merge semantics as classifyContinueIntentViaLlm:
-  // LLM fields win, then normalize forces invent/theme cues from text.
-  const merged = {
-    ...fallbackContinueIntentFromText(message),
-    ...intent,
-    targets: intent.targets,
-  };
-  return normalizeContinueIntent(merged, message);
-}
-
 describe("continue-intent-llm", () => {
-  it("system prompt documents logo/theme/nav intent rules", () => {
+  it("system prompt documents logo/theme/nav/shareFrom intent rules", () => {
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("inventLogo"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("inventLogoCount"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("assetOps"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("make_transparent"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("circular_mask"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("cut out the circular logo"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("7 different logos"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("adoptTheme"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("adoptChrome"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("look and feel"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("reuseProjectDesign"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("shareFrom"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("jamroast-components"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("navAlign"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("logo_invent"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("unhappy with the logos"));
@@ -37,38 +30,65 @@ describe("continue-intent-llm", () => {
     );
   });
 
-  it("normalize forces inventLogo when LLM misses dissatisfaction language", () => {
-    const merged = mergeValidated("I am unhappy with the logos", {
-      scope: "sections",
-      targets: [],
-      wantsAssetEdit: false,
-      inventLogo: false,
-      adoptTheme: false,
-      navAlign: false,
-      preserveChrome: true,
-      notes: "noop",
-    });
-    assert.equal(merged.inventLogo, true);
-    assert.equal(merged.preserveChrome, false);
-    assert.notEqual(merged.scope, "assets_only");
+  it("structured normalize prefers assetOps over inventLogo when both set", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "logo_invent",
+        targets: ["logo"],
+        wantsAssetEdit: true,
+        assetOps: ["make_transparent", "derive_icon_pack"],
+        inventLogo: true,
+        adoptTheme: false,
+        navAlign: false,
+        preserveChrome: false,
+        notes: "cut out + pack",
+      }),
+    );
+    assert.equal(intent.inventLogo, false);
+    assert.equal(intent.wantsAssetEdit, true);
+    assert.deepEqual(intent.assetOps, [
+      "make_transparent",
+      "derive_icon_pack",
+    ]);
+    assert.equal(intent.scope, "assets_only");
   });
 
-  it("normalize clears preserveChrome when LLM set inventLogo with preserveChrome true", () => {
-    const merged = mergeValidated("invent a new logo please", {
-      scope: "logo_invent",
-      targets: ["logo"],
-      wantsAssetEdit: false,
-      inventLogo: true,
-      adoptTheme: false,
-      navAlign: false,
-      preserveChrome: true,
-      notes: "new mark",
-    });
-    assert.equal(merged.inventLogo, true);
-    assert.equal(merged.preserveChrome, false);
+  it("structured normalize does not invent inventLogo from text when LLM omitted it", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "sections",
+        targets: [],
+        wantsAssetEdit: false,
+        inventLogo: false,
+        adoptTheme: false,
+        navAlign: false,
+        preserveChrome: true,
+        notes: "noop",
+      }),
+    );
+    assert.equal(intent.inventLogo, false);
+    assert.equal(intent.preserveChrome, true);
   });
 
-  it("validates LLM JSON for invent-logo continue", async () => {
+  it("structured normalize coerces inventLogo + assets_only away from assets_only", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "assets_only",
+        targets: ["logo"],
+        wantsAssetEdit: true,
+        inventLogo: true,
+        adoptTheme: false,
+        navAlign: false,
+        preserveChrome: false,
+        notes: "new mark",
+      }),
+    );
+    assert.equal(intent.inventLogo, true);
+    assert.equal(intent.wantsAssetEdit, false);
+    assert.notEqual(intent.scope, "assets_only");
+  });
+
+  it("validates LLM JSON for invent-logo continue", () => {
     const parsed = {
       scope: "logo_invent",
       targets: ["logo"],
@@ -76,7 +96,7 @@ describe("continue-intent-llm", () => {
       inventLogo: true,
       adoptTheme: false,
       navAlign: false,
-      preserveChrome: true,
+      preserveChrome: false,
       notes: "Replace prior logo with a new circle mark",
     };
     const intent = ContinueIntentSchema.parse(parsed);
@@ -85,20 +105,24 @@ describe("continue-intent-llm", () => {
     assert.ok(intent.targets.includes("logo"));
   });
 
-  it("validates adopt-theme + new logo JSON", () => {
+  it("validates adopt-theme + shareFrom for jamroast-components phrasing", () => {
     const parsed = {
       scope: "adopt_theme",
-      targets: ["palette", "logo"],
+      targets: ["palette", "landing", "dashboard"],
       wantsAssetEdit: false,
-      inventLogo: true,
+      inventLogo: false,
       adoptTheme: true,
+      shareFrom: "jamroast-components",
       navAlign: false,
-      preserveChrome: true,
-      notes: "Pull JamRoast palette and invent a new logo",
+      preserveChrome: false,
+      notes: "Mock landing + dashboard using jamroast-components",
     };
-    const intent = ContinueIntentSchema.parse(parsed);
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse(parsed),
+    );
     assert.equal(intent.adoptTheme, true);
-    assert.equal(intent.inventLogo, true);
+    assert.equal(intent.shareFrom, "jamroast-components");
+    assert.ok(intent.targets.includes("palette"));
   });
 
   it("rejects invalid scope / target values", () => {
@@ -128,10 +152,9 @@ describe("continue-intent-llm", () => {
     );
   });
 
-  it("merges validated LLM intent over regex fallback (LLM wins)", async () => {
-    const chatJsonMock = mock.fn(async () => ({
-      text: "{}",
-      parsed: {
+  it("LLM success path trusts preserveChrome when inventLogo is set", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
         scope: "logo_invent",
         targets: ["logo"],
         wantsAssetEdit: false,
@@ -139,20 +162,10 @@ describe("continue-intent-llm", () => {
         adoptTheme: false,
         navAlign: false,
         preserveChrome: true,
-        notes: "",
-      },
-      modelId: "test-model",
-    }));
-    const { parsed } = await chatJsonMock();
-    const merged = mergeValidated(
-      "Please keep the layout and invent a new symbolic logo",
-      parsed,
+        notes: "keep layout, new logo",
+      }),
     );
-    assert.equal(merged.scope, "logo_invent");
-    assert.equal(merged.inventLogo, true);
-    assert.ok(merged.targets.includes("logo"));
-    // Explicit keep layout → preserveChrome stays true after normalize
-    assert.equal(merged.preserveChrome, true);
-    assert.equal(chatJsonMock.mock.callCount(), 1);
+    assert.equal(intent.inventLogo, true);
+    assert.equal(intent.preserveChrome, true);
   });
 });

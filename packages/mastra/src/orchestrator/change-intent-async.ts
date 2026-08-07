@@ -64,7 +64,7 @@ export async function ensureChangeIntentAsync(
         modelId,
         description,
         priorMountSummary,
-        timeoutMs: 15_000,
+        timeoutMs: 90_000,
       });
       const intent = finalizeChangeIntent(llmOut, {
         description,
@@ -133,7 +133,7 @@ export async function previewChangeIntentAsync(
         modelId,
         description,
         priorMountSummary,
-        timeoutMs: 15_000,
+        timeoutMs: 90_000,
       });
       return {
         intent: finalizeChangeIntent(llmOut, {

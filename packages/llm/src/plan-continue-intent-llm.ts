@@ -1,6 +1,6 @@
 import {
   PlanContinueIntentSchema,
-  normalizePlanContinueIntent,
+  normalizePlanContinueIntentStructured,
   type PlanContinueIntent,
 } from "@slopcontrol/artifacts";
 import type { LlmEndpoint } from "@slopcontrol/types";
@@ -47,11 +47,11 @@ export async function classifyPlanContinueIntentViaLlm(opts: {
     modelId: opts.modelId,
     system: PLAN_CONTINUE_INTENT_SYSTEM_PROMPT,
     user,
-    timeoutMs: opts.timeoutMs ?? 15_000,
+    timeoutMs: opts.timeoutMs ?? 90_000,
     temperature: 0,
   });
 
-  // LLM wins when classification succeeds — do not merge regex fallback over it.
+  // LLM wins when classification succeeds — structured normalize only.
   const intent = PlanContinueIntentSchema.parse(parsed);
-  return normalizePlanContinueIntent(intent, opts.message);
+  return normalizePlanContinueIntentStructured(intent);
 }

@@ -11,6 +11,7 @@ import { describe, it } from "node:test";
 import {
   buildCrossProjectCatalog,
   detectDependencyIntentFromText,
+  listElementsToAutoImport,
   formatAskDependencyTaskBriefNudge,
   formatCrossProjectCatalogPromptBlock,
   formatDependencyIntentPromptBlock,
@@ -137,6 +138,86 @@ describe("cross-project-catalog", () => {
 
     const nudge = formatAskDependencyTaskBriefNudge(el);
     assert.match(nudge, /Element:/);
+  });
+
+  it("detectDependencyIntentFromText: import-all and multi element ids", () => {
+    const bulk = detectDependencyIntentFromText(
+      "Please can you import the elements from the project jamroast-components and apply them to this mockup",
+    );
+    assert.equal(bulk.importAllElementsFrom, "jamroast-components");
+
+    const listed = detectDependencyIntentFromText(
+      "Import these shared design elements from jamroast-components: menubar, theme-toggle, sign-in",
+    );
+    const ids = (listed.useElements ?? []).map((e) => e.id).sort();
+    assert.ok(ids.includes("menubar"));
+    assert.ok(ids.includes("theme-toggle"));
+    assert.ok(ids.includes("sign-in"));
+    assert.equal(listed.importAllElementsFrom, "jamroast-components");
+  });
+
+  it("listElementsToAutoImport expands importAllElementsFrom via catalog", () => {
+    const parent = tmp("import-all");
+    const jamroast = join(parent, "jamroast-components");
+    const jampress = join(parent, "press");
+    try {
+      mkdirSync(jamroast, { recursive: true });
+      mkdirSync(jampress, { recursive: true });
+      publishDesignElement({
+        projectRoot: jamroast,
+        elementId: "menubar",
+        kind: "shell",
+        label: "Menubar",
+        spec: "#",
+        mockHtml: "<header class='menubar'></header>",
+      });
+      publishDesignElement({
+        projectRoot: jamroast,
+        elementId: "theme-toggle",
+        label: "Toggle",
+        spec: "#",
+        mockHtml: "<button class='theme-toggle'></button>",
+      });
+      publishDesignElement({
+        projectRoot: jamroast,
+        elementId: "dashboard-shell",
+        kind: "shell",
+        label: "Dash",
+        spec: "#",
+        mockHtml: "<div class='dashboard-layout'></div>",
+      });
+      const catalog = buildCrossProjectCatalog({
+        targetRoot: jampress,
+        listProjects: () => [
+          {
+            id: "1",
+            name: "jamroast-components",
+            rootPath: jamroast,
+          },
+        ],
+      });
+      const intent = detectDependencyIntentFromText(
+        "import the elements from jamroast-components",
+      );
+      const toImport = listElementsToAutoImport({
+        intent,
+        catalog,
+        message: "import the elements from jamroast-components",
+      });
+      const ids = toImport.map((e) => e.id).sort();
+      // Landing chrome only — dashboard-shell excluded unless named
+      assert.deepEqual(ids, ["menubar", "theme-toggle"]);
+
+      const withDash = listElementsToAutoImport({
+        intent,
+        catalog,
+        message:
+          "import the elements from jamroast-components including the dashboard",
+      });
+      assert.ok(withDash.some((e) => e.id === "dashboard-shell"));
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   });
 
   it("resolve_dependency recommends ensure_rc + import/pnpm_add, never link", () => {

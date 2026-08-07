@@ -14,7 +14,6 @@ import {
   formatDesignLoopSelectionsPromptBlock,
   pinDesignLoopSelection,
   unpinDesignLoopSelection,
-  designLoopAskNeedsImageEdit,
   maybeAutoPinDominantLogoFromMock,
   maybeAutoPinFromOperatorMessage,
   pinDesignLoopLogoAsset,
@@ -102,6 +101,7 @@ describe("design-loop-selections", () => {
     assert.match(block, /PINNED/);
     assert.match(block, /logo-symbolic-3-ember-monogram/);
     assert.match(block, /make_transparent/);
+    assert.match(block, /circular_mask/);
     assert.match(block, /CANDIDATES/);
 
     const inventBlock = formatDesignLoopSelectionsPromptBlock({
@@ -123,15 +123,6 @@ describe("design-loop-selections", () => {
       loopId: meta.id,
     });
     assert.ok(!after.some((c) => c.pinned && c.conceptId === "concept-c"));
-  });
-
-  it("designLoopAskNeedsImageEdit detects alpha / icon pack", () => {
-    assert.equal(
-      designLoopAskNeedsImageEdit("strip black to alpha channel"),
-      true,
-    );
-    assert.equal(designLoopAskNeedsImageEdit("generate icon pack"), true);
-    assert.equal(designLoopAskNeedsImageEdit("tweak the landing copy"), false);
   });
 
   it("maybeAutoPinFromOperatorMessage pins explicit filename from assets/", () => {
@@ -172,7 +163,7 @@ describe("design-loop-selections", () => {
     assert.equal(logo?.asset, "jamlight-logo-modern-v4-alpha.png");
   });
 
-  it("maybeAutoPinFromOperatorMessage pins modern logo by style phrase", () => {
+  it("maybeAutoPinFromOperatorMessage ignores style phrases without a filename", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-modern-pin-"));
     roots.push(root);
     const meta = createDesignLoopMeta({
@@ -188,14 +179,7 @@ describe("design-loop-selections", () => {
       "assets",
     );
     mkdirSync(assetsDir, { recursive: true });
-    for (const name of [
-      "jam-light-mark-v1-alpha.png",
-      "jamlight-logo-modern-v4-alpha.png",
-      "jamlight-logo-rustic-v4-alpha.png",
-      "modern-icon-48.png",
-    ]) {
-      writeFileSync(join(assetsDir, name), "fake");
-    }
+    writeFileSync(join(assetsDir, "jamlight-logo-modern-v4-alpha.png"), "fake");
     writeDesignLoopVersion({
       projectRoot: root,
       loopId: meta.id,
@@ -210,9 +194,7 @@ describe("design-loop-selections", () => {
       message:
         "Please go with the modern logo. Please generate an icon pack for that.",
     });
-    assert.ok(next);
-    const logo = getDesignLoopSelections(next).find((s) => s.slot === "logo");
-    assert.equal(logo?.asset, "jamlight-logo-modern-v4-alpha.png");
+    assert.equal(next, null);
   });
 
   it("pin survives continue-handler re-read merge (stale working must not wipe selections)", () => {

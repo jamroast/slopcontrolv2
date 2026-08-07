@@ -169,111 +169,6 @@ function slugFocus(focus: string): string {
 }
 
 /**
- * Classify design scope from operator text (start brief or continue).
- * Conservative regex fallback; LLM may override via designScope patch.
- */
-export function classifyDesignScopeFromText(
-  text: string,
-  opts?: { source?: DesignScopeSource; prior?: DesignScope | null },
-): DesignScope {
-  const t = text ?? "";
-  const source = opts?.source ?? "start";
-  const prior = opts?.prior ?? null;
-
-  const widen =
-    /\b(whole|entire|full)\s+(site|app|product|landing|page)\b/i.test(t) ||
-    /\b(redesign|from scratch|start over|restyle everything)\b/i.test(t);
-  if (widen) {
-    return DesignScopeSchema.parse({
-      kind: "product",
-      focus: "site",
-      focusPaths: [],
-      preserve: [],
-      source,
-    });
-  }
-
-  const only =
-    /\b(only|just|solely)\b.{0,40}\b(the\s+)?/i.test(t) ||
-    /\b(narrow|focus\s+on|scoped?\s+to)\b/i.test(t);
-
-  // Theme / menubar shell
-  if (
-    /\b(dark\s*(and|&|\/)\s*light|light\s*(and|&|\/)\s*dark|theme\s*toggle|day\s*(and|&|\/)\s*night)\b/i.test(
-      t,
-    ) ||
-    (/\b(theme|theming)\b/i.test(t) &&
-      /\b(toggle|mode|modes|menubar|top\s*bar)\b/i.test(t) &&
-      !/\b(brand|logo|landing|agency)\b/i.test(t))
-  ) {
-    return DesignScopeSchema.parse({
-      kind: "shell",
-      focus: /\bmenubar|top\s*bar|nav\b/i.test(t) ? "menubar theme" : "theme",
-      focusPaths: [],
-      preserve: ["logo", "palette", "content"],
-      source,
-    });
-  }
-
-  // Component / region
-  const componentHit = t.match(
-    /\b(?:chat\s*)?(?:form|composer|prompt|bubble|line\s*items?|invoice\s*form|sign[- ]?in|modal|drawer|side\s*panel|agent\s*panel)\b/i,
-  );
-  if (componentHit || (only && /\b(form|composer|bubble|panel|modal)\b/i.test(t))) {
-    const focusRaw = (componentHit?.[0] ?? "component").toLowerCase().trim();
-    const focus = focusRaw.replace(/\s+/g, ".");
-    return DesignScopeSchema.parse({
-      kind: "component",
-      focus,
-      focusPaths: [],
-      preserve: ["chrome", "palette", "logo", "nav", "shell"],
-      source,
-    });
-  }
-
-  // Flow
-  if (/\b(flow|checkout|onboarding|sign[- ]?up\s*flow)\b/i.test(t) && only) {
-    return DesignScopeSchema.parse({
-      kind: "flow",
-      focus: "flow",
-      focusPaths: [],
-      preserve: ["chrome", "palette", "logo"],
-      source,
-    });
-  }
-
-  // Screen
-  if (/\b(dashboard|landing|home\s*page|settings|sign[- ]?in\s*page)\b/i.test(t)) {
-    const screen =
-      t.match(/\b(dashboard|landing|home\s*page|settings|sign[- ]?in)\b/i)?.[1] ??
-      "screen";
-    return DesignScopeSchema.parse({
-      kind: "screen",
-      focus: screen.toLowerCase().replace(/\s+/g, "-"),
-      focusPaths: [],
-      preserve: only ? ["palette", "logo"] : [],
-      source,
-    });
-  }
-
-  // Whole-product brand / theming
-  if (
-    /\b(brand|theming|theme|look\s*and\s*feel|agency|platform|sibling)\b/i.test(
-      t,
-    ) ||
-    !prior
-  ) {
-    return defaultProductScope(source);
-  }
-
-  // Continue without explicit scope change: keep prior
-  return DesignScopeSchema.parse({
-    ...prior,
-    source,
-  });
-}
-
-/**
  * Merge continue-intent targets into a scope patch (narrow when surgical).
  */
 export function applyContinueIntentToScope(
@@ -281,7 +176,7 @@ export function applyContinueIntentToScope(
   intent: ContinueIntent,
   message: string,
 ): DesignScope {
-  // Explicit LLM/regex designScope patch wins when present
+  // Explicit structured designScope patch wins when present
   if (intent.designScope && (intent.designScope.kind || intent.designScope.focus)) {
     return DesignScopeSchema.parse({
       kind: intent.designScope.kind ?? prior.kind,
@@ -292,14 +187,7 @@ export function applyContinueIntentToScope(
     });
   }
 
-  const fromText = classifyDesignScopeFromText(message, {
-    source: "continue",
-    prior,
-  });
-  // Explicit component/shell from text wins
-  if (fromText.kind === "component" || fromText.kind === "shell") {
-    return fromText;
-  }
+  void message;
   if (intent.scope === "full_revise") {
     return defaultProductScope("continue");
   }
@@ -349,12 +237,6 @@ export function applyContinueIntentToScope(
       ),
       source: "continue",
     });
-  }
-  if (
-    fromText.kind !== prior.kind ||
-    fromText.focus !== prior.focus
-  ) {
-    return fromText;
   }
   return DesignScopeSchema.parse({ ...prior, source: "continue" });
 }
@@ -718,8 +600,20 @@ function collectProjectCssSnippets(
 }
 
 /** Build mustNot extras from scope preserve list. */
-export function scopePreserveMustNots(scope: DesignScope): string[] {
+export function scopePreserveMustNots(
+  scope: DesignScope,
+  opts?: {
+    /**
+     * When applied_shell is in scope, omit these preserve keys so mock chrome
+     * layout (menubar width, nav slots) is not frozen as PRESERVE.
+     */
+    omitPreserveKeys?: string[];
+  },
+): string[] {
   if (scope.kind === "product" && !scope.preserve.length) return [];
+  const omit = new Set(
+    (opts?.omitPreserveKeys ?? []).map((k) => k.toLowerCase()),
+  );
   const out: string[] = [];
   if (scope.kind === "component" || scope.kind === "flow") {
     out.push(
@@ -727,6 +621,7 @@ export function scopePreserveMustNots(scope: DesignScope): string[] {
     );
   }
   for (const p of scope.preserve) {
+    if (omit.has(p.toLowerCase())) continue;
     out.push(`PRESERVE — do not change ${p} unless the operator explicitly asks.`);
   }
   return out;

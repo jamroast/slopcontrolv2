@@ -1,9 +1,9 @@
 /**
- * Narrow design-loop continues: classify asks, freeze structure, reject drift.
+ * Narrow design-loop continues: freeze structure, reject drift.
  *
- * Note: primary classification is LLM-based via `continue-intent.ts` +
- * `classifyContinueIntentWithLlm` (mastra). The regexes here are the
- * deterministic fallback and feed legacy `DesignLoopContinueMode` for tests.
+ * Classification is LLM-based via `continue-intent.ts` +
+ * `classifyContinueIntentWithLlm` (mastra). This module is the deterministic
+ * drift/patch machinery fed by the structured `ContinueIntent`.
  */
 
 import type { ContinueIntent } from "./continue-intent.js";
@@ -16,151 +16,16 @@ import {
   continueIntentMayTouchShell,
 } from "./continue-intent.js";
 
-export type DesignLoopContinueKind =
-  | "asset_only"
-  | "nav_align"
-  | "section_touch"
-  | "full_revise";
-
-export type DesignLoopContinueMode = {
-  kind: DesignLoopContinueKind;
-  assetEdit: boolean;
-  /** Normalized section keywords mentioned by the operator (positive asks only). */
-  sections: string[];
-  /** Operator asked to keep layout/copy/shell/hero unchanged. */
-  preserveLayout: boolean;
-  /** Align mock topbar/nav with live project inventory. */
-  navAlign: boolean;
-};
-
-const SECTION_PATTERNS: Array<{ id: string; re: RegExp }> = [
-  { id: "tasting-room", re: /\btasting\s*room\b/i },
-  { id: "landing", re: /\b(landing|home\s*page|hero)\b/i },
-  { id: "dashboard", re: /\bdashboard\b/i },
-  { id: "chat", re: /\b(chat|agent\s*panel)\b/i },
-  { id: "settings", re: /\bsettings?\b/i },
-  { id: "lockups", re: /\blockups?\b/i },
-  { id: "palette", re: /\bpalette\b/i },
-  { id: "typography", re: /\btypograph/i },
-];
-
-/**
- * Strip "do not change …" / "keep the …" spans so section keywords inside
- * negations ("Do not change hero") are not treated as section asks.
- */
-export function textForPositiveSectionDetection(text: string): string {
-  return (text ?? "")
-    .replace(
-      /\b(?:do\s+not|don't|dont)\s+(?:change|touch|alter|rewrite|modify|update)\b[^.!?\n]*/gi,
-      " ",
-    )
-    .replace(
-      /\bwithout\s+(?:changing|touching|altering|modifying)\b[^.!?\n]*/gi,
-      " ",
-    )
-    .replace(
-      /\b(?:keep|preserve|maintain)\s+(?:the\s+)?[^.!?\n]*/gi,
-      " ",
-    );
-}
-
-export function askPreservesLayout(text: string): boolean {
-  const t = text ?? "";
-  return (
-    /\b(?:keep|preserve|maintain)\b.{0,60}\b(layout|copy|shell|hero|structure|mock|menu|nav)\b/i.test(
-      t,
-    ) ||
-    /\b(?:do\s+not|don't|dont)\s+(?:change|touch|alter|rewrite|modify)\b.{0,60}\b(layout|copy|shell|hero|structure|mock|menu|nav)\b/i.test(
-      t,
-    )
-  );
-}
-
-/** Align mock menus with live code / what exists today. */
-export function askAlignsNavWithCode(text: string): boolean {
-  const t = text ?? "";
-  return (
-    /\b(align|match|sync|update)\b.{0,50}\b(menu|nav|navigation|header\s*links?)\b/i.test(
-      t,
-    ) ||
-    /\b(menu|nav|navigation)\b.{0,50}\b(align|match|code|today|current|in\s*place|exists|live)\b/i.test(
-      t,
-    ) ||
-    /\b(menu|nav|navigation).{0,80}\b(in\s+the\s+code|what\s+we\s+have|what\s+exists|what\s+is\s+in\s+place)\b/i.test(
-      t,
-    )
-  );
-}
-
-export function classifyDesignLoopContinueAsk(
-  text: string,
-): DesignLoopContinueMode {
-  const t = text ?? "";
-  const preserveLayout = askPreservesLayout(t);
-  const navAlign = askAlignsNavWithCode(t);
-  const assetEdit =
-    /\b(alpha|transparent|transparency|remove\s*background|strip\s*black|chroma|icon\s*pack|favicon|browser\s*pack|resize|trim|pad\s*image|make_transparent|derive_icon)\b/i.test(
-      t,
-    );
-  const sectionScan = textForPositiveSectionDetection(t);
-  const sections = SECTION_PATTERNS.filter((p) => p.re.test(sectionScan)).map(
-    (p) => p.id,
-  );
-  // Positive rewrite asks only (negated "do not change hero" already stripped).
-  const wantsFull =
-    /\b(redesign|from scratch|rewrite (the )?(whole|entire|full)|overhaul|new layout|restyle everything|start over)\b/i.test(
-      t,
-    ) ||
-    /\b(rewrite|change|replace)\b.{0,40}\b(hero|headline|copy|tagline)\b/i.test(
-      sectionScan,
-    );
-
-  if (wantsFull && !preserveLayout && !navAlign) {
-    return {
-      kind: "full_revise",
-      assetEdit,
-      sections,
-      preserveLayout,
-      navAlign: false,
-    };
+/** Exact class-token count (avoids BEM child false positives). Local to avoid cycle with design-element. */
+function countExactClassToken(html: string, token: string): number {
+  const re = /class=["']([^"']*)["']/gi;
+  let n = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const tokens = (m[1] ?? "").split(/\s+/).filter(Boolean);
+    if (tokens.includes(token)) n += 1;
   }
-  // Nav align wins over asset-only short-circuit (v11 bug: icon pack skipped menu sync).
-  if (navAlign) {
-    return {
-      kind: "nav_align",
-      assetEdit,
-      sections: [...new Set([...sections, "nav"])],
-      preserveLayout: true,
-      navAlign: true,
-    };
-  }
-  // Icon pack / alpha + keep layout → never open the door to a full rewrite.
-  if (assetEdit && (sections.length === 0 || preserveLayout)) {
-    return {
-      kind: "asset_only",
-      assetEdit: true,
-      sections: preserveLayout ? [] : sections,
-      preserveLayout,
-      navAlign: false,
-    };
-  }
-  if (sections.length > 0 || assetEdit) {
-    return {
-      kind: "section_touch",
-      assetEdit,
-      sections,
-      preserveLayout,
-      navAlign: false,
-    };
-  }
-  // Default continue: preserve structure (still allow small tweaks).
-  return {
-    kind: "section_touch",
-    assetEdit: false,
-    sections: [],
-    preserveLayout,
-    navAlign: false,
-  };
+  return n;
 }
 
 export type MockStructureFingerprint = {
@@ -227,16 +92,44 @@ export function extractNavLabels(html: string): string[] {
   return labels.slice(0, 24);
 }
 
-export function extractMockStructureFingerprint(
-  html: string,
-): MockStructureFingerprint {
-  const heroMatch =
-    html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i) ||
-    html.match(/class=["'][^"']*hero[^"']*["'][^>]*>[\s\S]*?<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
-  const heroRaw = (heroMatch?.[1] ?? "")
+function stripHtmlText(s: string): string {
+  return s
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Landing/hero-scoped H1 for drift. Prefer #landing / .hero / #brand regions;
+ * do not treat a dashboard greeting as the landing hero.
+ */
+export function extractLandingHeroH1(html: string): string {
+  const landingRegion = html.match(
+    /<(?:section|div|main)\b[^>]*(?:id=["'](?:landing|hero|brand)["']|class=["'][^"']*\b(?:hero|landing|brand)\b[^"']*["'])[^>]*>([\s\S]{0,12000}?)<\/(?:section|div|main)>/i,
+  )?.[1];
+  if (landingRegion) {
+    const h1 = landingRegion.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1];
+    if (h1) return stripHtmlText(h1).slice(0, 200);
+  }
+
+  const dashH1 = html.match(
+    /<(?:section|div|main)\b[^>]*(?:id=["']dashboard["']|class=["'][^"']*\bdashboard(?:-shell)?\b[^"']*["'])[^>]*>[\s\S]{0,400}?<h1\b[^>]*>([\s\S]*?)<\/h1>/i,
+  )?.[1];
+  const dashText = dashH1 ? stripHtmlText(dashH1) : "";
+
+  const allH1 = [...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)].map((m) =>
+    stripHtmlText(m[1] ?? ""),
+  );
+  const nonDash = allH1.find((t) => t && t !== dashText);
+  if (nonDash) return nonDash.slice(0, 200);
+  // Dashboard-only / greeting-only: no landing hero fingerprint.
+  if (dashText && allH1.every((t) => !t || t === dashText)) return "";
+  return (allH1[0] ?? "").slice(0, 200);
+}
+
+export function extractMockStructureFingerprint(
+  html: string,
+): MockStructureFingerprint {
   const tokenKeys = [
     ...html.matchAll(/--([a-zA-Z0-9-]+)\s*:/g),
   ].map((m) => m[1]!);
@@ -246,7 +139,7 @@ export function extractMockStructureFingerprint(
   ].map((m) => m[1]!);
   const logoAssetCounts = countMockLogoAssets(html);
   return {
-    heroH1: heroRaw.slice(0, 200),
+    heroH1: extractLandingHeroH1(html),
     tokenKeys: uniqueTokens,
     sectionIds: [...new Set(sectionIds)].slice(0, 40),
     navLabels: extractNavLabels(html),
@@ -256,6 +149,8 @@ export function extractMockStructureFingerprint(
     logoAssetCounts,
   };
 }
+
+export type MockDriftSeverity = "hard" | "soft";
 
 export type MockDriftIssue = {
   code:
@@ -267,32 +162,62 @@ export type MockDriftIssue = {
     | "shell_dropped"
     | "element_invented";
   detail: string;
+  /** hard → discard agent mock; soft → keep agent mock + NOTES warning. */
+  severity: MockDriftSeverity;
 };
 
+/** Issues that should discard the agent mock and keep the prior tip. */
+export function hardMockDriftIssues(
+  issues: MockDriftIssue[],
+): MockDriftIssue[] {
+  return issues.filter((i) => i.severity === "hard");
+}
+
+export function softMockDriftIssues(
+  issues: MockDriftIssue[],
+): MockDriftIssue[] {
+  return issues.filter((i) => i.severity === "soft");
+}
+
 /**
- * Reject structural / logo regressions on narrow continues.
- * Pass `intent` (LLM or fallback) for target-based gating; `mode` remains as
- * legacy regex classification when no intent was resolved.
+ * Structure codes are hard on narrow preserve modes; soft on surgical continues.
+ * Logo swap defaults hard. Pinned-element invent is soft when callers pass
+ * severity explicitly (LLM honor judge is the semantic arbiter).
+ */
+export function mockDriftIssueSeverity(
+  code: MockDriftIssue["code"],
+  opts: {
+    preserveChrome: boolean;
+    assetsOnly: boolean;
+    navAlign: boolean;
+  },
+): MockDriftSeverity {
+  if (code === "logo_swapped") return "hard";
+  // Default for element_invented kept hard for non-pinned callers; pinned
+  // theme-toggle path passes severity "soft" explicitly.
+  if (code === "element_invented") return "hard";
+  if (opts.preserveChrome || opts.assetsOnly || opts.navAlign) return "hard";
+  return "soft";
+}
+
+/**
+ * Detect structural / logo regressions vs ContinueIntent.
+ * Diff first, then allowlist by intent. Issues carry hard|soft severity —
+ * orchestrator only discards on hard.
  */
 export function detectMockDrift(opts: {
   previousHtml: string;
   nextHtml: string;
-  mode?: DesignLoopContinueMode;
   intent?: ContinueIntent;
   pinnedLogoAsset?: string | null;
   /** Pinned shared elements — competing theme toggles are rejected. */
   pinnedElements?: Array<{ id: string }>;
 }): MockDriftIssue[] {
-  const mode = opts.mode;
   const intent = opts.intent;
-  if (!mode && !intent && !opts.pinnedElements?.length) return [];
-  const isFullRevise = intent
-    ? intent.scope === "full_revise"
-    : mode?.kind === "full_revise";
-  if (isFullRevise) return [];
+  if (!intent && !opts.pinnedElements?.length) return [];
+  if (intent?.scope === "full_revise") return [];
 
-  // LLM intent wins: theme/logo redesign with preserveChrome=false must not be
-  // vetoed by hero/logo/token/nav fingerprints (keeps prior mock = silent no-op).
+  // Intent-aligned redesign: skip structure vetoes when chrome may change.
   // Element invent checks still apply when shared elements are pinned.
   const skipStructureDrift = Boolean(
     intent &&
@@ -304,63 +229,54 @@ export function detectMockDrift(opts: {
   const next = extractMockStructureFingerprint(opts.nextHtml);
   const issues: MockDriftIssue[] = [];
 
+  const preserveChrome = Boolean(intent?.preserveChrome);
+  const assetsOnly = intent?.scope === "assets_only";
+  const navAlign = Boolean(
+    intent?.navAlign || intent?.scope === "nav_align",
+  );
+  const sevOpts = { preserveChrome, assetsOnly, navAlign };
+  const push = (
+    code: MockDriftIssue["code"],
+    detail: string,
+    severity?: MockDriftSeverity,
+  ) => {
+    issues.push({
+      code,
+      detail,
+      severity: severity ?? mockDriftIssueSeverity(code, sevOpts),
+    });
+  };
+
+  // Pinned shared elements: do NOT hard-reject on brittle class-count regex
+  // (BEM children like theme-toggle__sun false-positive). Semantic honor is
+  // judged by classifyElementHonorViaLlm after deterministic apply.
   const hasThemeEl = (opts.pinnedElements ?? []).some(
-    (e) => e.id === "theme-toggle" || /theme.?toggle/i.test(e.id),
+    (e) =>
+      e.id === "theme-toggle" ||
+      /theme.?toggle/i.test(e.id) ||
+      e.id === "menubar",
   );
   if (hasThemeEl) {
+    // Soft heuristic only — never discard the mock from this signal alone.
     const html = opts.nextHtml ?? "";
-    const toggleNodes =
-      html.match(
-        /<(?:button|div|label|a)[^>]*>[\s\S]{0,200}?(?:dark\s*\/\s*light|day\s*\/\s*night|theme\s*toggle)[\s\S]{0,200}?<\/(?:button|div|label|a)>/gi,
-      ) ?? [];
-    const classToggles =
-      html.match(/class=["'][^"']*theme-toggle[^"']*["']/gi) ?? [];
-    const count = Math.max(toggleNodes.length, classToggles.length);
-    if (count > 1) {
-      issues.push({
-        code: "element_invented",
-        detail: `Pinned theme-toggle but mock has ${count} theme controls — embed the shared element once`,
-      });
+    const exact = countExactClassToken(html, "theme-toggle");
+    if (exact > 1) {
+      push(
+        "element_invented",
+        `Heuristic: ${exact} theme-toggle controls (exact class token) — LLM honor judge / apply will reconcile; not a hard reject`,
+        "soft",
+      );
     }
   }
 
   if (skipStructureDrift) return issues;
-  if (!mode && !intent) return issues;
+  if (!intent) return issues;
 
-  const preserveChrome = intent
-    ? intent.preserveChrome
-    : Boolean(mode && (mode.kind === "asset_only" || mode.kind === "nav_align" || mode.preserveLayout));
-  const assetsOnly = intent
-    ? intent.scope === "assets_only"
-    : mode?.kind === "asset_only";
-  const mayTouchHero = intent
-    ? continueIntentMayTouchHero(intent)
-    : !preserveChrome &&
-      mode?.kind === "section_touch" &&
-      mode.sections.some((s) => s === "landing");
-  const allowTokenChurn = intent
-    ? continueIntentAllowsTokenChurn(intent)
-    : false;
-  const allowLogoSwap = intent
-    ? continueIntentAllowsLogoSwap(intent)
-    : false;
-  const mayTouchNav = intent
-    ? continueIntentMayTouchNav(intent)
-    : Boolean(
-        mode &&
-          (mode.kind === "nav_align" ||
-            mode.navAlign ||
-            (!preserveChrome &&
-              mode.kind === "section_touch" &&
-              mode.sections.some((s) =>
-                ["dashboard", "landing", "settings", "nav"].includes(s),
-              ))),
-      );
-  const mayTouchShell = intent
-    ? continueIntentMayTouchShell(intent)
-    : !preserveChrome &&
-      mode?.kind === "section_touch" &&
-      mode.sections.some((s) => s === "dashboard");
+  const mayTouchHero = continueIntentMayTouchHero(intent);
+  const allowTokenChurn = continueIntentAllowsTokenChurn(intent);
+  const allowLogoSwap = continueIntentAllowsLogoSwap(intent);
+  const mayTouchNav = continueIntentMayTouchNav(intent);
+  const mayTouchShell = continueIntentMayTouchShell(intent);
 
   if (
     prev.heroH1 &&
@@ -368,10 +284,10 @@ export function detectMockDrift(opts: {
     normalizeCopy(prev.heroH1) !== normalizeCopy(next.heroH1)
   ) {
     if (!mayTouchHero) {
-      issues.push({
-        code: "hero_changed",
-        detail: `Hero changed from "${prev.heroH1.slice(0, 60)}" to "${next.heroH1.slice(0, 60)}"`,
-      });
+      push(
+        "hero_changed",
+        `Hero changed from "${prev.heroH1.slice(0, 60)}" to "${next.heroH1.slice(0, 60)}"`,
+      );
     }
   }
 
@@ -380,10 +296,10 @@ export function detectMockDrift(opts: {
     const kept = prev.tokenKeys.filter((k) => nextSet.has(k)).length;
     const ratio = kept / prev.tokenKeys.length;
     if (ratio < 0.7) {
-      issues.push({
-        code: "tokens_dropped",
-        detail: `Kept ${kept}/${prev.tokenKeys.length} prior :root token keys`,
-      });
+      push(
+        "tokens_dropped",
+        `Kept ${kept}/${prev.tokenKeys.length} prior :root token keys`,
+      );
     }
   }
 
@@ -397,27 +313,24 @@ export function detectMockDrift(opts: {
         isDerivedFromPinned(n, pinned),
       );
     if (prevPinnedCount > 0 && !nextUsesPinned) {
-      issues.push({
-        code: "logo_swapped",
-        detail: `Primary/pinned logo ${pinned} missing from new mock`,
-      });
+      push(
+        "logo_swapped",
+        `Primary/pinned logo ${pinned} missing from new mock`,
+        "hard",
+      );
     }
-    // Detect swap to a differently named *alpha* file that crowds out the pinned mark
     const fakeAlpha = Object.keys(next.logoAssetCounts).find(
       (n) =>
         /alpha/i.test(n) &&
         n !== pinned &&
         (next.logoAssetCounts[n] ?? 0) >= 1,
     );
-    if (
-      fakeAlpha &&
-      prevPinnedCount >= 2 &&
-      nextPinnedCount === 0
-    ) {
-      issues.push({
-        code: "logo_swapped",
-        detail: `Swapped pinned ${pinned} for ${fakeAlpha}`,
-      });
+    if (fakeAlpha && prevPinnedCount >= 2 && nextPinnedCount === 0) {
+      push(
+        "logo_swapped",
+        `Swapped pinned ${pinned} for ${fakeAlpha}`,
+        "hard",
+      );
     }
   }
 
@@ -429,33 +342,36 @@ export function detectMockDrift(opts: {
     const nextSet = new Set(next.sectionIds);
     const kept = prev.sectionIds.filter((id) => nextSet.has(id)).length;
     if (kept / prev.sectionIds.length < 0.5) {
-      issues.push({
-        code: "section_ids_dropped",
-        detail: `Narrow continue dropped section ids (${kept}/${prev.sectionIds.length})`,
-      });
+      push(
+        "section_ids_dropped",
+        `Narrow continue dropped section ids (${kept}/${prev.sectionIds.length})`,
+      );
     }
   }
 
-  if (
-    !mayTouchNav &&
-    prev.navLabels.length >= 2 &&
-    normalizeCopy(prev.navLabels.join("|")) !==
-      normalizeCopy(next.navLabels.join("|"))
-  ) {
-    issues.push({
-      code: "nav_changed",
-      detail: `Nav changed from [${prev.navLabels.join(", ")}] to [${next.navLabels.join(", ")}]`,
-    });
+  // Nav: compare label **sets** (order-insensitive). Pure reorder is never drift.
+  if (!mayTouchNav && prev.navLabels.length >= 2) {
+    const prevSet = navLabelSetKey(prev.navLabels);
+    const nextSet = navLabelSetKey(next.navLabels);
+    if (prevSet !== nextSet) {
+      push(
+        "nav_changed",
+        `Nav changed from [${prev.navLabels.join(", ")}] to [${next.navLabels.join(", ")}]`,
+      );
+    }
   }
 
   if (!mayTouchShell && prev.hasDashboardShell && !next.hasDashboardShell) {
-    issues.push({
-      code: "shell_dropped",
-      detail: "Dashboard shell / sidebar chrome was removed",
-    });
+    push("shell_dropped", "Dashboard shell / sidebar chrome was removed");
   }
 
   return issues;
+}
+
+function navLabelSetKey(labels: string[]): string {
+  return [...new Set(labels.map((l) => normalizeCopy(l)).filter(Boolean))]
+    .sort()
+    .join("|");
 }
 
 function normalizeCopy(s: string): string {
@@ -532,45 +448,48 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function formatContinueModePromptBlock(
-  mode: DesignLoopContinueMode,
-): string {
-  return formatLegacyContinueModePromptBlock(mode);
+/**
+ * Strip leftover agent planning prose / HTML from design-loop version NOTES.
+ * Returns empty string when the remnant is not operator-facing.
+ */
+export function sanitizeDesignLoopAgentNotes(raw: string): string {
+  const text = (raw ?? "")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/<!DOCTYPE[\s\S]*/i, "")
+    .replace(/<\/?(?:html|head|body|style|script)\b[\s\S]*/i, "")
+    .replace(/MOCK_HTML_COMPLETE/gi, "")
+    .replace(/MOCK_ASSETS_ONLY/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1_500);
+  if (!text) return "";
+  if (
+    /^(i'll|i will|i'm going to|let me|here'?s)\b/i.test(text) ||
+    /\bi'll\s+apply\b/i.test(text)
+  ) {
+    return "";
+  }
+  return text;
 }
 
-function formatLegacyContinueModePromptBlock(
-  mode: DesignLoopContinueMode,
-): string {
-  const lines = [
-    `CONTINUE MODE: ${mode.kind}${mode.preserveLayout ? " (preserve layout)" : ""}`,
-    mode.assetEdit
-      ? "- Asset edits allowed via make_transparent / derive_icon_pack / resize tools only."
-      : "- No asset regeneration unless the operator asked.",
-  ];
-  if (mode.kind === "nav_align") {
-    lines.push(
-      "- NAV ALIGN: update topbar/primary nav labels+hrefs to match LIVE SITE inventory only.",
-      "- Keep hero, dashboard shell, tokens, and pinned logos identical.",
-      "- Prefer MOCK_ASSETS_ONLY / omit HTML — the system can patch nav from inventory.",
-    );
-  } else if (mode.kind === "asset_only" || mode.preserveLayout) {
-    lines.push(
-      "- ASSET ONLY / PRESERVE: do NOT rewrite layout, hero copy, topbar nav labels, dashboard shell, or CSS architecture.",
-      "- Call edit tools, then return the PRIOR mock HTML with only asset src / icon-pack tile updates — or omit HTML and the system will patch the prior mock.",
-      "- End with MOCK_ASSETS_ONLY if you intentionally skip a full HTML rewrite.",
-    );
-  } else if (mode.kind === "section_touch") {
-    lines.push(
-      "- SURGICAL: copy the previous mock verbatim as the base.",
-      "- Change ONLY the requested sections" +
-        (mode.sections.length
-          ? ` (${mode.sections.join(", ")})`
-          : " (minimal tweaks)") +
-        " and any pinned/asset updates.",
-      "- Keep hero headline, topbar nav, dashboard shell, :root token names, and pinned logo paths identical unless those sections were named.",
-    );
-  } else {
-    lines.push("- Full revise allowed; still prefer pinned logos over inventing a new mark.");
-  }
-  return lines.join("\n");
+/**
+ * Build version NOTES: honor + soft drift first; agent notes only when honor is empty.
+ */
+export function composeDesignLoopVersionNotes(opts: {
+  elementHonorNotes?: string;
+  softDriftNotes?: string;
+  agentRaw?: string;
+  version: number;
+}): string {
+  const honor = (opts.elementHonorNotes ?? "").trim();
+  const soft = (opts.softDriftNotes ?? "").trim();
+  const agent = honor
+    ? ""
+    : sanitizeDesignLoopAgentNotes(opts.agentRaw ?? "");
+  const notes = [honor, soft, agent || (honor || soft ? "" : `v${opts.version}`)]
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 1_500);
+  return notes || `v${opts.version}`;
 }

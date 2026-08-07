@@ -17,3 +17,13 @@ When the task is **developing or fixing SlopControl** (this repo: `slopconrolV2`
 - Use **fixtures** under `slopconrolV2/packages/artifacts/fixtures/` for Intent / Blueprint reconcile / UI-gate smoke tests.
 - Read-only inspection of a managed project is allowed when diagnosing SlopControl behaviour.
 - **Exception:** the operator explicitly asks to edit a named managed project directly (e.g. “hotfix JamPress”).
+
+## Build-process configurator exception
+
+The LLM build-process configurator (`POST /projects/:id/build-process/configure` and import-time onboarding) is **allowed** to write in a managed project's tree, but only through the guardrailed apply layer (`applyBuildProcessChanges`):
+
+- **Allowed paths:** `package.json`, `pnpm-workspace.yaml`, `.npmrc`, `Dockerfile*`, `docker-compose*.yml`, `.github/workflows/*.yml`, `Makefile`, `pyproject.toml`, `Cargo.toml`, `.nvmrc`, `.tool-versions` — build plumbing only.
+- **Commands:** only binaries in the run-command allowlist (the resolved toolchain's bins + `corepack`/`node`).
+- **Never:** application source, product `.env*` values (the deterministic `writeProjectRegistryEnv` helper is the only env writer), or anything outside the allowlist.
+
+Rationale: build-process onboarding is SlopControl configuring *its own infrastructure contract* inside the project — like `ensureProjectNpmrc` and the canonical runtime env already do. Product changes still go through SlopControl runs. As the operator's agent, prefer calling the configurator over hand-editing build files in managed projects.

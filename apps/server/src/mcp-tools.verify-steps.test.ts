@@ -29,3 +29,21 @@ describe("MCP verify-steps tools", () => {
     assert.match(getRun!.description ?? "", /verify_steps/);
   });
 });
+
+describe("MCP relaunch_design_research", () => {
+  it("registers relaunch_design_research schema", () => {
+    const tool = SLOPCONTROL_MCP_TOOLS.find(
+      (t) => t.name === "relaunch_design_research",
+    );
+    assert.ok(tool);
+    assert.match(tool!.description ?? "", /recovery|research/i);
+    assert.deepEqual(
+      (tool!.inputSchema as { required?: string[] }).required,
+      ["projectId"],
+    );
+    const props = (tool!.inputSchema as { properties?: Record<string, unknown> })
+      .properties;
+    assert.ok(props?.loopId);
+    assert.ok(props?.phaseId);
+  });
+});

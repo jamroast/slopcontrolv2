@@ -3,7 +3,10 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { tearDownComposeInDir } from "./compose-teardown.js";
+import {
+  snapshotCanonicalRuntimeEnv,
+  tearDownComposeInDir,
+} from "./compose-teardown.js";
 
 describe("tearDownComposeInDir", () => {
   it("skips when no compose file is present", () => {
@@ -28,6 +31,41 @@ describe("tearDownComposeInDir", () => {
       assert.equal(r.attempted, true);
       // May fail if docker unavailable in CI — still must have attempted.
       assert.ok(typeof r.output === "string");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("snapshotCanonicalRuntimeEnv", () => {
+  it("captures registry keys from product .env files", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-canon-env-"));
+    try {
+      writeFileSync(
+        join(dir, ".env"),
+        [
+          "DB_PORT=5544",
+          "SLOPCONTROL_NPM_REGISTRY_URL=http://127.0.0.1:4873/",
+          "SLOPCONTROL_NPM_REGISTRY_DOCKER_URL=http://host.docker.internal:4873/",
+          "SLOPCONTROL_NPM_REGISTRY_TOKEN=tok-abc123",
+          "UNRELATED_KEY=nope",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+      const snap = snapshotCanonicalRuntimeEnv(dir);
+      const env = snap.files[".env"];
+      assert.ok(env);
+      assert.equal(
+        env.SLOPCONTROL_NPM_REGISTRY_URL,
+        "http://127.0.0.1:4873/",
+      );
+      assert.equal(
+        env.SLOPCONTROL_NPM_REGISTRY_DOCKER_URL,
+        "http://host.docker.internal:4873/",
+      );
+      assert.equal(env.SLOPCONTROL_NPM_REGISTRY_TOKEN, "tok-abc123");
+      assert.equal(env.UNRELATED_KEY, undefined);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

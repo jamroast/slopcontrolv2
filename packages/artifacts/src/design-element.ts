@@ -26,7 +26,12 @@ import {
   type DesignLoopMeta,
 } from "./design-loop.js";
 import { resolveShareAlias } from "./design-share.js";
-import { pinDesignLoopSelection } from "./design-loop-selections.js";
+import {
+  getDesignLoopSelections,
+  pinDesignLoopSelection,
+  refreshDesignLoopConcepts,
+  type DesignLoopMetaWithSelections,
+} from "./design-loop-selections.js";
 import {
   jamPackageNameForElement,
   scaffoldElementNpmPackage,
@@ -123,6 +128,495 @@ function slugElementId(raw: string): string {
       .replace(/^-+|-+$/g, "")
       .slice(0, 64) || "element"
   );
+}
+
+export { slugElementId };
+
+/** Candidate control/shell region that can be extracted from a mock. */
+export type ExtractableDesignElement = {
+  id: string;
+  label: string;
+  kind: DesignElementKind;
+  /** Detection source for the UI. */
+  reason: string;
+  /** Short HTML excerpt for preview (may be truncated). */
+  previewHtml: string;
+  /** True when this id already exists in the project element library. */
+  alreadyPublished: boolean;
+  /** True when matching project source files were found for @jam packaging. */
+  hasProjectSource: boolean;
+  /** Relative source paths that would be copied into element src/. */
+  sourcePaths: string[];
+  /** Target npm package name when published. */
+  npmPackage: string;
+};
+
+const VOID_HTML_TAGS = new Set([
+  "area",
+  "base",
+  "br",
+  "col",
+  "embed",
+  "hr",
+  "img",
+  "input",
+  "link",
+  "meta",
+  "param",
+  "source",
+  "track",
+  "wbr",
+]);
+
+/**
+ * Extract a complete HTML element starting at `openTagIndex` by balancing
+ * the same tag name (skips comments, script/style bodies, void tags).
+ */
+export function extractBalancedElement(
+  html: string,
+  openTagIndex: number,
+): string {
+  if (openTagIndex < 0 || openTagIndex >= html.length) return "";
+  if (html[openTagIndex] !== "<") return "";
+  const openMatch = html
+    .slice(openTagIndex)
+    .match(/^<([a-zA-Z][\w:-]*)(\s[^>]*)?>/);
+  if (!openMatch) return "";
+  const tag = openMatch[1]!.toLowerCase();
+  const openLen = openMatch[0].length;
+  // Self-closing open tag
+  if (/\/\s*>$/.test(openMatch[0]) || VOID_HTML_TAGS.has(tag)) {
+    return html.slice(openTagIndex, openTagIndex + openLen);
+  }
+
+  let i = openTagIndex + openLen;
+  let depth = 1;
+  const lower = html.toLowerCase();
+  const openNeedle = `<${tag}`;
+  const closeNeedle = `</${tag}`;
+
+  while (i < html.length && depth > 0) {
+    if (html.startsWith("<!--", i)) {
+      const end = html.indexOf("-->", i + 4);
+      i = end === -1 ? html.length : end + 3;
+      continue;
+    }
+    if (lower.startsWith("<script", i)) {
+      const end = lower.indexOf("</script>", i + 7);
+      i = end === -1 ? html.length : end + "</script>".length;
+      continue;
+    }
+    if (lower.startsWith("<style", i)) {
+      const end = lower.indexOf("</style>", i + 6);
+      i = end === -1 ? html.length : end + "</style>".length;
+      continue;
+    }
+    if (lower.startsWith(closeNeedle, i)) {
+      const after = html.slice(i + closeNeedle.length);
+      if (after.match(/^\s*>/)) {
+        depth -= 1;
+        const closeEnd = i + closeNeedle.length + after.match(/^\s*>/)![0].length;
+        if (depth === 0) {
+          return html.slice(openTagIndex, closeEnd);
+        }
+        i = closeEnd;
+        continue;
+      }
+    }
+    if (lower.startsWith(openNeedle, i)) {
+      const rest = html.slice(i + openNeedle.length);
+      // word boundary after tag name
+      if (rest.match(/^[\s/>]/)) {
+        const tagEnd = html.indexOf(">", i + 1);
+        if (tagEnd === -1) break;
+        const fullOpen = html.slice(i, tagEnd + 1);
+        if (!/\/\s*>$/.test(fullOpen) && !VOID_HTML_TAGS.has(tag)) {
+          depth += 1;
+        }
+        i = tagEnd + 1;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return "";
+}
+
+function classAttrHas(classAttr: string, className: string): boolean {
+  return classAttr
+    .split(/\s+/)
+    .filter(Boolean)
+    .some((c) => c.toLowerCase() === className.toLowerCase());
+}
+
+/** Find first element with a given class (optional tag allow-list) and return balanced outerHTML. */
+export function extractByClass(
+  html: string,
+  className: string,
+  tagHint?: string[],
+): string {
+  const re = /<([a-zA-Z][\w:-]*)\b([^>]*?)>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const tag = m[1]!.toLowerCase();
+    if (tagHint?.length && !tagHint.map((t) => t.toLowerCase()).includes(tag)) {
+      continue;
+    }
+    const attrs = m[2] ?? "";
+    const classMatch = attrs.match(/\bclass\s*=\s*(["'])([^"']*)\1/i);
+    if (!classMatch) continue;
+    if (!classAttrHas(classMatch[2] ?? "", className)) continue;
+    const block = extractBalancedElement(html, m.index);
+    if (block) return block;
+  }
+  return "";
+}
+
+/** Find first element with attr="value" and return balanced outerHTML. */
+export function extractByAttr(
+  html: string,
+  attr: string,
+  value: string,
+): string {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(
+    `<([a-zA-Z][\\w:-]*)\\b([^>]*?\\b${attr}\\s*=\\s*(["'])${escaped}\\3[^>]*)>`,
+    "i",
+  );
+  const m = re.exec(html);
+  if (!m) return "";
+  return extractBalancedElement(html, m.index);
+}
+
+function extractSignInControl(html: string): string {
+  // Prefer explicit sign-in markers on the control itself.
+  const byAttr =
+    extractByAttr(html, "href", "#signin") ||
+    extractByAttr(html, "href", "#sign-in") ||
+    extractByAttr(html, "id", "signin") ||
+    extractByAttr(html, "id", "sign-in") ||
+    extractByClass(html, "sign-in", ["a", "button"]) ||
+    extractByClass(html, "signin", ["a", "button"]);
+  if (byAttr) return byAttr;
+
+  const re = /<(a|button)\b([^>]*)>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const block = extractBalancedElement(html, m.index);
+    if (!block) continue;
+    const text = block.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    if (/^sign[\s-]?in$/i.test(text) || /\bsign[\s-]?in\b/i.test(text)) {
+      // Avoid grabbing a huge parent; require the control's own text to mention sign-in
+      // and keep length modest.
+      if (block.length <= 800) return block;
+    }
+  }
+  return "";
+}
+
+type KnownExtractPattern = {
+  id: string;
+  label: string;
+  kind: DesignElementKind;
+  test: (html: string) => boolean;
+  snippet: (html: string) => string;
+  reason: string;
+};
+
+const KNOWN_EXTRACT_PATTERNS: KnownExtractPattern[] = [
+  {
+    id: "theme-toggle",
+    label: "Theme toggle (day / night)",
+    kind: "control",
+    reason: "class theme-toggle or day/night toggle button",
+    test: (html) =>
+      /\btheme-toggle\b/i.test(html) ||
+      /<(?:button|div|label)[^>]*>[\s\S]{0,200}?(?:dark\s*\/\s*light|day\s*\/\s*night|theme\s*toggle)/i.test(
+        html,
+      ),
+    snippet: (html) =>
+      extractByClass(html, "theme-toggle", ["button", "div", "label"]) ||
+      extractByAttr(html, "data-element", "theme-toggle") ||
+      "",
+  },
+  {
+    id: "menubar",
+    label: "Menubar / top navigation",
+    kind: "shell",
+    reason: "class menubar or topbar header chrome",
+    test: (html) => /\b(?:menubar|topbar)\b/i.test(html),
+    snippet: (html) =>
+      extractByClass(html, "menubar", ["header", "nav", "div"]) ||
+      extractByClass(html, "topbar", ["header", "nav", "div"]) ||
+      "",
+  },
+  {
+    id: "user-pill",
+    label: "User pill / account control",
+    kind: "control",
+    reason: "class user-pill",
+    test: (html) => /\buser-pill\b/i.test(html),
+    snippet: (html) =>
+      extractByClass(html, "user-pill", ["div", "button", "a"]) || "",
+  },
+  {
+    id: "view-switcher",
+    label: "View switcher",
+    kind: "control",
+    reason: "class view-switcher",
+    test: (html) => /\bview-switcher\b/i.test(html),
+    snippet: (html) =>
+      extractByClass(html, "view-switcher", ["div", "nav", "ul"]) || "",
+  },
+  {
+    id: "dashboard-sidebar",
+    label: "Dashboard sidebar",
+    kind: "shell",
+    reason: "class dashboard-sidebar or dash-sidebar",
+    test: (html) => /\b(?:dashboard-sidebar|dash-sidebar)\b/i.test(html),
+    snippet: (html) =>
+      extractByClass(html, "dashboard-sidebar", ["aside", "nav", "div"]) ||
+      extractByClass(html, "dash-sidebar", ["aside", "nav", "div"]) ||
+      "",
+  },
+  {
+    id: "dashboard-shell",
+    label: "Dashboard shell / layout",
+    kind: "shell",
+    reason: "class dashboard-shell or dashboard-layout",
+    test: (html) => /\b(?:dashboard-shell|dashboard-layout)\b/i.test(html),
+    snippet: (html) =>
+      extractByClass(html, "dashboard-shell", ["div", "section", "main"]) ||
+      extractByClass(html, "dashboard-layout", ["div", "section", "main"]) ||
+      "",
+  },
+  {
+    id: "sign-in",
+    label: "Sign-in control",
+    kind: "control",
+    reason: "sign-in link or control in chrome",
+    test: (html) =>
+      /\bsign-?in\b/i.test(html) &&
+      /<(?:a|button)\b/i.test(html),
+    snippet: (html) => extractSignInControl(html),
+  },
+];
+
+/** Default project-relative source candidates for known element ids. */
+const ELEMENT_SOURCE_CANDIDATES: Record<string, string[]> = {
+  "theme-toggle": [
+    "src/components/shell/theme-toggle.tsx",
+    "src/components/shell/theme-toggle.ts",
+    "src/hooks/useTheme.ts",
+  ],
+  menubar: [
+    "src/components/shell/menubar.tsx",
+    "src/components/shell/menubar.ts",
+  ],
+  "user-pill": [
+    "src/components/shell/user-pill.tsx",
+    "src/components/shell/user-pill.ts",
+  ],
+  "view-switcher": [
+    "src/components/shell/view-switcher.tsx",
+    "src/components/shell/view-switcher.ts",
+  ],
+  "dashboard-sidebar": [
+    "src/components/dashboard/dashboard-sidebar.tsx",
+    "src/components/dashboard/dashboard-sidebar.ts",
+  ],
+  "dashboard-shell": [
+    "src/components/dashboard/dashboard-shell.tsx",
+    "src/components/dashboard/dashboard-shell.ts",
+  ],
+};
+
+/**
+ * Resolve existing source files for an element under a project root.
+ * Returns paths relative to projectRoot and file contents keyed for element src/.
+ */
+export function collectSourceFilesForElement(
+  projectRoot: string,
+  elementId: string,
+): { sourcePaths: string[]; srcFiles: Record<string, string> } {
+  const id = slugElementId(elementId);
+  const candidates = ELEMENT_SOURCE_CANDIDATES[id] ?? [];
+  const sourcePaths: string[] = [];
+  const srcFiles: Record<string, string> = {};
+  if (!projectRoot || !existsSync(projectRoot)) {
+    return { sourcePaths, srcFiles };
+  }
+  for (const rel of candidates) {
+    const abs = join(projectRoot, rel);
+    if (!existsSync(abs) || !statSync(abs).isFile()) continue;
+    sourcePaths.push(rel);
+    // Strip leading src/ for element src/ tree
+    const underSrc = rel.replace(/^src\//, "");
+    srcFiles[underSrc] = readFileSync(abs, "utf-8");
+  }
+  return { sourcePaths, srcFiles };
+}
+
+function truncatePreview(html: string, max = 400): string {
+  const t = html.replace(/\s+/g, " ").trim();
+  return t.length <= max ? t : `${t.slice(0, max)}…`;
+}
+
+/** Harvest CSS rules whose selectors mention the root class. */
+export function harvestCssForClass(html: string, className: string): string {
+  const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map(
+    (m) => m[1] ?? "",
+  );
+  if (!styles.length) return "";
+  const css = styles.join("\n");
+  const needle = className.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rules: string[] = [];
+  // Rough rule splitter — good enough for mock <style> blocks.
+  const chunks = css.split(/\}/);
+  for (const chunk of chunks) {
+    const body = chunk.trim();
+    if (!body) continue;
+    const rule = `${body}}`;
+    if (new RegExp(`\\.${needle}\\b`, "i").test(rule)) {
+      rules.push(rule.trim());
+    }
+  }
+  // Also keep :root / data-theme tokens when harvesting theme-related classes
+  if (/theme/i.test(className)) {
+    for (const m of css.matchAll(/:root\s*\{[\s\S]*?\}/g)) {
+      rules.unshift(m[0]);
+    }
+    for (const m of css.matchAll(
+      /\[data-theme\s*=\s*["'][^"']+["']\]\s*\{[\s\S]*?\}/g,
+    )) {
+      rules.push(m[0]);
+    }
+  }
+  return [...new Set(rules)].join("\n\n");
+}
+
+type ExtractableRegion = {
+  id: string;
+  label: string;
+  kind: DesignElementKind;
+  reason: string;
+  html: string;
+};
+
+/** Collect full HTML regions for extractable controls (deduped by id). */
+function collectExtractableRegions(html: string): ExtractableRegion[] {
+  const source = html ?? "";
+  const byId = new Map<string, ExtractableRegion>();
+
+  const push = (c: ExtractableRegion) => {
+    const id = slugElementId(c.id);
+    if (!id || byId.has(id)) return;
+    byId.set(id, { ...c, id });
+  };
+
+  // 1. Explicit data-element markers (authoritative names).
+  for (const m of source.matchAll(/data-element=["']([^"']+)["']/gi)) {
+    const rawId = m[1]?.trim() ?? "";
+    if (!rawId) continue;
+    const id = slugElementId(rawId);
+    // Walk back to the opening '<' of this tag
+    let openIdx = m.index ?? 0;
+    while (openIdx > 0 && source[openIdx] !== "<") openIdx -= 1;
+    const block =
+      extractByAttr(source, "data-element", rawId) ||
+      extractBalancedElement(source, openIdx) ||
+      `<div data-element="${id}"></div>`;
+    push({
+      id,
+      label: id
+        .split("-")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" "),
+      kind: /shell|menubar|sidebar|layout/i.test(id) ? "shell" : "control",
+      reason: `data-element="${rawId}"`,
+      html: block,
+    });
+  }
+
+  // 2. Known chrome patterns.
+  for (const p of KNOWN_EXTRACT_PATTERNS) {
+    if (!p.test(source)) continue;
+    const snip = p.snippet(source);
+    push({
+      id: p.id,
+      label: p.label,
+      kind: p.kind,
+      reason: p.reason,
+      html: snip || `<div class="${p.id}" data-element="${p.id}"></div>`,
+    });
+  }
+
+  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * Scan mock HTML for extractable shared-element candidates.
+ * Prefer `data-element` markers; also detect known chrome patterns
+ * (menubar, theme-toggle, user-pill, …). Ids are stable slugs for extract.
+ */
+export function listExtractableDesignElementsFromMock(
+  html: string,
+  opts?: { publishedIds?: Iterable<string>; projectRoot?: string },
+): ExtractableDesignElement[] {
+  const published = new Set(
+    [...(opts?.publishedIds ?? [])].map((id) => slugElementId(id)),
+  );
+  return collectExtractableRegions(html).map((r) => {
+    const source = opts?.projectRoot
+      ? collectSourceFilesForElement(opts.projectRoot, r.id)
+      : { sourcePaths: [] as string[], srcFiles: {} };
+    return {
+      id: r.id,
+      label: r.label,
+      kind: r.kind,
+      reason: r.reason,
+      previewHtml: truncatePreview(r.html),
+      alreadyPublished: published.has(r.id),
+      hasProjectSource: source.sourcePaths.length > 0,
+      sourcePaths: source.sourcePaths,
+      npmPackage: jamPackageNameForElement(r.id),
+    };
+  });
+}
+
+/**
+ * Resolve one extractable region by id (full HTML, not preview-truncated).
+ */
+export function resolveExtractableDesignElement(
+  html: string,
+  elementId: string,
+): ExtractableRegion | null {
+  const id = slugElementId(elementId);
+  return collectExtractableRegions(html).find((r) => r.id === id) ?? null;
+}
+
+/**
+ * List extractable candidates from a design-loop mock version.
+ * Marks ids already published in the project element library.
+ */
+export function listExtractableDesignElementsFromLoop(opts: {
+  projectRoot: string;
+  loopId: string;
+  version?: number;
+}): ExtractableDesignElement[] {
+  const meta = readDesignLoopMeta(opts.projectRoot, opts.loopId);
+  if (!meta) throw new Error(`Design loop not found: ${opts.loopId}`);
+  const version = opts.version ?? meta.currentVersion;
+  const html =
+    readDesignLoopMockHtml(opts.projectRoot, opts.loopId, version) ?? "";
+  if (!html.trim()) {
+    throw new Error(`No mock HTML for ${opts.loopId} v${version}`);
+  }
+  const publishedIds = listProjectElements(opts.projectRoot).map((e) => e.id);
+  return listExtractableDesignElementsFromMock(html, {
+    publishedIds,
+    projectRoot: opts.projectRoot,
+  });
 }
 
 export function projectElementsRoot(projectRoot: string): string {
@@ -442,16 +936,17 @@ export function publishDesignElement(
     writeFileSync(join(dir, "tokens.css"), opts.tokensCss.trim() + "\n", "utf-8");
   }
   if (hasCode) writeSrcTree(join(dir, "src"), srcFiles);
-  if (hasCode) {
-    scaffoldElementNpmPackage({
-      outDir: join(dir, "npm-package"),
-      elementId: id,
-      version,
-      label: meta.label,
-      srcFiles,
-      description: meta.label,
-    });
-  }
+  // Always scaffold @jam/<id> — code entry when present, else mock/tokens exports.
+  scaffoldElementNpmPackage({
+    outDir: join(dir, "npm-package"),
+    elementId: id,
+    version,
+    label: meta.label,
+    srcFiles,
+    description: meta.label,
+    mockHtml: opts.mockHtml,
+    tokensCss: opts.tokensCss,
+  });
   writeFileSync(
     join(dir, "META.json"),
     `${JSON.stringify(
@@ -486,6 +981,16 @@ export function publishDesignElement(
       if (existsSync(regSrc)) rmSync(regSrc, { recursive: true, force: true });
       writeSrcTree(regSrc, srcFiles);
     }
+    scaffoldElementNpmPackage({
+      outDir: join(regDir, "npm-package"),
+      elementId: id,
+      version,
+      label: meta.label,
+      srcFiles,
+      description: meta.label,
+      mockHtml: opts.mockHtml,
+      tokensCss: opts.tokensCss,
+    });
     upsertIndexEntry(regRoot, meta);
   }
 
@@ -499,6 +1004,8 @@ export function extractDesignElementFromMock(opts: {
   kind?: DesignElementKind;
   label?: string;
   brief?: string;
+  /** When set, copy matching project source into src/ for @jam packaging. */
+  projectRoot?: string;
 }): {
   elementId: string;
   kind: DesignElementKind;
@@ -511,39 +1018,61 @@ export function extractDesignElementFromMock(opts: {
   mountHints: string[];
   themeRequirements: string[];
   srcFiles: Record<string, string>;
+  sourcePaths: string[];
+  npmPackage: string;
 } {
   const html = opts.html ?? "";
+  const requestedId = opts.elementId?.trim()
+    ? slugElementId(opts.elementId)
+    : "";
+  const region = requestedId
+    ? resolveExtractableDesignElement(html, requestedId)
+    : null;
+  const candidates = collectExtractableRegions(html);
+  const fallbackRegion =
+    region ??
+    (!requestedId
+      ? (candidates.find((c) => c.id === "theme-toggle") ??
+        candidates[0] ??
+        null)
+      : null);
+
   const isTheme =
-    /\btheme-toggle\b/i.test(html) ||
-    /\bdata-theme\b/i.test(html) ||
-    /\b(day|night|dark\s*\/\s*light|theme)\s*toggle\b/i.test(
-      opts.brief ?? "",
-    ) ||
-    /theme\.?toggle/i.test(opts.elementId ?? "");
+    (fallbackRegion?.id === "theme-toggle" ||
+      requestedId === "theme-toggle" ||
+      /theme\.?toggle/i.test(opts.elementId ?? "")) &&
+    (Boolean(fallbackRegion) ||
+      /\btheme-toggle\b/i.test(html) ||
+      /\b(day|night|dark\s*\/\s*light|theme)\s*toggle\b/i.test(
+        opts.brief ?? "",
+      ));
 
   const elementId = slugElementId(
-    opts.elementId || (isTheme ? "theme-toggle" : "shared-control"),
+    requestedId ||
+      fallbackRegion?.id ||
+      (isTheme ? "theme-toggle" : "shared-control"),
   );
-  const kind: DesignElementKind = opts.kind ?? (isTheme ? "control" : "control");
+  const kind: DesignElementKind =
+    opts.kind ?? fallbackRegion?.kind ?? (isTheme ? "control" : "control");
   const label =
     opts.label?.trim() ||
+    fallbackRegion?.label ||
     (isTheme ? "Theme toggle (day / night)" : elementId);
 
-  // Prefer a marked control node; else a button near theme language.
-  let snippet = "";
-  const marked =
-    html.match(
-      /<(?:button|div|label)[^>]*(?:class=["'][^"']*theme-toggle[^"']*["']|data-element=["'][^"']*["'])[^>]*>[\s\S]{0,1200}?<\/(?:button|div|label)>/i,
-    )?.[0] ?? "";
-  if (marked) snippet = marked;
-  else {
-    const btn =
-      html.match(
-        /<button[^>]*>[\s\S]{0,400}?(?:dark|light|day|night|theme)[\s\S]{0,400}?<\/button>/i,
-      )?.[0] ?? "";
-    snippet = btn;
+  // Prefer the resolved region for the requested / listed id.
+  let snippet = fallbackRegion?.html?.trim() ?? "";
+  if (!snippet && isTheme) {
+    snippet =
+      extractByClass(html, "theme-toggle", ["button", "div", "label"]) ||
+      extractByAttr(html, "data-element", "theme-toggle") ||
+      "";
   }
   if (!snippet.trim()) {
+    if (requestedId && !fallbackRegion) {
+      throw new Error(
+        `No extractable element "${elementId}" in mock. Call list_extractable_design_elements first and use a listed id.`,
+      );
+    }
     snippet = isTheme
       ? `<button type="button" class="theme-toggle" aria-label="Toggle dark and light theme" data-element="theme-toggle">Dark / Light</button>
 <script>
@@ -560,13 +1089,24 @@ export function extractDesignElementFromMock(opts: {
       : `<div data-element="${elementId}" class="shared-element"><!-- define control --></div>`;
   }
 
-  const styleChunks = [
-    ...(html.match(/:root\s*\{[\s\S]*?\n\}/) ?? []),
-    ...(html.match(/\[data-theme\s*=\s*["']light["']\]\s*\{[\s\S]*?\n\}/) ?? []),
-    ...(html.match(/\.theme-toggle\s*\{[\s\S]*?\n\}/) ?? []),
+  const classRoots = [
+    elementId,
+    ...(elementId === "dashboard-shell" ? ["dashboard-layout"] : []),
+    ...(elementId === "menubar" ? ["topbar"] : []),
   ];
-  const tokensCss = styleChunks.join("\n\n");
+  const harvested = classRoots
+    .map((c) => harvestCssForClass(html, c))
+    .filter(Boolean)
+    .join("\n\n");
+  const styleChunks = [
+    harvested,
+    ...(html.match(/:root\s*\{[\s\S]*?\}/) ?? []),
+    ...(html.match(/\[data-theme\s*=\s*["']light["']\]\s*\{[\s\S]*?\}/) ?? []),
+  ].filter(Boolean);
+  const tokensCss = [...new Set(styleChunks)].join("\n\n");
 
+  const wrapInHeader =
+    kind === "control" || elementId === "theme-toggle" || elementId === "sign-in";
   const mockHtml = `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
@@ -579,9 +1119,7 @@ body{margin:0;font-family:system-ui,sans-serif;background:var(--background);colo
 </style>
 </head>
 <body>
-<header data-mount="menubar">
-${snippet}
-</header>
+${wrapInHeader ? `<header data-mount="menubar">\n${snippet}\n</header>` : snippet}
 </body>
 </html>`;
 
@@ -596,7 +1134,9 @@ ${snippet}
     : ["Control is keyboard focusable"];
   const mountHints = isTheme
     ? ["menubar", "header", "topbar"]
-    : ["host"];
+    : kind === "shell"
+      ? ["host", elementId]
+      : ["host"];
   const themeRequirements = isTheme
     ? [
         "Toggle must set document.documentElement.dataset.theme (html[data-theme])",
@@ -604,7 +1144,11 @@ ${snippet}
       ]
     : [];
 
-  const srcFiles: Record<string, string> = isTheme
+  const fromProject = opts.projectRoot
+    ? collectSourceFilesForElement(opts.projectRoot, elementId)
+    : { sourcePaths: [] as string[], srcFiles: {} as Record<string, string> };
+
+  const themeFallbackSrc: Record<string, string> = isTheme
     ? {
         "theme-toggle.ts": `/** Plain TS theme toggle — framework apps wrap as needed. */
 export type ThemeMode = "dark" | "light";
@@ -644,11 +1188,20 @@ export function bindThemeToggle(button: HTMLElement, root: HTMLElement = documen
       }
     : {};
 
+  // Prefer project source over hardcoded theme scaffold.
+  const srcFiles =
+    Object.keys(fromProject.srcFiles).length > 0
+      ? fromProject.srcFiles
+      : themeFallbackSrc;
+
+  const npmPackage = jamPackageNameForElement(elementId);
+
   const spec = [
     `# ${label}`,
     "",
     `Element id: \`${elementId}\``,
     `Kind: ${kind}`,
+    `npm: \`${npmPackage}\``,
     "",
     "## Behavior",
     isTheme
@@ -661,6 +1214,13 @@ export function bindThemeToggle(button: HTMLElement, root: HTMLElement = documen
     "## Accessibility",
     ...a11y.map((a) => `- ${a}`),
     "",
+    ...(fromProject.sourcePaths.length
+      ? [
+          "## Source",
+          ...fromProject.sourcePaths.map((p) => `- \`${p}\``),
+          "",
+        ]
+      : []),
     "## Must not",
     "- Do not invent a competing control when this element is pinned in a design loop.",
     opts.brief?.trim() ? `\n## Source brief\n${opts.brief.trim().slice(0, 800)}` : "",
@@ -680,6 +1240,8 @@ export function bindThemeToggle(button: HTMLElement, root: HTMLElement = documen
     mountHints,
     themeRequirements,
     srcFiles,
+    sourcePaths: fromProject.sourcePaths,
+    npmPackage,
   };
 }
 
@@ -773,6 +1335,16 @@ export function importDesignElementIntoLoop(opts: {
   return ref;
 }
 
+/** Inner HTML of element mock `<body>` (or full document fallback). */
+export function extractElementBodyHtml(mockHtml: string): string {
+  const body = mockHtml.match(/<body[^>]*>([\s\S]*)<\/body>/i)?.[1]?.trim();
+  return body || mockHtml.trim();
+}
+
+function elementTokensPath(mockPath: string): string {
+  return mockPath.replace(/mock\.html$/i, "tokens.css");
+}
+
 export function formatDesignElementsPromptBlock(
   elements: DesignElementRef[] | null | undefined,
   opts?: { projectRoot?: string; loopId?: string },
@@ -780,6 +1352,10 @@ export function formatDesignElementsPromptBlock(
   if (!elements?.length) return "";
   const lines: string[] = [
     "## SHARED ELEMENTS (authoritative controls — embed these; do NOT invent competing controls)",
+    "",
+    "Replace consumer chrome with shell elements (e.g. swap landing-header for menubar).",
+    "Keep product logo/content. Embed each snippet once. One theme control only.",
+    "Keep the product/project name as visible text next to the logo (menubar__logo-text); do not leave a logo-only mark.",
     "",
   ];
   for (const el of elements) {
@@ -793,17 +1369,28 @@ export function formatDesignElementsPromptBlock(
     if (el.mockPath) lines.push(`- mock: \`${el.mockPath}\``);
     if (el.specPath) lines.push(`- spec: \`${el.specPath}\``);
     if (el.codePath) lines.push(`- code: \`${el.codePath}\` (prefer mounting this TS/JS)`);
-    if (opts?.projectRoot && opts.loopId && el.mockPath) {
+    if (opts?.projectRoot && el.mockPath) {
       const abs = join(opts.projectRoot, el.mockPath);
       if (existsSync(abs)) {
-        const body = readFileSync(abs, "utf-8");
-        const snippet =
-          body.match(
-            /<(?:button|div)[^>]*(?:theme-toggle|data-element)[^>]*>[\s\S]{0,800}?<\/(?:button|div)>/i,
-          )?.[0] ?? body.slice(0, 600);
+        const mock = readFileSync(abs, "utf-8");
+        const body = extractElementBodyHtml(mock);
+        const snippet = body.slice(0, 6_000);
         lines.push("```html");
-        lines.push(snippet.trim().slice(0, 800));
+        lines.push(snippet.trim());
+        if (body.length > 6_000) lines.push("<!-- …truncated -->");
         lines.push("```");
+      }
+      const tokensAbs = join(opts.projectRoot, elementTokensPath(el.mockPath));
+      if (existsSync(tokensAbs)) {
+        const css = readFileSync(tokensAbs, "utf-8").trim().slice(0, 3_000);
+        if (css) {
+          lines.push("```css");
+          lines.push(css);
+          if (readFileSync(tokensAbs, "utf-8").trim().length > 3_000) {
+            lines.push("/* …truncated */");
+          }
+          lines.push("```");
+        }
       }
     }
     lines.push("");
@@ -814,6 +1401,347 @@ export function formatDesignElementsPromptBlock(
   return lines.join("\n");
 }
 
+const APPLY_CHROME_IDS = new Set([
+  "menubar",
+  "theme-toggle",
+  "sign-in",
+  "user-pill",
+  "view-switcher",
+]);
+const APPLY_DASHBOARD_IDS = new Set([
+  "dashboard-shell",
+  "dashboard-sidebar",
+]);
+
+/** Count elements with an exact class token (ignores BEM children like `theme-toggle__sun`). */
+export function countExactClassToken(html: string, token: string): number {
+  const re = /class=["']([^"']*)["']/gi;
+  let n = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html)) !== null) {
+    const tokens = (m[1] ?? "").split(/\s+/).filter(Boolean);
+    if (tokens.includes(token)) n += 1;
+  }
+  return n;
+}
+
+/** Remove theme-toggle controls that sit outside the menubar region. */
+export function stripExtraThemeTogglesOutsideMenubar(html: string): string {
+  const menubarIdx = html.search(
+    /<header\b[^>]*class=["'][^"']*\bmenubar\b/i,
+  );
+  let menubarBlock = "";
+  let before = html;
+  let after = "";
+  if (menubarIdx >= 0) {
+    menubarBlock = extractBalancedElement(html, menubarIdx);
+    if (menubarBlock) {
+      before = html.slice(0, menubarIdx);
+      after = html.slice(menubarIdx + menubarBlock.length);
+    }
+  }
+  const strip = (chunk: string) =>
+    chunk
+      .replace(
+        /<(?:button|div|label)[^>]*class=["'][^"']*\btheme-toggle\b[^"']*["'][^>]*>[\s\S]*?<\/(?:button|div|label)>/gi,
+        "",
+      )
+      .replace(
+        /<(?:button|div|label)[^>]*>[\s\S]{0,120}?(?:dark\s*\/\s*light|day\s*\/\s*night)[\s\S]{0,120}?<\/(?:button|div|label)>/gi,
+        "",
+      );
+  if (!menubarBlock) return strip(html);
+  return before + menubarBlock + strip(after);
+}
+
+function escapeHtmlText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Visible product name beside a logo link (menubar wordmark or logo-link text). */
+export function extractConsumerBrandLabel(html: string): string | null {
+  const logoText = html.match(
+    /<span\b[^>]*class=["'][^"']*\bmenubar__logo-text\b[^"']*["'][^>]*>([\s\S]*?)<\/span>/i,
+  );
+  const logoInner = logoText?.[1];
+  if (logoInner) {
+    const t = logoInner.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    if (t) return t.slice(0, 64);
+  }
+  const link = html.match(
+    /<(?:a|div)\b[^>]*class=["'][^"']*\b(?:menubar__logo|logo-link|brand(?:-link)?)\b[^"']*["'][^>]*>([\s\S]*?)<\/(?:a|div)>/i,
+  );
+  const linkInner = link?.[1];
+  if (linkInner) {
+    const t = linkInner
+      .replace(/<img\b[^>]*>/gi, "")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (t && t.length <= 48) return t;
+  }
+  return null;
+}
+
+/**
+ * Swap sibling monogram for the consumer logo image, but keep the product
+ * name wordmark (`menubar__logo-text`) — never strip brand text next to the mark.
+ */
+export function applyPinnedLogoToMenubarRegion(
+  region: string,
+  logoSrc: string,
+  brandName?: string | null,
+): string {
+  let out = region;
+  const name = brandName?.trim() || null;
+  const alt = name ? escapeHtmlText(name) : "";
+
+  // Drop monogram / placeholder mark only — keep logo-text wordmark.
+  out = out.replace(
+    /<div\b[^>]*class=["'][^"']*\bmenubar__logo-mark\b[^"']*["'][^>]*>[\s\S]*?<\/div>/gi,
+    "",
+  );
+
+  if (
+    /<a\b[^>]*class=["'][^"']*\bmenubar__logo\b[^"']*["'][^>]*>[\s\S]*?<img\b/i.test(
+      out,
+    )
+  ) {
+    out = out.replace(
+      /(<a\b[^>]*class=["'][^"']*\bmenubar__logo\b[^"']*["'][^>]*>[\s\S]*?<img\b[^>]*\bsrc=["'])([^"']+)(["'])/i,
+      `$1${logoSrc}$3`,
+    );
+    if (name) {
+      out = out.replace(
+        /(<a\b[^>]*class=["'][^"']*\bmenubar__logo\b[^"']*["'][^>]*>[\s\S]*?<img\b[^>]*\balt=["'])([^"']*)(["'])/i,
+        `$1${alt}$3`,
+      );
+    }
+  } else {
+    out = out.replace(
+      /(<a\b[^>]*class=["'][^"']*\bmenubar__logo\b[^"']*["'][^>]*>)/i,
+      `$1<img class="menubar__logo-img" src="${logoSrc}" alt="${alt}" width="34" height="34"/>`,
+    );
+  }
+
+  if (name) {
+    const safe = escapeHtmlText(name);
+    if (/\bmenubar__logo-text\b/i.test(out)) {
+      out = out.replace(
+        /(<span\b[^>]*class=["'][^"']*\bmenubar__logo-text\b[^"']*["'][^>]*>)[\s\S]*?(<\/span>)/gi,
+        `$1${safe}$2`,
+      );
+    } else {
+      out = out.replace(
+        /(<a\b[^>]*class=["'][^"']*\bmenubar__logo\b[^"']*["'][^>]*>[\s\S]*?<img\b[^>]*\/?>)/i,
+        `$1<span class="menubar__logo-text">${safe}</span>`,
+      );
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Deterministically merge pinned shared elements into consumer mock HTML.
+ * Landing chrome only by default — dashboard CSS/HTML is not dumped onto
+ * landing mocks (that previously broke layout).
+ */
+export function applyPinnedDesignElementsToMock(opts: {
+  html: string;
+  elements: DesignElementRef[];
+  projectRoot: string;
+  pinnedLogoSrc?: string | null;
+  /** Consumer product/project name shown next to the pinned logo. */
+  brandName?: string | null;
+  /** Force dashboard element CSS/HTML even on landing mocks. */
+  includeDashboard?: boolean;
+}): string {
+  let html = opts.html ?? "";
+  if (!html.trim() || !opts.elements.length) return html;
+
+  const consumerHasDashboard = /\b(?:dashboard-layout|dashboard-shell|dashboard-sidebar)\b/i.test(
+    html,
+  );
+  const includeDashboard =
+    opts.includeDashboard === true || consumerHasDashboard;
+  const brandName =
+    opts.brandName?.trim() || extractConsumerBrandLabel(html) || null;
+
+  const readMock = (ref: DesignElementRef): string | null => {
+    if (!ref.mockPath) return null;
+    const abs = join(opts.projectRoot, ref.mockPath);
+    if (!existsSync(abs)) return null;
+    return readFileSync(abs, "utf-8");
+  };
+
+  const applicable = opts.elements.filter((e) => {
+    if (APPLY_DASHBOARD_IDS.has(e.id)) return includeDashboard;
+    if (APPLY_CHROME_IDS.has(e.id)) return true;
+    // Unknown ids: apply tokens only if not dashboard-like
+    return !/^dashboard-/i.test(e.id);
+  });
+
+  const menubarRef = applicable.find((e) => e.id === "menubar");
+  if (menubarRef) {
+    const mock = readMock(menubarRef);
+    if (mock) {
+      let region =
+        extractByClass(extractElementBodyHtml(mock), "menubar", [
+          "header",
+          "nav",
+          "div",
+        ]) || extractElementBodyHtml(mock);
+
+      if (opts.pinnedLogoSrc?.trim()) {
+        region = applyPinnedLogoToMenubarRegion(
+          region,
+          opts.pinnedLogoSrc.trim(),
+          brandName,
+        );
+      } else if (brandName && /\bmenubar__logo-text\b/i.test(region)) {
+        const safe = escapeHtmlText(brandName);
+        region = region.replace(
+          /(<span\b[^>]*class=["'][^"']*\bmenubar__logo-text\b[^"']*["'][^>]*>)[\s\S]*?(<\/span>)/gi,
+          `$1${safe}$2`,
+        );
+      }
+
+      const landingIdx = html.search(
+        /<header\b[^>]*class=["'][^"']*\blanding-header\b/i,
+      );
+      const menubarIdx = html.search(
+        /<header\b[^>]*class=["'][^"']*\bmenubar\b/i,
+      );
+      const anyHeaderIdx = html.search(/<header\b/i);
+      const replaceAt = (idx: number) => {
+        const old = extractBalancedElement(html, idx);
+        if (!old) return false;
+        html = html.slice(0, idx) + region + html.slice(idx + old.length);
+        return true;
+      };
+      if (landingIdx >= 0) replaceAt(landingIdx);
+      else if (menubarIdx >= 0) replaceAt(menubarIdx);
+      else if (anyHeaderIdx >= 0) replaceAt(anyHeaderIdx);
+      else {
+        html = html.replace(/<body([^>]*)>/i, `<body$1>\n${region}\n`);
+      }
+    }
+  }
+
+  // Ensure theme-toggle present once when pinned and missing from menubar
+  const themeRef = applicable.find((e) => e.id === "theme-toggle");
+  if (themeRef && !/\btheme-toggle\b/i.test(html)) {
+    const mock = readMock(themeRef);
+    if (mock) {
+      const btn =
+        extractByClass(extractElementBodyHtml(mock), "theme-toggle", [
+          "button",
+          "div",
+          "label",
+        ]) || extractElementBodyHtml(mock);
+      if (btn) {
+        if (/\bmenubar__right\b/i.test(html)) {
+          html = html.replace(
+            /(<div\b[^>]*class=["'][^"']*\bmenubar__right\b[^"']*["'][^>]*>)/i,
+            `$1\n${btn}\n`,
+          );
+        } else if (/<\/header>/i.test(html)) {
+          html = html.replace(/<\/header>/i, `${btn}\n</header>`);
+        }
+      }
+    }
+  }
+
+  html = stripExtraThemeTogglesOutsideMenubar(html);
+
+  // Merge tokens only for chrome we applied (never dump dashboard CSS on landing).
+  const styleChunks: string[] = [];
+  for (const el of applicable) {
+    if (APPLY_DASHBOARD_IDS.has(el.id) && !includeDashboard) continue;
+    if (!el.mockPath) continue;
+    // Prefer menubar / theme-toggle tokens; skip sign-in (tiny) noise OK
+    if (
+      el.id !== "menubar" &&
+      el.id !== "theme-toggle" &&
+      !APPLY_DASHBOARD_IDS.has(el.id)
+    ) {
+      continue;
+    }
+    const tokensAbs = join(opts.projectRoot, elementTokensPath(el.mockPath));
+    if (!existsSync(tokensAbs)) continue;
+    let css = readFileSync(tokensAbs, "utf-8").trim();
+    if (!css) continue;
+    // Drop dashboard rules accidentally harvested into menubar tokens
+    if (el.id === "menubar" || el.id === "theme-toggle") {
+      css = css
+        .split(/\}/)
+        .filter((chunk) => {
+          const rule = chunk.trim();
+          if (!rule) return false;
+          if (/\.dashboard-/i.test(rule)) return false;
+          return true;
+        })
+        .map((c) => `${c.trim()}}`)
+        .filter((r) => r !== "}")
+        .join("\n");
+    }
+    if (!css.trim()) continue;
+    const probe =
+      el.id === "menubar"
+        ? ".menubar"
+        : el.id === "theme-toggle"
+          ? ".theme-toggle"
+          : css.match(/\.[a-zA-Z_-][\w-]*/)?.[0];
+    if (probe && new RegExp(`${probe.replace(".", "\\.")}\\s*\\{`).test(html)) {
+      continue;
+    }
+    styleChunks.push(`/* shared element ${el.id} */\n${css}`);
+  }
+  if (styleChunks.length) {
+    const inject = styleChunks.join("\n\n");
+    if (/<style\b[^>]*>/i.test(html)) {
+      // Append before </style> — do not prepend (avoids dashboard rules winning)
+      html = html.replace(/<\/style>/i, `\n${inject}\n</style>`);
+    } else if (/<\/head>/i.test(html)) {
+      html = html.replace(
+        /<\/head>/i,
+        `<style>\n${inject}\n</style>\n</head>`,
+      );
+    }
+  }
+
+  // Strip previously injected shared-element dashboard CSS blocks from landing.
+  if (!includeDashboard) {
+    html = html.replace(
+      /\/\*\s*shared element dashboard-[^*]+\*\/[\s\S]*?(?=\/\*\s*shared element|\n\s*\/\*|<\/style>)/gi,
+      "",
+    );
+  }
+
+  return html;
+}
+
+/** Count theme toggles outside `.menubar` (pinned menubar may contain one). */
+function countThemeTogglesOutsideMenubar(html: string): number {
+  const menubarIdx = html.search(
+    /<(?:header|div|nav)\b[^>]*class=["'][^"']*\bmenubar\b/i,
+  );
+  let scan = html;
+  if (menubarIdx >= 0) {
+    const block = extractBalancedElement(html, menubarIdx);
+    if (block) {
+      scan =
+        html.slice(0, menubarIdx) + html.slice(menubarIdx + block.length);
+    }
+  }
+  return countExactClassToken(scan, "theme-toggle");
+}
+
 /** Detect competing theme toggles when theme-toggle element is pinned. */
 export function detectPinnedElementDrift(opts: {
   html: string;
@@ -821,24 +1749,81 @@ export function detectPinnedElementDrift(opts: {
 }): Array<{ code: "element_invented"; detail: string }> {
   const issues: Array<{ code: "element_invented"; detail: string }> = [];
   const hasThemeEl = opts.elements.some(
-    (e) => e.id === "theme-toggle" || /theme.?toggle/i.test(e.id),
+    (e) =>
+      e.id === "theme-toggle" ||
+      /theme.?toggle/i.test(e.id) ||
+      e.id === "menubar",
   );
   if (!hasThemeEl) return issues;
-  const html = opts.html ?? "";
-  const toggleNodes =
-    html.match(
-      /<(?:button|div|label|a)[^>]*>[\s\S]{0,200}?(?:dark\s*\/\s*light|day\s*\/\s*night|theme\s*toggle|☀|☾|🌙|☀️)[\s\S]{0,200}?<\/(?:button|div|label|a)>/gi,
-    ) ?? [];
-  const classToggles =
-    html.match(/class=["'][^"']*theme-toggle[^"']*["']/gi) ?? [];
-  const count = Math.max(toggleNodes.length, classToggles.length);
-  if (count > 1) {
+  const outside = countThemeTogglesOutsideMenubar(opts.html ?? "");
+  if (outside > 0) {
     issues.push({
       code: "element_invented",
-      detail: `Pinned theme-toggle but mock has ${count} theme controls — embed the shared element once`,
+      detail: `Pinned theme-toggle/menubar but mock has ${outside} extra theme control(s) outside the menubar — keep a single shared toggle`,
     });
   }
   return issues;
+}
+
+/** True when a selection conceptId refers to the given element id (slug or @ver). */
+export function selectionConceptMatchesElementId(
+  conceptId: string,
+  elementId: string,
+): boolean {
+  const c = conceptId.trim().toLowerCase();
+  const id = elementId.trim().toLowerCase();
+  if (!c || !id) return false;
+  return c === id || c.startsWith(`${id}-`) || c.startsWith(`${id}@`);
+}
+
+/**
+ * Remove pinned elements from loop META and delete their loop `elements/` dirs.
+ * Also drops matching `slot=element` selections (e.g. dashboard-shell-2).
+ * Used to drop stale dashboard pins on landing import-all.
+ */
+export function unpinDesignElementsFromLoop(opts: {
+  projectRoot: string;
+  loopId: string;
+  elementIds: string[];
+}): DesignElementRef[] {
+  const meta = readDesignLoopMeta(opts.projectRoot, opts.loopId);
+  if (!meta) throw new Error(`Design loop not found: ${opts.loopId}`);
+  const remove = new Set(
+    opts.elementIds.map((id) => id.trim()).filter(Boolean),
+  );
+  if (!remove.size) return getDesignLoopElements(meta);
+
+  const kept = getDesignLoopElements(meta).filter((e) => !remove.has(e.id));
+  for (const id of remove) {
+    const elRoot = join(
+      designLoopDir(opts.projectRoot, opts.loopId),
+      "elements",
+      id,
+    );
+    if (existsSync(elRoot)) {
+      rmSync(elRoot, { recursive: true, force: true });
+    }
+  }
+  const priorSel = getDesignLoopSelections(meta);
+  const nextSel = priorSel.filter((s) => {
+    if (s.slot !== "element") return true;
+    for (const id of remove) {
+      if (selectionConceptMatchesElementId(s.conceptId, id)) return false;
+    }
+    return true;
+  });
+  const nextMeta: DesignLoopMetaWithElements & DesignLoopMetaWithSelections = {
+    ...meta,
+    elements: kept,
+    selections: nextSel,
+    updatedAt: new Date().toISOString(),
+  };
+  writeDesignLoopMeta(opts.projectRoot, nextMeta);
+  refreshDesignLoopConcepts({
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+  });
+  return kept;
 }
 
 /** Copy imported loop elements into phase design/elements/ on implement. */
@@ -960,6 +1945,7 @@ export function extractAndPublishDesignElementFromLoop(opts: {
     kind: opts.kind,
     label: opts.label,
     brief: meta.brief,
+    projectRoot: opts.projectRoot,
   });
   return publishDesignElement({
     projectRoot: opts.projectRoot,
@@ -1014,6 +2000,8 @@ export function prepareDesignElementNpmPackage(opts: {
     label: bundle.meta.label,
     srcFiles: bundle.srcFiles,
     description: bundle.meta.label,
+    mockHtml: bundle.mockHtml,
+    tokensCss: bundle.tokensCss,
   });
   return {
     packageRoot: scaffold.packageRoot,

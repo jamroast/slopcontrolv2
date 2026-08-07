@@ -1,7 +1,12 @@
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import {
+  circularMaskDesignAsset,
   deriveIconPackFromAsset,
+  applyDesignImageOp,
+  applyDesignImagePipeline,
+  formatDesignImageCatalogForLlm,
+  listDesignImageOpIds,
   generateDesignImage,
   importDesignImageById,
   makeTransparentDesignAsset,
@@ -51,7 +56,7 @@ export function createDesignLoopMediaTools(
   const generate_image = createTool({
     id: "generate_image",
     description:
-      "Invent a NEW raster via Flux. Do NOT use for alpha/transparent/icon-pack/resize on an existing asset — use make_transparent / derive_icon_pack / resize_image instead. When CONTINUE INTENT says NEW LOGO / inventLogo, pass inventNew=true (required if a logo is still pinned). After success, call pin_logo on the new filename.",
+      "Invent a NEW raster via Flux. Do NOT use for alpha/transparent/icon-pack/resize on an existing asset — use edit_image (catalog ops) instead. When CONTINUE INTENT says NEW LOGO / inventLogo, pass inventNew=true (required if a logo is still pinned). After success, call pin_logo on the new filename.",
     inputSchema: z.object({
       loopId: z.string().min(1),
       prompt: z.string().min(1),
@@ -76,14 +81,14 @@ export function createDesignLoopMediaTools(
           return {
             ok: false,
             error:
-              "This looks like an image EDIT (alpha/icon pack/resize). Use make_transparent, derive_icon_pack, resize_image, trim_image, or pad_image on the existing/pinned asset — do not generate_image.",
+              "This looks like an image EDIT. Use edit_image with a catalog op (make_transparent, circular_mask, derive_icon_pack, resize, …) on the existing/pinned asset — do not generate_image.",
           };
         }
         const pinned = pinnedLogoFilename(projectDir, loopId);
         if (pinned && !inventNew) {
           return {
             ok: false,
-            error: `Logo is pinned (${pinned}). Embed that path or call make_transparent/derive_icon_pack on it. Unpin first or pass inventNew=true only to invent an unrelated new mark.`,
+            error: `Logo is pinned (${pinned}). Embed that path or call edit_image on it. Unpin first or pass inventNew=true only to invent an unrelated new mark.`,
           };
         }
         const binding = registry.tryResolveDesignImage();
@@ -175,10 +180,102 @@ export function createDesignLoopMediaTools(
     },
   });
 
+  const edit_image = createTool({
+    id: "edit_image",
+    description: `Deterministic sharp edit of an EXISTING loop asset. Prefer this over one-off tools. Ops: ${listDesignImageOpIds().join(", ")}. ${formatDesignImageCatalogForLlm().slice(0, 1_200)}…`,
+    inputSchema: z.object({
+      loopId: z.string().min(1),
+      sourceFilename: z.string().optional(),
+      op: z.string().min(1).optional(),
+      params: z.record(z.string(), z.any()).optional(),
+      /** Multi-step recipe; when set, runs in order (each uses prior output). */
+      ops: z
+        .array(
+          z.object({
+            op: z.string().min(1),
+            params: z.record(z.string(), z.any()).optional(),
+          }),
+        )
+        .optional(),
+    }),
+    execute: async ({ loopId, sourceFilename, op, params, ops }) => {
+      try {
+        const meta = readDesignLoopMeta(projectDir, loopId);
+        if (!meta) return { ok: false, error: `Design loop not found: ${loopId}` };
+        const source =
+          sourceFilename?.trim() || pinnedLogoFilename(projectDir, loopId);
+        if (!source) {
+          return {
+            ok: false,
+            error:
+              "sourceFilename required (or pin a logo first via selections API)",
+          };
+        }
+        if (ops?.length) {
+          const pipeline = await applyDesignImagePipeline({
+            projectRoot: projectDir,
+            loopId,
+            sourceFilename: source,
+            ops,
+          });
+          const last = pipeline.results[pipeline.results.length - 1];
+          const outName = basenameSafe(pipeline.primaryFilename);
+          if (!last?.files?.length) {
+            pinDesignLoopLogoAsset({
+              projectRoot: projectDir,
+              loopId,
+              asset: outName,
+              label: `Edited mark (${outName})`,
+            });
+          }
+          return {
+            ok: true,
+            ...pipeline,
+            pinnedLogo: last?.files?.length ? undefined : outName,
+            hint: pipeline.summaries.join(" "),
+          };
+        }
+        if (!op?.trim()) {
+          return {
+            ok: false,
+            error: `op or ops required. Supported: ${listDesignImageOpIds().join(", ")}`,
+          };
+        }
+        const result = await applyDesignImageOp({
+          projectRoot: projectDir,
+          loopId,
+          sourceFilename: source,
+          op,
+          params,
+        });
+        const outName = basenameSafe(result.relativePath || source);
+        if (!result.files?.length && result.relativePath) {
+          pinDesignLoopLogoAsset({
+            projectRoot: projectDir,
+            loopId,
+            asset: outName,
+            label: `Edited mark (${outName})`,
+          });
+        }
+        return {
+          ok: true,
+          ...result,
+          pinnedLogo: result.files?.length ? undefined : outName,
+          hint: result.summary,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+
   const make_transparent = createTool({
     id: "make_transparent",
     description:
-      "Deterministic edit: convert near-black (or key color) background of an EXISTING loop asset to true RGBA alpha. Does not invent a new mark. Prefer pinned logo as sourceFilename.",
+      "Alias of edit_image op=make_transparent. Prefer edit_image for new work.",
     inputSchema: z.object({
       loopId: z.string().min(1),
       sourceFilename: z.string().optional(),
@@ -217,6 +314,56 @@ export function createDesignLoopMediaTools(
           ...result,
           pinnedLogo: outName,
           hint: `Pinned logo → ${outName}. Embed <img src="${result.relativePath}"> — true RGBA from ${result.sourceFilename}. Do not call generate_image.`,
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
+  });
+
+  const circular_mask = createTool({
+    id: "circular_mask",
+    description:
+      "Deterministic edit: soft circular alpha cut-out of an EXISTING loop asset (keep interior pixels). Use when the operator asks to cut out a circular logo. Does not invent a new mark.",
+    inputSchema: z.object({
+      loopId: z.string().min(1),
+      sourceFilename: z.string().optional(),
+      filename: z.string().optional(),
+    }),
+    execute: async ({ loopId, sourceFilename, filename }) => {
+      try {
+        const meta = readDesignLoopMeta(projectDir, loopId);
+        if (!meta) return { ok: false, error: `Design loop not found: ${loopId}` };
+        const source =
+          sourceFilename?.trim() || pinnedLogoFilename(projectDir, loopId);
+        if (!source) {
+          return {
+            ok: false,
+            error:
+              "sourceFilename required (or pin a logo first via selections API)",
+          };
+        }
+        const result = await circularMaskDesignAsset({
+          projectRoot: projectDir,
+          loopId,
+          sourceFilename: source,
+          filename,
+        });
+        const outName = basenameSafe(result.relativePath);
+        pinDesignLoopLogoAsset({
+          projectRoot: projectDir,
+          loopId,
+          asset: outName,
+          label: `Circular cut-out (${outName})`,
+        });
+        return {
+          ok: true,
+          ...result,
+          pinnedLogo: outName,
+          hint: `Pinned logo → ${outName}. Embed <img src="${result.relativePath}"> — circular RGBA from ${result.sourceFilename}.`,
         };
       } catch (error) {
         return {
@@ -489,7 +636,9 @@ export function createDesignLoopMediaTools(
   return {
     generate_image,
     pin_logo,
+    edit_image,
     make_transparent,
+    circular_mask,
     derive_icon_pack,
     resize_image,
     trim_image,

@@ -39,8 +39,26 @@ describe("intent-extract (mocked chatJson path)", () => {
     assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /clickable/i);
   });
 
-  it("finalize strips needsInteraction for theme/other without form cues", () => {
-    const intent = finalizeChangeIntent(
+  it("finalize trusts LLM needsInteraction for other (no description regex veto)", () => {
+    const noIx = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "Audit light/dark theme toggle",
+        goal: "Landing page responds to ThemeToggle data-theme.",
+        uiMount: "page",
+        changeKind: "other",
+        needsInteraction: false,
+        themeWiringOnly: true,
+      }),
+      {
+        description:
+          "Audit the existing light/dark theme toggle on the landing page.",
+      },
+    );
+    assert.equal(noIx.changeKind, "other");
+    assert.equal(noIx.themeWiringOnly, true);
+    assert.equal(noIx.interaction, undefined);
+
+    const withIx = finalizeChangeIntent(
       ChangeIntentLlmOutputSchema.parse({
         title: "Audit light/dark theme toggle",
         goal: "Landing page responds to ThemeToggle data-theme.",
@@ -53,8 +71,7 @@ describe("intent-extract (mocked chatJson path)", () => {
           "Audit the existing light/dark theme toggle on the landing page.",
       },
     );
-    assert.equal(intent.changeKind, "other");
-    assert.equal(intent.interaction, undefined);
+    assert.ok(withIx.interaction);
   });
 
   it("mock extractChangeIntentViaLlm via module mock", async () => {

@@ -67,7 +67,9 @@ export * from "./git-worktree.js";
 export * from "./design-tool.js";
 export * from "./design-media.js";
 export * from "./design-image-edit.js";
+export * from "./design-image-catalog.js";
 export * from "./mock-screenshot.js";
+
 export * from "./design-loop-review.js";
 export * from "./registry.js";
 export * from "./coding-engine-supervisor.js";

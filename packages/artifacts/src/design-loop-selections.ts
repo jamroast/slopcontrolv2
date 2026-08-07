@@ -478,6 +478,9 @@ export function formatDesignLoopSelectionsPromptBlock(opts: {
     "- strip black / alpha / transparent background → make_transparent(sourceFilename=pinned or named asset)",
   );
   lines.push(
+    "- cut out circular logo → circular_mask(sourceFilename=pinned or named asset)",
+  );
+  lines.push(
     "- icon pack / favicons / browser pack → derive_icon_pack(sourceFilename=...)",
   );
   lines.push("- resize / trim / pad → resize_image / trim_image / pad_image");
@@ -498,45 +501,9 @@ export function formatDesignLoopSelectionsPromptBlock(opts: {
   return lines.join("\n");
 }
 
-function resolveCatalogHitByStylePhrase(
-  catalog: ReturnType<typeof buildDesignLoopConceptCatalog>,
-  msg: string,
-): (typeof catalog)[number] | undefined {
-  // "go with the modern logo" / "use the rustic mark" → prefer *-alpha.png marks.
-  const styleFirst = msg.match(
-    /\b(modern|rustic|craft|vintage|abstract|circle|circular|symbolic)\b.{0,40}\b(logo|mark|symbol|monogram)\b/i,
-  );
-  if (styleFirst?.[1]) {
-    return pickStyleLogoFromCatalog(catalog, styleFirst[1].toLowerCase());
-  }
-  const nounFirst = msg.match(
-    /\b(logo|mark|symbol)\b.{0,40}\b(modern|rustic|craft|vintage|abstract|circle|circular)\b/i,
-  );
-  if (nounFirst?.[2]) {
-    return pickStyleLogoFromCatalog(catalog, nounFirst[2].toLowerCase());
-  }
-  return undefined;
-}
-
-function pickStyleLogoFromCatalog(
-  catalog: ReturnType<typeof buildDesignLoopConceptCatalog>,
-  style: string,
-): (typeof catalog)[number] | undefined {
-  const logoish = catalog.filter(
-    (c) =>
-      (c.slot === "logo" || !c.slot) &&
-      c.asset &&
-      new RegExp(style, "i").test(c.asset),
-  );
-  if (!logoish.length) return undefined;
-  const alpha = logoish.find((c) => /alpha/i.test(c.asset ?? ""));
-  const mark = logoish.find((c) => /logo|mark/i.test(c.asset ?? ""));
-  return alpha || mark || logoish[0];
-}
-
 /**
- * Chat-driven pin: operator names a file, concept, or style ("modern logo").
- * Explicit filenames pin directly from loop assets/ even when not in CONCEPTS.
+ * Pin logo only when the message names an asset that already exists on disk.
+ * Style/verb phrases are not classified here (LLM / explicit pin_logo tools).
  */
 export function maybeAutoPinFromOperatorMessage(opts: {
   projectRoot: string;
@@ -545,86 +512,35 @@ export function maybeAutoPinFromOperatorMessage(opts: {
 }): DesignLoopMeta | null {
   const msg = opts.message.trim();
   if (!msg) return null;
-  if (
-    !/\b(use|select|like|pin|go with|chosen|choose|set|switch\s+to|make)\b/i.test(
-      msg,
-    )
-  ) {
-    return null;
-  }
   const meta = readDesignLoopMeta(opts.projectRoot, opts.loopId);
   if (!meta) return null;
 
-  // 1. Explicit asset filename in the message — authoritative, no catalog required.
   const fileMatch = msg.match(
     /([a-z0-9._-]+\.(?:png|jpe?g|webp|gif|svg))/i,
   );
-  if (fileMatch?.[1]) {
-    const filename = fileMatch[1];
-    const assets = listDesignLoopAssets(
-      opts.projectRoot,
-      meta.projectId,
-      opts.loopId,
-    );
-    const onDisk = assets.find(
-      (a) => a.name.toLowerCase() === filename.toLowerCase(),
-    );
-    if (onDisk) {
-      try {
-        return pinDesignLoopSelection({
-          projectRoot: opts.projectRoot,
-          loopId: opts.loopId,
-          slot: "logo",
-          asset: onDisk.name,
-          conceptId: onDisk.name.replace(/\.[^.]+$/, ""),
-          label: onDisk.name,
-        });
-      } catch {
-        return null;
-      }
-    }
-  }
-
-  const catalog = buildDesignLoopConceptCatalog({
-    projectRoot: opts.projectRoot,
-    loopId: opts.loopId,
-  });
-  const conceptMatch = msg.match(/concept\s*([a-z0-9]+)/i);
-  let hit = conceptMatch
-    ? catalog.find(
-        (c) =>
-          c.conceptId === `concept-${conceptMatch[1]!.toLowerCase()}` ||
-          c.label.toLowerCase() ===
-            `concept ${conceptMatch[1]!.toLowerCase()}`,
-      )
-    : undefined;
-  if (!hit && fileMatch?.[1]) {
-    const needle = fileMatch[1].toLowerCase();
-    hit = catalog.find((c) => c.asset?.toLowerCase() === needle);
-  }
-  if (!hit) {
-    hit = resolveCatalogHitByStylePhrase(catalog, msg);
-  }
-  if (!hit) return null;
+  if (!fileMatch?.[1]) return null;
+  const filename = fileMatch[1];
+  const assets = listDesignLoopAssets(
+    opts.projectRoot,
+    meta.projectId,
+    opts.loopId,
+  );
+  const onDisk = assets.find(
+    (a) => a.name.toLowerCase() === filename.toLowerCase(),
+  );
+  if (!onDisk) return null;
   try {
     return pinDesignLoopSelection({
       projectRoot: opts.projectRoot,
       loopId: opts.loopId,
-      slot: hit.slot || "logo",
-      conceptId: hit.conceptId,
-      asset: hit.asset,
-      label: hit.label,
-      excerpt: hit.excerpt,
+      slot: "logo",
+      asset: onDisk.name,
+      conceptId: onDisk.name.replace(/\.[^.]+$/, ""),
+      label: onDisk.name,
     });
   } catch {
     return null;
   }
-}
-
-export function designLoopAskNeedsImageEdit(text: string): boolean {
-  return /\b(alpha|transparent|transparency|remove\s*background|strip\s*black|chroma|icon\s*pack|favicon|browser\s*pack|resize|trim|pad\s*image|make_transparent|derive_icon)\b/i.test(
-    text ?? "",
-  );
 }
 
 /**

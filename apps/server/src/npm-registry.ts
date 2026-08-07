@@ -4,17 +4,29 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import {
+  dirMaxMtimeMs,
   ensureNpmRegistryLayout,
+  findRegisteredConsumers,
   isNpmRegistryDisabled,
   listNpmRegistryPackages,
   npmRegistryConfigPath,
+  propagateLibraryVersion,
   readNpmRegistryMeta,
+  readProjectConfig,
+  resolveProjectToolchain,
+  runToolchainCommand,
+  toolchainBuildCmd,
+  toolchainBumpVersionCmd,
+  toolchainPublishCmd,
+  npmRegistryEnvValues,
   writeNpmRegistryMeta,
   type NpmRegistryMeta,
+  type PropagationResult,
 } from "@slopcontrol/artifacts";
+import type { BuildToolchainSpec } from "@slopcontrol/types";
 
 const require = createRequire(import.meta.url);
 
@@ -320,4 +332,203 @@ export async function publishToNpmRegistry(opts: {
     );
   }
   return { ok: true, stdout: result.stdout, meta };
+}
+
+export type LibraryPublishStep = {
+  step: "build" | "bump" | "publish";
+  command: string[];
+  code: number;
+  durationMs: number;
+  note?: string;
+};
+
+export type LibraryPublishReport = {
+  ok: boolean;
+  name: string;
+  version: string;
+  toolchainKind: string;
+  steps: LibraryPublishStep[];
+  propagation?: PropagationResult[];
+  meta: NpmRegistryMeta;
+};
+
+const REPUBLISH_CONFLICT_RE =
+  /409|EPUBLISHCONFLICT|cannot publish over|previously published|already exists/i;
+
+function readPackageJsonVersion(packageDir: string): {
+  name: string;
+  version: string;
+} {
+  const pkg = JSON.parse(
+    readFileSync(join(packageDir, "package.json"), "utf-8"),
+  ) as { name?: string; version?: string };
+  if (!pkg.name) throw new Error(`package.json missing name in ${packageDir}`);
+  return { name: pkg.name, version: pkg.version ?? "0.0.0" };
+}
+
+/**
+ * Toolchain-driven library publish: the project's OWN build system does the
+ * work (build → version bump → publish), SlopControl only orchestrates and
+ * records evidence. On 409 (version already in registry) bump once more and
+ * retry — registries reject republishing an existing version.
+ */
+export async function publishLibraryToRegistry(opts: {
+  dataDir: string;
+  packageDir: string;
+  bump?: "patch" | "minor" | "major";
+  toolchain?: BuildToolchainSpec;
+  /** Registered projects — used to find consumers for propagation. */
+  projects?: Array<{ id?: string; name: string; rootPath: string }>;
+  propagate?: boolean;
+  resolveToolchain?: (root: string) => BuildToolchainSpec | null;
+  /** Test seams. */
+  runner?: typeof runToolchainCommand;
+  ensureRegistry?: () => Promise<NpmRegistryMeta>;
+  commandTimeoutMs?: number;
+}): Promise<LibraryPublishReport> {
+  const runner = opts.runner ?? runToolchainCommand;
+  const meta = await (opts.ensureRegistry ?? (() => startNpmRegistry(opts.dataDir)))();
+  const registryUrl = meta.url;
+  const steps: LibraryPublishStep[] = [];
+
+  const spec =
+    opts.toolchain ??
+    resolveProjectToolchain({
+      projectRoot: opts.packageDir,
+      configured: readProjectConfig(opts.packageDir).toolchain,
+    }).spec;
+  if (!spec) {
+    throw new Error(
+      `no build toolchain resolved for ${opts.packageDir} — run project_build_process_configure first`,
+    );
+  }
+  const timeoutMs = opts.commandTimeoutMs ?? 10 * 60_000;
+  // Toolchain steps run with the canonical registry env so committed .npmrc
+  // env-var references (auth host + token) resolve during publish/consume.
+  const registryEnv = npmRegistryEnvValues(meta);
+  const run = (step: LibraryPublishStep["step"], command: string[]) =>
+    runner({
+      cmd: command,
+      cwd: opts.packageDir,
+      env: registryEnv,
+      timeoutMs,
+      redactSecrets: [meta.authToken],
+    }).then((r) => {
+      steps.push({
+        step,
+        command,
+        code: r.code,
+        durationMs: r.durationMs,
+      });
+      return r;
+    });
+
+  // 1. Build when dist is missing or older than src (build system's job).
+  const buildCmd = toolchainBuildCmd(spec);
+  if (buildCmd) {
+    const srcMax = dirMaxMtimeMs(join(opts.packageDir, "src"));
+    const distMax = dirMaxMtimeMs(join(opts.packageDir, "dist"));
+    const needsBuild = distMax === null || (srcMax !== null && srcMax > distMax);
+    if (needsBuild) {
+      const r = await run("build", buildCmd);
+      if (r.code !== 0) {
+        throw new Error(
+          `library build failed (${r.code}): ${(r.stderr || r.stdout).slice(0, 1_000)}`,
+        );
+      }
+    } else {
+      steps.push({
+        step: "build",
+        command: buildCmd,
+        code: 0,
+        durationMs: 0,
+        note: "dist up to date — skipped",
+      });
+    }
+  }
+
+  // 2. Bump via the build system's version command (never hand-edit).
+  const bumpCmd = toolchainBumpVersionCmd(spec, opts.bump ?? "patch");
+  if (!bumpCmd) {
+    throw new Error(
+      `toolchain ${spec.kind} has no bumpVersionCmd — configure one before publishing (immutable registry versions)`,
+    );
+  }
+  {
+    const r = await run("bump", bumpCmd);
+    if (r.code !== 0) {
+      throw new Error(
+        `version bump failed (${r.code}): ${(r.stderr || r.stdout).slice(0, 1_000)}`,
+      );
+    }
+  }
+  let { name, version } = readPackageJsonVersion(opts.packageDir);
+
+  // 3. Publish; on 409 conflict bump again and retry once.
+  const publishCmd = toolchainPublishCmd(spec, registryUrl);
+  if (!publishCmd) {
+    throw new Error(`toolchain ${spec.kind} has no publishCmd configured`);
+  }
+  let publish = await run("publish", publishCmd);
+  if (publish.code !== 0 && REPUBLISH_CONFLICT_RE.test(publish.stderr + publish.stdout)) {
+    const retryBump = await run("bump", bumpCmd);
+    if (retryBump.code !== 0) {
+      throw new Error(
+        `version re-bump failed (${retryBump.code}): ${(retryBump.stderr || retryBump.stdout).slice(0, 1_000)}`,
+      );
+    }
+    version = readPackageJsonVersion(opts.packageDir).version;
+    publish = await run("publish", publishCmd);
+  }
+  if (publish.code !== 0) {
+    throw new Error(
+      `library publish failed (${publish.code}): ${(publish.stderr || publish.stdout).slice(0, 1_500)}`,
+    );
+  }
+
+  // 4. Evidence in REGISTRY.json.
+  meta.publishedPackages = {
+    ...(meta.publishedPackages ?? {}),
+    [name]: {
+      version,
+      publishedAt: new Date().toISOString(),
+      toolchainKind: spec.kind,
+    },
+  };
+  meta.updatedAt = new Date().toISOString();
+  writeNpmRegistryMeta(opts.dataDir, meta);
+
+  // 5. Propagate to registered consumers via their own toolchains.
+  let propagation: PropagationResult[] | undefined;
+  if (opts.propagate !== false && opts.projects?.length) {
+    const consumers = findRegisteredConsumers({
+      projects: opts.projects,
+      packageName: name,
+      excludeRootPath: opts.packageDir,
+    });
+    propagation = await propagateLibraryVersion({
+      consumers,
+      packageName: name,
+      version,
+      resolveToolchain:
+        opts.resolveToolchain ??
+        ((root: string) =>
+          resolveProjectToolchain({
+            projectRoot: root,
+            configured: readProjectConfig(root).toolchain,
+          }).spec),
+      runner,
+      timeoutMs: 5 * 60_000,
+    });
+  }
+
+  return {
+    ok: true,
+    name,
+    version,
+    toolchainKind: spec.kind,
+    steps,
+    propagation,
+    meta,
+  };
 }

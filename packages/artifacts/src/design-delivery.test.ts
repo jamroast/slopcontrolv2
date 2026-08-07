@@ -121,3 +121,69 @@ true
     );
   });
 });
+
+describe("design-delivery structured flag wins over description regex", () => {
+  const reviewOnlyDoc = `# Phase 08
+
+## Scope
+This is a **review-only** phase.
+
+## File Changes
+**No file changes are required.**
+
+## Success Criteria
+- ok
+
+## Automated Checks
+\`\`\`bash
+true
+\`\`\`
+`;
+
+  it("flag false + regex-positive description → no audit, no note", () => {
+    const description =
+      "day and night mode button is not appearing on the menubar in the playground";
+    // Sanity: the regex alone would flag this description.
+    assert.equal(operatorRequestsMissingThemeControl(description), true);
+
+    const audit = phaseDocRejectsMissingThemeAudit({
+      description,
+      phaseDoc: reviewOnlyDoc,
+      togglePresent: true,
+      designShellOrThemeAccepted: true,
+      requestsMissingThemeControl: false,
+    });
+    assert.equal(audit.ok, true);
+    assert.deepEqual(audit.issues, []);
+
+    const note = formatAntiAuditThemeDeliveryNote({
+      description,
+      togglePresent: true,
+      requestsMissingThemeControl: false,
+    });
+    assert.equal(note, "");
+  });
+
+  it("flag true + regex-negative description → audit issue and note fire", () => {
+    const description = "Phase 12: theme polish follow-up";
+    // Sanity: the regex alone would NOT flag this description.
+    assert.equal(operatorRequestsMissingThemeControl(description), false);
+
+    const audit = phaseDocRejectsMissingThemeAudit({
+      description,
+      phaseDoc: reviewOnlyDoc,
+      togglePresent: true,
+      designShellOrThemeAccepted: true,
+      requestsMissingThemeControl: true,
+    });
+    assert.equal(audit.ok, false);
+    assert.ok(audit.issues.some((i) => /review-only|No file changes/i.test(i)));
+
+    const note = formatAntiAuditThemeDeliveryNote({
+      description,
+      togglePresent: true,
+      requestsMissingThemeControl: true,
+    });
+    assert.match(note, /Do NOT close as review-only/i);
+  });
+});

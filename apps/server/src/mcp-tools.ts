@@ -1031,7 +1031,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "implement_design",
       description:
-        "Bind an accepted design-loop mock + ACCEPTANCE checklist to a phase: writes UI-SPEC, tokens.css, design/mock.html, design/ACCEPTANCE.json, DESIGN_COMPLETE. Creates a new phase and starts research when phaseId is omitted or the linked phase is complete. Product code still only changes in start_development.",
+        "Bind an accepted design-loop mock + ACCEPTANCE checklist to a phase: writes UI-SPEC, tokens.css, design/mock.html, design/ACCEPTANCE.json, DESIGN_COMPLETE. Creates a new phase and starts research when phaseId is omitted — including after a prior implement on the same loop (even if the old phase is still incomplete). Pass phaseId only to force rebind onto an existing phase (no automatic new research unless that creates a new phase). Product code still only changes in start_development.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1040,7 +1040,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           phaseId: {
             type: "string",
             description:
-              "Existing incomplete phase to bind. Omit (recommended) so a complete linked phase triggers a new phase + research.",
+              "Force rebind onto this existing phase (skips opening a new phase). Omit (recommended) so each implement after accept gets a new phase + research.",
           },
           startResearch: {
             type: "boolean",
@@ -1054,6 +1054,32 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           },
         },
         required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "relaunch_design_research",
+      description:
+        "Recovery: create a new phase from an accepted/implemented design loop, rebind the current mock + DESIGN_PACK + UI-SPEC, and always start research. Use when implement_design only stamped design_complete without a research run (stale RESEARCH/PHASE). Pass loopId and/or phaseId (phaseId resolves via loop.meta.phaseId or design/STATUS.md). Product code still only changes after review → start_development.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: {
+            type: "string",
+            description: "Design loop id (preferred when known)",
+          },
+          phaseId: {
+            type: "string",
+            description:
+              "Stuck phase that was bound from implement_design — used to find the design loop when loopId is omitted",
+          },
+          dependsOn: {
+            type: "array",
+            items: { type: "string" },
+            description: "Optional phase ids for the new research phase",
+          },
+        },
+        required: ["projectId"],
       },
     },
     {
@@ -1120,6 +1146,66 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           version: { type: "number" },
         },
         required: ["projectId", "elementId"],
+      },
+    },
+    {
+      name: "design_library_publish",
+      description:
+        "Publish a component-library project (e.g. jamroast-components) to the private registry via its OWN toolchain: build (when dist stale) → semver bump → publish (409 → bump+retry), then propagate name@^version to all registered consumers so their lockfiles refresh natively.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          bump: {
+            type: "string",
+            enum: ["patch", "minor", "major"],
+            description: "Version bump (default patch)",
+          },
+          propagate: {
+            type: "boolean",
+            description: "Update registered consumers (default true)",
+          },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "project_build_process_state",      description:
+        "Read a project's build-process state: resolved BuildToolchain (commands as data) + recorded BUILD_PROCESS.json evidence. No LLM call.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "project_build_process_audit",
+      description:
+        "LLM audit of a project's build process against the SlopControl capability checklist (build → publish → consume → docker → CI). Reports gaps + proposed changes; applies nothing.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "project_build_process_configure",
+      description:
+        "LLM configurator: resolve the project's BuildToolchain (npm/pnpm/rust/python/...) and apply guardrailed build-process changes, then persist the toolchain. Idempotent; low-confidence results are audit-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          runCommands: {
+            type: "boolean",
+            description: "Execute allowlisted toolchain commands (default true)",
+          },
+        },
+        required: ["projectId"],
       },
     },
     {
@@ -1213,15 +1299,36 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
-      name: "design_element_extract",
+      name: "list_extractable_design_elements",
       description:
-        "Extract a shared element (default theme-toggle) from a design-loop mock and publish to the project library. Optional publishToRegistry. Author path for central brand projects.",
+        "List extractable shared-element candidates from a design-loop mock (data-element markers + known chrome: menubar, theme-toggle, user-pill, …). Use returned id/label with design_element_extract.",
       inputSchema: {
         type: "object",
         properties: {
           projectId: { type: "string" },
           loopId: { type: "string" },
-          elementId: { type: "string" },
+          version: {
+            type: "number",
+            description: "Mock version (default: current)",
+          },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_element_extract",
+      description:
+        "Extract a shared element from a design-loop mock and publish to the project library. Prefer list_extractable_design_elements first, then pass the listed elementId (and optional label). Without elementId, defaults to theme-toggle when present. Optional publishToRegistry.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          elementId: {
+            type: "string",
+            description:
+              "Id from list_extractable_design_elements (e.g. menubar, theme-toggle)",
+          },
           version: { type: "number" },
           label: { type: "string" },
           kind: { type: "string" },
@@ -2809,6 +2916,65 @@ export function createSlopcontrolMcpServer(
       });
     }
 
+    if (name === "design_library_publish") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-library/publish`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              bump: args.bump,
+              propagate: args.propagate !== false,
+            }),
+          },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "project_build_process_state") {      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/build-process`,
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "project_build_process_audit") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/build-process/audit`,
+          { method: "POST", headers: { "Content-Type": "application/json" } },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "project_build_process_configure") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/build-process/configure`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              runCommands: args.runCommands !== false,
+            }),
+          },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
     if (name === "list_design_elements") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -2918,6 +3084,27 @@ export function createSlopcontrolMcpServer(
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "list_extractable_design_elements") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const q =
+          typeof args.version === "number"
+            ? `?version=${encodeURIComponent(String(args.version))}`
+            : "";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/elements/extractable${q}`,
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
           isError: !res.ok,
         };
       });
@@ -3224,6 +3411,36 @@ export function createSlopcontrolMcpServer(
         if (args.phaseId) payload.phaseId = args.phaseId;
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/implement`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "relaunch_design_research") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId =
+          typeof args.loopId === "string" ? args.loopId.trim() : "";
+        const phaseId =
+          typeof args.phaseId === "string" ? args.phaseId.trim() : "";
+        const payload: Record<string, unknown> = {
+          dependsOn: args.dependsOn,
+        };
+        if (loopId) payload.loopId = loopId;
+        if (phaseId) payload.phaseId = phaseId;
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/relaunch-design-research`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },

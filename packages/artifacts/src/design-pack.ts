@@ -113,7 +113,71 @@ function extractTypographyCues(html: string): string[] {
   return cues.slice(0, 8);
 }
 
-function extractShellNotes(html: string, request: string, notes: string): string[] {
+/**
+ * True when the mock shows a content-aligned menubar (inner bar at
+ * `--content-max`, not full-bleed flex children on the sticky header).
+ */
+export function mockHasContentAlignedMenubar(html: string): boolean {
+  const h = html ?? "";
+  if (/menubar__inner/i.test(h)) return true;
+  if (/landing-header-inner/i.test(h) && /--content-max/i.test(h)) return true;
+  // *-header-inner / menubar inner with content-max
+  if (
+    /(?:header|menubar)(?:__|-)?inner\b[\s\S]{0,400}max-width\s*:\s*var\(\s*--content-max/i.test(
+      h,
+    )
+  ) {
+    return true;
+  }
+  // menubar CSS block with max-width + content-max
+  if (
+    /\.menubar\b[\s\S]{0,800}max-width\s*:\s*var\(\s*--content-max/i.test(h) ||
+    /\.menubar__[a-z0-9_-]*\b[\s\S]{0,400}max-width\s*:\s*var\(\s*--content-max/i.test(
+      h,
+    )
+  ) {
+    return true;
+  }
+  // Centered menubar wrapping an inner container constrained to content-max
+  if (
+    /\bmenubar\b/i.test(h) &&
+    /--content-max/i.test(h) &&
+    /justify-content\s*:\s*center/i.test(h) &&
+    /max-width\s*:\s*var\(\s*--content-max/i.test(h)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * True when the mock shows a full-viewport dashboard chrome frame
+ * (edge-to-edge bar / DashboardShell-style fill), distinct from landing
+ * content-max marketing chrome.
+ */
+export function mockHasDashboardFullBleedShell(html: string): boolean {
+  const h = html ?? "";
+  if (/dash-header\b/i.test(h) && /full[- ]?(?:viewport[- ]?)?width|FULL WIDTH/i.test(h)) {
+    return true;
+  }
+  if (
+    /\bdashboard\b/i.test(h) &&
+    /(?:full[- ]?screen|full[- ]?viewport|100vh|100dvh|min-height\s*:\s*calc\s*\(\s*100vh)/i.test(
+      h,
+    )
+  ) {
+    return true;
+  }
+  if (/DashboardShell|dashboard-shell/i.test(h)) return true;
+  return false;
+}
+
+/** Concrete + heuristic shell notes for DESIGN_PACK.shell. */
+export function extractShellNotes(
+  html: string,
+  request: string,
+  notes: string,
+): string[] {
   const blob = `${html}\n${request}\n${notes}`.toLowerCase();
   const notesOut: string[] = [];
   if (/\bdark\b/.test(blob) && /\blight\b/.test(blob)) {
@@ -127,10 +191,41 @@ function extractShellNotes(html: string, request: string, notes: string): string
   if (/\btaste\s*room\b/.test(blob)) {
     notesOut.push("Taste Room concept in applied frames / content.");
   }
-  if (/\bmenubar\b|\btop\s*bar\b|\bnav\b/.test(blob)) {
+  const contentAligned = mockHasContentAlignedMenubar(html);
+  const dashFullBleed = mockHasDashboardFullBleedShell(html);
+  const dualChrome =
+    contentAligned &&
+    dashFullBleed &&
+    (/\blanding\b/.test(blob) || /landing-header/i.test(html));
+
+  if (dualChrome) {
+    notesOut.push(
+      "Landing menubar: center an inner bar at max-width: var(--content-max) matching page content (marketing chrome).",
+    );
+    notesOut.push(
+      "Dashboard menubar: full-viewport-width bar (edge-to-edge background); inner slots may still align to --content-max — do not constrain the bar itself to content-max.",
+    );
+    notesOut.push(
+      "Dashboard shell: fill the viewport below the bar (min-height: calc(100vh - var(--bar-h))) with sidebar + main like jamroast DashboardShell — not a content-max card stack in a short mock section.",
+    );
+    notesOut.push(
+      "Menubar slots: logo + primary nav left; auth / theme (and optional view switcher) right within the inner bar.",
+    );
+  } else if (contentAligned) {
+    notesOut.push(
+      "Menubar: center an inner bar at max-width: var(--content-max) matching page content (not full-bleed flex children).",
+    );
+    notesOut.push(
+      "Menubar slots: logo + primary nav left; auth / theme (and optional view switcher) right within the inner bar.",
+    );
+  } else if (/\bmenubar\b|\btop\s*bar\b|\bnav\b/.test(blob)) {
     notesOut.push("Respect menubar / top-nav shell patterns from the mock.");
   }
-  if (/\bdashboard\b/.test(blob)) {
+  if (dashFullBleed && !dualChrome) {
+    notesOut.push(
+      "Dashboard: full-viewport shell (edge-to-edge chrome / min-height calc(100vh - var(--bar-h))).",
+    );
+  } else if (/\bdashboard\b/.test(blob) && !dualChrome) {
     notesOut.push("Dashboard / portal applied frames are part of the visual contract.");
   }
   return notesOut.slice(0, 10);
@@ -175,16 +270,33 @@ function extractContentPillars(opts: {
   return pillars.slice(0, 16);
 }
 
+/**
+ * Preserve must-nots from conceptual scope. When applied_shell is in scope,
+ * mock chrome layout is authoritative — omit PRESERVE for shell/nav/chrome.
+ */
 function buildMustNot(
   acceptance: DesignLoopAcceptance,
   logos: DesignPack["logos"],
   scope?: DesignScope | null,
+  inScope?: string[],
 ): string[] {
   const out: string[] = [
     "Do not invent a competing logo/mark metaphor when logos[] lists accepted assets.",
     "Do not treat public/brand/*-reuse.svg tile stubs as the accepted mark.",
   ];
-  if (scope) out.push(...scopePreserveMustNots(scope));
+  const appliedShellInScope =
+    (inScope ?? []).includes("applied_shell") ||
+    acceptance.features.some((f) => f.id === "applied_shell" && f.accepted);
+  if (scope) {
+    out.push(
+      ...scopePreserveMustNots(scope, {
+        // applied_shell means implement mock chrome; do not freeze nav/shell.
+        omitPreserveKeys: appliedShellInScope
+          ? ["shell", "nav", "chrome"]
+          : [],
+      }),
+    );
+  }
   const unticked = acceptance.features.filter((f) => !f.accepted);
   for (const f of unticked) {
     out.push(`OUT OF SCOPE — do not expand into ${f.id}: ${f.label}`);
@@ -287,7 +399,7 @@ export function compileDesignPackFromAccept(opts: {
     inScope,
     alreadyApplied: alreadyApplied.length ? alreadyApplied : undefined,
     mustNot: [
-      ...buildMustNot(opts.acceptance, logos, scope),
+      ...buildMustNot(opts.acceptance, logos, scope, inScope),
       ...alreadyAppliedMustNots,
       ...elements.map(
         (e) =>
@@ -464,6 +576,20 @@ export function formatDesignPackPromptBlock(
   if (pack.shell.length) {
     lines.push("### shell");
     for (const s of pack.shell) lines.push(`- ${s}`);
+    if (
+      pack.inScope.includes("applied_shell") &&
+      pack.shell.some((s) => /content-max|menubar__inner|inner bar/i.test(s))
+    ) {
+      if (pack.shell.some((s) => /Dashboard shell: fill the viewport|full-viewport-width bar/i.test(s))) {
+        lines.push(
+          "CRITICAL: applied_shell has dual chrome — landing menubar is content-max; dashboard bar is full-viewport-width with a viewport-filling shell (DashboardShell pattern). File Changes must implement both variants. Automated Checks: `--content-max` on landing/menubar path + Menubar/JampressMenubar mount in playground App **or** product shell (portal/marketing/layout).",
+        );
+      } else {
+        lines.push(
+          "CRITICAL: applied_shell includes content-aligned menubar — File Changes must update Menubar layout (inner `--content-max` wrapper + left/right slots), not only add props. Automated Checks must prove `--content-max` on the menubar inner bar and Menubar/JampressMenubar mount in playground App **or** product layout shell.",
+        );
+      }
+    }
     lines.push("");
   }
   if (pack.contentPillars.length) {

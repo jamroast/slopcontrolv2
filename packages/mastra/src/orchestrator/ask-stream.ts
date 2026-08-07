@@ -108,21 +108,32 @@ export function summarizeToolResult(toolName: string, result: unknown): string {
 }
 
 /**
+ * Deterministic "this is a real answer" markers. When present the reply is
+ * treated as substantive: no synthesis pass and no judge call is burned.
+ */
+export function hasSubstantiveReplyMarkers(text: string): boolean {
+  const body = (text ?? "").trim();
+  if (!body) return false;
+  if (/##\s*Task brief/i.test(body)) return true;
+  if (/\broot cause\b/i.test(body)) return true;
+  if (/\bdiagnosis\b/i.test(body) && body.length > 200) return true;
+  if (/^#{1,3}\s+/m.test(body) && body.length > 280) return true;
+  const pathHits = (body.match(/[`']?[a-zA-Z0-9_./-]+\.(tsx?|jsx?|css|md)/g) ?? [])
+    .length;
+  if (pathHits >= 2 && body.length > 400 && !/^Let me\b/i.test(body)) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * True when the agent returned mid-loop narration without a real answer.
  * Used to trigger a tools-disabled synthesis pass.
  */
 export function isAskNarrationOnlyReply(text: string): boolean {
   const body = (text ?? "").trim();
   if (!body) return true;
-  if (/##\s*Task brief/i.test(body)) return false;
-  if (/\broot cause\b/i.test(body)) return false;
-  if (/\bdiagnosis\b/i.test(body) && body.length > 200) return false;
-  if (/^#{1,3}\s+/m.test(body) && body.length > 280) return false;
-  const pathHits = (body.match(/[`']?[a-zA-Z0-9_./-]+\.(tsx?|jsx?|css|md)/g) ?? [])
-    .length;
-  if (pathHits >= 2 && body.length > 400 && !/^Let me\b/i.test(body)) {
-    return false;
-  }
+  if (hasSubstantiveReplyMarkers(body)) return false;
 
   const letMe =
     (body.match(/\bLet me (?:investigate|check|verify|look|start|confirm)\b/gi) ??
@@ -132,6 +143,106 @@ export function isAskNarrationOnlyReply(text: string): boolean {
   if (letMe >= 1 && sentences.length <= 4 && body.length < 900) return true;
   if (/:\s*$/.test(body) && letMe >= 1) return true;
   return false;
+}
+
+/** Structural verdict shape (mirrors @slopcontrol/llm ask-narration-llm). */
+export type NarrationJudgeVerdict = {
+  narrationOnly?: boolean;
+  reason?: string;
+};
+
+/**
+ * Injected LLM narration judge — the heuristic is a cheap pre-filter, the
+ * judge decides whether a synthesis pass is actually burned.
+ */
+export type NarrationJudgeFn = (input: {
+  reply: string;
+  toolCallCount: number;
+}) => Promise<NarrationJudgeVerdict>;
+
+export type NarrationSynthesisDecision = {
+  synthesize: boolean;
+  /** True when the regex heuristic flagged the reply as narration. */
+  heuristicFlagged: boolean;
+  /** Heuristic flagged narration but the judge denied the synthesis pass. */
+  judgeOverrode: boolean;
+  judgeReason?: string;
+};
+
+/**
+ * Narration→synthesis decision. The heuristic handles the cheap cases; the
+ * LLM judge arbitrates both directions:
+ *  - heuristic flags narration → judge confirms before a synthesis pass burns;
+ *  - heuristic misses (long concatenated monologue from a step-exhausted agent
+ *    blows the length caps) → judge is consulted unless the reply carries
+ *    substantive-answer markers.
+ * Judge deny keeps the reply; judge error keeps prior behavior (synthesize on
+ * heuristic hit, keep reply on heuristic miss).
+ */
+export async function decideNarrationSynthesis(opts: {
+  reply: string;
+  toolCallCount: number;
+  synthesizeIfNarration?: boolean;
+  judgeFn?: NarrationJudgeFn | null;
+}): Promise<NarrationSynthesisDecision> {
+  const no = { synthesize: false, heuristicFlagged: false, judgeOverrode: false };
+  if (opts.synthesizeIfNarration === false) return no;
+  if (opts.toolCallCount <= 0) return no;
+
+  if (isAskNarrationOnlyReply(opts.reply)) {
+    if (!opts.judgeFn)
+      return { synthesize: true, heuristicFlagged: true, judgeOverrode: false };
+    try {
+      const verdict = await opts.judgeFn({
+        reply: opts.reply,
+        toolCallCount: opts.toolCallCount,
+      });
+      if (verdict.narrationOnly === false) {
+        return {
+          synthesize: false,
+          heuristicFlagged: true,
+          judgeOverrode: true,
+          judgeReason: verdict.reason,
+        };
+      }
+      return {
+        synthesize: true,
+        heuristicFlagged: true,
+        judgeOverrode: false,
+        judgeReason: verdict.reason,
+      };
+    } catch {
+      return { synthesize: true, heuristicFlagged: true, judgeOverrode: false };
+    }
+  }
+
+  // Heuristic miss. Substantive markers → deterministic no; otherwise the
+  // length-capped heuristic may be hiding an unfinished monologue, so let the
+  // judge arbitrate. No judge / judge error → keep prior no-synthesis behavior.
+  if (hasSubstantiveReplyMarkers(opts.reply)) return no;
+  if (!opts.judgeFn) return no;
+  try {
+    const verdict = await opts.judgeFn({
+      reply: opts.reply,
+      toolCallCount: opts.toolCallCount,
+    });
+    if (verdict.narrationOnly) {
+      return {
+        synthesize: true,
+        heuristicFlagged: false,
+        judgeOverrode: false,
+        judgeReason: verdict.reason,
+      };
+    }
+    return {
+      synthesize: false,
+      heuristicFlagged: false,
+      judgeOverrode: false,
+      judgeReason: verdict.reason,
+    };
+  } catch {
+    return no;
+  }
 }
 
 /** Map a Mastra stream chunk to zero-or-more progress events. */

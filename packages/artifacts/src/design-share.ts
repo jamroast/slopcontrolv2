@@ -83,6 +83,25 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * True when `needle` appears in `haystack` as a whole project/folder token.
+ * Identifier chars are `[a-z0-9_-]` so hyphens do not create a boundary —
+ * "jamroast" does **not** match inside "jamroast-components".
+ */
+export function textMentionsProjectName(
+  haystack: string,
+  needle: string,
+): boolean {
+  const n = needle.trim().toLowerCase();
+  if (n.length < 3) return false;
+  const h = haystack.toLowerCase();
+  const re = new RegExp(
+    `(^|[^a-z0-9_-])${escapeRegExp(n)}($|[^a-z0-9_-])`,
+    "i",
+  );
+  return re.test(h);
+}
+
 /** True when share source is the same project as the target (self-import). */
 export function isSameDesignShareRoot(
   targetRoot: string,
@@ -109,6 +128,7 @@ function rejectSelfShare(
  * Chat auto-detect: find a shareable source project referenced in operator
  * text (absolute path, registered name, or literal sibling dir name).
  * Returns null when nothing resolvable is mentioned.
+ * When several names match, the **longest** identifier wins (hyphen-safe).
  */
 export function detectShareSourceFromText(opts: {
   targetRoot: string;
@@ -120,7 +140,6 @@ export function detectShareSourceFromText(opts: {
 }): DesignShareSource | null {
   const text = (opts.text ?? "").trim();
   if (!text) return null;
-  const lower = text.toLowerCase();
   const targetBase = basename(opts.targetRoot.replace(/\/$/, "")).toLowerCase();
 
   const tryName = (name: string): DesignShareSource | null =>
@@ -148,18 +167,29 @@ export function detectShareSourceFromText(opts: {
     if (src) return src;
   }
 
-  // 2. Registered project names / folder basenames.
+  // 2. Registered project names / folder basenames — longest match wins.
+  type Hit = { matchLen: number; source: DesignShareSource };
+  const registeredHits: Hit[] = [];
   for (const p of opts.listProjects?.() ?? []) {
     const base = basename(p.rootPath.replace(/\/$/, "")).toLowerCase();
     if (base === targetBase) continue;
     if (isSameDesignShareRoot(opts.targetRoot, p.rootPath)) continue;
     const candidates = [p.name, base].filter(Boolean);
+    let bestLen = 0;
     for (const c of candidates) {
-      if (c.length < 3) continue;
-      if (new RegExp(`\\b${escapeRegExp(c.toLowerCase())}\\b`, "i").test(lower)) {
-        return { projectId: p.id, rootPath: p.rootPath, name: p.name };
-      }
+      if (!textMentionsProjectName(text, c)) continue;
+      bestLen = Math.max(bestLen, c.trim().length);
     }
+    if (bestLen > 0) {
+      registeredHits.push({
+        matchLen: bestLen,
+        source: { projectId: p.id, rootPath: p.rootPath, name: p.name },
+      });
+    }
+  }
+  if (registeredHits.length) {
+    registeredHits.sort((a, b) => b.matchLen - a.matchLen);
+    return registeredHits[0]!.source;
   }
 
   // 3. Sibling dir names under the target's parent folder (literal match only).
@@ -177,12 +207,16 @@ export function detectShareSourceFromText(opts: {
   } catch {
     return null;
   }
+  const siblingHits: Array<{ matchLen: number; name: string }> = [];
   for (const s of siblings) {
     if (s.toLowerCase() === targetBase || s.length < 3) continue;
-    if (new RegExp(`\\b${escapeRegExp(s.toLowerCase())}\\b`, "i").test(lower)) {
-      const src = tryName(s);
-      if (src) return src;
-    }
+    if (!textMentionsProjectName(text, s)) continue;
+    siblingHits.push({ matchLen: s.length, name: s });
+  }
+  siblingHits.sort((a, b) => b.matchLen - a.matchLen);
+  for (const hit of siblingHits) {
+    const src = tryName(hit.name);
+    if (src) return src;
   }
   return null;
 }
@@ -469,9 +503,9 @@ export function formatSharedDesignPromptBlock(
 ): string {
   if (!imported) return "";
   const lines: string[] = [
-    "## SHARED DESIGN (imported from another project — authoritative for palette, tokens, dual theme, and logos over LIVE SITE)",
+    "## SHARED DESIGN (imported from another project — authoritative for palette, tokens, dual theme, shell chrome, and logos over LIVE SITE)",
     "",
-    "CRITICAL: Apply these tokens/logos. Do not invent a new purple/cream palette. LIVE SITE wins only for nav/routes/screen copy.",
+    "CRITICAL: Apply these tokens/logos and shell notes. Do not invent a new purple/cream palette or a competing day/night toggle when SHARED ELEMENTS includes theme-toggle. LIVE SITE wins only for nav/routes/screen copy.",
     "",
     `Source: ${imported.source.name ?? imported.source.rootPath}`,
     `Imported: ${imported.importedAt}`,
@@ -484,6 +518,14 @@ export function formatSharedDesignPromptBlock(
     lines.push("```css");
     lines.push(imported.tokensCss.trim().slice(0, 2_200));
     lines.push("```");
+    lines.push("");
+  }
+  const shellNotes = imported.pack?.shell?.filter((s) => s.trim()) ?? [];
+  if (shellNotes.length) {
+    lines.push(
+      "### Shared shell / chrome (apply menubar slots + layout; do not invent competing theme controls)",
+    );
+    for (const s of shellNotes.slice(0, 12)) lines.push(`- ${s}`);
     lines.push("");
   }
   if (imported.logoAssetPaths.length) {

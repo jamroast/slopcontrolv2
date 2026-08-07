@@ -58,6 +58,11 @@ export type AntiAuditThemeOpts = {
   togglePresent?: boolean;
   /** design ACCEPTANCE accepted theme_modes or applied_shell. */
   designShellOrThemeAccepted?: boolean;
+  /**
+   * Structured Change Intent flag. When set, overrides description regex
+   * for whether the operator asked for a missing theme control.
+   */
+  requestsMissingThemeControl?: boolean;
   projectRoot?: string;
   phaseId?: string;
 };
@@ -108,10 +113,21 @@ function resolveDesignThemeSignals(opts: AntiAuditThemeOpts): {
  * Fail when operator asked for a missing/visible theme control and PHASE
  * closed as review-only despite a bound mock toggle / accepted shell theme.
  */
+function wantsMissingThemeControl(opts: {
+  description: string;
+  requestsMissingThemeControl?: boolean;
+}): boolean {
+  if (typeof opts.requestsMissingThemeControl === "boolean") {
+    return opts.requestsMissingThemeControl;
+  }
+  // Legacy callers / offline — heuristic only when structured flag absent.
+  return operatorRequestsMissingThemeControl(opts.description);
+}
+
 export function phaseDocRejectsMissingThemeAudit(
   opts: AntiAuditThemeOpts,
 ): { ok: boolean; issues: string[] } {
-  if (!operatorRequestsMissingThemeControl(opts.description)) {
+  if (!wantsMissingThemeControl(opts)) {
     return { ok: true, issues: [] };
   }
   if (!phaseDocDeclaresReviewOnlyNoFileChanges(opts.phaseDoc)) {
@@ -135,16 +151,18 @@ export function formatAntiAuditThemeDeliveryNote(opts: {
   description: string;
   togglePresent?: boolean;
   designShellOrThemeAccepted?: boolean;
+  requestsMissingThemeControl?: boolean;
   projectRoot?: string;
   phaseId?: string;
 }): string {
-  if (!operatorRequestsMissingThemeControl(opts.description)) return "";
+  if (!wantsMissingThemeControl(opts)) return "";
   const { togglePresent, designShellOrThemeAccepted } =
     resolveDesignThemeSignals({
       description: opts.description,
       phaseDoc: "",
       togglePresent: opts.togglePresent,
       designShellOrThemeAccepted: opts.designShellOrThemeAccepted,
+      requestsMissingThemeControl: opts.requestsMissingThemeControl,
       projectRoot: opts.projectRoot,
       phaseId: opts.phaseId,
     });

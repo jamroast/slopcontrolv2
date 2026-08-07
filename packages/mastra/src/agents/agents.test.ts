@@ -93,6 +93,8 @@ describe("ask / agent chat tool split", () => {
       assert.ok("generate_image" in loopTools);
       assert.ok("pin_logo" in loopTools);
       assert.ok("make_transparent" in loopTools);
+      assert.ok("edit_image" in loopTools);
+      assert.ok("circular_mask" in loopTools);
       assert.ok("derive_icon_pack" in loopTools);
       assert.ok("resize_image" in loopTools);
       assert.ok("search_images" in loopTools);
@@ -210,6 +212,8 @@ describe("ask / agent chat tool split", () => {
       );
       assert.match(planInstr, /CRITICAL emit rule|Never end a turn without/i);
       assert.match(planInstr, /exhaustive sibling|step budget/i);
+      assert.match(planInstr, /chat-facing summary/i);
+      assert.match(planInstr, /not possible in the plan loop/i);
       const repairTools = await repair.listTools();
       assert.equal("read_file" in repairTools, false);
       assert.equal("list_files" in repairTools, false);

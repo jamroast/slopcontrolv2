@@ -14,14 +14,18 @@ Return ONLY a JSON object with these fields:
 - uiMount: "composer" | "bubble" | "modal" | "page" | "n/a"
 - changeKind: "engagement" | "chrome-hide" | "backend" | "other"
 - needsInteraction (boolean): true only when fill/submit (or equivalent) must be proven
+- brandTheming (boolean): true when the ask is brand identity, palette, logo, wordmark, visual identity, or applying sibling theming/design that needs a design pass
+- themeWiringOnly (boolean): true when the ask is only wiring a theme toggle / data-theme / light-dark switch with no new brand identity (coding only — not a design pass). Mutually exclusive with brandTheming.
+- requestsMissingThemeControl (boolean): true when the operator says a menubar day/night or theme toggle is missing / not appearing / must be added or shown
 - mustNot (optional string[]): extra constraints
 - refinementOf (optional string or string[]): prior phase id hint if refining a mount
 
 Classification rules:
 - chrome-hide: hide empty form / tab strip / chrome when nothing to gather — no fill/submit contract. Set needsInteraction false. Prefer uiMount "composer".
 - engagement: broken or missing fill/submit / populate / validate on forms at a mount. Set needsInteraction true.
-- backend: non-UI / infrastructure / API-only (DB, migrations, env, servers). needsInteraction false; uiMount usually "n/a".
-- other: UI or product change that is neither chrome-hide nor engagement — INCLUDING brand, theming, logo, palette, design-system, look-and-feel, theme toggle / light-dark switch, landing-page chrome. Never classify brand/theming/logo as backend. Set needsInteraction false.
+- backend: non-UI / infrastructure / API-only (DB, migrations, env, servers). needsInteraction false; uiMount usually "n/a". Never brand/theming/logo.
+- other: UI or product change that is neither chrome-hide nor engagement — INCLUDING brand, theming, logo, palette, design-system, look-and-feel, theme toggle / light-dark switch, landing-page chrome. Never classify brand/theming/logo as backend. Set needsInteraction false unless fill/submit is required.
+- brandTheming=true for new logos, palettes, sibling theme adoption, visual identity. themeWiringOnly=true only for toggle/data-theme wiring without new identity (then brandTheming=false).
 - Multilingual OK (Afrikaans, English, mixed).
 - Do NOT invent needsInteraction=true for chrome-hide or backend.
 - Do NOT set needsInteraction for non-form clicks (theme toggle, nav links, decorative controls) — clickable ≠ fill/submit form contract.
@@ -62,7 +66,7 @@ export async function extractChangeIntentViaLlm(
     modelId: opts.modelId,
     system: CHANGE_INTENT_SYSTEM_PROMPT,
     user: userParts.join("\n"),
-    timeoutMs: opts.timeoutMs ?? 15_000,
+    timeoutMs: opts.timeoutMs ?? 90_000,
     temperature: 0,
   });
 

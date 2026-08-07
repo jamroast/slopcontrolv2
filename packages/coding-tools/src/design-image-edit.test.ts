@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { describe, it, after } from "node:test";
 import sharp from "sharp";
 import {
+  alphaOutputFilename,
+  circularMaskDesignAsset,
   deriveIconPackFromAsset,
   makeTransparentDesignAsset,
   promptLooksLikeImageEdit,
@@ -20,6 +22,15 @@ describe("design-image-edit", () => {
         /* ignore */
       }
     }
+  });
+
+  it("alphaOutputFilename never stacks -alpha-alpha", () => {
+    assert.equal(alphaOutputFilename("mark.png"), "mark-alpha.png");
+    assert.equal(alphaOutputFilename("mark-alpha.png"), "mark-alpha.png");
+    assert.equal(
+      alphaOutputFilename("mark-alpha-alpha.png"),
+      "mark-alpha.png",
+    );
   });
 
   it("makeTransparentDesignAsset produces RGBA with transparent corners", async () => {
@@ -56,6 +67,7 @@ describe("design-image-edit", () => {
       loopId,
       sourceFilename: "mark.png",
       threshold: 20,
+      circularFallback: false,
     });
     assert.equal(out.hasAlpha, true);
     assert.match(out.relativePath, /mark-alpha\.png$/);
@@ -74,6 +86,145 @@ describe("design-image-edit", () => {
     const ci = (cy * info.width + cx) * 4;
     assert.ok(data[ci + 3]! > 200);
     assert.ok(data[ci]! > 200);
+  });
+
+  it("auto-keys charcoal plate corners (JamPress-style)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-charcoal-"));
+    roots.push(root);
+    const loopId = "loop-charcoal";
+    const dir = join(root, ".slopcontrol", "design-loops", loopId, "assets");
+    mkdirSync(dir, { recursive: true });
+    const size = 64;
+    const buf = Buffer.alloc(size * size * 3);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = (y * size + x) * 3;
+        const dx = x - size / 2;
+        const dy = y - size / 2;
+        const inCircle = Math.hypot(dx, dy) < size * 0.35;
+        if (inCircle) {
+          buf[i] = 232;
+          buf[i + 1] = 67;
+          buf[i + 2] = 10;
+        } else {
+          // charcoal plate (~#222), not pure black
+          buf[i] = 34;
+          buf[i + 1] = 36;
+          buf[i + 2] = 35;
+        }
+      }
+    }
+    await sharp(buf, { raw: { width: size, height: size, channels: 3 } })
+      .png()
+      .toFile(join(dir, "circular-mark.png"));
+
+    const out = await makeTransparentDesignAsset({
+      projectRoot: root,
+      loopId,
+      sourceFilename: "circular-mark.png",
+      circularFallback: false,
+    });
+    assert.equal(out.relativePath.endsWith("circular-mark-alpha.png"), true);
+    const { data, info } = await sharp(out.absolutePath)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    assert.ok(data[3]! < 16, "corner should be transparent after auto-key");
+    const ci =
+      (Math.floor(info.height / 2) * info.width + Math.floor(info.width / 2)) *
+      4;
+    assert.ok(data[ci + 3]! > 200);
+    assert.ok(data[ci]! > 200);
+  });
+
+  it("circularMaskDesignAsset clears outside circle, keeps interior", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-circle-mask-"));
+    roots.push(root);
+    const loopId = "loop-circle";
+    const dir = join(root, ".slopcontrol", "design-loops", loopId, "assets");
+    mkdirSync(dir, { recursive: true });
+    const size = 64;
+    await sharp({
+      create: {
+        width: size,
+        height: size,
+        channels: 3,
+        background: { r: 34, g: 36, b: 35 },
+      },
+    })
+      .composite([
+        {
+          input: await sharp({
+            create: {
+              width: 30,
+              height: 30,
+              channels: 3,
+              background: { r: 232, g: 67, b: 10 },
+            },
+          })
+            .png()
+            .toBuffer(),
+          left: 17,
+          top: 17,
+        },
+      ])
+      .png()
+      .toFile(join(dir, "plate.png"));
+
+    const out = await circularMaskDesignAsset({
+      projectRoot: root,
+      loopId,
+      sourceFilename: "plate.png",
+    });
+    assert.match(out.relativePath, /plate-alpha\.png$/);
+    const { data, info } = await sharp(out.absolutePath)
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    assert.equal(data[3], 0);
+    const ci =
+      (Math.floor(info.height / 2) * info.width + Math.floor(info.width / 2)) *
+      4;
+    assert.ok(data[ci + 3]! > 200);
+  });
+
+  it("re-keying an -alpha source overwrites without -alpha-alpha", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-no-stack-"));
+    roots.push(root);
+    const loopId = "loop-stack";
+    const dir = join(root, ".slopcontrol", "design-loops", loopId, "assets");
+    mkdirSync(dir, { recursive: true });
+    await sharp({
+      create: {
+        width: 16,
+        height: 16,
+        channels: 3,
+        background: { r: 0, g: 0, b: 0 },
+      },
+    })
+      .png()
+      .toFile(join(dir, "mark.png"));
+    await sharp({
+      create: {
+        width: 16,
+        height: 16,
+        channels: 3,
+        background: { r: 0, g: 0, b: 0 },
+      },
+    })
+      .png()
+      .toFile(join(dir, "mark-alpha.png"));
+
+    const out = await makeTransparentDesignAsset({
+      projectRoot: root,
+      loopId,
+      sourceFilename: "mark-alpha.png",
+      circularFallback: false,
+    });
+    // Prefer non-alpha sibling mark.png → out mark-alpha.png (not mark-alpha-alpha)
+    assert.equal(out.sourceFilename, "mark.png");
+    assert.match(out.relativePath, /mark-alpha\.png$/);
+    assert.equal(out.relativePath.includes("alpha-alpha"), false);
   });
 
   it("deriveIconPackFromAsset writes multiple sizes", async () => {
@@ -107,6 +258,7 @@ describe("design-image-edit", () => {
 
   it("promptLooksLikeImageEdit classifies edit asks", () => {
     assert.equal(promptLooksLikeImageEdit("change to alpha channel"), true);
+    assert.equal(promptLooksLikeImageEdit("cut out the circular logo"), true);
     assert.equal(promptLooksLikeImageEdit("invent a new logo mark"), false);
   });
 

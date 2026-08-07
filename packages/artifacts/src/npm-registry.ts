@@ -16,7 +16,7 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 
 export const DEFAULT_NPM_REGISTRY_PORT = 4873;
-export const NPM_PRIVATE_SCOPES = ["@jam", "@slopcontrol"] as const;
+export const NPM_PRIVATE_SCOPES = ["@jam", "@jamroast", "@slopcontrol"] as const;
 
 export const NpmRegistryMetaSchema = z.object({
   url: z.string(),
@@ -29,6 +29,17 @@ export const NpmRegistryMetaSchema = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
   lastError: z.string().optional(),
+  /** Evidence of library publishes (name → last published version). */
+  publishedPackages: z
+    .record(
+      z.string(),
+      z.object({
+        version: z.string(),
+        publishedAt: z.string(),
+        toolchainKind: z.string().default(""),
+      }),
+    )
+    .default({}),
 });
 export type NpmRegistryMeta = z.infer<typeof NpmRegistryMetaSchema>;
 
@@ -56,6 +67,11 @@ export function resolveNpmRegistryPort(): number {
   const raw = process.env.SLOPCONTROL_NPM_REGISTRY_PORT;
   const n = raw ? Number(raw) : DEFAULT_NPM_REGISTRY_PORT;
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_NPM_REGISTRY_PORT;
+}
+
+export function resolveNpmRegistryHost(): string {
+  const raw = process.env.SLOPCONTROL_NPM_REGISTRY_HOST?.trim();
+  return raw && raw.length > 0 ? raw : "127.0.0.1";
 }
 
 export function isNpmRegistryDisabled(): boolean {
@@ -114,6 +130,10 @@ packages:
     access: $all
     publish: $all
     unpublish: $all
+  '@jamroast/*':
+    access: $all
+    publish: $all
+    unpublish: $all
   '@slopcontrol/*':
     access: $all
     publish: $all
@@ -145,7 +165,7 @@ export function ensureNpmRegistryLayout(dataDir: string): NpmRegistryMeta {
   mkdirSync(join(root, "plugins"), { recursive: true });
 
   const port = resolveNpmRegistryPort();
-  const host = "127.0.0.1";
+  const host = resolveNpmRegistryHost();
   const url = `http://${host}:${port}/`;
   const now = new Date().toISOString();
   const prior = readNpmRegistryMeta(dataDir);
@@ -302,6 +322,223 @@ export function listNpmRegistryPackages(
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/** URL containers use to reach the host-bound registry (Docker Desktop DNS). */
+export function npmRegistryDockerUrl(
+  meta: Pick<NpmRegistryMeta, "port">,
+): string {
+  return `http://host.docker.internal:${meta.port}/`;
+}
+
+/**
+ * Canonical registry env values for managed projects (.env / .env.docker /
+ * CI secrets). Phases and the build-process configurator write these into
+ * product env files; docker-compose passes the DOCKER_URL as a build ARG.
+ *
+ * Contract: *_URL values include the protocol (used for registry mappings and
+ * `pnpm publish --registry`). *_AUTH_HOST values are host:port WITHOUT
+ * protocol — the shape .npmrc nerf-dart auth lines require:
+ *   //${SLOPCONTROL_NPM_REGISTRY_AUTH_HOST}/:_authToken=${SLOPCONTROL_NPM_REGISTRY_TOKEN}
+ */
+export function npmRegistryEnvValues(
+  meta: Pick<NpmRegistryMeta, "url" | "port" | "authToken">,
+): Record<string, string> {
+  let authHost = `127.0.0.1:${meta.port}`;
+  try {
+    authHost = new URL(meta.url).host || authHost;
+  } catch {
+    // keep host:port fallback derived from the port
+  }
+  return {
+    SLOPCONTROL_NPM_REGISTRY_URL: meta.url,
+    SLOPCONTROL_NPM_REGISTRY_DOCKER_URL: npmRegistryDockerUrl(meta),
+    SLOPCONTROL_NPM_REGISTRY_AUTH_HOST: authHost,
+    SLOPCONTROL_NPM_REGISTRY_DOCKER_AUTH_HOST: `host.docker.internal:${meta.port}`,
+    SLOPCONTROL_NPM_REGISTRY_TOKEN: meta.authToken,
+  };
+}
+
+export type NpmRegistryPackageFreshness = {
+  name: string;
+  stale: boolean;
+  reason: string;
+  tarballMtime?: string;
+  distMtime?: string;
+};
+
+function upsertEnvLine(body: string, key: string, value: string): string {
+  const re = new RegExp(`^${key}=.*$`, "m");
+  const line = `${key}=${value}`;
+  if (re.test(body)) return body.replace(re, line);
+  const trimmed = body.replace(/\s*$/, "");
+  return trimmed ? `${trimmed}\n${line}\n` : `${line}\n`;
+}
+
+/** True when the project's .gitignore covers the given env file (secret-safe). */
+function envFileGitignored(projectRoot: string, rel: string): boolean {
+  const path = join(projectRoot, ".gitignore");
+  if (!existsSync(path)) return false;
+  const body = readFileSync(path, "utf-8");
+  const base = rel.replace(/^\//, "");
+  for (const rawLine of body.split("\n")) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || line.startsWith("!")) continue;
+    const norm = line.replace(/^\//, "").replace(/^\*\*\//, "");
+    if (norm === base) return true;
+    if (norm.endsWith("*") && base.startsWith(norm.slice(0, -1))) return true;
+  }
+  return false;
+}
+
+export type ProjectRegistryEnvWrite = {
+  files: string[];
+  tokenWritten: boolean;
+};
+
+/**
+ * Deterministically upsert the canonical registry env values into a managed
+ * project's env files. The LLM never touches these (secrets-bearing) files —
+ * this is the ONLY writer, called by the build-process onboarding/configure
+ * service.
+ *
+ * `.env` gets all five values: it is docker-compose's interpolation source
+ * for the build ARG contract. `.env.docker` gets the DOCKER_* trio. The
+ * TOKEN is only written when the target file is gitignored; otherwise the
+ * operator sources it from `GET /projects/:id/build-process` (registryEnv).
+ */
+export function writeProjectRegistryEnv(opts: {
+  projectRoot: string;
+  meta: Pick<NpmRegistryMeta, "url" | "port" | "authToken">;
+}): ProjectRegistryEnvWrite {
+  const values = npmRegistryEnvValues(opts.meta);
+  const files: string[] = [];
+  let tokenWritten = false;
+
+  const targets: Array<{ rel: string; keys: string[] }> = [
+    {
+      rel: ".env",
+      keys: [
+        "SLOPCONTROL_NPM_REGISTRY_URL",
+        "SLOPCONTROL_NPM_REGISTRY_DOCKER_URL",
+        "SLOPCONTROL_NPM_REGISTRY_AUTH_HOST",
+        "SLOPCONTROL_NPM_REGISTRY_DOCKER_AUTH_HOST",
+        "SLOPCONTROL_NPM_REGISTRY_TOKEN",
+      ],
+    },
+    {
+      rel: ".env.docker",
+      keys: [
+        "SLOPCONTROL_NPM_REGISTRY_DOCKER_URL",
+        "SLOPCONTROL_NPM_REGISTRY_DOCKER_AUTH_HOST",
+        "SLOPCONTROL_NPM_REGISTRY_TOKEN",
+      ],
+    },
+  ];
+
+  for (const target of targets) {
+    const abs = join(opts.projectRoot, target.rel);
+    const prior = existsSync(abs) ? readFileSync(abs, "utf-8") : "";
+    const secretSafe = envFileGitignored(opts.projectRoot, target.rel);
+    let body = prior;
+    if (!body.trim()) {
+      body = "# SlopControl npm registry coordinates (managed — do not hand-edit).\n";
+    }
+    for (const key of target.keys) {
+      if (key === "SLOPCONTROL_NPM_REGISTRY_TOKEN" && !secretSafe) continue;
+      body = upsertEnvLine(body, key, values[key] ?? "");
+    }
+    if (body !== prior) {
+      writeFileSync(abs, body, "utf-8");
+      files.push(target.rel);
+    }
+    if (target.keys.includes("SLOPCONTROL_NPM_REGISTRY_TOKEN") && secretSafe) {
+      tokenWritten = true;
+    }
+  }
+  return { files, tokenWritten };
+}
+/** Newest file mtime (ms) under a dir, recursive. Null when missing/empty. */
+export function dirMaxMtimeMs(dir: string): number | null {
+  if (!existsSync(dir)) return null;
+  let max = 0;
+  const walk = (d: string): void => {
+    for (const entry of readdirSync(d)) {
+      if (entry.startsWith(".")) continue;
+      const full = join(d, entry);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) {
+        walk(full);
+      } else if (st.mtimeMs > max) {
+        max = st.mtimeMs;
+      }
+    }
+  };
+  walk(dir);
+  return max > 0 ? max : null;
+}
+
+/**
+ * Cheap staleness check: is the project's build output newer than the
+ * tarball currently sitting in the registry? Catches "edited src, rebuilt
+ * dist, never republished" before a consumer's clean install does.
+ */
+export function npmRegistryPackageFreshness(opts: {
+  dataDir: string;
+  name: string;
+  distDir: string;
+}): NpmRegistryPackageFreshness {
+  const pkg = listNpmRegistryPackages(opts.dataDir).find(
+    (p) => p.name === opts.name,
+  );
+  if (!pkg) {
+    return {
+      name: opts.name,
+      stale: true,
+      reason: "package not found in registry storage (never published?)",
+    };
+  }
+  let tarballMax = 0;
+  for (const entry of readdirSync(pkg.path)) {
+    if (!entry.endsWith(".tgz")) continue;
+    try {
+      const mt = statSync(join(pkg.path, entry)).mtimeMs;
+      if (mt > tarballMax) tarballMax = mt;
+    } catch {
+      /* skip */
+    }
+  }
+  if (!tarballMax) {
+    return {
+      name: opts.name,
+      stale: true,
+      reason: "no tarball found in registry storage",
+    };
+  }
+  const distMax = dirMaxMtimeMs(opts.distDir);
+  if (distMax === null) {
+    return {
+      name: opts.name,
+      stale: true,
+      reason: `dist dir missing or empty: ${opts.distDir}`,
+      tarballMtime: new Date(tarballMax).toISOString(),
+    };
+  }
+  const stale = distMax > tarballMax;
+  return {
+    name: opts.name,
+    stale,
+    reason: stale
+      ? "dist output is newer than the published tarball — republish needed"
+      : "published tarball is up to date with dist output",
+    tarballMtime: new Date(tarballMax).toISOString(),
+    distMtime: new Date(distMax).toISOString(),
+  };
+}
+
 export function jamPackageNameForElement(elementId: string): string {
   const id = elementId
     .trim()
@@ -313,6 +550,8 @@ export function jamPackageNameForElement(elementId: string): string {
 
 /**
  * Scaffold an npm package directory from design-element src files.
+ * Always produces a proper @jam/<id> package.json. When src is empty,
+ * exports mock.html / tokens.css so the registry shape stays consistent.
  * Returns the package root path (created under elementVersionDir/npm-package).
  */
 export function scaffoldElementNpmPackage(opts: {
@@ -322,6 +561,8 @@ export function scaffoldElementNpmPackage(opts: {
   label?: string;
   srcFiles: Record<string, string>;
   description?: string;
+  mockHtml?: string;
+  tokensCss?: string;
 }): {
   packageRoot: string;
   packageName: string;
@@ -337,17 +578,21 @@ export function scaffoldElementNpmPackage(opts: {
   mkdirSync(packageRoot, { recursive: true });
 
   const files = { ...opts.srcFiles };
-  if (!Object.keys(files).length) {
+  const hasCode = Object.keys(files).length > 0;
+  const mockHtml = opts.mockHtml?.trim() ?? "";
+  const tokensCss = opts.tokensCss?.trim() ?? "";
+
+  if (mockHtml) {
+    writeFileSync(join(packageRoot, "mock.html"), `${mockHtml}\n`, "utf-8");
+  }
+  if (tokensCss) {
+    writeFileSync(join(packageRoot, "tokens.css"), `${tokensCss}\n`, "utf-8");
+  }
+
+  if (!hasCode && !mockHtml) {
     files["index.js"] =
       `/** @jam/${opts.elementId} — placeholder */\nexport {};\n`;
   }
-
-  // Prefer a single entry
-  const entries = Object.keys(files);
-  const mainFile =
-    entries.find((f) => /^index\.(js|mjs|cjs|ts)$/i.test(f)) ||
-    entries.find((f) => /\.(js|mjs|cjs)$/i.test(f)) ||
-    entries[0]!;
 
   for (const [rel, body] of Object.entries(files)) {
     const dest = join(packageRoot, rel);
@@ -355,7 +600,32 @@ export function scaffoldElementNpmPackage(opts: {
     writeFileSync(dest, body, "utf-8");
   }
 
-  // If only .ts sources, also write a thin .js re-export note via copying ts as main for consumers that use tsx/bundlers
+  const entries = Object.keys(files);
+  const mainFile = hasCode
+    ? entries.find((f) => /^index\.(js|mjs|cjs|ts|tsx)$/i.test(f)) ||
+      entries.find((f) => /\.(tsx|ts|js|mjs|cjs)$/i.test(f)) ||
+      entries[0]!
+    : mockHtml
+      ? "mock.html"
+      : "index.js";
+
+  const exports: Record<string, unknown> = {};
+  if (hasCode || mainFile) {
+    exports["."] = {
+      default: `./${mainFile}`,
+      import: `./${mainFile}`,
+    };
+  }
+  if (mockHtml) {
+    exports["./mock.html"] = "./mock.html";
+    if (!hasCode) {
+      exports["."] = "./mock.html";
+    }
+  }
+  if (tokensCss) {
+    exports["./tokens.css"] = "./tokens.css";
+  }
+
   const pkg = {
     name: packageName,
     version: packageVersion,
@@ -366,13 +636,9 @@ export function scaffoldElementNpmPackage(opts: {
     type: "module",
     main: mainFile,
     module: mainFile,
-    types: mainFile.endsWith(".ts") ? mainFile : undefined,
-    exports: {
-      ".": {
-        default: `./${mainFile}`,
-        import: `./${mainFile}`,
-      },
-    },
+    types:
+      hasCode && /\.tsx?$/i.test(mainFile) ? mainFile : undefined,
+    exports,
     files: ["**/*"],
     keywords: ["slopcontrol", "jam", opts.elementId],
     license: "UNLICENSED",

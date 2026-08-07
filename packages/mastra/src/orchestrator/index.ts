@@ -12,6 +12,10 @@ import {
   buildProjectInventory,
   synthesizeBlueprintFromInventory,
   buildFailureDiagnosis,
+  buildFailureDiagnosisAsync,
+  type BuildFailureDiagnosisInput,
+  type ClassifyVerifyFailureFn,
+  type FailureDiagnosis,
   buildDevelopmentHandoff,
   writeDevelopmentHandoff,
   formatDiagnosisCard,
@@ -68,8 +72,8 @@ import {
   buildAdjacentPhaseContextPack,
   buildSiblingBrandRefPack,
   descriptionMentionsBrandTheming,
-  isBrandThemingAsk,
-  isThemeWiringAsk,
+  changeIntentIsBrandTheming,
+  changeIntentIsThemeWiringOnly,
   phaseDocAlignsWithChangeIntent,
   researchEngagementQuality,
   formatAntiAuditThemeDeliveryNote,
@@ -79,6 +83,9 @@ import {
   upsertRoadmapEntry,
   validateBlueprintDocument,
   validatePhaseDocForDev,
+  validateRuntimeClaimProofs,
+  validateRuntimeClaimProofsAsync,
+  type ClaimProofJudgeFn,
   verifyDatabaseArtifacts,
   verifyOllamaCloudChatAccess,
   verifyOllamaCloudModelIds,
@@ -122,14 +129,17 @@ import {
   formatDesignLoopReviseBlock,
   formatPhaseBoundMockPromptBlock,
   formatDesignPackPromptBlock,
+  formatClaimProofChecksGuidance,
   formatDesignLoopSelectionsPromptBlock,
   maybeAutoPinFromOperatorMessage,
   maybeAutoPinDominantLogoFromMock,
-  designLoopAskNeedsImageEdit,
   refreshDesignLoopConcepts,
   readPhaseDesignPack,
   resolveDesignLoopGenerateFallback,
   detectMockDrift,
+  hardMockDriftIssues,
+  softMockDriftIssues,
+  composeDesignLoopVersionNotes,
   patchMockForAssetContinue,
   getDesignLoopSelections,
   readDesignLoopMeta,
@@ -139,13 +149,12 @@ import {
   patchMockNavFromInventory,
   CONTINUE_INTENT_DEFAULT,
   fallbackContinueIntentFromText,
-  normalizeContinueIntent,
-  textSignalsReuseProjectDesign,
   continueIntentAllowsLogoSwap,
   formatContinueIntentPromptBlock,
   readSharedDesignImport,
   formatSharedDesignPromptBlock,
   detectShareSourceFromText,
+  resolveDesignShareSource,
   readShareableDesign,
   importDesignShareIntoLoop,
   pickProjectPriorDesign,
@@ -158,11 +167,15 @@ import {
   dominantMockLogoAsset,
   readDesignLoopElements,
   formatDesignElementsPromptBlock,
-  detectElementImportFromText,
+  resolveDesignElement,
   importDesignElementIntoLoop,
+  unpinDesignElementsFromLoop,
+  applyPinnedDesignElementsToMock,
+  stripExtraThemeTogglesOutsideMenubar,
+  extractElementBodyHtml,
   getDesignLoopScope,
   applyContinueIntentToScope,
-  classifyDesignScopeFromText,
+  defaultProductScope,
   formatConceptualModelPromptBlock,
   extractThemeContractFromHtml,
   packHasThemeModes,
@@ -185,7 +198,7 @@ import {
   failurePlanDocument,
   PLAN_CONTINUE_INTENT_DEFAULT,
   fallbackPlanContinueIntentFromText,
-  normalizePlanContinueIntent,
+  normalizePlanContinueIntentStructured,
   formatPlanContinueIntentPromptBlock,
   buildSiblingInvestigationPack,
   briefWantsSiblingInvestigation,
@@ -193,6 +206,7 @@ import {
   readPhasePlanPack,
   buildCrossProjectCatalog,
   detectDependencyIntentFromText,
+  listElementsToAutoImport,
   formatCrossProjectCatalogPromptBlock,
   formatDependencyIntentPromptBlock,
   formatAskDependencyTaskBriefNudge,
@@ -218,13 +232,20 @@ import {
   syncPhaseArtifactsToWorktree,
   syncIgnoredArtifactsFromWorktree,
   deriveIconPackFromAsset,
+  makeTransparentDesignAsset,
+  circularMaskDesignAsset,
 } from "@slopcontrol/coding-tools";
 import {
   chatWithImages,
   classifyContinueIntentViaLlm,
   classifyPlanContinueIntentViaLlm,
   classifyDependencyIntentViaLlm,
-  shouldClassifyDependencyIntent,
+  classifyElementHonorViaLlm,
+  classifyVerifyFailureViaLlm,
+  judgeClaimProofViaLlm,
+  judgeNarrationOnlyViaLlm,
+  buildElementHonorSnippets,
+  tryMenubarEmbedSimilarity,
   filterRasterVisionPaths,
   type LlmRegistry,
 } from "@slopcontrol/llm";
@@ -235,10 +256,11 @@ import {
 import {
   ASK_SYNTHESIS_PROMPT_PREFIX,
   askProgressFromStreamChunk,
-  isAskNarrationOnlyReply,
+  decideNarrationSynthesis,
   LiveTurnInterruptedError,
   type AskProgressCallback,
   type LiveProgressCallback,
+  type NarrationJudgeFn,
 } from "./ask-stream.js";
 import {
   buildSupervisorEnrichPrompt,
@@ -325,6 +347,78 @@ export interface OrchestratorContext {
   dataDir: string;
   registry: LlmRegistry;
   agents: OrchestratorAgents;
+  /**
+   * Auto-publish hook fired after a phase completes on a project whose
+   * config sets `componentLibrary: true`. Defaults to an HTTP POST to the
+   * server's design-library/publish endpoint (same boundary as the MCP
+   * layer); inject a fake in tests.
+   */
+  publishComponentLibrary?: (opts: {
+    projectId: string;
+    projectRoot: string;
+  }) => Promise<ComponentLibraryPublishOutcome>;
+}
+
+export type ComponentLibraryPublishOutcome = {
+  ok: boolean;
+  summary: string;
+};
+
+/** Map the server's publish report to a run-log outcome (pure, testable). */
+export function summarizeLibraryPublishResponse(
+  httpStatus: number,
+  body: {
+    name?: string;
+    version?: string;
+    propagation?: Array<{ ok: boolean }>;
+    error?: string;
+  },
+): ComponentLibraryPublishOutcome {
+  if (httpStatus < 200 || httpStatus >= 300) {
+    return { ok: false, summary: body.error ?? `HTTP ${httpStatus}` };
+  }
+  const consumers = body.propagation ?? [];
+  const failed = consumers.filter((c) => !c.ok).length;
+  const consumerPart = consumers.length
+    ? `; ${consumers.length - failed}/${consumers.length} consumers updated`
+    : "; no registered consumers";
+  return {
+    ok: true,
+    summary: `${body.name}@${body.version} published${consumerPart}`,
+  };
+}
+
+/**
+ * Default auto-publish: server REST endpoint (orchestrator → server over
+ * HTTP keeps packages/mastra decoupled from apps/server).
+ */
+export async function defaultPublishComponentLibrary(opts: {
+  projectId: string;
+  projectRoot: string;
+}): Promise<ComponentLibraryPublishOutcome> {
+  const base = `http://127.0.0.1:${process.env.SLOPCONTROL_PORT ?? 3020}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10 * 60_000);
+  try {
+    const res = await fetch(
+      `${base}/projects/${encodeURIComponent(opts.projectId)}/design-library/publish`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+        signal: controller.signal,
+      },
+    );
+    const body = (await res.json().catch(() => ({}))) as {
+      name?: string;
+      version?: string;
+      propagation?: Array<{ ok: boolean }>;
+      error?: string;
+    };
+    return summarizeLibraryPublishResponse(res.status, body);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export interface AskTurnInput {
@@ -513,12 +607,15 @@ function clipPromptSection(label: string, text: string, maxChars: number): strin
   return `${body.slice(0, maxChars)}\n\n…[truncated ${label}: ${body.length} chars total; read_file \`.slopcontrol/${label}\` if you need more]`;
 }
 
-/** True when brief/feedback likely needs image search/gen/edit/review tools. */
-function designLoopNeedsMediaTools(brief: string, message?: string): boolean {
-  const text = `${brief}\n${message ?? ""}`;
-  if (designLoopAskNeedsImageEdit(text)) return true;
-  return /\b(image|images|search|generate|logo|photo|photos|stock|openverse|import|review|vision|icon|mark|alpha|transparent|favicon|pin)\b/i.test(
-    text,
+/** Media tools from structured ContinueIntent (no chat regex). */
+function designLoopNeedsMediaTools(intent: ContinueIntent): boolean {
+  return (
+    intent.inventLogo ||
+    intent.wantsAssetEdit ||
+    (intent.assetOps?.length ?? 0) > 0 ||
+    intent.targets.includes("logo") ||
+    intent.scope === "assets_only" ||
+    intent.scope === "logo_invent"
   );
 }
 
@@ -712,6 +809,8 @@ async function runAgentLiveTurn(
     abortSignal?: AbortSignal;
     /** When true, narration-only + tools → synthesis pass */
     synthesizeIfNarration?: boolean;
+    /** LLM judge confirming narration before a synthesis pass is burned. */
+    narrationJudgeFn?: NarrationJudgeFn | null;
     statusLabel?: string;
   },
 ): Promise<{ reply: string; toolCallCount: number; synthesized: boolean }> {
@@ -820,11 +919,25 @@ async function runAgentLiveTurn(
 
     let out = reply;
     let synthesized = false;
-    if (
-      opts?.synthesizeIfNarration !== false &&
-      isAskNarrationOnlyReply(out) &&
-      toolCallCount > 0
-    ) {
+    const narrationDecision = await decideNarrationSynthesis({
+      reply: out,
+      toolCallCount,
+      synthesizeIfNarration: opts?.synthesizeIfNarration,
+      judgeFn: opts?.narrationJudgeFn,
+    });
+    if (narrationDecision.judgeOverrode) {
+      slog.info("agent", `${name} narration heuristic overridden by llm judge`, {
+        toolCallCount,
+        reason: narrationDecision.judgeReason ?? "",
+      });
+    }
+    if (!narrationDecision.heuristicFlagged && narrationDecision.synthesize) {
+      slog.info("agent", `${name} narration heuristic miss rescued by llm judge`, {
+        toolCallCount,
+        reason: narrationDecision.judgeReason ?? "",
+      });
+    }
+    if (narrationDecision.synthesize) {
       throwIfAborted();
       emit({
         type: "status",
@@ -953,6 +1066,7 @@ async function runAskAgentStream(
     timeoutMs?: number;
     onProgress?: AskProgressCallback;
     abortSignal?: AbortSignal;
+    narrationJudgeFn?: NarrationJudgeFn | null;
   },
 ): Promise<{ reply: string; toolCallCount: number; synthesized: boolean }> {
   return runAgentLiveTurn(agent, prompt, resourceId, threadId, {
@@ -1153,7 +1267,9 @@ export {
   askProgressFromStreamChunk,
   askProgressLine,
   clipAskProgress,
+  decideNarrationSynthesis,
   formatAskWorkingStub,
+  hasSubstantiveReplyMarkers,
   isAskNarrationOnlyReply,
   isLiveTurnInterruptedError,
   LiveTurnInterruptedError,
@@ -1166,6 +1282,9 @@ export type {
   AskProgressEvent,
   LiveProgressCallback,
   LiveProgressEvent,
+  NarrationJudgeFn,
+  NarrationJudgeVerdict,
+  NarrationSynthesisDecision,
 } from "./ask-stream.js";
 export {
   ensureChangeIntentAsync,
@@ -1273,6 +1392,8 @@ export async function runSuccessChecks(
     forceDepsInstall?: boolean;
     /** When set, claim-vs-proof can read phase design ACCEPTANCE / mock. */
     phaseId?: string;
+    /** When set, claim-vs-proof gate issues are refined by the LLM judge. */
+    registry?: LlmRegistry;
   },
 ): Promise<SuccessCheckResult> {
   const mode = opts?.mode ?? "full";
@@ -1385,8 +1506,16 @@ export async function runSuccessChecks(
       projectRoot: project.rootPath,
       phaseId: opts?.phaseId,
     });
-    if (!phaseGate.ok) {
-      const msg = `PHASE.md validation failed:\n${phaseGate.issues.map((i) => `- ${i}`).join("\n")}`;
+    const refined = opts?.registry
+      ? await refineClaimProofGateIssues(
+          opts.registry,
+          phaseDoc,
+          phaseGate.issues,
+          { projectRoot: project.rootPath, phaseId: opts?.phaseId },
+        )
+      : { issues: phaseGate.issues, warnings: [] as string[] };
+    if (refined.issues.length > 0) {
+      const msg = `PHASE.md validation failed:\n${refined.issues.map((i) => `- ${i}`).join("\n")}`;
       parts.push(msg);
       return failResult(parts, steps, {
         name: "phase-doc-validation",
@@ -1600,6 +1729,125 @@ export async function runSuccessChecks(
   };
 }
 
+/** Bind the LLM verify-failure classifier to the classification role; null when unbound. */
+function tryBindVerifyFailureClassifier(
+  registry: LlmRegistry,
+): ClassifyVerifyFailureFn | null {
+  try {
+    const { endpoint, modelId } =
+      registry.resolveEndpointForRole("classification");
+    return (input) =>
+      classifyVerifyFailureViaLlm({
+        endpoint,
+        modelId,
+        output: input.output,
+        stepName: input.stepName,
+        command: input.command,
+        exitCode: input.exitCode,
+        signals: input.signals,
+        timeoutMs: 90_000,
+      });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * LLM-first failure diagnosis: deterministic fast-path → LLM classifier →
+ * regex-tree fallback. Falls back to the fully sync path when no
+ * classification endpoint is bound.
+ */
+async function diagnoseVerifyFailureLlmFirst(
+  registry: LlmRegistry,
+  input: BuildFailureDiagnosisInput,
+): Promise<FailureDiagnosis> {
+  const classifyFn = tryBindVerifyFailureClassifier(registry);
+  if (!classifyFn) return buildFailureDiagnosis(input);
+  const diagnosis = await buildFailureDiagnosisAsync(input, { classifyFn });
+  const tags = diagnosis.tags ?? [];
+  if (tags.includes("llm-fallback")) {
+    slog.warn("verify", "failure classification LLM failed; regex fallback", {
+      class: diagnosis.class,
+      fingerprint: diagnosis.fingerprint,
+    });
+  } else if (tags.includes("llm")) {
+    slog.info("verify", "failure classified via llm", {
+      class: diagnosis.class,
+      confidence: diagnosis.confidence,
+      fingerprint: diagnosis.fingerprint,
+    });
+  }
+  return diagnosis;
+}
+
+/** Bind the LLM claim-proof judge to the classification role; null when unbound. */
+function tryBindClaimProofJudge(registry: LlmRegistry): ClaimProofJudgeFn | null {
+  try {
+    const { endpoint, modelId } =
+      registry.resolveEndpointForRole("classification");
+    return (input) =>
+      judgeClaimProofViaLlm({
+        endpoint,
+        modelId,
+        claim: input.claim,
+        issue: input.issue,
+        phaseDocExcerpt: input.phaseDocExcerpt,
+        timeoutMs: 90_000,
+      });
+  } catch {
+    return null;
+  }
+}
+
+/** Bind the LLM narration judge to the classification role; null when unbound. */
+function tryBindNarrationJudge(registry: LlmRegistry): NarrationJudgeFn | null {
+  try {
+    const { endpoint, modelId } =
+      registry.resolveEndpointForRole("classification");
+    return (input) =>
+      judgeNarrationOnlyViaLlm({
+        endpoint,
+        modelId,
+        reply: input.reply,
+        toolCallCount: input.toolCallCount,
+        timeoutMs: 90_000,
+      });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refine the claim-vs-proof subset of phase-doc gate issues with the LLM
+ * judge: deterministic validators flag, the judge arbitrates. Issues not
+ * produced by validateRuntimeClaimProofs pass through untouched; a missing
+ * endpoint keeps the deterministic set (fail closed).
+ */
+async function refineClaimProofGateIssues(
+  registry: LlmRegistry,
+  phaseDoc: string,
+  issues: string[],
+  opts?: { projectRoot?: string; phaseId?: string },
+): Promise<{ issues: string[]; warnings: string[] }> {
+  const deterministic = validateRuntimeClaimProofs(phaseDoc, opts);
+  if (deterministic.length === 0) return { issues, warnings: [] };
+  const judgeFn = tryBindClaimProofJudge(registry);
+  if (!judgeFn) return { issues, warnings: [] };
+  const refined = await validateRuntimeClaimProofsAsync(phaseDoc, {
+    ...opts,
+    judgeFn,
+  });
+  const claimSet = new Set(deterministic);
+  const passthrough = issues.filter((i) => !claimSet.has(i));
+  if (refined.warnings.length > 0) {
+    slog.info("verify", "claim-vs-proof gap rejected by llm judge", {
+      phaseId: opts?.phaseId,
+      warnings: refined.warnings,
+    });
+  }
+  return { issues: [...passthrough, ...refined.issues], warnings: refined.warnings };
+}
+
 export class ChangeOrchestrator {
   constructor(private readonly ctx: OrchestratorContext) {}
 
@@ -1622,8 +1870,7 @@ export class ChangeOrchestrator {
     const catalogBlock = formatCrossProjectCatalogPromptBlock(catalog);
     const text = opts.message?.trim() ?? "";
     let intent: DependencyIntent | null = null;
-    if (text && shouldClassifyDependencyIntent(text)) {
-      intent = detectDependencyIntentFromText(text);
+    if (text) {
       try {
         const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
           "classification",
@@ -1632,10 +1879,13 @@ export class ChangeOrchestrator {
           endpoint,
           modelId,
           message: text,
-          timeoutMs: 12_000,
+          timeoutMs: 90_000,
         });
-      } catch {
-        /* regex fallback already set */
+      } catch (err) {
+        slog.warn("deps", "dependency intent LLM failed; regex fallback", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        intent = detectDependencyIntentFromText(text);
       }
     }
     const intentBlock = formatDependencyIntentPromptBlock(intent);
@@ -2107,6 +2357,7 @@ ${message.trim()}`;
         timeoutMs: 240_000,
         onProgress: input.onProgress,
         abortSignal: input.abortSignal,
+        narrationJudgeFn: tryBindNarrationJudge(this.ctx.registry),
       },
     );
     return { reply: reply.trim() || "(empty reply)" };
@@ -2119,53 +2370,85 @@ ${message.trim()}`;
     html: string;
     notes: string;
     usedScaffold: boolean;
+    /** Operator-facing chat reply (not the HTML dump). */
+    reply: string;
   }> {
     const { project, loopId, brief, message, previousHtml, version } = input;
     ensureSlopcontrolDir(project.rootPath);
     const isContinue = version > 1 || Boolean(previousHtml?.trim());
     const desc = [brief, message ?? ""].filter(Boolean).join("\n");
     const continueText = message?.trim() || desc;
+    const finishDesign = (opts: {
+      html: string;
+      notes: string;
+      usedScaffold: boolean;
+      reply?: string;
+    }) => ({
+      html: opts.html,
+      notes: opts.notes,
+      usedScaffold: opts.usedScaffold,
+      reply:
+        (opts.reply ?? opts.notes).trim() ||
+        `Design loop v${version} updated.`,
+    });
 
-    // Primary classification: LLM → structured ContinueIntent. Regex fallback
-    // only when registry/LLM unavailable (offline, timeout, parse failure).
+    // Primary classification: LLM → structured ContinueIntent (start + continue).
+    // Regex fallback only when registry/LLM unavailable.
+    const classifyText = isContinue ? continueText : brief || desc;
     let continueIntent: ContinueIntent = CONTINUE_INTENT_DEFAULT;
-    if (isContinue) {
-      const fallback = fallbackContinueIntentFromText(continueText);
+    {
+      const fallbackOnce = fallbackContinueIntentFromText(classifyText);
+      const startFallback: ContinueIntent =
+        !fallbackOnce.adoptTheme &&
+        !fallbackOnce.reuseProjectDesign &&
+        fallbackOnce.scope === "sections" &&
+        fallbackOnce.targets.length === 0
+          ? {
+              ...CONTINUE_INTENT_DEFAULT,
+              scope: "full_revise",
+              preserveChrome: false,
+            }
+          : { ...fallbackOnce, preserveChrome: false };
       try {
         const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
           "classification",
         );
-        continueIntent = await classifyContinueIntentViaLlm({
-          endpoint,
-          modelId,
-          message: continueText,
-          brief,
-          timeoutMs: 15_000,
-        });
+        const classifyOnce = () =>
+          classifyContinueIntentViaLlm({
+            endpoint,
+            modelId,
+            message: classifyText,
+            brief: isContinue ? brief : undefined,
+            isStart: !isContinue,
+            timeoutMs: 90_000,
+          });
+        try {
+          continueIntent = await classifyOnce();
+        } catch (firstErr) {
+          const msg =
+            firstErr instanceof Error ? firstErr.message : String(firstErr);
+          if (/abort|timed out/i.test(msg)) {
+            slog.warn("design-loop", "continue intent LLM aborted; retrying once", {
+              loopId,
+              isStart: !isContinue,
+              error: msg,
+            });
+            continueIntent = await classifyOnce();
+          } else {
+            throw firstErr;
+          }
+        }
       } catch (err) {
         slog.warn("design-loop", "continue intent LLM failed; regex fallback", {
           loopId,
+          isStart: !isContinue,
           error: err instanceof Error ? err.message : String(err),
         });
-        continueIntent = fallback;
-      }
-      continueIntent = normalizeContinueIntent(continueIntent, continueText);
-    } else {
-      const startText = brief || desc;
-      // Fresh loop that asks for this project's existing theming — classify reuse
-      // instead of inventing a blank full_revise palette.
-      if (textSignalsReuseProjectDesign(startText)) {
-        continueIntent = fallbackContinueIntentFromText(startText);
-      } else {
-        continueIntent = {
-          ...CONTINUE_INTENT_DEFAULT,
-          scope: "full_revise",
-          preserveChrome: false,
-        };
+        continueIntent = isContinue ? fallbackOnce : startFallback;
       }
     }
 
-    // Conceptual model scope: classify on start; patch on continue from intent/chat.
+    // Conceptual model scope from structured intent (no chat regex classify).
     {
       const metaNow = readDesignLoopMeta(project.rootPath, loopId);
       if (metaNow) {
@@ -2176,7 +2459,14 @@ ${message.trim()}`;
               continueIntent,
               message?.trim() || desc,
             )
-          : classifyDesignScopeFromText(brief || desc, { source: "start" });
+          : continueIntent.designScope?.kind ||
+              continueIntent.designScope?.focus
+            ? applyContinueIntentToScope(
+                defaultProductScope("start"),
+                continueIntent,
+                brief || desc,
+              )
+            : defaultProductScope("start");
         if (
           nextScope.kind !== priorScope.kind ||
           nextScope.focus !== priorScope.focus ||
@@ -2197,8 +2487,12 @@ ${message.trim()}`;
     }
 
     // Invent/replace: clear prior logo pin so generate_image + force-pin cannot
-    // restore the superseded mark. Skip auto-pin from mock on invent turns.
-    if (isContinue && continueIntent.inventLogo) {
+    // restore the superseded mark. Skip when asset recipe edits the existing pin.
+    if (
+      isContinue &&
+      continueIntent.inventLogo &&
+      !(continueIntent.assetOps?.length > 0)
+    ) {
       try {
         unpinDesignLoopSelection({
           projectRoot: project.rootPath,
@@ -2227,14 +2521,6 @@ ${message.trim()}`;
           asset: logo?.asset,
           conceptId: logo?.conceptId,
         });
-      } else if (
-        /\b(pin|go with|use|select|choose)\b/i.test(message) &&
-        /\b(logo|mark|\.png|\.svg|\.webp)\b/i.test(message)
-      ) {
-        slog.warn("design-loop", "chat asked to pin logo but no match found", {
-          loopId,
-          messagePreview: message.slice(0, 200),
-        });
       }
     }
     if (
@@ -2258,7 +2544,7 @@ ${message.trim()}`;
       /* catalog best-effort */
     }
 
-    const pinnedLogo =
+    let pinnedLogo =
       getDesignLoopSelections(
         readDesignLoopMeta(project.rootPath, loopId),
       ).find((s) => s.slot === "logo")?.asset ?? null;
@@ -2282,9 +2568,7 @@ ${message.trim()}`;
     // Seed same-project prior design when operator asks to reuse current theming.
     // Sibling SHARED_FROM stays separate; PRIOR_DESIGN.json is the intentional self path.
     let priorDesignImport = readProjectPriorDesignImport(project.rootPath, loopId);
-    const wantsPriorDesign =
-      continueIntent.reuseProjectDesign ||
-      textSignalsReuseProjectDesign(isContinue ? continueText : brief || desc);
+    const wantsPriorDesign = continueIntent.reuseProjectDesign;
     if (wantsPriorDesign && !priorDesignImport) {
       try {
         const prior = pickProjectPriorDesign(project.rootPath, {
@@ -2323,38 +2607,143 @@ ${message.trim()}`;
       workingPreviousHtml = priorDesignImport.mockHtml;
     }
     let assetPatchNotes = "";
-    const wantsIconPack =
-      continueIntent.wantsAssetEdit &&
-      /\bicon\s*pack|favicon|browser\s*pack\b/i.test(message ?? desc);
-    if (
-      isContinue &&
-      continueIntent.wantsAssetEdit &&
-      wantsIconPack &&
-      workingPreviousHtml?.trim()
-    ) {
-      try {
-        const pack = await deriveIconPackFromAsset({
-          projectRoot: project.rootPath,
-          loopId,
-          preferredFilename: pinnedLogo ?? undefined,
-          prefix: `icon-v${version}`,
-        });
-        workingPreviousHtml = patchMockForAssetContinue({
-          previousHtml: workingPreviousHtml,
-          loopId,
-          primaryLogoAsset: pack.sourceFilename || pinnedLogo,
-          iconPackFiles: pack.files,
-        });
-        const redirectNote = pack.redirectedFrom
-          ? ` (source redirected from ${pack.redirectedFrom} → ${pack.sourceFilename})`
-          : "";
-        assetPatchNotes = `Icon pack ${pack.files.length} sizes from ${pack.sourceFilename}${redirectNote}.`;
-      } catch (err) {
-        slog.warn("design-loop", "deterministic icon pack failed; falling through", {
-          loopId,
-          error: err instanceof Error ? err.message : String(err),
-        });
+    // LLM-first: run only assetOps from classified intent (LLM success or
+    // full regex fallback after classify failure). Never re-infer from chat.
+    const assetOps =
+      !continueIntent.inventLogo && continueIntent.assetOps?.length
+        ? continueIntent.assetOps
+        : [];
+    if (isContinue && assetOps.length && workingPreviousHtml?.trim()) {
+      let primaryLogo = pinnedLogo ?? undefined;
+      for (const op of assetOps) {
+        try {
+          if (op === "make_transparent") {
+            const source =
+              primaryLogo ||
+              dominantMockLogoAsset(workingPreviousHtml) ||
+              undefined;
+            if (!source) {
+              slog.warn("design-loop", "make_transparent skipped; no logo asset", {
+                loopId,
+              });
+              continue;
+            }
+            const result = await makeTransparentDesignAsset({
+              projectRoot: project.rootPath,
+              loopId,
+              sourceFilename: source,
+            });
+            const outName = basename(result.relativePath);
+            primaryLogo = outName;
+            pinDesignLoopLogoAsset({
+              projectRoot: project.rootPath,
+              loopId,
+              asset: outName,
+              label: outName.replace(/\.[^.]+$/, ""),
+            });
+            workingPreviousHtml = patchMockForAssetContinue({
+              previousHtml: workingPreviousHtml,
+              loopId,
+              primaryLogoAsset: outName,
+            });
+            const fallbackNote = result.usedCircularFallback
+              ? " (circular fallback)"
+              : "";
+            assetPatchNotes = [
+              assetPatchNotes,
+              `Alpha ${outName} from ${result.sourceFilename}${fallbackNote}.`,
+            ]
+              .filter(Boolean)
+              .join(" ");
+            slog.info("design-loop", "asset recipe make_transparent", {
+              loopId,
+              source: result.sourceFilename,
+              out: outName,
+              usedCircularFallback: result.usedCircularFallback ?? false,
+              keyRgb: result.keyRgb,
+              threshold: result.threshold,
+            });
+          } else if (op === "circular_mask") {
+            const source =
+              primaryLogo ||
+              dominantMockLogoAsset(workingPreviousHtml) ||
+              undefined;
+            if (!source) {
+              slog.warn("design-loop", "circular_mask skipped; no logo asset", {
+                loopId,
+              });
+              continue;
+            }
+            const result = await circularMaskDesignAsset({
+              projectRoot: project.rootPath,
+              loopId,
+              sourceFilename: source,
+            });
+            const outName = basename(result.relativePath);
+            primaryLogo = outName;
+            pinDesignLoopLogoAsset({
+              projectRoot: project.rootPath,
+              loopId,
+              asset: outName,
+              label: outName.replace(/\.[^.]+$/, ""),
+            });
+            workingPreviousHtml = patchMockForAssetContinue({
+              previousHtml: workingPreviousHtml,
+              loopId,
+              primaryLogoAsset: outName,
+            });
+            assetPatchNotes = [
+              assetPatchNotes,
+              `Circular cut-out ${outName} from ${result.sourceFilename}.`,
+            ]
+              .filter(Boolean)
+              .join(" ");
+            slog.info("design-loop", "asset recipe circular_mask", {
+              loopId,
+              source: result.sourceFilename,
+              out: outName,
+            });
+          } else if (op === "derive_icon_pack") {
+            const pack = await deriveIconPackFromAsset({
+              projectRoot: project.rootPath,
+              loopId,
+              preferredFilename: primaryLogo ?? undefined,
+              prefix: `icon-v${version}`,
+            });
+            primaryLogo = pack.sourceFilename || primaryLogo;
+            workingPreviousHtml = patchMockForAssetContinue({
+              previousHtml: workingPreviousHtml,
+              loopId,
+              primaryLogoAsset: pack.sourceFilename || primaryLogo,
+              iconPackFiles: pack.files,
+            });
+            const redirectNote = pack.redirectedFrom
+              ? ` (source redirected from ${pack.redirectedFrom} → ${pack.sourceFilename})`
+              : "";
+            assetPatchNotes = [
+              assetPatchNotes,
+              `Icon pack ${pack.files.length} sizes from ${pack.sourceFilename}${redirectNote}.`,
+            ]
+              .filter(Boolean)
+              .join(" ");
+            slog.info("design-loop", "asset recipe derive_icon_pack", {
+              loopId,
+              source: pack.sourceFilename,
+              sizes: pack.files.length,
+            });
+          }
+        } catch (err) {
+          slog.warn("design-loop", `asset recipe ${op} failed; continuing`, {
+            loopId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
+      // Refresh pin after recipe for later prompt / force-pin.
+      pinnedLogo =
+        getDesignLoopSelections(
+          readDesignLoopMeta(project.rootPath, loopId),
+        ).find((s) => s.slot === "logo")?.asset ?? pinnedLogo;
     }
 
     // Deterministic nav align from live inventory (no agent rewrite).
@@ -2379,11 +2768,11 @@ ${message.trim()}`;
             primaryLogoAsset: pinnedLogo,
           })
         : workingPreviousHtml;
-      return {
+      return finishDesign({
         html: navHtml,
         notes: `${assetPatchNotes} Prior layout/shell preserved.`,
         usedScaffold: false,
-      };
+      });
     }
 
     // Skip agent rewrite when asset-only OR preserve-only (no nav-align left to do).
@@ -2393,7 +2782,10 @@ ${message.trim()}`;
       (continueIntent.scope === "assets_only" ||
         (continueIntent.preserveChrome &&
           continueIntent.wantsAssetEdit &&
-          wantsIconPack &&
+          (continueIntent.assetOps?.length > 0 ||
+            /\bicon\s*pack|favicon|browser\s*pack|alpha|transparent\b/i.test(
+              message ?? desc,
+            )) &&
           !continueIntent.navAlign))
     ) {
       const assetHtml = pinnedLogo
@@ -2403,11 +2795,11 @@ ${message.trim()}`;
             primaryLogoAsset: pinnedLogo,
           })
         : workingPreviousHtml;
-      return {
+      return finishDesign({
         html: assetHtml,
         notes: `Asset-only continue: ${assetPatchNotes || "prior mock preserved"}. Prior layout/nav/shell preserved.`,
         usedScaffold: false,
-      };
+      });
     }
 
     const wantThemeExcerpts =
@@ -2435,36 +2827,49 @@ ${message.trim()}`;
       version: previousHtml ? Math.max(1, version - 1) : version,
       inventLogo: continueIntent.inventLogo,
     });
-    const needsMedia =
-      designLoopNeedsMediaTools(brief, message) || continueIntent.inventLogo;
+    const needsMedia = designLoopNeedsMediaTools(continueIntent);
     const needsEdit =
-      designLoopAskNeedsImageEdit(desc) && !continueIntent.inventLogo;
+      continueIntent.wantsAssetEdit && !continueIntent.inventLogo;
     const modeBlock =
-      isContinue || continueIntent.reuseProjectDesign
+      isContinue ||
+      continueIntent.reuseProjectDesign ||
+      continueIntent.adoptTheme ||
+      continueIntent.adoptChrome ||
+      continueIntent.inventLogo
         ? formatContinueIntentPromptBlock(continueIntent)
         : "";
 
-    // Chat-driven sibling design share: "pull the theme from <registered project>".
-    // Runs on start and continue. Same-project reuse uses PRIOR_DESIGN (above).
-    // Sibling wins for SHARED_FROM only when a resolvable other project is named.
+    // Sibling share: gated by structured adoptTheme / adoptChrome / shareFrom / absolute path.
+    // Resolver may match registered names; intent is never inferred from palette alone.
     const shareText = (isContinue ? message : brief || desc)?.trim() ?? "";
     let siblingShareImported = false;
     if (shareText && !continueIntent.reuseProjectDesign) {
       const mentionsPath = extractSiblingProjectPaths(shareText).length > 0;
       const wantsSharedDesign =
         continueIntent.adoptTheme ||
-        mentionsPath ||
-        (!wantsPriorDesign &&
-          continueIntent.targets.some((t) =>
-            ["palette", "tokens", "typography", "brand"].includes(t),
-          ));
+        continueIntent.adoptChrome ||
+        Boolean(continueIntent.shareFrom?.trim()) ||
+        mentionsPath;
       if (wantsSharedDesign) {
-        const detected = detectShareSourceFromText({
-          targetRoot: project.rootPath,
-          text: shareText,
-          listProjects: input.listProjects,
-          findProjectByRootPath: input.findProjectByRootPath,
-        });
+        const hint = continueIntent.shareFrom?.trim() ?? "";
+        let detected =
+          hint.length > 0
+            ? resolveDesignShareSource({
+                targetRoot: project.rootPath,
+                fromName: hint.startsWith("/") ? undefined : hint,
+                fromRootPath: hint.startsWith("/") ? hint : undefined,
+                listProjects: input.listProjects,
+                findProjectByRootPath: input.findProjectByRootPath,
+              })
+            : null;
+        if (!detected) {
+          detected = detectShareSourceFromText({
+            targetRoot: project.rootPath,
+            text: hint || shareText,
+            listProjects: input.listProjects,
+            findProjectByRootPath: input.findProjectByRootPath,
+          });
+        }
         if (detected) {
           try {
             const share = readShareableDesign(detected);
@@ -2491,9 +2896,14 @@ ${message.trim()}`;
               error: err instanceof Error ? err.message : String(err),
             });
           }
-        } else if (continueIntent.adoptTheme || mentionsPath) {
+        } else if (
+          continueIntent.adoptTheme ||
+          continueIntent.adoptChrome ||
+          mentionsPath
+        ) {
           slog.warn("design-loop", "adopt-theme intent but no resolvable source in message", {
             loopId,
+            shareFrom: hint || undefined,
           });
         }
       }
@@ -2511,6 +2921,7 @@ ${message.trim()}`;
       Boolean(sharedDesignBlock) ||
       Boolean(priorDesignBlock) ||
       continueIntent.adoptTheme ||
+      continueIntent.adoptChrome ||
       continueIntent.reuseProjectDesign;
     siteInventoryBlock = formatLiveSiteInventoryPromptBlock(siteInventory, 6_500, {
       sharedDesignActive,
@@ -2528,49 +2939,169 @@ ${message.trim()}`;
       });
     }
 
-    // Shared design elements (theme-toggle etc.): chat import + prompt block.
-    if (isContinue && message?.trim()) {
-      try {
-        const elBundle = detectElementImportFromText({
-          text: message,
-          targetRoot: project.rootPath,
-          dataDir: input.dataDir ?? this.ctx.dataDir,
-          listProjects: input.listProjects,
-        });
-        if (elBundle) {
-          importDesignElementIntoLoop({
+    // Shared design elements: DependencyIntent (multi + import-all), not agent MCP.
+    // adoptChrome also ensures theme-toggle from shareFrom when resolvable.
+    {
+      const elText = (isContinue ? message : brief || desc)?.trim() ?? "";
+      if (elText || continueIntent.adoptChrome) {
+        try {
+          let depIntent: DependencyIntent | null = null;
+          if (elText) {
+            try {
+              const { endpoint, modelId } =
+                this.ctx.registry.resolveEndpointForRole("classification");
+              depIntent = await classifyDependencyIntentViaLlm({
+                endpoint,
+                modelId,
+                message: elText,
+                timeoutMs: 90_000,
+              });
+            } catch {
+              depIntent = detectDependencyIntentFromText(elText);
+            }
+          }
+          const catalog = buildCrossProjectCatalog({
             targetRoot: project.rootPath,
-            loopId,
-            bundle: elBundle,
-            origin: elBundle.meta.sourceRootPath ? "project" : "registry",
-            sourceName: elBundle.meta.sourceRootPath
-              ? basename(elBundle.meta.sourceRootPath)
-              : "registry",
+            dataDir: input.dataDir ?? this.ctx.dataDir,
+            listProjects: input.listProjects,
           });
-          slog.info("design-loop", "auto-imported shared element from chat", {
+          const toImport = depIntent
+            ? listElementsToAutoImport({
+                intent: depIntent,
+                catalog,
+                message: elText,
+              })
+            : [];
+          if (
+            continueIntent.adoptChrome &&
+            !toImport.some((e) => e.id === "theme-toggle")
+          ) {
+            toImport.push({
+              id: "theme-toggle",
+              fromProject:
+                continueIntent.shareFrom?.trim() ||
+                depIntent?.importAllElementsFrom ||
+                undefined,
+            });
+          }
+          if (
+            continueIntent.adoptChrome &&
+            !toImport.some((e) => e.id === "menubar") &&
+            (depIntent?.importAllElementsFrom ||
+              continueIntent.shareFrom?.trim())
+          ) {
+            toImport.push({
+              id: "menubar",
+              fromProject:
+                continueIntent.shareFrom?.trim() ||
+                depIntent?.importAllElementsFrom ||
+                undefined,
+            });
+          }
+          for (const item of toImport) {
+            const from = item.fromProject?.trim();
+            const elBundle = resolveDesignElement({
+              elementId: item.id,
+              targetRoot: project.rootPath,
+              dataDir: input.dataDir ?? this.ctx.dataDir,
+              listProjects: input.listProjects,
+              origin: from
+                ? from.toLowerCase() === "registry"
+                  ? "registry"
+                  : `project:${from}`
+                : undefined,
+            });
+            if (elBundle) {
+              importDesignElementIntoLoop({
+                targetRoot: project.rootPath,
+                loopId,
+                bundle: elBundle,
+                origin: elBundle.meta.sourceRootPath ? "project" : "registry",
+                sourceName: elBundle.meta.sourceRootPath
+                  ? basename(elBundle.meta.sourceRootPath)
+                  : from || "registry",
+              });
+              slog.info("design-loop", "auto-imported shared element from chat", {
+                loopId,
+                elementId: elBundle.meta.id,
+                version: elBundle.meta.version,
+                reason: depIntent?.importAllElementsFrom
+                  ? "import_all"
+                  : depIntent
+                    ? "dependency_intent"
+                    : "adopt_chrome",
+              });
+            } else {
+              slog.warn(
+                "design-loop",
+                "shared element not found in sibling/registry (extract/publish first)",
+                {
+                  loopId,
+                  elementId: item.id,
+                  from: from || undefined,
+                },
+              );
+            }
+          }
+          // Landing import-all: drop stale dashboard pins so apply/judge aren't poisoned.
+          {
+            const priorHtmlForDash =
+              workingPreviousHtml ?? previousHtml ?? "";
+            const priorHasDashboardEarly =
+              /\b(?:dashboard-layout|dashboard-shell|dashboard-sidebar)\b/i.test(
+                priorHtmlForDash,
+              );
+            if (
+              depIntent?.importAllElementsFrom &&
+              !priorHasDashboardEarly &&
+              !/\bdashboard\b/i.test(elText)
+            ) {
+              const kept = unpinDesignElementsFromLoop({
+                projectRoot: project.rootPath,
+                loopId,
+                elementIds: ["dashboard-shell", "dashboard-sidebar"],
+              });
+              slog.info(
+                "design-loop",
+                "pruned stale dashboard element pins for landing import-all",
+                {
+                  loopId,
+                  remaining: kept.map((e) => e.id),
+                },
+              );
+            }
+          }
+        } catch (err) {
+          slog.warn("design-loop", "element auto-import failed", {
             loopId,
-            elementId: elBundle.meta.id,
-            version: elBundle.meta.version,
+            error: err instanceof Error ? err.message : String(err),
           });
         }
-      } catch (err) {
-        slog.warn("design-loop", "element auto-import failed", {
-          loopId,
-          error: err instanceof Error ? err.message : String(err),
-        });
       }
     }
     const loopElements = readDesignLoopElements(project.rootPath, loopId);
-    const elementsBlock = formatDesignElementsPromptBlock(loopElements, {
+    // Prompt: prefer landing chrome snippets; omit dashboard bodies unless present in prior mock.
+    const priorHasDashboard = /\b(?:dashboard-layout|dashboard-shell|dashboard-sidebar)\b/i.test(
+      workingPreviousHtml ?? previousHtml ?? "",
+    );
+    const elementsForPrompt = priorHasDashboard
+      ? loopElements
+      : loopElements.filter((e) => !/^dashboard-/i.test(e.id));
+    const elementsBlock = formatDesignElementsPromptBlock(elementsForPrompt, {
       projectRoot: project.rootPath,
       loopId,
     });
 
+    const inventCount = continueIntent.inventLogo
+      ? Math.max(1, Math.min(12, continueIntent.inventLogoCount ?? 1))
+      : 1;
     const htmlReturnRule =
       continueIntent.scope === "assets_only" || continueIntent.scope === "nav_align"
         ? "Prefer MOCK_ASSETS_ONLY (no full HTML). If you return HTML, keep prior mock; only asset src / icon-pack / LIVE SITE nav updates."
-        : continueIntent.inventLogo
-          ? "Return a complete HTML document based on the prior mock — invent a NEW logo via generate_image (inventNew=true) + pin_logo; do not re-embed the superseded pin. Nav must match LIVE SITE."
+        : continueIntent.inventLogo && inventCount > 1
+          ? `Return a complete HTML document based on the prior mock — call generate_image (inventNew=true) exactly ${inventCount} times with distinct styles/filenames; embed a logo-card / Concept grid of all ${inventCount} variants; do NOT pin_logo. Nav must match LIVE SITE.`
+          : continueIntent.inventLogo
+            ? "Return a complete HTML document based on the prior mock — invent a NEW logo via generate_image (inventNew=true) + pin_logo; do not re-embed the superseded pin. Nav must match LIVE SITE."
           : continueIntent.scope === "full_revise"
             ? "Return a short rationale (1–3 sentences) then a complete self-contained HTML document in a ```html fence. Nav must match LIVE SITE inventory."
             : "Return a complete HTML document based on the prior mock — preserve hero, tokens, shell, and pinned logos; change only requested sections/targets. Nav must match LIVE SITE.";
@@ -2623,7 +3154,9 @@ ${modeBlock ? `${modeBlock}\n` : ""}${conceptualModelBlock}
 
 ${needsEdit
   ? "Operator asked for an IMAGE EDIT (alpha/icon pack/resize). Call make_transparent / derive_icon_pack / resize_image — do NOT generate_image. Prefer pinned / true RGBA sources."
-  : continueIntent.inventLogo
+  : continueIntent.inventLogo && inventCount > 1
+    ? `Operator asked for ${inventCount} NEW logo variants. Call generate_image with inventNew=true exactly ${inventCount} times (distinct styles/filenames), embed a logo-card / Concept grid of all of them, and do NOT pin_logo — operator will choose later.`
+    : continueIntent.inventLogo
     ? "Operator asked for a NEW logo. Call generate_image with inventNew=true, embed the new relativePath, then pin_logo that filename. Do not reuse the superseded pin."
     : continueIntent.reuseProjectDesign
       ? "Operator asked to reuse this project's existing theming. Prefer PRIOR DESIGN tokens/logos and revise from the prior mock — do not invent a new brand system."
@@ -2656,8 +3189,13 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         project.id,
         `design-loop-${loopId}-v${version}`,
         {
-          maxSteps:
-            continueIntent.scope === "assets_only" ? 8 : needsMedia ? 12 : 4,
+          maxSteps: continueIntent.inventLogo
+            ? Math.min(28, 8 + inventCount * 2)
+            : continueIntent.scope === "assets_only"
+              ? 8
+              : needsMedia
+                ? 12
+                : 4,
           timeoutMs: 300_000,
           onProgress: input.onProgress,
           abortSignal: input.abortSignal,
@@ -2673,11 +3211,13 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         loopId,
         error: detail,
       });
-      return resolveDesignLoopGenerateFallback({
-        brief,
-        previousHtml: workingPreviousHtml ?? previousHtml,
-        errorDetail: detail,
-        scaffold: scaffoldDesignLoopMock,
+      return finishDesign({
+        ...resolveDesignLoopGenerateFallback({
+          brief,
+          previousHtml: workingPreviousHtml ?? previousHtml,
+          errorDetail: detail,
+          scaffold: scaffoldDesignLoopMock,
+        }),
       });
     }
 
@@ -2692,7 +3232,7 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         loopId,
         primaryLogoAsset: pinnedLogo,
       });
-      return {
+      return finishDesign({
         html,
         notes:
           [
@@ -2708,7 +3248,7 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
             .slice(0, 1_500) ||
           `Asset-only continue: prior mock preserved (v${version})`,
         usedScaffold: false,
-      };
+      });
     }
 
     if (!extracted) {
@@ -2719,15 +3259,131 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         scaffold: scaffoldDesignLoopMock,
       });
       usedScaffold = fallback.usedScaffold;
-      return {
+      return finishDesign({
         ...fallback,
         notes:
           fallback.notes ||
           (usedScaffold ? "Scaffold mock (no HTML in agent output)" : `v${version}`),
-      };
+      });
     }
 
     let html = extracted;
+    let softDriftNotes = "";
+
+    // Apply pinned SHARED ELEMENTS before drift so menubar/toggle cleanup
+    // is scored, not the agent's messy intermediate HTML.
+    let elementHonorNotes = "";
+    {
+      const pinnedEls = readDesignLoopElements(project.rootPath, loopId);
+      if (pinnedEls.length && html?.trim()) {
+        const logoSrc = pinnedLogo
+          ? `.slopcontrol/design-loops/${loopId}/assets/${pinnedLogo}`
+          : null;
+        const before = html;
+        html = applyPinnedDesignElementsToMock({
+          html,
+          elements: pinnedEls,
+          projectRoot: project.rootPath,
+          pinnedLogoSrc: logoSrc,
+          brandName: project.name,
+        });
+        if (html !== before) {
+          slog.info("design-loop", "applied pinned design elements to mock", {
+            loopId,
+            elementIds: pinnedEls.map((e) => e.id),
+          });
+        }
+
+        // LLM honor judge (semantic). Never discard the applied mock on regex.
+        try {
+          const { endpoint, modelId } =
+            this.ctx.registry.resolveEndpointForRole("classification");
+          let menubarSimilarity: number | null = null;
+          let embedSignal: "ok" | "skipped" = "skipped";
+          const menubarRef = pinnedEls.find((e) => e.id === "menubar");
+          if (menubarRef?.mockPath) {
+            try {
+              const pinnedMenubarAbs = join(
+                project.rootPath,
+                menubarRef.mockPath,
+              );
+              if (existsSync(pinnedMenubarAbs)) {
+                const pinnedBody = extractElementBodyHtml(
+                  readFileSync(pinnedMenubarAbs, "utf-8"),
+                );
+                const mockHeader =
+                  html.match(
+                    /<header\b[^>]*>[\s\S]{0,4000}?<\/header>/i,
+                  )?.[0] ?? "";
+                const sim = await tryMenubarEmbedSimilarity({
+                  endpoint,
+                  modelId,
+                  pinnedMenubarHtml: pinnedBody,
+                  mockHeaderHtml: mockHeader,
+                });
+                if (typeof sim === "number" && Number.isFinite(sim)) {
+                  menubarSimilarity = sim;
+                  embedSignal = "ok";
+                }
+              }
+            } catch {
+              embedSignal = "skipped";
+            }
+          }
+          const honor = await classifyElementHonorViaLlm({
+            endpoint,
+            modelId,
+            pinnedElementIds: pinnedEls.map((e) => e.id),
+            mockSnippets: buildElementHonorSnippets(html),
+            operatorHints: [
+              `adoptChrome=${continueIntent.adoptChrome}`,
+              `scope=${continueIntent.scope}`,
+              message?.slice(0, 400) ?? "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            menubarSimilarity:
+              menubarSimilarity == null ? undefined : menubarSimilarity,
+            timeoutMs: 90_000,
+          });
+          slog.info("design-loop", "element honor judge", {
+            loopId,
+            honors: honor.honorsPinnedElements,
+            competing: honor.competingThemeControl,
+            confidence: honor.confidence,
+            menubarSimilarity,
+            embedSignal,
+          });
+          if (
+            honor.competingThemeControl &&
+            honor.confidence === "high"
+          ) {
+            const cleaned = stripExtraThemeTogglesOutsideMenubar(html);
+            if (cleaned !== html) {
+              html = cleaned;
+              slog.info(
+                "design-loop",
+                "stripped extra theme toggles outside menubar after honor judge",
+                { loopId },
+              );
+            }
+          }
+          elementHonorNotes = [
+            `Element honor: honors=${honor.honorsPinnedElements} competing=${honor.competingThemeControl} missingMenubar=${honor.missingMenubar} missingToggle=${honor.missingThemeToggle} confidence=${honor.confidence}.`,
+            honor.notes.trim(),
+          ]
+            .filter(Boolean)
+            .join(" ")
+            .slice(0, 800);
+        } catch (err) {
+          slog.warn("design-loop", "element honor judge skipped", {
+            loopId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
     if (isContinue && baseHtml && continueIntent.scope !== "full_revise") {
       const drift = detectMockDrift({
         previousHtml: baseHtml,
@@ -2736,12 +3392,15 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         pinnedLogoAsset: pinnedLogo,
         pinnedElements: readDesignLoopElements(project.rootPath, loopId),
       });
-      if (drift.length) {
-        const intentSummary = `intent={scope:${continueIntent.scope}, adoptTheme:${continueIntent.adoptTheme}, inventLogo:${continueIntent.inventLogo}, preserveChrome:${continueIntent.preserveChrome}, targets:[${continueIntent.targets.join(",")}]}`;
+      const hard = hardMockDriftIssues(drift);
+      const soft = softMockDriftIssues(drift);
+      const intentSummary = `intent={scope:${continueIntent.scope}, adoptTheme:${continueIntent.adoptTheme}, inventLogo:${continueIntent.inventLogo}, preserveChrome:${continueIntent.preserveChrome}, targets:[${continueIntent.targets.join(",")}]}`;
+      if (hard.length) {
         slog.warn("design-loop", "rejecting drifted mock; keeping prior + asset patch", {
           loopId,
           version,
-          issues: drift.map((d) => d.code),
+          issues: hard.map((d) => d.code),
+          softIssues: soft.map((d) => d.code),
           intent: {
             scope: continueIntent.scope,
             adoptTheme: continueIntent.adoptTheme,
@@ -2755,16 +3414,53 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
           loopId,
           primaryLogoAsset: pinnedLogo,
         });
+        {
+          const pinnedEls = readDesignLoopElements(project.rootPath, loopId);
+          if (pinnedEls.length) {
+            const logoSrc = pinnedLogo
+              ? `.slopcontrol/design-loops/${loopId}/assets/${pinnedLogo}`
+              : null;
+            html = applyPinnedDesignElementsToMock({
+              html,
+              elements: pinnedEls,
+              projectRoot: project.rootPath,
+              pinnedLogoSrc: logoSrc,
+              brandName: project.name,
+            });
+          }
+        }
         const notes = [
           assetPatchNotes,
-          `Rejected layout/logo/element drift (${drift.map((d) => d.code).join(", ")}); kept prior mock.`,
+          elementHonorNotes,
+          `Rejected layout/logo drift (${hard.map((d) => d.code).join(", ")}); kept prior mock.`,
           intentSummary,
-          ...drift.map((d) => d.detail),
+          ...hard.map((d) => d.detail),
         ]
           .filter(Boolean)
           .join(" ")
           .slice(0, 1_500);
-        return { html, notes, usedScaffold: false };
+        return finishDesign({ html, notes, usedScaffold: false });
+      }
+      if (soft.length) {
+        slog.warn("design-loop", "soft drift warning; keeping agent mock", {
+          loopId,
+          version,
+          issues: soft.map((d) => d.code),
+          intent: {
+            scope: continueIntent.scope,
+            targets: continueIntent.targets,
+            preserveChrome: continueIntent.preserveChrome,
+          },
+        });
+        softDriftNotes = [
+          assetPatchNotes,
+          `Soft drift warning (${soft.map((d) => d.code).join(", ")}); kept agent mock.`,
+          intentSummary,
+          ...soft.map((d) => d.detail),
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .slice(0, 1_500);
       }
     }
 
@@ -2784,7 +3480,11 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
           asset: pinnedLogo,
         });
       }
-    } else if (continueIntent.inventLogo && html?.trim()) {
+    } else if (
+      continueIntent.inventLogo &&
+      inventCount <= 1 &&
+      html?.trim()
+    ) {
       const newLogo = dominantMockLogoAsset(html);
       if (newLogo && newLogo !== pinnedLogo) {
         try {
@@ -2807,18 +3507,24 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
       }
     }
 
-    const notes = raw
+    const notes = composeDesignLoopVersionNotes({
+      elementHonorNotes,
+      softDriftNotes,
+      agentRaw: raw,
+      version,
+    });
+    const chatProse = raw
       .replace(/```[\s\S]*?```/g, "")
-      .replace(/<!DOCTYPE[\s\S]*/i, "")
-      .replace(/MOCK_HTML_COMPLETE/gi, "")
       .replace(/MOCK_ASSETS_ONLY/gi, "")
+      .replace(/MOCK_HTML_COMPLETE/gi, "")
       .trim()
-      .slice(0, 1_500);
-    return {
+      .slice(0, 2_000);
+    return finishDesign({
       html,
-      notes: notes || `v${version}`,
+      notes,
       usedScaffold: false,
-    };
+      reply: chatProse || notes,
+    });
   }
 
   /**
@@ -2828,17 +3534,29 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
     plan: string;
     notes: string;
     usedScaffold: boolean;
+    reply: string;
   }> {
     const { project, loopId, brief, message, previousPlan, version } = input;
     ensureSlopcontrolDir(project.rootPath);
     const isContinue = version > 1 || Boolean(previousPlan?.trim());
     const desc = [brief, message ?? ""].filter(Boolean).join("\n");
+    const finishPlan = (opts: {
+      plan: string;
+      notes: string;
+      usedScaffold: boolean;
+      reply?: string;
+    }) => ({
+      plan: opts.plan,
+      notes: opts.notes,
+      usedScaffold: opts.usedScaffold,
+      reply:
+        (opts.reply ?? opts.notes).trim() || `Plan loop v${version} updated.`,
+    });
 
     let continueIntent: PlanContinueIntent = PLAN_CONTINUE_INTENT_DEFAULT;
     if (isContinue) {
-      const fallback = normalizePlanContinueIntent(
+      const fallback = normalizePlanContinueIntentStructured(
         fallbackPlanContinueIntentFromText(message?.trim() || desc),
-        message?.trim() || desc,
       );
       try {
         const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
@@ -2849,7 +3567,7 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
           modelId,
           message: message?.trim() || desc,
           brief,
-          timeoutMs: 15_000,
+          timeoutMs: 90_000,
         });
       } catch (err) {
         slog.warn("plan-loop", "continue intent LLM failed; regex fallback", {
@@ -3005,11 +3723,13 @@ Return a short rationale then the full plan in a markdown fence. End with PLAN_C
         loopId,
         error: detail,
       });
-      return resolvePlanLoopGenerateFallback({
-        brief,
-        previousPlan,
-        errorDetail: detail,
-        scope,
+      return finishPlan({
+        ...resolvePlanLoopGenerateFallback({
+          brief,
+          previousPlan,
+          errorDetail: detail,
+          scope,
+        }),
       });
     }
 
@@ -3019,11 +3739,11 @@ Return a short rationale then the full plan in a markdown fence. End with PLAN_C
         .replace(/PLAN_COMPLETE/gi, "")
         .trim()
         .slice(0, 1_500);
-      return {
+      return finishPlan({
         plan: previousPlan.trim(),
         notes: notes || "Clarify-only continue; prior plan preserved.",
         usedScaffold: false,
-      };
+      });
     }
 
     let plan = extractPlanDocument(raw);
@@ -3055,15 +3775,15 @@ End with PLAN_COMPLETE.`;
     }
 
     if (!plan?.trim() && previousPlan?.trim()) {
-      return {
+      return finishPlan({
         plan: previousPlan.trim(),
         notes:
           "Agent returned empty plan; prior kept. Call plan_loop_retry.",
         usedScaffold: true,
-      };
+      });
     }
     if (!plan?.trim()) {
-      return {
+      return finishPlan({
         plan: failurePlanDocument({
           brief,
           errorDetail: "empty agent plan after repair",
@@ -3071,7 +3791,7 @@ End with PLAN_COMPLETE.`;
         notes:
           "Failure plan — empty agent output after repair. Call plan_loop_retry.",
         usedScaffold: true,
-      };
+      });
     }
 
     let validation = validatePlanDocument(plan);
@@ -3100,15 +3820,15 @@ End with PLAN_COMPLETE.`;
     if (!validation.ok && previousPlan?.trim()) {
       const priorOk = validatePlanDocument(previousPlan);
       if (priorOk.ok) {
-        return {
+        return finishPlan({
           plan: previousPlan.trim(),
           notes: `Rejected incomplete plan (missing: ${validation.missing.join(", ") || "—"}; empty: ${validation.empty.join(", ") || "—"}); kept prior.`,
           usedScaffold: true,
-        };
+        });
       }
     }
     if (!validation.ok && !previousPlan?.trim()) {
-      return {
+      return finishPlan({
         plan: scaffoldPlanDocument({
           brief,
           scope,
@@ -3116,27 +3836,23 @@ End with PLAN_COMPLETE.`;
         }),
         notes: `Scaffold — incomplete plan sections`,
         usedScaffold: true,
-      };
+      });
     }
 
-    const notes = [
-      mergeNote,
-      raw
-        .replace(/```[\s\S]*?```/g, "")
-        .replace(/^#\s+Plan[\s\S]*/im, "")
-        .replace(/PLAN_COMPLETE/gi, "")
-        .trim()
-        .slice(0, 1_500),
-    ]
-      .filter(Boolean)
-      .join(" ");
+    const chatProse = raw
+      .replace(/```[\s\S]*?```/g, "")
+      .replace(/^#\s+Plan[\s\S]*/im, "")
+      .replace(/PLAN_COMPLETE/gi, "")
+      .trim()
+      .slice(0, 2_000);
+    const notes = [mergeNote, chatProse].filter(Boolean).join(" ");
 
-    return {
+    return finishPlan({
       plan,
       notes: notes || `v${version}`,
-      // Merge fills missing H2s but keeps the new Goal/scope — not a scaffold keep-prior.
       usedScaffold: false,
-    };
+      reply: chatProse || notes || `Plan loop v${version} updated.`,
+    });
   }
 
   /**
@@ -3253,6 +3969,7 @@ ${message.trim()}`;
         onProgress: input.onProgress,
         abortSignal: input.abortSignal,
         synthesizeIfNarration: true,
+        narrationJudgeFn: tryBindNarrationJudge(this.ctx.registry),
         statusLabel: "agent started",
       },
     );
@@ -3366,8 +4083,7 @@ Form / engagement honesty (Change Intent has an interaction contract — mandato
 Research date (authoritative): ${researchDate} — put \`Date: ${researchDate}\` near the top of RESEARCH.md.
 `;
     const brandResearchNote =
-      isBrandThemingAsk(`${intent.title}\n${intent.goal}\n${description}`) &&
-      !isThemeWiringAsk(`${intent.title}\n${intent.goal}\n${description}`)
+      changeIntentIsBrandTheming(intent)
       ? `
 Brand / theming research (mandatory when Change Intent is brand/theming):
 - Prefer sibling **consumed** logo paths (Header / shell \`img\` / \`next/image\` → usually \`public/images/logo.svg\`).
@@ -3420,13 +4136,31 @@ CRITICAL theme contract (theme_modes):
 - ThemeToggle (or equivalent) must set documentElement data-theme — not only a .light class that never receives tokens.
 - Body/chrome must use var(--background)/var(--foreground) (or equivalent semantic vars), not hard-coded --color-dark-* that ignore the toggle.
 - Cite DESIGN_PACK.theme.requirements and lightTokensCss when present.
-- **Mounted ≠ visible:** playground (or app) CSS that consumes package shell components must \`@source "../src/**/*.{ts,tsx}"\` (or equivalent) **or** prove built CSS contains ThemeToggle color/size utilities (\`text-text-secondary\`, \`h-9\`, …). Import-order alone (\`@import "tailwindcss"\` first) is **insufficient**.
 `
         : "";
+    const claimProofResearchNote = (() => {
+      const designShellOrTheme = Boolean(
+        designAcceptance?.features?.some(
+          (f) =>
+            f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
+        ) ||
+          phasePackForResearch?.inScope?.includes("theme_modes") ||
+          phasePackForResearch?.inScope?.includes("applied_shell"),
+      );
+      const askSignalsShellTheme =
+        changeIntentIsBrandTheming(intent) ||
+        changeIntentIsThemeWiringOnly(intent);
+      if (!designShellOrTheme && !askSignalsShellTheme) return "";
+      return `\n${formatClaimProofChecksGuidance({
+        shellNotes: phasePackForResearch?.shell,
+        designShellOrTheme,
+      })}\n`;
+    })();
     const antiAuditThemeNote = formatAntiAuditThemeDeliveryNote({
       description: phase.description,
       projectRoot: project.rootPath,
       phaseId: phase.id,
+      requestsMissingThemeControl: intent.requestsMissingThemeControl,
       designShellOrThemeAccepted: designAcceptance?.features?.some(
         (f) =>
           f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
@@ -3462,10 +4196,10 @@ ${acceptanceBlock}
 - If applied_shell is in scope, plan portal/dashboard UI fidelity to the accepted mock frames — not palette-only.
 - Obey DESIGN_PACK.json logos/tokens/contentPillars/scope/theme/elements; do not invent a competing mark or control.
 - If conceptual model scope.kind is component/flow, File Changes must stay within focusPaths/focus — do not expand to full site shell.
-${themeResearchNote}${elementsResearchNote}${crossDepResearchPack ? `\n${crossDepResearchPack}\n` : ""}${designPackBlock ? `\n${designPackBlock}\n` : ""}${boundMockBlock ? `\n${boundMockBlock}\n` : ""}
+${themeResearchNote}${claimProofResearchNote}${elementsResearchNote}${crossDepResearchPack ? `\n${crossDepResearchPack}\n` : ""}${designPackBlock ? `\n${designPackBlock}\n` : ""}${boundMockBlock ? `\n${boundMockBlock}\n` : ""}
 `
       : [designPackBlock, boundMockBlock, crossDepResearchPack].filter(Boolean).join("\n\n")
-        ? `\n${themeResearchNote}${elementsResearchNote}${[crossDepResearchPack, designPackBlock, boundMockBlock].filter(Boolean).join("\n\n")}\n`
+        ? `\n${themeResearchNote}${claimProofResearchNote}${elementsResearchNote}${[crossDepResearchPack, designPackBlock, boundMockBlock].filter(Boolean).join("\n\n")}\n`
         : crossDepResearchPack
           ? `\n${crossDepResearchPack}\n`
           : "";
@@ -3700,9 +4434,8 @@ Phase id: ${phase.id}`;
     );
     const intentBlock = formatChangeIntentPromptBlock(intent);
     const adjacentPack = buildAdjacentPhaseContextPack(project.rootPath, 5);
-    const intentDesignText = `${intent.title}\n${intent.goal}\n${phase.description}`;
-    const brandDesignAsk =
-      isBrandThemingAsk(intentDesignText) && !isThemeWiringAsk(intentDesignText);
+    const brandDesignAsk = changeIntentIsBrandTheming(intent);
+    const themeWiringOnly = changeIntentIsThemeWiringOnly(intent);
     const designRoutingNote =
       intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
         ? brandDesignAsk
@@ -3727,7 +4460,7 @@ Design routing (brand/theming):
 - Decide shell scope explicitly; do not freeze marketing/portal shells without stating palette-only.
 - Automated Checks: no design-fallback SVGs in public/brand/; wordmarks must not glue words (e.g. JamLight); shells must reference the new lockup.
 `
-          : isThemeWiringAsk(intentDesignText)
+          : themeWiringOnly
             ? `
 Design routing (theme toggle / data-theme wiring — not a brand identity pass):
 - Near the top of PHASE.md include \`Requires design pass: no\`.
@@ -3759,16 +4492,34 @@ ${draftPlanBlock ? `\n${draftPlanBlock}\n` : ""}
       : draftPlanBlock
         ? `\n${draftPlanBlock}\n`
         : "";
-    const draftThemeNote = packHasThemeModes(draftPhasePack)
-      ? `
-CRITICAL theme_modes: Plan File Changes for html[data-theme] light remaps of semantic tokens; ThemeToggle must set data-theme; body/chrome on var(--background)/var(--foreground) — not hard-coded --color-dark-* alone.
-Mounted ≠ visible: Success Criteria must claim the day/night control is **visible**; Automated Checks need mount greps **plus** \`@source\` covering package src **or** vite build + grep built CSS for ThemeToggle utilities — not import-order-only.
-`
-      : "";
+    const draftThemeNote = (() => {
+      const designShellOrTheme = Boolean(
+        draftAcceptance?.features?.some(
+          (f) =>
+            f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
+        ) ||
+          draftPhasePack?.inScope?.includes("theme_modes") ||
+          draftPhasePack?.inScope?.includes("applied_shell"),
+      );
+      const themeModes = packHasThemeModes(draftPhasePack);
+      if (!themeModes && !designShellOrTheme) return "";
+      const parts: string[] = [];
+      if (themeModes) {
+        parts.push(`CRITICAL theme_modes: Plan File Changes for html[data-theme] light remaps of semantic tokens; ThemeToggle must set data-theme; body/chrome on var(--background)/var(--foreground) — not hard-coded --color-dark-* alone.`);
+      }
+      parts.push(
+        formatClaimProofChecksGuidance({
+          shellNotes: draftPhasePack?.shell,
+          designShellOrTheme: themeModes || designShellOrTheme,
+        }),
+      );
+      return `\n${parts.join("\n")}\n`;
+    })();
     const draftAntiAuditThemeNote = formatAntiAuditThemeDeliveryNote({
       description: phase.description,
       projectRoot: project.rootPath,
       phaseId: phase.id,
+      requestsMissingThemeControl: intent.requestsMissingThemeControl,
       designShellOrThemeAccepted: draftAcceptance?.features?.some(
         (f) =>
           f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
@@ -3880,6 +4631,7 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         research,
         testCommand: config.testCommand,
         intent,
+        projectRoot: project.rootPath,
       });
       log(project, run, reason);
       writePhaseDoc(project.rootPath, phase.id, scaffolded);
@@ -4132,6 +4884,16 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       projectRoot: project.rootPath,
       phaseId: phase.id,
     });
+    const claimRefined = await refineClaimProofGateIssues(
+      this.ctx.registry,
+      phaseDoc,
+      gate.issues,
+      { projectRoot: project.rootPath, phaseId: phase.id },
+    );
+    for (const warning of claimRefined.warnings) {
+      log(project, run, `claim-vs-proof: ${warning}`);
+    }
+    const gateIssues = claimRefined.issues;
     const align = phaseDocAlignsWithResearch(
       phaseDoc,
       research,
@@ -4142,15 +4904,20 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       phaseDoc,
       projectRoot: project.rootPath,
       phaseId: phase.id,
+      requestsMissingThemeControl: intent.requestsMissingThemeControl,
+      designShellOrThemeAccepted: draftAcceptance?.features?.some(
+        (f) =>
+          f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
+      ),
     });
-    if (!gate.ok) {
+    if (gateIssues.length > 0) {
       log(
         project,
         run,
-        `PHASE.md still invalid after scaffold:\n${gate.issues.join("\n")}`,
+        `PHASE.md still invalid after scaffold:\n${gateIssues.join("\n")}`,
       );
       if (researchLooksSolid(research)) {
-        return recoverableDraftFail(gate.issues.join("; "), {
+        return recoverableDraftFail(gateIssues.join("; "), {
           title: "Draft rejected: PHASE structure",
           kind: "phase-structure",
         });
@@ -4162,7 +4929,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         buildPlanningFailureDiagnosis({
           stage: "draft",
           title: "Draft blocked: PHASE structure",
-          detail: gate.issues.join("; "),
+          detail: gateIssues.join("; "),
           phaseId: phase.id,
           runId: run.id,
           kind: "phase-structure-blocked",
@@ -4278,11 +5045,20 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         projectRoot: project.rootPath,
         phaseId: phase.id,
       });
-      if (!gate.ok) {
+      const claimRefined = await refineClaimProofGateIssues(
+        this.ctx.registry,
+        phaseDoc,
+        gate.issues,
+        { projectRoot: project.rootPath, phaseId: phase.id },
+      );
+      for (const warning of claimRefined.warnings) {
+        log(project, run, `claim-vs-proof: ${warning}`);
+      }
+      if (claimRefined.issues.length > 0) {
         log(
           project,
           run,
-          `--- Cannot approve: PHASE.md failed validation ---\n${gate.issues.map((i) => `- ${i}`).join("\n")}`,
+          `--- Cannot approve: PHASE.md failed validation ---\n${claimRefined.issues.map((i) => `- ${i}`).join("\n")}`,
         );
         writePhaseStatus(project.rootPath, phase.id, "in_review");
         return "in_review";
@@ -4308,6 +5084,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         phaseDoc,
         projectRoot: project.rootPath,
         phaseId: phase.id,
+        requestsMissingThemeControl: intent.requestsMissingThemeControl,
       });
       if (!antiAudit.ok) {
         log(
@@ -4346,9 +5123,8 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       { registry: this.ctx.registry },
     );
     const intentBlock = formatChangeIntentPromptBlock(intent);
-    const reviseDesignText = `${intent.title}\n${intent.goal}\n${phase.description}`;
-    const brandAsk =
-      isBrandThemingAsk(reviseDesignText) && !isThemeWiringAsk(reviseDesignText);
+    const brandAsk = changeIntentIsBrandTheming(intent);
+    const themeWiringOnly = changeIntentIsThemeWiringOnly(intent);
     const designRoutingNote =
       intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
         ? brandAsk
@@ -4369,7 +5145,7 @@ Design routing (brand/theming):
 - Keep \`Requires design pass: yes\` and ## Brand / ## Assets.
 - Automated Checks must reject design-fallback SVGs under public/brand/.
 `
-          : isThemeWiringAsk(reviseDesignText)
+          : themeWiringOnly
             ? `
 Design routing (theme toggle / data-theme wiring — not a brand identity pass):
 - Keep or add \`Requires design pass: no\` near the top of PHASE.md.
@@ -5435,6 +6211,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         let checks = await runSuccessChecks(project, phaseDoc, worktree.path, {
           mode: autoMerge ? "build" : "full",
           phaseId: phase.id,
+          registry: this.ctx.registry,
         });
         if (!checks.ok && isExit127CommandNotFoundFailure(checks)) {
           log(
@@ -5446,6 +6223,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             mode: autoMerge ? "build" : "full",
             forceDepsInstall: true,
             phaseId: phase.id,
+            registry: this.ctx.registry,
           });
           if (checks.ok) {
             log(
@@ -5669,7 +6447,12 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                 project,
                 phaseDoc,
                 project.rootPath,
-                { mode: "verify", forceDepsInstall: true, phaseId: phase.id },
+                {
+                  mode: "verify",
+                  forceDepsInstall: true,
+                  phaseId: phase.id,
+                  registry: this.ctx.registry,
+                },
               );
               let rootVerify = rootChecks;
               if (!rootVerify.ok && isExit127CommandNotFoundFailure(rootVerify)) {
@@ -5682,7 +6465,12 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                   project,
                   phaseDoc,
                   project.rootPath,
-                  { mode: "verify", forceDepsInstall: true, phaseId: phase.id },
+                  {
+                    mode: "verify",
+                    forceDepsInstall: true,
+                    phaseId: phase.id,
+                    registry: this.ctx.registry,
+                  },
                 );
               }
               persistCheckOutput(
@@ -5865,6 +6653,32 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             "complete",
             phase.dependsOn ?? [],
           );
+          if (config.componentLibrary) {
+            const publish =
+              this.ctx.publishComponentLibrary ??
+              defaultPublishComponentLibrary;
+            try {
+              const outcome = await publish({
+                projectId: project.id,
+                projectRoot: project.rootPath,
+              });
+              log(
+                project,
+                run,
+                outcome.ok
+                  ? `--- Component library auto-publish: ${outcome.summary} ---`
+                  : `--- Component library auto-publish failed (phase still complete): ${outcome.summary} ---`,
+              );
+            } catch (error) {
+              log(
+                project,
+                run,
+                `--- Component library auto-publish failed (phase still complete): ${
+                  error instanceof Error ? error.message : String(error)
+                } ---`,
+              );
+            }
+          }
           return finishDevelop("complete", {
             worktreePath:
               autoMerge && config.removeWorktreeOnComplete !== false
@@ -5892,7 +6706,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         );
 
         const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
-        const diagnosis = buildFailureDiagnosis({
+        const diagnosis = await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
           output: checks.summary || checks.output,
           firstFailure: checks.firstFailure,
           failingStepId: verifySteps?.firstFailure?.id,
@@ -6291,6 +7105,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
     let checks = await runSuccessChecks(project, phaseDoc, worktree.path, {
       mode: "full",
       phaseId: phase.id,
+      registry: this.ctx.registry,
     });
     if (!checks.ok && isExit127CommandNotFoundFailure(checks)) {
       log(project, run, "--- Auto deps-install after exit 127 (retry_verify) ---");
@@ -6298,6 +7113,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         mode: "full",
         forceDepsInstall: true,
         phaseId: phase.id,
+        registry: this.ctx.registry,
       });
     }
 
@@ -6330,7 +7146,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
       };
     }
 
-    const diagnosis = buildFailureDiagnosis({
+    const diagnosis = await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
       output: checks.summary || checks.output,
       firstFailure: checks.firstFailure,
       failingStepId: verifySteps?.firstFailure?.id,

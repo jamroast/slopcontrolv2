@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  classifyDesignLoopContinueAsk,
+  composeDesignLoopVersionNotes,
   detectMockDrift,
   dominantMockLogoAsset,
+  hardMockDriftIssues,
   patchMockForAssetContinue,
+  sanitizeDesignLoopAgentNotes,
+  softMockDriftIssues,
 } from "./design-loop-continue.js";
 import {
   ContinueIntentSchema,
@@ -12,37 +15,6 @@ import {
 } from "./continue-intent.js";
 
 describe("design-loop-continue", () => {
-  it("classifies icon pack ask as asset_only", () => {
-    const m = classifyDesignLoopContinueAsk(
-      "Please regenerate the icon pack now that the alpha channel is correct",
-    );
-    assert.equal(m.kind, "asset_only");
-    assert.equal(m.assetEdit, true);
-  });
-
-  it("does not treat 'do not change hero' as a landing section ask", () => {
-    const m = classifyDesignLoopContinueAsk(
-      "Keep the v7 layout and copy. Derive icon pack from ember-monogram-alpha.png only. Do not change hero or shell.",
-    );
-    assert.equal(m.kind, "asset_only");
-    assert.equal(m.preserveLayout, true);
-    assert.deepEqual(m.sections, []);
-  });
-
-  it("classifies icon pack + tasting room as section_touch", () => {
-    const m = classifyDesignLoopContinueAsk(
-      "Please regenerate the icon pack. Also investigate the tasting room styling",
-    );
-    assert.equal(m.kind, "section_touch");
-    assert.ok(m.sections.includes("tasting-room"));
-    assert.equal(m.assetEdit, true);
-  });
-
-  it("classifies redesign as full_revise", () => {
-    const m = classifyDesignLoopContinueAsk("redesign the whole landing from scratch");
-    assert.equal(m.kind, "full_revise");
-  });
-
   it("dominantMockLogoAsset prefers mark over icon tiles", () => {
     const html = `
 <img src=".slopcontrol/design-loops/x/assets/ember-monogram-alpha.png">
@@ -68,34 +40,21 @@ describe("design-loop-continue", () => {
     const issues = detectMockDrift({
       previousHtml: prev,
       nextHtml: next,
-      mode: {
-        kind: "asset_only",
-        assetEdit: true,
-        sections: [],
-        preserveLayout: true,
+      intent: ContinueIntentSchema.parse({
+        scope: "assets_only",
+        targets: [],
+        wantsAssetEdit: true,
+        inventLogo: false,
+        adoptTheme: false,
+        reuseProjectDesign: false,
         navAlign: false,
-      },
+        preserveChrome: true,
+        notes: "",
+      }),
       pinnedLogoAsset: "ember-monogram-alpha.png",
     });
     assert.ok(issues.some((i) => i.code === "hero_changed"));
     assert.ok(issues.some((i) => i.code === "logo_swapped"));
-  });
-
-  it("classifies align menu with code as nav_align", () => {
-    const m = classifyDesignLoopContinueAsk(
-      "That looks good, the menu items do not align with what exists today. Could you please align with what we have today in the code",
-    );
-    assert.equal(m.kind, "nav_align");
-    assert.equal(m.navAlign, true);
-    assert.equal(m.preserveLayout, true);
-  });
-
-  it("nav_align wins over icon-pack asset_only short-circuit", () => {
-    const m = classifyDesignLoopContinueAsk(
-      "Keep the v7 layout. Derive icon pack. But please align the menu items with what is in place today",
-    );
-    assert.equal(m.kind, "nav_align");
-    assert.equal(m.assetEdit, true);
   });
 
   it("detectMockDrift catches nav and shell drops", () => {
@@ -115,13 +74,17 @@ describe("design-loop-continue", () => {
     const issues = detectMockDrift({
       previousHtml: prev,
       nextHtml: next,
-      mode: {
-        kind: "asset_only",
-        assetEdit: true,
-        sections: [],
-        preserveLayout: true,
+      intent: ContinueIntentSchema.parse({
+        scope: "assets_only",
+        targets: [],
+        wantsAssetEdit: true,
+        inventLogo: false,
+        adoptTheme: false,
+        reuseProjectDesign: false,
         navAlign: false,
-      },
+        preserveChrome: true,
+        notes: "",
+      }),
     });
     assert.ok(issues.some((i) => i.code === "nav_changed"));
     assert.ok(issues.some((i) => i.code === "shell_dropped"));
@@ -135,13 +98,17 @@ describe("design-loop-continue", () => {
     const issues = detectMockDrift({
       previousHtml: prev,
       nextHtml: next,
-      mode: {
-        kind: "nav_align",
-        assetEdit: false,
-        sections: ["nav"],
-        preserveLayout: true,
+      intent: ContinueIntentSchema.parse({
+        scope: "nav_align",
+        targets: ["nav"],
+        wantsAssetEdit: false,
+        inventLogo: false,
+        adoptTheme: false,
+        reuseProjectDesign: false,
         navAlign: true,
-      },
+        preserveChrome: true,
+        notes: "",
+      }),
     });
     assert.ok(!issues.some((i) => i.code === "nav_changed"));
   });
@@ -312,6 +279,173 @@ describe("design-loop-continue", () => {
       intent,
     });
     assert.ok(issues.some((i) => i.code === "hero_changed"));
+    assert.ok(hardMockDriftIssues(issues).some((i) => i.code === "hero_changed"));
+  });
+
+  it("detectMockDrift: nav reorder alone is not nav_changed (JamLight menubar)", () => {
+    const prev = `<!DOCTYPE html><html>
+<header><ul class="topbar-nav">
+<li><a href="#">Dashboard</a></li><li><a href="#">Roasts</a></li>
+<li><a href="#">Inventory</a></li><li><a href="#">Settings</a></li>
+</ul></header>
+<div class="dashboard-shell"></div><h1>JamLight</h1></html>`;
+    const next = `<!DOCTYPE html><html>
+<header><ul class="topbar-nav">
+<li><a href="#">Settings</a></li><li><a href="#">Inventory</a></li>
+<li><a href="#">Roasts</a></li><li><a href="#">Dashboard</a></li>
+</ul></header>
+<div class="dashboard-shell"></div><h1>JamLight</h1></html>`;
+    const intent = ContinueIntentSchema.parse({
+      scope: "assets_only",
+      targets: [],
+      wantsAssetEdit: true,
+      inventLogo: false,
+      adoptTheme: false,
+      reuseProjectDesign: false,
+      navAlign: false,
+      preserveChrome: true,
+      notes: "",
+    });
+    const issues = detectMockDrift({
+      previousHtml: prev,
+      nextHtml: next,
+      intent,
+    });
+    assert.ok(!issues.some((i) => i.code === "nav_changed"));
+  });
+
+  it("detectMockDrift: shell/layout intent allows nav label set changes", () => {
+    const prev = `<ul class="topbar-nav"><li><a>Dashboard</a></li><li><a>Roasts</a></li></ul>
+<div class="dashboard-shell"></div><h1>JamLight</h1>`;
+    const next = `<ul class="topbar-nav"><li><a>Home</a></li><li><a>Chat</a></li></ul>
+<div class="dashboard-shell"></div><h1>JamLight</h1>`;
+    const intent = ContinueIntentSchema.parse({
+      scope: "sections",
+      targets: ["shell", "layout"],
+      wantsAssetEdit: false,
+      inventLogo: false,
+      adoptTheme: false,
+      reuseProjectDesign: false,
+      navAlign: false,
+      preserveChrome: false,
+      notes: "logo left, auth/theme right",
+    });
+    const issues = detectMockDrift({
+      previousHtml: prev,
+      nextHtml: next,
+      intent,
+    });
+    assert.ok(!issues.some((i) => i.code === "nav_changed"));
+  });
+
+  it("detectMockDrift: dashboard continue hero change is soft (JamLight v7 regression)", () => {
+    const prev = `<!DOCTYPE html><html>
+<section id="landing" class="hero"><h1>Invoicing and CRM, in one ledger.</h1></section>
+<section id="dashboard" class="dashboard"><h2>Overview</h2></section>
+</html>`;
+    const next = `<!DOCTYPE html><html>
+<section id="landing" class="hero"><h1>Good morning, Brett</h1></section>
+<section id="dashboard" class="dashboard-shell"><h1>Dashboard</h1></section>
+</html>`;
+    const intent = ContinueIntentSchema.parse({
+      scope: "sections",
+      targets: ["dashboard", "shell", "layout"],
+      wantsAssetEdit: false,
+      inventLogo: false,
+      adoptTheme: false,
+      reuseProjectDesign: false,
+      navAlign: false,
+      preserveChrome: false,
+      notes: "mock out a full-screen dashboard",
+    });
+    const issues = detectMockDrift({
+      previousHtml: prev,
+      nextHtml: next,
+      intent,
+    });
+    const hero = issues.filter((i) => i.code === "hero_changed");
+    assert.ok(hero.length >= 1, "hero fingerprint still reports the landing change");
+    assert.equal(hero[0]!.severity, "soft");
+    assert.deepEqual(hardMockDriftIssues(issues), []);
+    assert.ok(softMockDriftIssues(issues).some((i) => i.code === "hero_changed"));
+  });
+
+  it("detectMockDrift: assets_only logo swap remains hard", () => {
+    const prev = `<!DOCTYPE html><html><style>:root{--a:#1;--b:#2;--c:#3;--d:#4;--e:#5;--f:#6;--g:#7;--h:#8;}</style>
+<img src=".slopcontrol/design-loops/L/assets/jam-light-mark-v1-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/jam-light-mark-v1-alpha.png">
+<section id="landing"><h1>Keep</h1></section></html>`;
+    const next = `<!DOCTYPE html><html><style>:root{--a:#1;--b:#2;--c:#3;--d:#4;--e:#5;--f:#6;--g:#7;--h:#8;}</style>
+<img src=".slopcontrol/design-loops/L/assets/other-mark-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/other-mark-alpha.png">
+<section id="landing"><h1>Keep</h1></section></html>`;
+    const intent = ContinueIntentSchema.parse({
+      scope: "assets_only",
+      targets: [],
+      wantsAssetEdit: true,
+      inventLogo: false,
+      adoptTheme: false,
+      reuseProjectDesign: false,
+      navAlign: false,
+      preserveChrome: true,
+      notes: "",
+    });
+    const issues = detectMockDrift({
+      previousHtml: prev,
+      nextHtml: next,
+      intent,
+      pinnedLogoAsset: "jam-light-mark-v1-alpha.png",
+    });
+    assert.ok(issues.some((i) => i.code === "logo_swapped" && i.severity === "hard"));
+    assert.ok(hardMockDriftIssues(issues).some((i) => i.code === "logo_swapped"));
+  });
+
+  it("detectMockDrift: competing theme-toggle is soft when pinned (LLM honor is arbiter)", () => {
+    const prev = `<header><button class="theme-toggle">Dark / Light</button><h1>X</h1></header>`;
+    const next = `<header><button class="theme-toggle">Dark / Light</button><button class="theme-toggle">Also</button><h1>X</h1></header>`;
+    const intent = ContinueIntentSchema.parse({
+      scope: "sections",
+      targets: ["dashboard"],
+      wantsAssetEdit: false,
+      inventLogo: false,
+      adoptTheme: false,
+      reuseProjectDesign: false,
+      navAlign: false,
+      preserveChrome: false,
+      notes: "",
+    });
+    const issues = detectMockDrift({
+      previousHtml: prev,
+      nextHtml: next,
+      intent,
+      pinnedElements: [{ id: "theme-toggle" }],
+    });
+    assert.ok(issues.some((i) => i.code === "element_invented" && i.severity === "soft"));
+    assert.ok(!hardMockDriftIssues(issues).some((i) => i.code === "element_invented"));
+  });
+
+  it("detectMockDrift: BEM theme-toggle children are not hard invent", () => {
+    const prev = `<header class="menubar"><button class="theme-toggle">T</button><h1>X</h1></header>`;
+    const next = `<header class="menubar"><button class="theme-toggle"><svg class="theme-toggle__sun"></svg><svg class="theme-toggle__moon"></svg></button><h1>X</h1></header>`;
+    const intent = ContinueIntentSchema.parse({
+      scope: "sections",
+      targets: ["landing"],
+      wantsAssetEdit: false,
+      inventLogo: false,
+      adoptTheme: false,
+      reuseProjectDesign: false,
+      navAlign: false,
+      preserveChrome: false,
+      notes: "",
+    });
+    const issues = detectMockDrift({
+      previousHtml: prev,
+      nextHtml: next,
+      intent,
+      pinnedElements: [{ id: "theme-toggle" }, { id: "menubar" }],
+    });
+    assert.ok(!hardMockDriftIssues(issues).some((i) => i.code === "element_invented"));
+    assert.ok(!issues.some((i) => i.code === "element_invented" && i.severity === "hard"));
   });
 
   it("patchMockForAssetContinue swaps fake alpha and icon pack tiles", () => {
@@ -353,5 +487,31 @@ describe("design-loop-continue", () => {
     assert.doesNotMatch(out, /jam-light-mark-v1-alpha/);
     // Icon pack tiles are left alone unless iconPackFiles is provided.
     assert.match(out, /modern-icon-48\.png/);
+  });
+
+  it("sanitizeDesignLoopAgentNotes drops first-person planning prose", () => {
+    assert.equal(
+      sanitizeDesignLoopAgentNotes(
+        "I'll apply the jamroast-components shared tokens to the landing page.",
+      ),
+      "",
+    );
+    assert.equal(
+      sanitizeDesignLoopAgentNotes("Menubar centered with logo left."),
+      "Menubar centered with logo left.",
+    );
+  });
+
+  it("composeDesignLoopVersionNotes prefers honor and skips agent prose", () => {
+    const notes = composeDesignLoopVersionNotes({
+      elementHonorNotes:
+        "Element honor: honors=true competing=false missingMenubar=false missingToggle=false confidence=high.",
+      softDriftNotes: "",
+      agentRaw:
+        "I'll apply the jamroast-components shared tokens, menubar shell, theme toggle.",
+      version: 8,
+    });
+    assert.match(notes, /Element honor/);
+    assert.doesNotMatch(notes, /I'll apply/);
   });
 });

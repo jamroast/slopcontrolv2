@@ -17,6 +17,20 @@ export type ChangeIntent = {
   uiMount: UiMount;
   /** LLM/heuristic classification of the change (verification still keys off interaction). */
   changeKind?: ChangeKind;
+  /**
+   * Brand / palette / logo / identity work that needs a design pass.
+   * Set by LLM (or offline heuristic); prefer over regex on description.
+   */
+  brandTheming?: boolean;
+  /**
+   * Theme toggle / data-theme wiring only — coding, not a design pass.
+   * When true, overrides brandTheming for design-pass routing.
+   */
+  themeWiringOnly?: boolean;
+  /**
+   * Operator asked to add/show a missing menubar theme control (anti-audit delivery).
+   */
+  requestsMissingThemeControl?: boolean;
   refinementOf: string[];
   supersedes: string[];
   mustNot: string[];
@@ -32,6 +46,9 @@ export const ChangeIntentLlmOutputSchema = z.object({
   uiMount: z.enum(["composer", "bubble", "modal", "page", "n/a"]),
   changeKind: z.enum(["engagement", "chrome-hide", "backend", "other"]),
   needsInteraction: z.boolean(),
+  brandTheming: z.boolean().optional(),
+  themeWiringOnly: z.boolean().optional(),
+  requestsMissingThemeControl: z.boolean().optional(),
   mustNot: z.array(z.string()).optional(),
   /** Optional prior phase id hint(s) for mount refinement. */
   refinementOf: z.union([z.string(), z.array(z.string())]).optional(),
@@ -92,7 +109,8 @@ const BRAND_THEMING_RE =
 const LOGO_TYPO_RE = /\bnew\s+logs?\b/i;
 
 /**
- * True when the ask is about brand, theming, logo, or palette — not backend.
+ * Offline/heuristic: brand, theming, logo, or palette ask.
+ * Prefer changeIntentIsBrandTheming when INTENT.json exists.
  */
 export function isBrandThemingAsk(description: string): boolean {
   const text = description ?? "";
@@ -100,8 +118,28 @@ export function isBrandThemingAsk(description: string): boolean {
 }
 
 /**
+ * Structured brand-theming gate (LLM flags; legacy Intent falls back to heuristic).
+ */
+export function changeIntentIsBrandTheming(intent: ChangeIntent): boolean {
+  if (intent.themeWiringOnly === true) return false;
+  if (typeof intent.brandTheming === "boolean") return intent.brandTheming;
+  const text = `${intent.title}\n${intent.goal}\n${intent.rawDescription}`;
+  return isBrandThemingAsk(text) && !isThemeWiringAsk(text);
+}
+
+/**
+ * Structured theme-wiring-only gate (LLM flags; legacy falls back to heuristic).
+ */
+export function changeIntentIsThemeWiringOnly(intent: ChangeIntent): boolean {
+  if (typeof intent.themeWiringOnly === "boolean") return intent.themeWiringOnly;
+  if (intent.brandTheming === true) return false;
+  const text = `${intent.title}\n${intent.goal}\n${intent.rawDescription}`;
+  return isThemeWiringAsk(text);
+}
+
+/**
  * Theme toggle / data-theme / light-dark wiring without new brand identity.
- * These should not force a design pass (UI-SPEC / logo gen) — coding only.
+ * Offline heuristic only — prefer changeIntentIsThemeWiringOnly.
  */
 export function isThemeWiringAsk(description: string): boolean {
   const text = description ?? "";
@@ -332,9 +370,8 @@ function normalizeRefinementOf(
 
 /**
  * Deterministic post-process for LLM or heuristic Intent fields.
- * Clips lengths, applies mount side effects, and sets interaction only for
- * engagement — never for chrome-hide / backend. For changeKind "other",
- * ignore LLM needsInteraction unless the description needs a form contract.
+ * Clips lengths, applies mount side effects, and sets interaction from
+ * structured changeKind / needsInteraction (no description regex veto).
  */
 export function finalizeChangeIntent(
   raw: ChangeIntentLlmOutput,
@@ -352,10 +389,7 @@ export function finalizeChangeIntent(
   const allowInteraction =
     changeKind !== "chrome-hide" &&
     changeKind !== "backend" &&
-    (changeKind === "engagement" ||
-      (changeKind === "other"
-        ? needsInteractionContract(description)
-        : Boolean(raw.needsInteraction)));
+    (changeKind === "engagement" || Boolean(raw.needsInteraction));
 
   const resolvePriorMount = (): void => {
     if (!opts.projectRoot || refinementOf.length > 0) return;
@@ -407,11 +441,19 @@ export function finalizeChangeIntent(
     ? defaultInteractionContract(uiMount === "n/a" ? "composer" : uiMount)
     : undefined;
 
+  const themeWiringOnly = Boolean(raw.themeWiringOnly);
+  const brandTheming = themeWiringOnly
+    ? false
+    : Boolean(raw.brandTheming);
+
   return {
     title,
     goal,
     uiMount,
     changeKind,
+    brandTheming,
+    themeWiringOnly,
+    requestsMissingThemeControl: Boolean(raw.requestsMissingThemeControl),
     refinementOf,
     supersedes,
     mustNot,
@@ -505,11 +547,14 @@ export function extractChangeIntent(
     800,
   );
 
+  const themeWiringOnly = isThemeWiringAsk(heuristicText);
+  const brandTheming =
+    !themeWiringOnly && isBrandThemingAsk(heuristicText);
   const changeKind: ChangeKind = chromeOnly
     ? "chrome-hide"
     : wantsIx
       ? "engagement"
-      : isBrandThemingAsk(heuristicText)
+      : brandTheming || themeWiringOnly
         ? "other"
         : uiMount === "n/a"
           ? "backend"
@@ -522,6 +567,9 @@ export function extractChangeIntent(
       uiMount,
       changeKind,
       needsInteraction: wantsIx,
+      brandTheming,
+      themeWiringOnly,
+      requestsMissingThemeControl: false,
       refinementOf,
     },
     { description: raw, projectRoot: opts?.projectRoot, phaseId: opts?.phaseId },
@@ -546,6 +594,11 @@ export function formatChangeIntentPromptBlock(intent: ChangeIntent): string {
     `- **goal:** ${intent.goal}`,
     `- **uiMount:** ${intent.uiMount}`,
     intent.changeKind ? `- **changeKind:** ${intent.changeKind}` : null,
+    intent.brandTheming ? `- **brandTheming:** true` : null,
+    intent.themeWiringOnly ? `- **themeWiringOnly:** true` : null,
+    intent.requestsMissingThemeControl
+      ? `- **requestsMissingThemeControl:** true`
+      : null,
     intent.refinementOf.length
       ? `- **refinementOf:** ${intent.refinementOf.join(", ")}`
       : null,

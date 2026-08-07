@@ -8,3 +8,4 @@ dist/
 .turbo/
 coverage/
 .mastra/
+.slopcontrol/

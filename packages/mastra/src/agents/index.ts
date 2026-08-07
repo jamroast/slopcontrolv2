@@ -1,6 +1,7 @@
 import { Agent } from "@mastra/core/agent";
 import { Memory } from "@mastra/memory";
 import { blueprintContractPromptBlock } from "@slopcontrol/artifacts";
+import { formatDesignImageCatalogForLlm } from "@slopcontrol/coding-tools";
 import type { LlmRegistry } from "@slopcontrol/llm";
 import { createProjectTools } from "../tools/project-tools.js";
 import { createDesignLoopMediaTools } from "../tools/design-loop-tools.js";
@@ -351,6 +352,7 @@ export function createDesignLoopAgent(
   memory: Memory,
 ): Agent {
   const media = createDesignLoopMediaTools(projectDir, registry);
+  const imageCatalog = formatDesignImageCatalogForLlm();
 
   return new Agent({
     id: "design-loop-agent",
@@ -360,39 +362,42 @@ export function createDesignLoopAgent(
     instructions: `You are the SlopControl design-loop agent.
 Produce ONE self-contained HTML mock (wireframe or mid-fi) for look-and-feel discussion.
 
+${imageCatalog}
+
 Rules:
 - Output a single HTML document in a \`\`\`html fence (or raw <!DOCTYPE html>…). Inline CSS only — no external stylesheets/fonts CDNs.
 - Use :root CSS variables for palette/typography. Prefer LIVE SITE inventory (nav/tokens/logos/routes) and sibling cues already in the prompt. No filesystem reads — inventory is injected for you.
 - Show labeled states when relevant. Keep it one page, not a full SPA.
 - The prompt always states the current loopId — pass that loopId to media tools.
-- PINNED concepts/assets in the prompt are frozen UNLESS CONTINUE INTENT says NEW LOGO / inventLogo (logo pin superseded): then generate_image with inventNew=true, embed the new path, pin_logo the new filename — do NOT re-embed the superseded mark.
+- PINNED concepts/assets in the prompt are frozen UNLESS CONTINUE INTENT says NEW LOGO / inventLogo (logo pin superseded): then generate_image with inventNew=true, embed the new path, pin_logo the new filename — do NOT re-embed the superseded mark. When CONTINUE INTENT asks for inventLogoCount > 1, call generate_image that many times, show a logo-card / Concept picker grid, and do NOT pin_logo until the operator chooses.
 - When the operator names a logo file or says pin/use/go with a mark (and is not asking to invent), call pin_logo with that filename first, then embed it in the mock (menubar + landing). Do not keep an older mark.
 - CONCEPTUAL MODEL in the prompt is authoritative scope: kind/focus/preserve. component/flow → one composition around the focus (ghost chrome ok, labeled out of scope). shell/theme → menubar + data-theme dark/light proof. Do not expand past focus.
 - When theme modes are in the conceptual model, include :root dark tokens AND [data-theme="light"] remaps; toggles must set documentElement data-theme. Prefer SHARED DESIGN / sibling dual-theme ladders over inventing purple/cream.
-- SHARED ELEMENTS in the prompt are authoritative controls (e.g. theme-toggle): embed that snippet once at the mount hint — never invent a second day/night button.
-- CONTINUE MODE in the prompt is authoritative: asset_only / section_touch means preserve hero copy, shell, and :root token names — do not invent new landing copy (except when inventLogo/adoptTheme).
-- Prefer true RGBA sources (hasAlpha). Filenames containing "alpha" that are still RGB are INVALID — call make_transparent or use the pinned RGBA mark.
+- SHARED ELEMENTS in the prompt are authoritative: prefer their full HTML/CSS snippets (shell menubar replaces landing-header). Never invent a second day/night button. The orchestrator also merges pinned elements after your HTML — still emit correct chrome. When ADOPT CHROME / SHARED DESIGN shell notes apply, follow sibling menubar left/right slots.
+- CONTINUE MODE in the prompt is authoritative: asset_only / section_touch means preserve hero copy, shell, and :root token names — do not invent new landing copy (except when inventLogo/adoptTheme/adoptChrome).
+- Prefer true RGBA sources (hasAlpha). Filenames containing "alpha" that are still RGB are INVALID — call edit_image (make_transparent / circular_mask) or use the pinned RGBA mark.
 - Media / edit tools (do not claim they ran without a tool result):
   - pin / use / go with a named existing asset → pin_logo (then embed that path)
-  - alpha / strip black / transparent background on an EXISTING asset → make_transparent (true RGBA; never Flux)
-  - icon pack / favicons from an EXISTING mark → derive_icon_pack (resize only; uses pinned / true RGBA)
-  - resize / trim / pad existing → resize_image / trim_image / pad_image
-  - invent / replace / unhappy with logos → generate_image with inventNew=true, then pin_logo
+  - ANY pixel edit on an EXISTING asset → edit_image with a catalog op (see DESIGN IMAGE CAPABILITIES). Prefer edit_image over one-off aliases.
+  - invent / replace / unhappy with logos → generate_image with inventNew=true, then pin_logo (or N variants + concept grid and no pin when inventLogoCount > 1)
   - stock photos → search_images then import_image
   - review look → review_look
+- If the operator asks for an edit the catalog cannot do and inventLogo is false: say so in the chat summary and suggest the closest catalog ops — do not call generate_image to "fix" it.
 - Never use generate_image to "fix" alpha, backgrounds, or icon packs — that invents a different mark.
 - After import/gen/edit, embed local relative paths (<img src=".slopcontrol/...">). Cite attribution when importing.
-- Cap thrash: ≤1 search and ≤1 generate per turn unless asked for more. Prefer writing the mock when media is not needed.
+- Cap thrash: ≤1 search and ≤1 generate per turn unless inventLogoCount or the operator asks for more. Prefer writing the mock when media is not needed.
 - If generation falls back to a scaffold / times out, tell the operator to call MCP \`design_loop_retry\` for this loopId.
 - Do NOT write product source files. Do NOT produce UI-SPEC.md as a file.
-- After a short note (1–3 sentences), end with the HTML document and MOCK_HTML_COMPLETE — or MOCK_ASSETS_ONLY when CONTINUE MODE is asset_only.
+- After a clear chat-facing summary (what changed / refused — 2–6 sentences), end with the HTML document and MOCK_HTML_COMPLETE — or MOCK_ASSETS_ONLY when CONTINUE MODE is asset_only.
 - Avoid purple-on-white defaults unless the brief asks for them.`,
     model: registry.resolve("design"),
     memory,
     tools: {
       generate_image: media.generate_image,
       pin_logo: media.pin_logo,
+      edit_image: media.edit_image,
       make_transparent: media.make_transparent,
+      circular_mask: media.circular_mask,
       derive_icon_pack: media.derive_icon_pack,
       resize_image: media.resize_image,
       trim_image: media.trim_image,
@@ -430,7 +435,9 @@ export function createPlanLoopAgent(
 Produce ONE structured PLAN.md for operator review before research.
 
 Rules:
-- Output a short rationale (1–3 sentences), then the full plan in a \`\`\`markdown fence (or raw # Plan …).
+- Lead with a chat-facing summary (2–6 sentences): what sections changed, what was refused / out of scope. Do NOT dump the full PLAN into the chat narrative — the plan document is the artifact.
+- If the operator asks to implement code, run docker, invent an unrelated product, or do design-loop pixel/image work: say that is not possible in the plan loop and suggest Ask / design-loop / promote → research as appropriate. Keep or revise the PLAN only when still relevant.
+- Then emit the full plan in a \`\`\`markdown fence (or raw # Plan …).
 - Required H2 sections (exactly these titles — always emit all nine, even if some bodies are brief stubs): Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes.
 - Goal must be 1–3 sentences summarizing intent — NEVER paste the operator brief verbatim.
 - CRITICAL emit rule: after at most a few targeted tool calls (confirm local paths that will appear under Likely areas), WRITE the fenced PLAN.md. Never end a turn without \`## Goal\`, all nine H2 titles, and PLAN_COMPLETE.

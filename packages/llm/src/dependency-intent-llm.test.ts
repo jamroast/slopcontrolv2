@@ -10,9 +10,14 @@ describe("dependency-intent-llm", () => {
     assert.match(DEPENDENCY_INTENT_SYSTEM_PROMPT, /npm link/i);
     assert.match(DEPENDENCY_INTENT_SYSTEM_PROMPT, /JSON/);
     assert.match(DEPENDENCY_INTENT_SYSTEM_PROMPT, /forbidNpmLink/);
+    assert.match(DEPENDENCY_INTENT_SYSTEM_PROMPT, /look and feel/i);
+    assert.match(DEPENDENCY_INTENT_SYSTEM_PROMPT, /theme-toggle/);
+    assert.match(DEPENDENCY_INTENT_SYSTEM_PROMPT, /importAllElementsFrom/);
+    assert.match(DEPENDENCY_INTENT_SYSTEM_PROMPT, /useElements/);
   });
 
-  it("shouldClassifyDependencyIntent gates linking language", () => {
+  it("shouldClassifyDependencyIntent still detects linking language (deprecated pre-gate)", () => {
+    // Classification always runs when text is present; this helper is legacy/test-only.
     assert.equal(
       shouldClassifyDependencyIntent("use theme-toggle from jamroast"),
       true,

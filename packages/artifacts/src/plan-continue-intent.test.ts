@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   fallbackPlanContinueIntentFromText,
-  normalizePlanContinueIntent,
+  normalizePlanContinueIntentStructured,
   formatPlanContinueIntentPromptBlock,
   textSignalsPlanExpand,
 } from "./plan-continue-intent.js";
@@ -25,20 +25,28 @@ describe("plan-continue-intent", () => {
     assert.notEqual(fb.scope, "narrow_scope");
   });
 
-  it("normalize promotes weak sections/narrow to expand on clear expand cues", () => {
-    const weak = normalizePlanContinueIntent(
-      {
-        scope: "narrow_scope",
-        sections: [],
-        focus: "management",
-        preserve: ["unrelated modules"],
-        notes: "",
-      },
-      CHAT_EXTEND_MSG,
-    );
-    assert.equal(weak.scope, "expand_scope");
-    assert.equal(weak.focus, undefined);
-    assert.equal(weak.preserve, undefined);
+  it("structured normalize does not promote scope from text expand cues", () => {
+    const weak = normalizePlanContinueIntentStructured({
+      scope: "narrow_scope",
+      sections: [],
+      focus: "management",
+      preserve: ["unrelated modules"],
+      notes: "",
+    });
+    // LLM/fallback already chose narrow — structured normalize must not re-scan chat.
+    assert.equal(weak.scope, "narrow_scope");
+    assert.equal(weak.focus, "management");
+    assert.deepEqual(weak.preserve, ["unrelated modules"]);
+  });
+
+  it("structured normalize fills sections on expand_scope", () => {
+    const expanded = normalizePlanContinueIntentStructured({
+      scope: "expand_scope",
+      sections: [],
+      notes: "add chat",
+    });
+    assert.equal(expanded.scope, "expand_scope");
+    assert.ok(expanded.sections.length >= 3);
   });
 
   it("format block reopens locks on expand/full_revise", () => {

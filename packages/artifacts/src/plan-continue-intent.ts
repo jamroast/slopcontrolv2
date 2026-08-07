@@ -147,33 +147,15 @@ export function fallbackPlanContinueIntentFromText(
 }
 
 /**
- * Post-classify normalize: clear expand cues override weak narrow/sections.
+ * Schema-only coherence after LLM (or fallback) classification.
+ * Does not re-read operator text — no regex overrides on success path.
  */
-export function normalizePlanContinueIntent(
+export function normalizePlanContinueIntentStructured(
   intent: PlanContinueIntent,
-  text: string,
 ): PlanContinueIntent {
-  const t = text ?? "";
-  const expand = textSignalsPlanExpand(t);
-  const full = textSignalsPlanFullRevise(t);
-
   let scope = intent.scope;
-  if (full) scope = "full_revise";
-  else if (
-    expand &&
-    (scope === "narrow_scope" ||
-      scope === "clarify_only" ||
-      (scope === "sections" && intent.sections.length === 0))
-  ) {
-    scope = "expand_scope";
-  } else if (expand && scope === "sections") {
-    // Explicit expand language beats surgical-only sections
-    scope = "expand_scope";
-  }
-
   let focus = intent.focus;
   if (scope === "expand_scope" || scope === "full_revise") {
-    // Drop regex-poisoned focus like "management" from "Project Management"
     if (
       focus &&
       /^(management|workflows?|projects?|only|just)$/i.test(focus)
@@ -215,6 +197,16 @@ export function normalizePlanContinueIntent(
     focus,
     preserve,
   });
+}
+
+/**
+ * @deprecated Prefer normalizePlanContinueIntentStructured. Text arg ignored.
+ */
+export function normalizePlanContinueIntent(
+  intent: PlanContinueIntent,
+  _text?: string,
+): PlanContinueIntent {
+  return normalizePlanContinueIntentStructured(intent);
 }
 
 export function formatPlanContinueIntentPromptBlock(
