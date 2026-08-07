@@ -13,8 +13,13 @@ describe("coding engine starters", () => {
       port: 4096,
       hostname: "127.0.0.1",
     });
-    assert.deepEqual(cmd, [
-      "opencode",
+    // argv[0] is the vendored opencode-ai binary when installed, else "opencode"
+    assert.match(
+      cmd[0] ?? "",
+      /(^|[/\\])opencode$/,
+      `expected an opencode binary, got ${cmd[0]}`,
+    );
+    assert.deepEqual(cmd.slice(1), [
       "serve",
       "--port",
       "4096",
@@ -54,7 +59,7 @@ describe("coding engine starters", () => {
     assert.equal(plan.serviceId, "coding");
     assert.equal(plan.healthMode, "opencode");
     assert.match(plan.healthUrl, /4100/);
-    assert.equal(plan.command[0], "opencode");
+    assert.match(plan.command[0] ?? "", /(^|[/\\])opencode$/);
     assert.equal(plan.env.OPENCODE_ENABLE_EXA, "1");
   });
 

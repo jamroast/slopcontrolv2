@@ -73,4 +73,3 @@ export * from "./mock-screenshot.js";
 export * from "./design-loop-review.js";
 export * from "./registry.js";
 export * from "./coding-engine-supervisor.js";
-export * from "./opencode-fetch.js";

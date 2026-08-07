@@ -5,6 +5,7 @@ packages:
 allowBuilds:
   core-js: false
   esbuild: true
+  opencode-ai: true
   sharp: true
 
 # pnpm 11 defaults to 1440 (1 day). Fresh AI SDK / Next transitive deps

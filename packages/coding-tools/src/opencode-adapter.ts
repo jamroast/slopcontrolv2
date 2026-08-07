@@ -8,7 +8,6 @@ import type {
   CodingTool,
   RunPromptOptions,
 } from "./index.js";
-import { ensureOpenCodeFetchTimeouts } from "./opencode-fetch.js";
 import { detectCodingProbeAbuseFromEvents } from "./probe-abuse.js";
 import {
   detectProviderRateLimit,
@@ -16,6 +15,9 @@ import {
 } from "./provider-stall.js";
 
 export type CodingEventListener = (event: CodingEvent) => void;
+
+/** Turn completion signalled from the SSE event stream. */
+type TurnSignal = { kind: "idle" } | { kind: "error"; message: string };
 
 interface OpenCodeSessionState {
   client: ReturnType<typeof createOpencodeClient>;
@@ -29,6 +31,8 @@ interface OpenCodeSessionState {
   recentEventText: string;
   /** Last OpenCode event timestamp (ms) for idle detection */
   lastActivityAt: number;
+  /** Set while a promptAsync turn is in flight; resolved by session events */
+  turnWaiter?: { resolve: (signal: TurnSignal) => void } | null;
 }
 
 const sessions = new Map<string, OpenCodeSessionState>();
@@ -125,11 +129,7 @@ async function withFetchRetry<T>(
       }
       if (!isTransientFetchError(error) || i === attempts) {
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `${label} failed after ${i} attempt(s): ${message}. ` +
-            `If this is "fetch failed", OpenCode may have dropped a long-running prompt — ` +
-            `avoid live API probing loops; keep coding turns focused.`,
-        );
+        throw new Error(`${label} failed after ${i} attempt(s): ${message}`);
       }
       const delayMs = 1500 * i;
       await new Promise((r) => setTimeout(r, delayMs));
@@ -146,6 +146,22 @@ function appendEventText(state: OpenCodeSessionState, payload: unknown): void {
   } catch {
     // ignore
   }
+}
+
+/** Human-readable message from a session.error event payload. */
+function describeSessionError(error: unknown): string {
+  if (!error || typeof error !== "object") return "OpenCode session error";
+  const record = error as {
+    name?: string;
+    message?: string;
+    data?: { message?: string };
+  };
+  return (
+    record.data?.message ??
+    record.message ??
+    record.name ??
+    "OpenCode session error"
+  );
 }
 
 function abortSession(state: OpenCodeSessionState): void {
@@ -170,11 +186,38 @@ async function sessionHasFileChanges(state: OpenCodeSessionState): Promise<boole
   }
 }
 
+/** Read the most recent assistant message text after a turn goes idle. */
+async function readLastAssistantText(
+  state: OpenCodeSessionState,
+): Promise<string> {
+  try {
+    const res = await state.client.session.messages({
+      path: { id: state.sessionId },
+      query: { directory: state.projectDir },
+    });
+    const messages = res.data ?? [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const message = messages[i];
+      if (!message) continue;
+      if ((message.info as { role?: string }).role === "assistant") {
+        return extractTextOutput(
+          message.parts as Array<{ type?: string; text?: string }>,
+        );
+      }
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}
+
 /**
- * Race a blocking OpenCode prompt against probe / rate-limit / idle / wall-clock watchdogs.
- * Wall-clock with file changes → turn_budget_yield (sticky session).
+ * Fire a non-blocking promptAsync and drive completion from the SSE event
+ * stream (session.idle / session.error). Watchdogs: probe-abuse, provider
+ * rate-limit, event-stream silence, wall-clock budget (soft yield with
+ * worktree changes -> TURN_BUDGET_YIELD, sticky session).
  */
-function runPromptWithWatchdog(
+function runTurnEventDriven(
   state: OpenCodeSessionState,
   body: {
     system?: string;
@@ -189,12 +232,71 @@ function runPromptWithWatchdog(
   let settled = false;
   let watchdogTimer: ReturnType<typeof setInterval> | undefined;
 
-  const shouldAbort = () => settled;
+  const finish = (result: CodingResult): CodingResult => {
+    if (!settled) {
+      settled = true;
+      if (watchdogTimer) clearInterval(watchdogTimer);
+      state.turnWaiter = null;
+    }
+    return result;
+  };
 
-  const promptPromise = withFetchRetry(
-    "OpenCode session.prompt",
+  const superseded = (): CodingResult => ({
+    output: "",
+    exitCode: 1,
+    aborted: true,
+    abortReason: "superseded_by_watchdog",
+    events: [],
+  });
+
+  const turnSignal = new Promise<TurnSignal>((resolve) => {
+    state.turnWaiter = { resolve };
+  });
+
+  const signalResult = turnSignal.then(async (signal): Promise<CodingResult> => {
+    if (settled) return superseded();
+    if (signal.kind === "error") {
+      return finish({
+        output: signal.message,
+        exitCode: 1,
+        aborted: true,
+        abortReason: "session_error",
+        events: [],
+      });
+    }
+    const output = await readLastAssistantText(state);
+    if (settled) return superseded();
+    const probe = detectCodingProbeAbuseFromEvents(state.recentEventText);
+    if (probe) {
+      return finish({
+        output: `${output}\n\n${probe}`,
+        exitCode: 1,
+        aborted: true,
+        abortReason: probe,
+        events: [],
+      });
+    }
+    const rate = detectProviderRateLimit(state.recentEventText);
+    if (rate) {
+      return finish({
+        output: `${output}\n\n${rate}`,
+        exitCode: 1,
+        aborted: true,
+        abortReason: "provider_rate_limit",
+        events: [],
+      });
+    }
+    return finish({
+      output,
+      exitCode: output.includes("DEV_BLOCKED") ? 1 : 0,
+      events: [],
+    });
+  });
+
+  const dispatch = withFetchRetry(
+    "OpenCode session.promptAsync",
     () =>
-      state.client.session.prompt({
+      state.client.session.promptAsync({
         path: { id: state.sessionId },
         query: { directory: state.projectDir },
         body: {
@@ -203,62 +305,21 @@ function runPromptWithWatchdog(
           parts: body.parts,
         },
       }),
-    { shouldAbort },
-  )
-    .then((result) => {
-      if (settled) {
-        return {
-          output: "",
-          exitCode: 1,
-          aborted: true,
-          abortReason: "superseded_by_watchdog",
-          events: [],
-        } satisfies CodingResult;
-      }
-      settled = true;
-      if (watchdogTimer) clearInterval(watchdogTimer);
-      const parts = result.data?.parts ?? [];
-      const output = extractTextOutput(
-        parts as Array<{ type?: string; text?: string }>,
-      );
-      const probe = detectCodingProbeAbuseFromEvents(state.recentEventText);
-      if (probe) {
-        return {
-          output: `${output}\n\n${probe}`,
-          exitCode: 1,
-          aborted: true,
-          abortReason: probe,
-          events: [],
-        } satisfies CodingResult;
-      }
-      const rate = detectProviderRateLimit(state.recentEventText);
-      if (rate) {
-        return {
-          output: `${output}\n\n${rate}`,
-          exitCode: 1,
-          aborted: true,
-          abortReason: "provider_rate_limit",
-          events: [],
-        } satisfies CodingResult;
-      }
-      return {
-        output,
-        exitCode: output.includes("DEV_BLOCKED") ? 1 : 0,
+    { shouldAbort: () => settled },
+  ).then(
+    // Dispatched — turn completion now comes from the event stream/watchdog.
+    () => new Promise<CodingResult>(() => undefined),
+    (error: unknown) =>
+      finish({
+        output: `OpenCode prompt dispatch failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        exitCode: 1,
+        aborted: true,
+        abortReason: "prompt_dispatch_failed",
         events: [],
-      } satisfies CodingResult;
-    })
-    .catch((error) => {
-      if (settled) {
-        return {
-          output: "",
-          exitCode: 1,
-          aborted: true,
-          abortReason: "superseded_by_watchdog",
-          events: [],
-        } satisfies CodingResult;
-      }
-      throw error;
-    });
+      }),
+  );
 
   const watchdog = new Promise<CodingResult>((resolve) => {
     const started = Date.now();
@@ -270,86 +331,85 @@ function runPromptWithWatchdog(
 
       const probe = detectCodingProbeAbuseFromEvents(state.recentEventText);
       if (probe) {
-        settled = true;
-        clearInterval(watchdogTimer);
         abortSession(state);
-        resolve({
-          output: probe,
-          exitCode: 1,
-          aborted: true,
-          abortReason: probe,
-          events: [],
-        });
+        resolve(
+          finish({
+            output: probe,
+            exitCode: 1,
+            aborted: true,
+            abortReason: probe,
+            events: [],
+          }),
+        );
         return;
       }
 
       const rate = detectProviderRateLimit(state.recentEventText);
       if (rate) {
-        settled = true;
-        clearInterval(watchdogTimer);
         abortSession(state);
-        resolve({
-          output: rate,
-          exitCode: 1,
-          aborted: true,
-          abortReason: "provider_rate_limit",
-          events: [],
-        });
+        resolve(
+          finish({
+            output: rate,
+            exitCode: 1,
+            aborted: true,
+            abortReason: "provider_rate_limit",
+            events: [],
+          }),
+        );
         return;
       }
 
       const silentMs = Date.now() - state.lastActivityAt;
       if (silentMs >= idleMs && Date.now() - started >= idleMs) {
-        settled = true;
-        clearInterval(watchdogTimer);
         abortSession(state);
-        resolve({
-          output: `Coding turn idle: no OpenCode events for ${idleMs}ms. Coding LLM may be stalled or throttled.`,
-          exitCode: 1,
-          aborted: true,
-          abortReason: "turn_idle",
-          events: [],
-        });
+        resolve(
+          finish({
+            output: `Coding turn idle: no OpenCode events for ${idleMs}ms. Coding LLM may be stalled or throttled.`,
+            exitCode: 1,
+            aborted: true,
+            abortReason: "turn_idle",
+            events: [],
+          }),
+        );
         return;
       }
 
       if (Date.now() - started >= timeoutMs) {
-        settled = true;
-        clearInterval(watchdogTimer);
         abortSession(state);
         void (async () => {
           const changed = await sessionHasFileChanges(state);
-          if (changed) {
-            resolve({
-              output:
-                `Coding turn soft budget (${timeoutMs}ms) reached with worktree changes. ` +
-                `Yielding; OpenCode session stays sticky — continue next iteration without recreate.`,
-              exitCode: 1,
-              aborted: true,
-              abortReason: TURN_BUDGET_YIELD,
-              events: [],
-            });
-          } else {
-            resolve({
-              output: `Coding turn exceeded ${timeoutMs}ms wall clock with no file changes. Aborting; coding LLM may be stalled.`,
-              exitCode: 1,
-              aborted: true,
-              abortReason: "turn_timeout",
-              events: [],
-            });
-          }
+          resolve(
+            finish(
+              changed
+                ? {
+                    output:
+                      `Coding turn soft budget (${timeoutMs}ms) reached with worktree changes. ` +
+                      `Yielding; OpenCode session stays sticky — continue next iteration without recreate.`,
+                    exitCode: 1,
+                    aborted: true,
+                    abortReason: TURN_BUDGET_YIELD,
+                    events: [],
+                  }
+                : {
+                    output: `Coding turn exceeded ${timeoutMs}ms wall clock with no file changes. Aborting; coding LLM may be stalled.`,
+                    exitCode: 1,
+                    aborted: true,
+                    abortReason: "turn_timeout",
+                    events: [],
+                  },
+            ),
+          );
         })();
       }
     }, 2000);
   });
 
-  return Promise.race([promptPromise, watchdog]);
+  return Promise.race([signalResult, watchdog, dispatch]);
 }
 
 function createClient(baseUrl: string) {
-  ensureOpenCodeFetchTimeouts();
-  // Use default globalThis.fetch (Request-compatible). Long timeouts come from
-  // setGlobalDispatcher — do not pass a custom undici fetch wrapper.
+  // All session traffic is short-lived (promptAsync returns 204 immediately),
+  // so the default globalThis.fetch timeouts are sufficient.
   return createOpencodeClient({ baseUrl });
 }
 
@@ -429,7 +489,9 @@ export class OpenCodeAdapter implements CodingTool {
     };
 
     sessions.set(session.id, state);
-    void this.startEventStream(state);
+    // Await the SSE subscription before the ack turn so the turn's
+    // session.idle completion event cannot be missed.
+    await this.startEventStream(state);
 
     const contextParts = [
       `Working directory: ${opts.projectDir}`,
@@ -441,7 +503,7 @@ export class OpenCodeAdapter implements CodingTool {
       .filter(Boolean)
       .join("\n");
 
-    const ack = await runPromptWithWatchdog(
+    const ack = await runTurnEventDriven(
       state,
       {
         system: contextParts,
@@ -456,6 +518,7 @@ export class OpenCodeAdapter implements CodingTool {
       DEFAULT_IDLE_MS,
     );
     if (ack.aborted) {
+      state.eventAbort?.abort();
       sessions.delete(session.id);
       throw new Error(
         `OpenCode session ack aborted: ${ack.abortReason ?? "unknown"}`,
@@ -476,25 +539,20 @@ export class OpenCodeAdapter implements CodingTool {
     }
     if (!content.trim()) return;
 
-    const result = await runPromptWithWatchdog(
-      state,
-      {
-        system: `${label}\n\n${content}`,
-        parts: [
-          {
-            type: "text",
-            text: `Context updated: ${label}. Wait for the next implementation instruction.`,
-          },
-        ],
-      },
-      DEFAULT_TURN_TIMEOUT_MS,
-      DEFAULT_IDLE_MS,
+    // noReply: the context lands in the session transcript without burning a
+    // model turn.
+    await withFetchRetry("OpenCode injectContext", () =>
+      state.client.session.prompt({
+        path: { id: state.sessionId },
+        query: { directory: state.projectDir },
+        body: {
+          noReply: true,
+          parts: [
+            { type: "text", text: `[Context: ${label}]\n\n${content}` },
+          ],
+        },
+      }),
     );
-    if (result.aborted) {
-      throw new Error(
-        `OpenCode injectContext aborted: ${result.abortReason ?? "unknown"}`,
-      );
-    }
   }
 
   async runPrompt(
@@ -521,7 +579,7 @@ export class OpenCodeAdapter implements CodingTool {
       process.env.SLOPCONTROL_CODING_IDLE_MS ?? DEFAULT_IDLE_MS,
     );
 
-    return runPromptWithWatchdog(
+    return runTurnEventDriven(
       state,
       {
         ...(system ? { system } : {}),
@@ -550,6 +608,11 @@ export class OpenCodeAdapter implements CodingTool {
     if (!state) return;
 
     state.eventAbort?.abort();
+    state.turnWaiter?.resolve({
+      kind: "error",
+      message: "Session aborted by SlopControl",
+    });
+    state.turnWaiter = null;
     await state.client.session
       .abort({
         path: { id: state.sessionId },
@@ -559,32 +622,63 @@ export class OpenCodeAdapter implements CodingTool {
     sessions.delete(session.id);
   }
 
+  /**
+   * Subscribe to the directory event stream. Resolves once the subscription
+   * is established so callers can safely fire promptAsync turns afterwards.
+   */
   private async startEventStream(state: OpenCodeSessionState): Promise<void> {
     const abort = new AbortController();
     state.eventAbort = abort;
 
+    let events: Awaited<ReturnType<typeof state.client.event.subscribe>>;
     try {
-      const events = await state.client.event.subscribe({
+      events = await state.client.event.subscribe({
         query: { directory: state.projectDir },
       });
-
-      for await (const event of events.stream) {
-        if (abort.signal.aborted) break;
-        appendEventText(state, event);
-        state.onEvent?.({
-          type: String((event as { type?: string }).type ?? "event"),
-          payload: event,
-        });
-      }
     } catch (error) {
-      if (abort.signal.aborted) return;
       state.onEvent?.({
         type: "event.error",
         payload: {
           message: error instanceof Error ? error.message : String(error),
         },
       });
+      throw error;
     }
+
+    void (async () => {
+      try {
+        for await (const event of events.stream) {
+          if (abort.signal.aborted) break;
+          appendEventText(state, event);
+          if (
+            event.type === "session.idle" &&
+            event.properties.sessionID === state.sessionId
+          ) {
+            state.turnWaiter?.resolve({ kind: "idle" });
+          } else if (
+            event.type === "session.error" &&
+            event.properties.sessionID === state.sessionId
+          ) {
+            state.turnWaiter?.resolve({
+              kind: "error",
+              message: describeSessionError(event.properties.error),
+            });
+          }
+          state.onEvent?.({
+            type: event.type,
+            payload: event,
+          });
+        }
+      } catch (error) {
+        if (abort.signal.aborted) return;
+        state.onEvent?.({
+          type: "event.error",
+          payload: {
+            message: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
+    })();
   }
 }
 

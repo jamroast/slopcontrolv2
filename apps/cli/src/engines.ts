@@ -2,6 +2,7 @@ import {
   buildOpenCodeEnv,
   isOpenCodeReachable,
   listCodingTools,
+  resolveOpenCodeBinary,
 } from "@slopcontrol/coding-tools";
 import type { SlopcontrolYaml } from "./config-schema.js";
 import type { HealthMode } from "./health.js";
@@ -26,8 +27,11 @@ export function buildOpenCodeCommand(opts: {
   commandOverride?: string[];
 }): string[] {
   if (opts.commandOverride?.length) return [...opts.commandOverride];
+  // Prefer the opencode-ai binary vendored via @slopcontrol/coding-tools so
+  // we never depend on whatever `opencode` happens to be on PATH.
+  const binary = resolveOpenCodeBinary() ?? "opencode";
   return [
-    "opencode",
+    binary,
     "serve",
     "--port",
     String(opts.port),
