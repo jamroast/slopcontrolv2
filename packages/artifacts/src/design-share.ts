@@ -31,6 +31,11 @@ import {
   preferAuthoritativeLogos,
   projectTokenCandidates,
 } from "./sibling-brand-refs.js";
+import {
+  getDesignLoopSelections,
+  readDesignLoopSelections,
+  replaceDesignLoopSelections,
+} from "./design-loop-selections.js";
 
 export type DesignShareSourceRef =
   | { kind: "projectId"; value: string }
@@ -910,4 +915,174 @@ export function formatProjectPriorDesignPromptBlock(
   return body.length <= maxChars
     ? body
     : `${body.slice(0, maxChars)}\n…[truncated PRIOR DESIGN]`;
+}
+
+/**
+ * Brand assets = PINNED, asset-bearing selections from the latest
+ * accepted/implemented loop. Strict by design: unpinned files in a loop's
+ * assets dir never travel, and loops that were never accepted are invisible.
+ * Brand identity is not opt-in reuse — it inherits by default.
+ */
+export type ProjectBrandAssets = {
+  sourceLoopId: string;
+  version?: number;
+  /** Pinned asset filenames (basenames), sorted. */
+  assets: string[];
+  /** The logo-slot pin's filename, when pinned. */
+  logoAsset?: string;
+};
+
+export function pickProjectBrandAssets(
+  projectRoot: string,
+  opts?: { excludeLoopId?: string },
+): ProjectBrandAssets | null {
+  const loop = pickPriorLoop(projectRoot, opts?.excludeLoopId);
+  if (!loop) return null;
+  const assetsDir = designLoopAssetsDir(projectRoot, loop.id);
+  const selections = getDesignLoopSelections(loop);
+  const seen = new Set<string>();
+  let logoAsset: string | undefined;
+  for (const sel of selections) {
+    if (!sel.asset) continue;
+    const name = basename(sel.asset);
+    if (name.startsWith(".") || !LOGO_EXT_RE.test(name)) continue;
+    if (!existsSync(join(assetsDir, name))) continue;
+    seen.add(name);
+    if (sel.slot === "logo" && !logoAsset) logoAsset = name;
+  }
+  if (!seen.size) return null;
+  return {
+    sourceLoopId: loop.id,
+    version: loop.acceptedVersion ?? loop.currentVersion,
+    assets: [...seen].sort(),
+    logoAsset,
+  };
+}
+
+export type ImportedProjectBrandAssets = {
+  sourceLoopId: string;
+  version?: number;
+  loopId: string;
+  importedAt: string;
+  /** Asset filenames copied into this loop's assets dir. */
+  assets: string[];
+  logoAsset?: string;
+};
+
+export function brandAssetsPath(projectRoot: string, loopId: string): string {
+  return join(designLoopDir(projectRoot, loopId), "BRAND_ASSETS.json");
+}
+
+export function readProjectBrandAssetsImport(
+  projectRoot: string,
+  loopId: string,
+): ImportedProjectBrandAssets | null {
+  const path = brandAssetsPath(projectRoot, loopId);
+  if (!existsSync(path)) return null;
+  try {
+    const imported = JSON.parse(
+      readFileSync(path, "utf-8"),
+    ) as ImportedProjectBrandAssets;
+    if (!imported?.assets?.length) return null;
+    return imported;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Carry pinned brand assets into a fresh loop: copy the files, record
+ * BRAND_ASSETS.json, and re-pin the logo selection so the new loop starts
+ * with the operator's mark already pinned (edit chains + mock generator see
+ * it from turn one). The pin is only seeded when the loop has no logo pin.
+ */
+export function importProjectBrandAssetsIntoLoop(opts: {
+  projectRoot: string;
+  loopId: string;
+  brand: ProjectBrandAssets;
+}): ImportedProjectBrandAssets {
+  const sourceAssetsDir = designLoopAssetsDir(
+    opts.projectRoot,
+    opts.brand.sourceLoopId,
+  );
+  const assetsDir = designLoopAssetsDir(opts.projectRoot, opts.loopId);
+  mkdirSync(assetsDir, { recursive: true });
+  mkdirSync(designLoopDir(opts.projectRoot, opts.loopId), { recursive: true });
+
+  const copied: string[] = [];
+  for (const name of opts.brand.assets) {
+    try {
+      copyFileSync(join(sourceAssetsDir, name), join(assetsDir, name));
+      copied.push(name);
+    } catch {
+      /* skip unreadable asset */
+    }
+  }
+
+  const imported: ImportedProjectBrandAssets = {
+    sourceLoopId: opts.brand.sourceLoopId,
+    version: opts.brand.version,
+    loopId: opts.loopId,
+    importedAt: new Date().toISOString(),
+    assets: copied,
+    logoAsset:
+      opts.brand.logoAsset && copied.includes(opts.brand.logoAsset)
+        ? opts.brand.logoAsset
+        : undefined,
+  };
+  writeFileSync(
+    brandAssetsPath(opts.projectRoot, opts.loopId),
+    `${JSON.stringify(imported, null, 2)}\n`,
+    "utf-8",
+  );
+
+  if (imported.logoAsset) {
+    const existing = readDesignLoopSelections(opts.projectRoot, opts.loopId);
+    if (!existing.some((s) => s.slot === "logo")) {
+      const name = imported.logoAsset;
+      try {
+        replaceDesignLoopSelections({
+          projectRoot: opts.projectRoot,
+          loopId: opts.loopId,
+          selections: [
+            ...existing,
+            {
+              slot: "logo",
+              conceptId: name.replace(/\.[^.]+$/, ""),
+              label: name,
+              asset: name,
+              pinnedAt: imported.importedAt,
+            },
+          ],
+        });
+      } catch {
+        /* pin carry is best-effort; the file + record still landed */
+      }
+    }
+  }
+  return imported;
+}
+
+/**
+ * BRAND ASSETS prompt block — top authority for logos/marks. Self-contained
+ * CRITICAL line so it composes ahead of SHARED/PRIOR/LIVE SITE blocks.
+ */
+export function formatBrandAssetsPromptBlock(
+  imported: ImportedProjectBrandAssets | null | undefined,
+): string {
+  if (!imported || !imported.assets.length) return "";
+  const lines: string[] = [
+    "## BRAND ASSETS (operator-pinned in an accepted design loop — authoritative for logos/marks)",
+    "",
+    "CRITICAL: Use these files for the logo and brand marks. Do NOT invent a new logo, restyle, or substitute a placeholder — the operator pinned these. They outrank LIVE SITE, SHARED DESIGN, and PRIOR DESIGN for brand marks. Inventing a logo is allowed only when the operator explicitly asks for a new mark.",
+    "",
+    `Source: design loop ${imported.sourceLoopId}@v${imported.version ?? "?"}`,
+    "",
+    "### Pinned brand assets (already copied into this loop's assets/):",
+  ];
+  for (const name of imported.assets) {
+    lines.push(`- \`${name}\`${name === imported.logoAsset ? " (pinned logo)" : ""}`);
+  }
+  lines.push("");
+  return lines.join("\n");
 }

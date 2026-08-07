@@ -16,6 +16,10 @@ import {
   importProjectPriorDesignIntoLoop,
   readProjectPriorDesignImport,
   formatProjectPriorDesignPromptBlock,
+  pickProjectBrandAssets,
+  importProjectBrandAssetsIntoLoop,
+  readProjectBrandAssetsImport,
+  formatBrandAssetsPromptBlock,
 } from "./design-share.js";
 import {
   designLoopDir,
@@ -24,6 +28,10 @@ import {
   writeDesignLoopVersion,
 } from "./design-loop.js";
 import { writeDesignLoopPack } from "./design-pack.js";
+import {
+  readDesignLoopSelections,
+  replaceDesignLoopSelections,
+} from "./design-loop-selections.js";
 import { existsSync } from "node:fs";
 
 function tmpRoot(name: string): string {
@@ -551,4 +559,158 @@ test("pickProjectPriorDesign returns null when nothing prior", () => {
   const root = tmpRoot("prior-empty");
   assert.equal(pickProjectPriorDesign(root), null);
   rmSync(root, { recursive: true, force: true });
+});
+
+function writeAcceptedLoopWithAssets(root: string, loopId: string): void {
+  const now = new Date().toISOString();
+  writeDesignLoopMeta(root, {
+    id: loopId,
+    projectId: "proj-1",
+    brief: "brand exploration",
+    status: "implemented",
+    currentVersion: 1,
+    acceptedVersion: 1,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const assetsDir = designLoopAssetsDir(root, loopId);
+  mkdirSync(assetsDir, { recursive: true });
+  writeFileSync(join(assetsDir, "mark.png"), Buffer.from([0x89, 0x50]));
+  writeFileSync(join(assetsDir, "draft-exploration.png"), Buffer.from([0x89]));
+}
+
+test("brand carry: only pinned assets from the latest accepted loop travel", () => {
+  const root = tmpRoot("brand-carry");
+  try {
+    writeAcceptedLoopWithAssets(root, "loop-old");
+    // Pin the logo; leave draft-exploration.png unpinned.
+    replaceDesignLoopSelections({
+      projectRoot: root,
+      loopId: "loop-old",
+      selections: [
+        {
+          slot: "logo",
+          conceptId: "mark",
+          label: "mark.png",
+          asset: "mark.png",
+          pinnedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    writeDesignLoopMeta(root, {
+      id: "loop-new",
+      projectId: "proj-1",
+      brief: "new dashboard",
+      status: "open",
+      currentVersion: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const brand = pickProjectBrandAssets(root, { excludeLoopId: "loop-new" });
+    assert.ok(brand);
+    assert.equal(brand!.sourceLoopId, "loop-old");
+    assert.deepEqual(brand!.assets, ["mark.png"]); // draft-exploration.png excluded
+    assert.equal(brand!.logoAsset, "mark.png");
+
+    const imported = importProjectBrandAssetsIntoLoop({
+      projectRoot: root,
+      loopId: "loop-new",
+      brand: brand!,
+    });
+    assert.deepEqual(imported.assets, ["mark.png"]);
+    assert.ok(
+      existsSync(join(designLoopAssetsDir(root, "loop-new"), "mark.png")),
+    );
+    assert.ok(readProjectBrandAssetsImport(root, "loop-new"));
+
+    // The pin carried: the new loop starts with the logo already pinned.
+    const pins = readDesignLoopSelections(root, "loop-new");
+    const logoPin = pins.find((s) => s.slot === "logo");
+    assert.equal(logoPin?.asset, "mark.png");
+
+    const block = formatBrandAssetsPromptBlock(imported);
+    assert.match(block, /BRAND ASSETS/);
+    assert.match(block, /Do NOT invent a new logo/);
+    assert.match(block, /mark\.png/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("brand carry: non-accepted loops and pin-less loops yield nothing", () => {
+  const root = tmpRoot("brand-strict");
+  try {
+    // Open (never accepted) loop WITH a pinned logo — must be invisible.
+    writeDesignLoopMeta(root, {
+      id: "loop-open",
+      projectId: "proj-1",
+      brief: "wip",
+      status: "open",
+      currentVersion: 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    assert.equal(pickProjectBrandAssets(root), null);
+
+    // Accepted loop with assets on disk but NO pins — strict: nothing travels.
+    writeAcceptedLoopWithAssets(root, "loop-accepted");
+    assert.equal(pickProjectBrandAssets(root), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("brand carry: import never overwrites an existing logo pin", () => {
+  const root = tmpRoot("brand-keep-pin");
+  try {
+    writeAcceptedLoopWithAssets(root, "loop-old");
+    replaceDesignLoopSelections({
+      projectRoot: root,
+      loopId: "loop-old",
+      selections: [
+        {
+          slot: "logo",
+          conceptId: "mark",
+          asset: "mark.png",
+          pinnedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    writeDesignLoopMeta(root, {
+      id: "loop-new",
+      projectId: "proj-1",
+      brief: "fresh",
+      status: "open",
+      currentVersion: 0,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    // Operator already pinned a different logo in the new loop.
+    replaceDesignLoopSelections({
+      projectRoot: root,
+      loopId: "loop-new",
+      selections: [
+        {
+          slot: "logo",
+          conceptId: "other",
+          asset: "other.png",
+          pinnedAt: new Date().toISOString(),
+        },
+      ],
+    });
+
+    const brand = pickProjectBrandAssets(root, { excludeLoopId: "loop-new" });
+    importProjectBrandAssetsIntoLoop({
+      projectRoot: root,
+      loopId: "loop-new",
+      brand: brand!,
+    });
+    const logoPin = readDesignLoopSelections(root, "loop-new").find(
+      (s) => s.slot === "logo",
+    );
+    assert.equal(logoPin?.asset, "other.png");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

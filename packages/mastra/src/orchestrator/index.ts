@@ -159,6 +159,10 @@ import {
   importDesignShareIntoLoop,
   pickProjectPriorDesign,
   importProjectPriorDesignIntoLoop,
+  pickProjectBrandAssets,
+  importProjectBrandAssetsIntoLoop,
+  readProjectBrandAssetsImport,
+  formatBrandAssetsPromptBlock,
   readProjectPriorDesignImport,
   formatProjectPriorDesignPromptBlock,
   extractSiblingProjectPaths,
@@ -2563,6 +2567,39 @@ ${message.trim()}`;
     // siteInventoryBlock rebuilt after share import (authority depends on SHARED).
     let siteInventoryBlock = formatLiveSiteInventoryPromptBlock(siteInventory);
 
+    // Brand assets ALWAYS carry: pinned assets from the latest accepted/
+    // implemented loop seed every fresh loop (strict — pins only, accepted
+    // loops only). Independent of the reuseProjectDesign intent gate.
+    let brandAssetsImport = readProjectBrandAssetsImport(
+      project.rootPath,
+      loopId,
+    );
+    if (!brandAssetsImport) {
+      try {
+        const brand = pickProjectBrandAssets(project.rootPath, {
+          excludeLoopId: loopId,
+        });
+        if (brand) {
+          brandAssetsImport = importProjectBrandAssetsIntoLoop({
+            projectRoot: project.rootPath,
+            loopId,
+            brand,
+          });
+          slog.info("design-loop", "carried pinned brand assets", {
+            loopId,
+            sourceLoopId: brand.sourceLoopId,
+            assets: brand.assets,
+          });
+        }
+      } catch (err) {
+        slog.warn("design-loop", "brand asset carry failed", {
+          loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    const brandAssetsBlock = formatBrandAssetsPromptBlock(brandAssetsImport);
+
     // Deterministic icon-pack derive + patch before any agent rewrite.
     let workingPreviousHtml = previousHtml;
     // Seed same-project prior design when operator asks to reuse current theming.
@@ -3165,7 +3202,7 @@ Otherwise prefer writing the mock with few or zero tool calls.
 
 ${selectionsBlock}
 
-${sharedDesignBlock ? `${sharedDesignBlock}\n` : ""}${priorDesignBlock ? `${priorDesignBlock}\n` : ""}${elementsBlock ? `${elementsBlock}\n` : ""}${siteInventoryBlock ? `${siteInventoryBlock}\n` : ""}
+${brandAssetsBlock ? `${brandAssetsBlock}\n` : ""}${sharedDesignBlock ? `${sharedDesignBlock}\n` : ""}${priorDesignBlock ? `${priorDesignBlock}\n` : ""}${elementsBlock ? `${elementsBlock}\n` : ""}${siteInventoryBlock ? `${siteInventoryBlock}\n` : ""}
 Brief:
 ${clipPromptSection("brief", brief, 3_000)}
 
