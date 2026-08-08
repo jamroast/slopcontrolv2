@@ -1,4 +1,12 @@
-import { existsSync, openSync, readSync, closeSync, watch, statSync } from "node:fs";
+import {
+  existsSync,
+  openSync,
+  readSync,
+  closeSync,
+  watch,
+  statSync,
+  fstatSync,
+} from "node:fs";
 import { cmdUp } from "./cmd-up.js";
 import { checkHttpHealth } from "./health.js";
 import { loadConfig } from "./config.js";
@@ -67,7 +75,9 @@ function followLogFile(
   return new Promise((resolve, reject) => {
     let offset = startOffset;
     let fd: number | null = null;
+    let fdIno: number | null = null;
     let watcher: ReturnType<typeof watch> | null = null;
+    let timer: NodeJS.Timeout | null = null;
     let closed = false;
 
     const cleanup = () => {
@@ -78,6 +88,10 @@ function followLogFile(
       } catch {
         /* ignore */
       }
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
       if (fd != null) {
         try {
           closeSync(fd);
@@ -85,6 +99,7 @@ function followLogFile(
           /* ignore */
         }
         fd = null;
+        fdIno = null;
       }
     };
 
@@ -100,6 +115,7 @@ function followLogFile(
 
     try {
       fd = openSync(filePath, "r");
+      fdIno = fstatSync(fd).ino;
     } catch (err) {
       signal.removeEventListener("abort", onAbort);
       reject(err);
@@ -107,11 +123,26 @@ function followLogFile(
     }
 
     const pump = () => {
-      if (closed || fd == null) return;
+      if (closed) return;
       try {
-        const size = statSync(filePath).size;
+        const st = statSync(filePath);
+        const size = st.size;
+        if (fd == null || st.ino !== fdIno) {
+          // Rotated / recreated: fs.watch tracks the renamed inode, so
+          // reopen the path to follow the fresh log.
+          if (fd != null) {
+            try {
+              closeSync(fd);
+            } catch {
+              /* ignore */
+            }
+          }
+          fd = openSync(filePath, "r");
+          fdIno = fstatSync(fd).ino;
+          offset = 0;
+        }
         if (size < offset) {
-          // truncated / rotated
+          // truncated
           offset = 0;
         }
         if (size === offset) return;
@@ -134,6 +165,10 @@ function followLogFile(
     pump();
     try {
       watcher = watch(filePath, { persistent: true }, () => pump());
+      // Poll as well: after rotation the watcher is bound to the renamed
+      // inode and never fires for the new file at this path.
+      timer = setInterval(pump, 2000);
+      timer.unref?.();
     } catch (err) {
       cleanup();
       signal.removeEventListener("abort", onAbort);

@@ -4,6 +4,8 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -34,10 +36,29 @@ export function appendServiceLog(serviceId: string, line: string): void {
   appendFileSync(path, text, "utf-8");
 }
 
-/** Truncate / create empty log for a fresh spawn. */
+/** Previous generation of a service log (kept off the *.log listing). */
+export function serviceLogPrevPath(serviceId: string): string {
+  return `${serviceLogPath(serviceId)}.prev`;
+}
+
+/**
+ * Rotate the current log to <id>.log.prev, then create a fresh empty log.
+ * Truncation strands open `tail -f` handles (offset past EOF); rotation keeps
+ * the previous run's output and plays well with `tail -F` / `slopcontrol logs -f`.
+ */
 export function resetServiceLog(serviceId: string): void {
   ensureCliLogsDir();
-  writeFileSync(serviceLogPath(serviceId), "", "utf-8");
+  const path = serviceLogPath(serviceId);
+  const prev = serviceLogPrevPath(serviceId);
+  try {
+    if (existsSync(path) && statSync(path).size > 0) {
+      rmSync(prev, { force: true });
+      renameSync(path, prev);
+    }
+  } catch {
+    /* best-effort rotation — a fresh file is still created below */
+  }
+  writeFileSync(path, "", "utf-8");
 }
 
 export function listServiceLogFiles(): Array<{ id: string; path: string; size: number }> {

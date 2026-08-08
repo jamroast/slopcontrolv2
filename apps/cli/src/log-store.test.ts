@@ -10,6 +10,7 @@ import {
   readLastLines,
   resetServiceLog,
   serviceLogPath,
+  serviceLogPrevPath,
 } from "./log-store.js";
 
 const roots: string[] = [];
@@ -43,6 +44,28 @@ describe("log-store", () => {
     assert.equal(readLastLines(path, 2), "line two\nline three");
     assert.ok(listServiceLogFiles().some((f) => f.id === id));
     rmSync(path, { force: true });
+  });
+
+  it("resetServiceLog rotates the current log to .prev instead of truncating", () => {
+    const id = `test-rotate-${Date.now()}`;
+    const path = serviceLogPath(id);
+    const prev = serviceLogPrevPath(id);
+    try {
+      appendServiceLog(id, "old run output");
+      resetServiceLog(id);
+      assert.equal(readFileSync(path, "utf-8"), "");
+      assert.match(readFileSync(prev, "utf-8"), /old run output/);
+      // .prev stays out of the service listing (no fake "server.prev" service)
+      assert.ok(!listServiceLogFiles().some((f) => f.path === prev));
+      // Second rotation replaces the older prev
+      appendServiceLog(id, "new run output");
+      resetServiceLog(id);
+      assert.match(readFileSync(prev, "utf-8"), /new run output/);
+      assert.ok(!readFileSync(prev, "utf-8").includes("old run output"));
+    } finally {
+      rmSync(path, { force: true });
+      rmSync(prev, { force: true });
+    }
   });
 
   it("readLastLines returns empty for missing file", () => {
