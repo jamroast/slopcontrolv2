@@ -32,6 +32,8 @@ export type LiveTurnRecord = {
   status: LiveTurnStatus;
   controller: AbortController;
   events: LiveTurnEvent[];
+  /** Cumulative assistant text chars — survives MAX_EVENTS eviction. */
+  textLen: number;
   startedAt: string;
   lastEventAt: string;
   interruptReason?: string;
@@ -80,6 +82,7 @@ export class LiveTurnRegistry {
       status: "running",
       controller: new AbortController(),
       events: [],
+      textLen: 0,
       startedAt: now,
       lastEventAt: now,
     };
@@ -116,6 +119,9 @@ export class LiveTurnRegistry {
     turn.events.push(stamped);
     if (turn.events.length > MAX_EVENTS) {
       turn.events.splice(0, turn.events.length - MAX_EVENTS);
+    }
+    if (stamped.type === "text") {
+      turn.textLen += stamped.text.length;
     }
     turn.lastEventAt = stamped.at;
     for (const listener of this.listeners) {
