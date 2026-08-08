@@ -34,6 +34,16 @@ import {
   getDesignLoopElements,
   type DesignElementRef,
 } from "./design-element.js";
+import {
+  getDesignLoopSelections,
+  type DesignLoopSelection,
+} from "./design-loop-selections.js";
+
+/** Operator-pinned selection carried into the pack (logo, palette, …). */
+export type DesignPackSelection = DesignLoopSelection & {
+  /** Loop-relative (or phase-relative after bind) asset path. */
+  path?: string;
+};
 
 const SLOP_DIR = ".slopcontrol";
 
@@ -71,6 +81,11 @@ export type DesignPack = {
   theme?: ThemeContract;
   /** Pinned shared design elements (controls/patterns) on accept. */
   elements?: DesignElementRef[];
+  /**
+   * Operator-pinned selections (logo, palette, …) at accept time. The pinned
+   * logo is authoritative — implement must wire THIS asset as the product logo.
+   */
+  selections?: DesignPackSelection[];
   createdAt: string;
   updatedAt: string;
 };
@@ -373,6 +388,13 @@ export function compileDesignPackFromAccept(opts: {
 
   const elements = getDesignLoopElements(meta);
 
+  const selections = getDesignLoopSelections(meta).map((s) => ({
+    ...s,
+    path: s.asset
+      ? `.slopcontrol/design-loops/${opts.loopId}/assets/${s.asset}`
+      : undefined,
+  }));
+
   const alreadyAppliedMustNots = alreadyApplied
     .filter((id) => !inScope.includes(id))
     .map(
@@ -411,6 +433,7 @@ export function compileDesignPackFromAccept(opts: {
     // Theme contract only authoritative when theme_modes is in this implement delta.
     theme: inScope.includes("theme_modes") ? theme : undefined,
     elements: elements.length ? elements : undefined,
+    selections: selections.length ? selections : undefined,
     createdAt: now,
     updatedAt: now,
   };
@@ -485,6 +508,12 @@ export function copyDesignPackToPhase(opts: {
     logos: pack.logos.map((l) => ({
       name: l.name,
       path: `.slopcontrol/phases/${opts.phaseId}/design/assets/${l.name}`,
+    })),
+    selections: pack.selections?.map((s) => ({
+      ...s,
+      path: s.asset
+        ? `.slopcontrol/phases/${opts.phaseId}/design/assets/${s.asset}`
+        : s.path,
     })),
     mockPath: `.slopcontrol/phases/${opts.phaseId}/design/mock.html`,
     updatedAt: new Date().toISOString(),
@@ -566,6 +595,29 @@ export function formatDesignPackPromptBlock(
   if (pack.logos.length) {
     lines.push("### logos (mount these — do not invent a competing mark)");
     for (const l of pack.logos) lines.push(`- ${l.name}: \`${l.path}\``);
+    lines.push("");
+  }
+  const pinnedLogo = pack.selections?.find(
+    (s) => s.slot === "logo" && s.asset,
+  );
+  if (pinnedLogo?.asset) {
+    lines.push(
+      "### pinned logo (OPERATOR-SELECTED — authoritative)",
+      `- ${pinnedLogo.label ?? pinnedLogo.asset}: \`${pinnedLogo.path ?? pinnedLogo.asset}\``,
+      `- Copy THIS exact file into the product's static brand dir (e.g. \`public/brand/${pinnedLogo.asset}\`) and wire it as THE product logo — menubar \`logoSrc\`, favicon/app icons. Do NOT substitute older brand files, other logo variants from the logos list, or tile+circle fallbacks. Automated Checks must grep the shell for the pinned filename.`,
+      "",
+    );
+  }
+  const otherSelections = (pack.selections ?? []).filter(
+    (s) => s !== pinnedLogo,
+  );
+  if (otherSelections.length) {
+    lines.push("### pinned selections (operator-pinned — preserve)");
+    for (const s of otherSelections) {
+      lines.push(
+        `- ${s.slot}: ${s.label ?? s.conceptId}${s.path ? ` (\`${s.path}\`)` : ""}`,
+      );
+    }
     lines.push("");
   }
   if (pack.typography.length) {

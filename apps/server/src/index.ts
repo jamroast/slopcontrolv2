@@ -95,6 +95,7 @@ import {
   listNpmRegistryPackages,
   npmRegistryEnvValues,
   npmRegistryPackageFreshness,
+  writeProjectRegistryEnv,
   readNpmRegistryMeta,
   prepareDesignElementNpmPackage,
   recordDesignElementNpmPublish,
@@ -1139,13 +1140,27 @@ app.post("/projects/:id/build-process/configure", async (req, res) => {
       modelId,
       runCommands,
     });
+    // A configure must leave the project fully wired: inject the canonical
+    // registry env (SLOPCONTROL_NPM_REGISTRY_*) into the project's env files,
+    // same as import-time onboarding does.
+    let envFiles: string[] = [];
+    let tokenWritten = false;
+    if (report.applied && !report.auditOnly) {
+      const env = writeProjectRegistryEnv({
+        projectRoot: project.rootPath,
+        meta: ensureNpmRegistryLayout(defaultDataDir()),
+      });
+      envFiles = env.files;
+      tokenWritten = env.tokenWritten;
+    }
     log.info("project", "build-process configure", {
       projectId: project.id,
       applied: report.applied,
       auditOnly: report.auditOnly,
       changes: report.changes.filter((c) => c.applied).length,
+      envFiles: envFiles.length,
     });
-    res.json(report);
+    res.json({ ...report, envFiles, tokenWritten });
   } catch (err) {
     res.status(500).json({
       error: err instanceof Error ? err.message : String(err),
@@ -1206,6 +1221,49 @@ app.post("/projects/:id/build-process/verify", async (req, res) => {
       projectId: project.id,
       ok: report.ok,
       steps: report.steps.map((s) => `${s.step}:${s.code}`).join(","),
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+/**
+ * Consume side of the registry cycle: update THIS project to a published
+ * library version via its own toolchain (pnpm add …) and commit the bump.
+ * For projects imported before publish-time propagation existed.
+ */
+app.post("/projects/:id/design-library/consume", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const body = (req.body ?? {}) as {
+    packageName?: string;
+    version?: string;
+    commitBump?: boolean;
+  };
+  if (!body.packageName) {
+    res.status(400).json({ error: "packageName is required" });
+    return;
+  }
+  try {
+    const { consumeLibraryFromRegistry } = await import("./npm-registry.js");
+    const report = await consumeLibraryFromRegistry({
+      dataDir: defaultDataDir(),
+      projectRoot: project.rootPath,
+      packageName: body.packageName,
+      version: body.version,
+      commitBump: body.commitBump,
+    });
+    log.info("project", "design library consume", {
+      projectId: project.id,
+      name: report.packageName,
+      version: report.version,
+      ok: report.ok,
     });
     res.json(report);
   } catch (err) {

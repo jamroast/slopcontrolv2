@@ -68,6 +68,11 @@ export type PropagationResult = {
  * Update each consumer to `name@^version` via the consumer's OWN toolchain
  * (pnpm add / npm install …) so the lockfile refreshes natively. Never
  * hand-edit manifests or lockfiles.
+ *
+ * The bump is committed (package.json + toolchain lockfiles only) so the
+ * update survives subsequent phase worktrees/merges — an uncommitted bump
+ * evaporates on the next phase cycle. Commit failures degrade to a warning
+ * in `detail`; the consume update itself still counts as successful.
  */
 export async function propagateLibraryVersion(opts: {
   consumers: RegisteredConsumer[];
@@ -76,6 +81,8 @@ export async function propagateLibraryVersion(opts: {
   resolveToolchain: (consumerRoot: string) => BuildToolchainSpec | null;
   runner?: typeof runToolchainCommand;
   timeoutMs?: number;
+  /** Commit the bump (package.json + lockfiles) after a successful update. */
+  commitBump?: boolean;
 }): Promise<PropagationResult[]> {
   const runner = opts.runner ?? runToolchainCommand;
   const dep = `${opts.packageName}@^${opts.version}`;
@@ -99,15 +106,37 @@ export async function propagateLibraryVersion(opts: {
       timeoutMs: opts.timeoutMs ?? 5 * 60_000,
       redactSecrets: [process.env.SLOPCONTROL_NPM_REGISTRY_TOKEN ?? ""],
     });
+    let detail =
+      run.code === 0
+        ? `updated to ${dep}`
+        : `consume update failed (${run.code}): ${(run.stderr || run.stdout).slice(0, 400)}`;
+    if (run.code === 0 && opts.commitBump !== false && spec) {
+      const bumpFiles = ["package.json", ...spec.lockfiles];
+      const commit = await runner({
+        cmd: [
+          "git",
+          "commit",
+          "-m",
+          `chore(deps): bump ${opts.packageName} to ^${opts.version} (slopcontrol library propagation)`,
+          "--",
+          ...bumpFiles,
+        ],
+        cwd: consumer.rootPath,
+        timeoutMs: 60_000,
+      });
+      detail +=
+        commit.code === 0
+          ? " — bump committed"
+          : /nothing to commit/i.test(`${commit.stdout}\n${commit.stderr}`)
+            ? " — already committed / no changes"
+            : ` — WARNING: bump left uncommitted (${(commit.stderr || commit.stdout).trim().slice(0, 200)})`;
+    }
     results.push({
       consumer,
       ok: run.code === 0,
       command,
       code: run.code,
-      detail:
-        run.code === 0
-          ? `updated to ${dep}`
-          : `consume update failed (${run.code}): ${(run.stderr || run.stdout).slice(0, 400)}`,
+      detail,
     });
   }
   return results;

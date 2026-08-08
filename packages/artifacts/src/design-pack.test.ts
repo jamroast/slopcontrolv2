@@ -26,6 +26,7 @@ import {
   readDesignLoopPack,
   readPhaseDesignPack,
 } from "./design-pack.js";
+import { replaceDesignLoopSelections } from "./design-loop-selections.js";
 
 describe("design-pack", () => {
   const roots: string[] = [];
@@ -161,6 +162,81 @@ describe("design-pack", () => {
       "utf-8",
     );
     assert.match(raw, /contentPillars/);
+  });
+
+  it("pinned logo selection flows into pack, phase bind, prompt block and UI-SPEC", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-dpack-sel-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({
+      projectId: "p1",
+      brief: "New logo",
+    });
+    writeDesignLoopMeta(root, meta);
+    writeDesignLoopVersion({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      html: `<!DOCTYPE html><html><head><style>:root{--x:1}</style></head>
+<body><img src="./assets/mark-v2.png" alt="logo"></body></html>`,
+      notes: "ok",
+      request: "new circular logo",
+    });
+    mkdirSync(
+      join(root, ".slopcontrol", "design-loops", meta.id, "assets"),
+      { recursive: true },
+    );
+    writeFileSync(
+      join(root, ".slopcontrol", "design-loops", meta.id, "assets", "mark-v2.png"),
+      "png",
+    );
+    replaceDesignLoopSelections({
+      projectRoot: root,
+      loopId: meta.id,
+      selections: [
+        {
+          slot: "logo",
+          conceptId: "c1",
+          label: "Circular mark v2",
+          asset: "mark-v2.png",
+          pinnedAt: new Date().toISOString(),
+        },
+      ],
+    });
+
+    acceptDesignLoop(root, meta.id, 1, {
+      acceptedFeatureIds: ["logo"],
+    });
+    const pack = readDesignLoopPack(root, meta.id);
+    assert.ok(pack);
+    const sel = pack!.selections?.find((s) => s.slot === "logo");
+    assert.equal(sel?.asset, "mark-v2.png");
+    assert.match(sel?.path ?? "", /design-loops\/.*\/assets\/mark-v2\.png/);
+    assert.match(
+      formatDesignPackPromptBlock(pack),
+      /pinned logo \(OPERATOR-SELECTED/,
+    );
+
+    mkdirSync(join(root, ".slopcontrol", "phases", "02-logo"), {
+      recursive: true,
+    });
+    bindAcceptedDesignLoopToPhase({
+      projectRoot: root,
+      loopId: meta.id,
+      phaseId: "02-logo",
+    });
+    const phasePack = readPhaseDesignPack(root, "02-logo");
+    const phaseSel = phasePack?.selections?.find((s) => s.slot === "logo");
+    assert.equal(phaseSel?.asset, "mark-v2.png");
+    assert.match(
+      phaseSel?.path ?? "",
+      /phases\/02-logo\/design\/assets\/mark-v2\.png/,
+    );
+    const uiSpec = readFileSync(
+      join(root, ".slopcontrol", "phases", "02-logo", "UI-SPEC.md"),
+      "utf-8",
+    );
+    assert.match(uiSpec, /operator-pinned logo is `mark-v2\.png`/);
+    assert.match(uiSpec, /Do NOT substitute older brand files/);
   });
 
   it("extractShellNotes emits concrete content-aligned menubar bullets", () => {

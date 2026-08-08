@@ -168,6 +168,46 @@ describe("applyBuildProcessChanges guardrails", () => {
     }
   });
 
+  it("replace_section never splits a marker line (dangling continuation)", () => {
+    const root = tmp("sectionline");
+    try {
+      writeFileSync(
+        join(root, "Dockerfile"),
+        [
+          "FROM node:22-alpine AS deps",
+          "COPY package.json pnpm-lock.yaml ./",
+          "RUN --mount=type=cache,id=pnpm,target=/pnpm/store \\",
+          "    pnpm install --frozen-lockfile",
+          "",
+        ].join("\n"),
+        "utf-8",
+      );
+      const { results } = applyBuildProcessChanges({
+        projectRoot: root,
+        toolchain: PNPM_SPEC,
+        changes: [
+          {
+            op: "replace_section",
+            path: "Dockerfile",
+            markerStart: "COPY package.json pnpm-lock.yaml ./",
+            // Marker is a PREFIX of the real line (which ends in ` \`).
+            markerEnd: "RUN --mount=type=cache,id=pnpm,target=/pnpm/store",
+            content: "ARG SLOPCONTROL_NPM_REGISTRY_TOKEN\nRUN printf 'x' > .npmrc",
+            rationale: "registry wiring",
+          },
+        ],
+      });
+      assert.equal(results[0]?.applied, true);
+      const out = readFileSync(join(root, "Dockerfile"), "utf-8");
+      // Line-anchored match must NOT match the prefix; block is appended
+      // instead, and the original RUN continuation survives intact.
+      assert.match(out, /RUN --mount=type=cache,id=pnpm,target=\/pnpm\/store \\\n    pnpm install --frozen-lockfile/);
+      assert.doesNotMatch(out, /pnpm\/store\n \\n/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("replace_section inserts and replaces marker blocks", () => {
     const root = tmp("section");
     try {

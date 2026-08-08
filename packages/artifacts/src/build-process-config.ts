@@ -387,20 +387,50 @@ function applyReplaceSection(
   const abs = assertPathAllowed(projectRoot, change.path);
   const block = `${change.markerStart}\n${change.content.trimEnd()}\n${change.markerEnd}\n`;
   const prior = existsSync(abs) ? readFileSync(abs, "utf-8") : "";
-  const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(
-    `${esc(change.markerStart)}[\\s\\S]*?${esc(change.markerEnd)}\\n?`,
-    "m",
-  );
-  const next = re.test(prior)
-    ? prior.replace(re, block)
-    : prior.trimEnd()
-      ? `${prior.trimEnd()}\n\n${block}`
-      : block;
+  const next = replaceSectionLineAnchored(prior, change, block);
   assertNoDuplicateYamlKeys(next, change.path);
   mkdirSync(join(abs, ".."), { recursive: true });
   writeFileSync(abs, next, "utf-8");
   return `section replaced in ${change.path}`;
+}
+
+/**
+ * Markers are WHOLE LINES (trimmed compare). Substring regex matching let a
+ * markerEnd match a line prefix — e.g. `RUN --mount=…` inside
+ * `RUN --mount=… \` — leaving a dangling ` \` that silently corrupts
+ * Dockerfiles. Multi-line markers (rare) fall back to the substring regex.
+ */
+function replaceSectionLineAnchored(
+  prior: string,
+  change: Extract<BuildProcessConfigChange, { op: "replace_section" }>,
+  block: string,
+): string {
+  const start = change.markerStart.trim();
+  const end = change.markerEnd.trim();
+  if (start.includes("\n") || end.includes("\n")) {
+    const esc = (s: string): string =>
+      s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(
+      `${esc(change.markerStart)}[\\s\\S]*?${esc(change.markerEnd)}\\n?`,
+      "m",
+    );
+    return re.test(prior)
+      ? prior.replace(re, block)
+      : appendBlock(prior, block);
+  }
+  const lines = prior.split("\n");
+  const i = lines.findIndex((l) => l.trim() === start);
+  if (i === -1) return appendBlock(prior, block);
+  const j = lines.findIndex((l, idx) => idx > i && l.trim() === end);
+  if (j === -1) return appendBlock(prior, block);
+  const blockLines = block.trimEnd().split("\n");
+  return [...lines.slice(0, i), ...blockLines, ...lines.slice(j + 1)].join(
+    "\n",
+  );
+}
+
+function appendBlock(prior: string, block: string): string {
+  return prior.trimEnd() ? `${prior.trimEnd()}\n\n${block}` : block;
 }
 
 /**

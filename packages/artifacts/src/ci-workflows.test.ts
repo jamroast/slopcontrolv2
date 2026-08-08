@@ -23,6 +23,32 @@ describe("ci workflow templates", () => {
     assert.match(yaml, /run: pnpm run build/);
   });
 
+  it("ci.yml generates .npmrc from secrets for registry-aware toolchains", () => {
+    const spec = defaultToolchainSpec("node-pnpm");
+    assert.ok(spec);
+    const yaml = renderCiWorkflowYaml(spec)!;
+    const npmrcIdx = yaml.indexOf("Generate .npmrc from SlopControl secrets");
+    const installIdx = yaml.indexOf("pnpm install --frozen-lockfile");
+    assert.ok(npmrcIdx !== -1, "npmrc step present");
+    assert.ok(npmrcIdx < installIdx, "npmrc step precedes install");
+    assert.match(yaml, /@jamroast:registry=%s/);
+    assert.match(yaml, /secrets\.SLOPCONTROL_NPM_REGISTRY_TOKEN/);
+    assert.ok(!yaml.includes("127.0.0.1"));
+  });
+
+  it("ci.yml omits the npmrc step when the toolchain ignores registries", () => {
+    const spec = BuildToolchainSpecSchema.parse({
+      kind: "rust-cargo",
+      buildCmd: ["cargo", "build"],
+      installCmd: ["cargo", "fetch"],
+      frozenInstallCmd: ["cargo", "fetch", "--locked"],
+      lockfiles: ["Cargo.lock"],
+      registryEnvKeys: [],
+    });
+    const yaml = renderCiWorkflowYaml(spec);
+    if (yaml) assert.doesNotMatch(yaml, /npmrc/);
+  });
+
   it("ci.yml for node-npm uses npm ci", () => {
     const spec = defaultToolchainSpec("node-npm");
     assert.ok(spec);

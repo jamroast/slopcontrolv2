@@ -15,7 +15,7 @@ import {
   readNpmRegistryMeta,
   runToolchainCommand,
 } from "@slopcontrol/artifacts";
-import { publishLibraryToRegistry } from "./npm-registry.js";
+import { consumeLibraryFromRegistry, publishLibraryToRegistry } from "./npm-registry.js";
 
 function tmp(name: string): string {
   return mkdtempSync(join(tmpdir(), `sc-libpub-${name}-`));
@@ -211,6 +211,74 @@ describe("publishLibraryToRegistry", () => {
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(lib, { recursive: true, force: true });
+    }
+  });
+
+  it("consumeLibraryFromRegistry bumps the consumer via its toolchain + commits", async () => {
+    const dataDir = tmp("datacons");
+    const consumer = tmp("cons");
+    try {
+      ensureNpmRegistryLayout(dataDir);
+      writeFileSync(
+        join(consumer, "package.json"),
+        JSON.stringify({
+          name: "crm",
+          dependencies: { "@jamroast/components": "0.0.0" },
+        }),
+        "utf-8",
+      );
+      writeFileSync(join(consumer, "pnpm-lock.yaml"), "lockfileVersion: 9\n");
+      const calls: string[][] = [];
+      const report = await consumeLibraryFromRegistry({
+        dataDir,
+        projectRoot: consumer,
+        packageName: "@jamroast/components",
+        version: "0.0.2",
+        runner: async (run) => {
+          calls.push(run.cmd);
+          return { code: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false };
+        },
+      });
+      assert.equal(report.ok, true);
+      assert.equal(report.version, "0.0.2");
+      assert.deepEqual(calls[0], ["pnpm", "add", "@jamroast/components@^0.0.2"]);
+      assert.equal(calls[1]?.[0], "git");
+      assert.match(report.propagation[0]?.detail ?? "", /bump committed/);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(consumer, { recursive: true, force: true });
+    }
+  });
+
+  it("consumeLibraryFromRegistry rejects projects that do not depend on the package", async () => {
+    const dataDir = tmp("datana");
+    const consumer = tmp("cons-na");
+    try {
+      ensureNpmRegistryLayout(dataDir);
+      writeFileSync(
+        join(consumer, "package.json"),
+        JSON.stringify({ name: "other", dependencies: { react: "^19" } }),
+        "utf-8",
+      );
+      await assert.rejects(
+        consumeLibraryFromRegistry({
+          dataDir,
+          projectRoot: consumer,
+          packageName: "@jamroast/components",
+          version: "0.0.2",
+          runner: async () => ({
+            code: 0,
+            stdout: "",
+            stderr: "",
+            durationMs: 1,
+            timedOut: false,
+          }),
+        }),
+        /does not depend on/,
+      );
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(consumer, { recursive: true, force: true });
     }
   });
 });

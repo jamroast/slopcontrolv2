@@ -5,7 +5,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   dirMaxMtimeMs,
   ensureNpmRegistryLayout,
@@ -530,5 +530,66 @@ export async function publishLibraryToRegistry(opts: {
     steps,
     propagation,
     meta,
+  };
+}
+
+/**
+ * Consume half of the registry cycle, callable on its own: bring ONE
+ * consumer project to a published library version via the consumer's own
+ * toolchain (pnpm add …) and commit the bump so it survives later phase
+ * merges. Exists for projects imported before publish-time propagation (or
+ * whose propagation failed) — no republish required.
+ */
+export async function consumeLibraryFromRegistry(opts: {
+  dataDir: string;
+  projectRoot: string;
+  packageName: string;
+  /** Defaults to the registry's dist-tags latest. */
+  version?: string;
+  commitBump?: boolean;
+  runner?: typeof runToolchainCommand;
+}): Promise<{
+  ok: boolean;
+  packageName: string;
+  version: string;
+  propagation: PropagationResult[];
+}> {
+  const version =
+    opts.version ??
+    listNpmRegistryPackages(opts.dataDir).find(
+      (p) => p.name === opts.packageName,
+    )?.latest;
+  if (!version) {
+    throw new Error(
+      `no published version of ${opts.packageName} in the local registry`,
+    );
+  }
+  const consumer = findRegisteredConsumers({
+    projects: [{ name: basename(opts.projectRoot), rootPath: opts.projectRoot }],
+    packageName: opts.packageName,
+  })[0];
+  if (!consumer) {
+    throw new Error(
+      `${opts.projectRoot} does not depend on ${opts.packageName}`,
+    );
+  }
+  const propagation = await propagateLibraryVersion({
+    consumers: [consumer],
+    packageName: opts.packageName,
+    version,
+    resolveToolchain:
+      ((root: string) =>
+        resolveProjectToolchain({
+          projectRoot: root,
+          configured: readProjectConfig(root).toolchain,
+        }).spec),
+    runner: opts.runner,
+    commitBump: opts.commitBump,
+  });
+  return {
+    ok: propagation.every((r) => r.ok),
+    packageName: opts.packageName,
+    version,
+    propagation,
   };
 }

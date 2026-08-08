@@ -182,6 +182,8 @@ export function ensureNpmRegistryLayout(dataDir: string): NpmRegistryMeta {
     createdAt: prior?.createdAt ?? now,
     updatedAt: now,
     lastError: prior?.lastError,
+    // Publish evidence must survive restarts — ensure* runs on every boot.
+    publishedPackages: prior?.publishedPackages ?? {},
   });
 
   writeFileSync(

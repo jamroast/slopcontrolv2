@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
@@ -176,6 +176,58 @@ describe("onboardProjectBuildProcess", () => {
       assert.equal(evidence?.onboarding, "applied");
       assert.ok(evidence?.lastOnboardAt);
       assert.equal(evidence?.origin, "llm");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("CI fallback never overwrites an existing workflow", async () => {
+    const root = tmp("cipreserve");
+    try {
+      seedNodeProject(root);
+      mkdirSync(join(root, ".github", "workflows"), { recursive: true });
+      const rich = "# rich project pipeline\nname: CI\non: {push: {branches: [main]}}\n";
+      writeFileSync(join(root, ".github", "workflows", "ci.yml"), rich, "utf-8");
+      restore = mockLlm(LLM_RESULT); // touches .npmrc only, not workflows
+
+      const report = await onboardProjectBuildProcess({
+        projectRoot: root,
+        endpoint: ENDPOINT,
+        registryMeta: REGISTRY_META,
+      });
+
+      assert.equal(report.status, "applied");
+      assert.equal(
+        readFileSync(join(root, ".github", "workflows", "ci.yml"), "utf-8"),
+        rich,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("CI fallback generates ci.yml with npmrc secrets step when no workflow exists", async () => {
+    const root = tmp("cigen");
+    try {
+      seedNodeProject(root);
+      restore = mockLlm(LLM_RESULT);
+
+      const report = await onboardProjectBuildProcess({
+        projectRoot: root,
+        endpoint: ENDPOINT,
+        registryMeta: REGISTRY_META,
+      });
+
+      assert.equal(report.status, "applied");
+      const ci = readFileSync(
+        join(root, ".github", "workflows", "ci.yml"),
+        "utf-8",
+      );
+      assert.match(ci, /Generate \.npmrc from SlopControl secrets/);
+      assert.match(ci, /secrets\.SLOPCONTROL_NPM_REGISTRY_TOKEN/);
+      const npmrcIdx = ci.indexOf("Generate .npmrc");
+      const installIdx = ci.indexOf("- name: Install");
+      assert.ok(npmrcIdx !== -1 && installIdx !== -1 && npmrcIdx < installIdx);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

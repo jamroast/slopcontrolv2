@@ -1401,6 +1401,8 @@ export function uiSpecFromDesignLoopMock(opts: {
   theme?: import("./design-conceptual-model.js").ThemeContract | null;
   /** Concrete DESIGN_PACK.shell bullets (menubar content-max, slots, …). */
   shellNotes?: string[] | null;
+  /** Operator-pinned logo selection (phase-relative asset path when bound). */
+  pinnedLogo?: { name: string; label?: string; path: string } | null;
 }): string {
   const features = opts.acceptance?.features ?? [];
   const accepted = features.filter((f) => f.accepted);
@@ -1539,7 +1541,9 @@ File Changes must update the product Menubar (or equivalent shell) to match — 
 
 ${
   hasLogo
-    ? "IN SCOPE. Follow mark/wordmark treatment in the mock when present; otherwise reuse sibling family craft (consumed `public/images/logo.svg`), not tile+circle fallbacks."
+    ? opts.pinnedLogo
+      ? `IN SCOPE. The operator-pinned logo is \`${opts.pinnedLogo.name}\`${opts.pinnedLogo.label ? ` (${opts.pinnedLogo.label})` : ""} at \`${opts.pinnedLogo.path}\`. Copy THIS exact file into the product's static brand dir (e.g. \`public/brand/${opts.pinnedLogo.name}\`) and wire it as THE product logo — menubar \`logoSrc\`, favicon/app icons. Do NOT substitute older brand files, other logo variants from the assets, or tile+circle fallbacks. Automated Checks must grep the shell/layout for the pinned filename.`
+      : "IN SCOPE. Follow mark/wordmark treatment in the mock when present; otherwise reuse sibling family craft (consumed `public/images/logo.svg`), not tile+circle fallbacks."
     : "OUT OF SCOPE for this accept — do not replace logo family unless required by another accepted feature."
 }
 
@@ -1674,6 +1678,24 @@ export function bindAcceptedDesignLoopToPhase(opts: {
   } catch {
     shellNotes = [];
   }
+  let pinnedLogo: { name: string; label?: string; path: string } | null = null;
+  try {
+    const { getDesignLoopSelections } = requireDesignPack(
+      "./design-loop-selections.js",
+    ) as typeof import("./design-loop-selections.js");
+    const sel = getDesignLoopSelections(meta).find(
+      (s) => s.slot === "logo" && s.asset,
+    );
+    if (sel?.asset) {
+      pinnedLogo = {
+        name: sel.asset,
+        label: sel.label,
+        path: `.slopcontrol/phases/${opts.phaseId}/design/assets/${sel.asset}`,
+      };
+    }
+  } catch {
+    pinnedLogo = null;
+  }
   const uiSpec = uiSpecFromDesignLoopMock({
     brief: uiSpecBrief,
     loopId: opts.loopId,
@@ -1683,6 +1705,7 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     scope,
     theme: inScopeSet.has("theme_modes") ? theme : null,
     shellNotes,
+    pinnedLogo,
   });
   const uiSpecFile = join(
     opts.projectRoot,

@@ -33,7 +33,7 @@ import {
   type BuildToolchainSpec,
   type LlmEndpoint,
 } from "@slopcontrol/types";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 export type BuildProcessState = {
@@ -130,9 +130,10 @@ export async function configureProjectBuildProcess(opts: {
     toolchain: result.toolchain,
   });
 
-  // Deterministic CI fallback: the LLM owns workflow generation, but when
-  // its changes left .github/workflows/ untouched and the resolved kind has
-  // templates, fill the gap with the same toolchain commands.
+  // Deterministic CI fallback: only when the project has NO workflow at
+  // all. The LLM owns amendments to existing workflows — overwriting a
+  // richer pipeline with the minimal template destroys project-specific
+  // triggers/steps (observed on Jamlight's ci.yml).
   const touchedWorkflows = results.some(
     (r) =>
       r.applied &&
@@ -140,7 +141,11 @@ export async function configureProjectBuildProcess(opts: {
       typeof r.change.path === "string" &&
       r.change.path.startsWith(".github/workflows/"),
   );
-  if (!touchedWorkflows) {
+  const workflowsDir = join(opts.projectRoot, ".github", "workflows");
+  const hasAnyWorkflow =
+    existsSync(workflowsDir) &&
+    readdirSync(workflowsDir).some((f) => /\.ya?ml$/.test(f));
+  if (!touchedWorkflows && !hasAnyWorkflow) {
     const fallbackChanges: BuildProcessConfigChange[] = [];
     const ciYaml = renderCiWorkflowYaml(result.toolchain);
     if (ciYaml) {

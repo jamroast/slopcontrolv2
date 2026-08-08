@@ -1209,6 +1209,23 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "project_library_consume",
+      description:
+        "Update this project to a published library version from the local SlopControl registry via the project's own toolchain (e.g. pnpm add @jamroast/components@^x.y.z) and commit the bump. Version defaults to the registry's latest. Use for projects imported before publish-time propagation existed.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          packageName: { type: "string" },
+          version: {
+            type: "string",
+            description: "Target version (default: registry latest)",
+          },
+        },
+        required: ["projectId", "packageName"],
+      },
+    },
+    {
       name: "list_design_elements",
       description:
         "List shared design elements in the project library (.slopcontrol/elements) and the global registry (~/.slopcontrol/shared-elements). Use before design_element_import.",
@@ -2967,6 +2984,25 @@ export function createSlopcontrolMcpServer(
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               runCommands: args.runCommands !== false,
+            }),
+          },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "project_library_consume") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-library/consume`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              packageName: args.packageName,
+              ...(args.version ? { version: args.version } : {}),
             }),
           },
         );

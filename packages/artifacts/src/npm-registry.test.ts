@@ -15,6 +15,7 @@ import {
   readNpmRegistryMeta,
   scaffoldElementNpmPackage,
   buildVerdaccioConfigYaml,
+  writeNpmRegistryMeta,
   writeProjectRegistryEnv,
 } from "./npm-registry.js";
 import {
@@ -43,6 +44,22 @@ describe("npm-registry layout + rc", () => {
       assert.ok(meta.scopes.includes("@jamroast"));
       const again = ensureNpmRegistryLayout(dataDir);
       assert.equal(again.authToken, meta.authToken);
+      // Publish evidence must survive re-ensure (server restart path).
+      writeNpmRegistryMeta(dataDir, {
+        ...again,
+        publishedPackages: {
+          "@jamroast/components": {
+            version: "0.0.2",
+            publishedAt: new Date().toISOString(),
+            toolchainKind: "node-pnpm",
+          },
+        },
+      });
+      const after = ensureNpmRegistryLayout(dataDir);
+      assert.equal(
+        after.publishedPackages["@jamroast/components"]?.version,
+        "0.0.2",
+      );
       const cfg = readFileSync(
         join(dataDir, "npm-registry", "config.yaml"),
         "utf-8",
@@ -345,6 +362,54 @@ describe("consumer propagation", () => {
       assert.equal(results.length, 1);
       assert.equal(results[0]?.ok, true);
       assert.deepEqual(seen[0], ["pnpm", "add", "@jamroast/components@^0.0.1"]);
+      // Bump is committed so it survives later phase merges/worktrees.
+      assert.deepEqual(seen[1], [
+        "git",
+        "commit",
+        "-m",
+        "chore(deps): bump @jamroast/components to ^0.0.1 (slopcontrol library propagation)",
+        "--",
+        "package.json",
+        "pnpm-lock.yaml",
+      ]);
+      assert.match(results[0]?.detail ?? "", /bump committed/);
+    } finally {
+      rmSync(consumer.rootPath, { recursive: true, force: true });
+    }
+  });
+
+  it("propagateLibraryVersion keeps ok when the bump commit fails", async () => {
+    const consumer: RegisteredConsumer = {
+      name: "JamPress",
+      rootPath: tmp("propf"),
+      depSpec: "0.0.0",
+    };
+    try {
+      const results = await propagateLibraryVersion({
+        consumers: [consumer],
+        packageName: "@jamroast/components",
+        version: "0.0.1",
+        resolveToolchain: () => ({
+          kind: "node-pnpm",
+          consumeUpdateCmd: ["pnpm", "add", "{dep}"],
+          lockfiles: ["pnpm-lock.yaml"],
+          registryEnvKeys: [],
+        }),
+        runner: async (opts) => {
+          if (opts.cmd[0] === "git") {
+            return {
+              code: 128,
+              stdout: "",
+              stderr: "fatal: not a git repository",
+              durationMs: 1,
+              timedOut: false,
+            };
+          }
+          return { code: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false };
+        },
+      });
+      assert.equal(results[0]?.ok, true);
+      assert.match(results[0]?.detail ?? "", /left uncommitted/);
     } finally {
       rmSync(consumer.rootPath, { recursive: true, force: true });
     }
