@@ -71,6 +71,18 @@ describe("@slopcontrol/artifacts", () => {
     }
   });
 
+  it("allocatePhaseId skips the Operator request wrapper in slugs", () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "slop-slug-"));
+    try {
+      const desc =
+        "## Operator request\n\n\n\nMake the dashboard menubar full width\n\n### Proposed approach\n\n…";
+      const first = allocatePhaseId(projectRoot, desc);
+      assert.equal(first.id, "01-make-the-dashboard-menubar-full-width");
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it("strips agent preamble when writing research/phase", () => {
     const projectRoot = mkdtempSync(join(tmpdir(), "slop-md-"));
     try {

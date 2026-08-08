@@ -203,13 +203,31 @@ export function nextPhaseOrdinal(projectRoot: string): number {
   return max + 1;
 }
 
+/**
+ * First meaningful content line of a phase description. Ask-derived
+ * descriptions start with a "## Operator request" wrapper and may contain
+ * markdown headings — skip those so titles and slugs reflect the actual ask.
+ */
+export function descriptionContentLine(
+  description: string | undefined,
+): string {
+  const line = (description ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .filter((l) => !/^#+\s*operator request\s*$/i.test(l))
+    .map((l) => l.replace(/^#+\s*/, ""))
+    .find(Boolean);
+  return (line ?? description ?? "").replace(/\s+/g, " ").trim();
+}
+
 export function allocatePhaseId(
   projectRoot: string,
   description: string,
 ): { id: string; ordinal: number; slug: string } {
   ensureSlopcontrolDir(projectRoot);
   const ordinal = nextPhaseOrdinal(projectRoot);
-  const slug = slugify(description);
+  const slug = slugify(descriptionContentLine(description));
   return { id: formatPhaseId(ordinal, slug), ordinal, slug };
 }
 

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { allocatePhaseId, ensurePhaseDir } from "@slopcontrol/artifacts";
+import { allocatePhaseId, descriptionContentLine, ensurePhaseDir } from "@slopcontrol/artifacts";
 import type {
   AgentMessage,
   AgentSession,
@@ -23,6 +23,18 @@ export function sanitizeAskTitle(
   const one = raw.replace(/\s+/g, " ").trim();
   if (!one) return undefined;
   return one.length <= maxLen ? one : one.slice(0, maxLen).trim();
+}
+
+/**
+ * Single-line title for phases. Ask-derived descriptions start with a
+ * "## Operator request" wrapper and may contain markdown/newlines; a raw
+ * slice leaks all of that into the title (and on into the roadmap row).
+ */
+export function phaseTitleFromDescription(
+  description: string | undefined,
+  maxLen = 120,
+): string {
+  return descriptionContentLine(description).slice(0, maxLen);
 }
 
 export interface SlopStoreData {
@@ -136,7 +148,7 @@ export class SlopStore {
       status: "draft",
       ordinal: allocated.ordinal,
       slug: allocated.slug,
-      title: input.description.slice(0, 120),
+      title: phaseTitleFromDescription(input.description),
       dependsOn,
       createdAt: now,
       updatedAt: now,

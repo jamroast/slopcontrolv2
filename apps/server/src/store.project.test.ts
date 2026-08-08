@@ -3,7 +3,46 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { SlopStore } from "./store.js";
+import { SlopStore, phaseTitleFromDescription } from "./store.js";
+
+describe("phaseTitleFromDescription", () => {
+  it("skips the Operator request wrapper and strips markdown/newlines", () => {
+    const desc =
+      "## Operator request\n\n\n\nMake the dashboard menubar full width\n\nmore detail here";
+    assert.equal(
+      phaseTitleFromDescription(desc),
+      "Make the dashboard menubar full width",
+    );
+  });
+
+  it("handles headings and collapses whitespace", () => {
+    assert.equal(
+      phaseTitleFromDescription("### Fix the\n\nbuild   failure"),
+      "Fix the",
+    );
+    assert.equal(phaseTitleFromDescription(""), "");
+  });
+
+  it("createPhase stores the sanitized title", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-phase-title-"));
+    try {
+      const store = new SlopStore(join(dir, "store.json"));
+      const projectRoot = join(dir, "proj");
+      mkdirSync(projectRoot, { recursive: true });
+      const project = store.createProject({ name: "p", rootPath: projectRoot });
+      const phase = store.createPhase({
+        projectId: project.id,
+        description: "## Operator request\n\nWiden the dashboard menubar",
+        rootPath: projectRoot,
+      });
+      assert.equal(phase.title, "Widen the dashboard menubar");
+      assert.ok(!phase.title.includes("\n"));
+      assert.ok(!phase.title.includes("##"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("SlopStore project rename", () => {
   it("updateProject renames display name; id and rootPath unchanged", () => {

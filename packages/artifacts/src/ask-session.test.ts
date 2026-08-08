@@ -93,6 +93,49 @@ More chatter.`,
     assert.match(fromAsk, /Dark mode toggle/);
   });
 
+  it("buildAskTaskDescription promotes only the latest user message from a continued session", () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const ask: AskSession = {
+      id: "ask-multi",
+      projectId: "proj-1",
+      status: "open",
+      messages: [
+        {
+          role: "user",
+          content: "Old topic: npm run manage fails in the Docker build",
+          at: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          role: "assistant",
+          content:
+            "## Task brief\n- Title: Fix Docker build\n- Goal: build passes\n",
+          at: "2026-01-01T00:01:00.000Z",
+        },
+        {
+          role: "user",
+          content: "New topic: make the dashboard menubar full width",
+          at: "2026-01-02T00:00:00.000Z",
+        },
+        {
+          role: "assistant",
+          content:
+            "## Task brief\n- Title: Full-width dashboard menubar\n- Goal: dashboard bar spans viewport\n",
+          at: "2026-01-02T00:01:00.000Z",
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    };
+    const desc = buildAskTaskDescription(ask);
+    const operatorSection = desc.split("### Ask conversation context")[0] ?? "";
+    assert.match(operatorSection, /dashboard menubar full width/);
+    assert.ok(
+      !operatorSection.includes("npm run manage"),
+      "stale first-topic content must not appear in the operator request",
+    );
+    assert.match(desc, /Full-width dashboard menubar/);
+  });
+
   it("falls back to first user message when no Task brief", () => {
     const now = "2026-01-01T00:00:00.000Z";
     const ask: AskSession = {

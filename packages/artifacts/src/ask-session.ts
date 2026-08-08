@@ -105,8 +105,11 @@ export function readAskMeta(
 
 /**
  * Build a phase description for promote_ask.
- * Prefers an explicit override, then **operator (user) messages first**,
- * with the ask agent's Task brief as a non-binding proposed approach.
+ * Prefers an explicit override, then the **latest operator (user) message** —
+ * continued ask sessions often shift topic, and concatenating every user
+ * message buries the current request under stale ones (earlier context still
+ * rides along in the transcript excerpt). The ask agent's latest Task brief is
+ * appended as a non-binding proposed approach.
  */
 export function buildAskTaskDescription(
   ask: AskSession,
@@ -116,15 +119,13 @@ export function buildAskTaskDescription(
   if (override) return override.slice(0, opts?.maxChars ?? 8_000);
 
   const maxChars = opts?.maxChars ?? 8_000;
-  const userMessages = ask.messages.filter((m) => m.role === "user");
-  const operatorBlock =
-    userMessages.length > 0
-      ? [
-          "## Operator request",
-          "",
-          ...userMessages.map((m) => m.content.trim()).filter(Boolean),
-        ].join("\n\n")
-      : null;
+  const lastUserMessage = [...ask.messages]
+    .reverse()
+    .find((m) => m.role === "user")
+    ?.content.trim();
+  const operatorBlock = lastUserMessage
+    ? ["## Operator request", "", lastUserMessage].join("\n\n")
+    : null;
 
   const brief = extractLastTaskBrief(ask.messages);
   const proposed = brief
