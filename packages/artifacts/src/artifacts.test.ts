@@ -48,11 +48,13 @@ import {
   assignVerifyStepIds,
   writeDiagnosis,
   phaseNeedsDesign,
+  phaseHasUsableLogo,
   isDesignComplete,
   markDesignComplete,
   writeUiSpec,
   writeChangeIntent,
   parseDesignAssetBriefs,
+  isDerivativeAssetBrief,
   isDatabasePhase,
 } from "./index.js";
 
@@ -1259,13 +1261,180 @@ true
 `);
       assert.equal(briefs.length, 2);
       assert.equal(briefs[0]?.filename, "logo.png");
+      assert.equal(briefs[0]?.source, undefined);
+
+      // 4th Source column marks derivative briefs (no generative model needed).
+      const derived = parseDesignAssetBriefs(`## Assets
+| Name | Filename | Prompt | Source |
+| --- | --- | --- | --- |
+| Alpha logo | jamlight-alpha.png | alpha-channel cut-out of the pinned logo | jamlight-circular-mark-v1.png |
+| Icon pack | icon-pack.png | 5 sizes from pinned logo | \`jamlight-circular-mark-v1.png\` |
+`);
+      assert.equal(derived.length, 2);
+      assert.equal(derived[0]?.source, "jamlight-circular-mark-v1.png");
+      assert.equal(derived[1]?.source, "jamlight-circular-mark-v1.png");
+      assert.ok(isDerivativeAssetBrief(derived[0]!));
+      assert.ok(isDerivativeAssetBrief(derived[1]!));
+
+      // Derivative names route even without an explicit Source column.
+      assert.ok(
+        isDerivativeAssetBrief({ name: "Icon pack (5 sizes)", filename: "icon-pack.png" }),
+      );
+      assert.ok(
+        !isDerivativeAssetBrief({ name: "Hero artwork", filename: "hero.png" }),
+      );
+
+      // Documentation rows (authority/reference/pinned/already-on-disk) are
+      // never generation briefs — the phase-23 fail-closed false positive.
+      const withRefRows = parseDesignAssetBriefs(`## Assets
+| Name | Filename | Prompt | Source |
+| --- | --- | --- | --- |
+| Pinned circular mark (authority) | jamlight-circular-mark-v1.png | The operator-pinned mark, already on disk | |
+| New hero artwork | hero-new.png | generate a wide jam-making hero banner | |
+| Existing footer logo (reference) | footer-logo.svg | For reference only | |
+`);
+      assert.equal(withRefRows.length, 1);
+      assert.equal(withRefRows[0]?.name, "New hero artwork");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 
-  it("phaseNeedsDesign routes by changeKind (chrome-hide/backend skip unless forced)", () => {
-    const root = mkdtempSync(join(tmpdir(), "slop-design-kind-"));
+  it("phaseNeedsDesign skips design for stockAdoption intents (design-by-reference)", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-design-stock-"));
+    try {
+      ensureSlopcontrolDir(root);
+      const phaseId = "22-stock-menubar";
+      writePhaseDoc(
+        root,
+        phaseId,
+        `# Phase ${phaseId}
+
+Requires design pass: no
+
+## Scope
+Strip custom menubars; mount stock jamroast-components menubar theming.
+
+## File Changes
+- src/components/menubar.tsx
+
+## Success Criteria
+Stock menubar renders
+
+## Automated Checks
+\`\`\`bash
+npx vitest run
+\`\`\`
+`,
+      );
+      writeChangeIntent(root, phaseId, {
+        title: "Adopt stock jamroast-components menubar theming",
+        goal: "Strip custom menubars and use stock library theming",
+        uiMount: "page",
+        changeKind: "other",
+        stockAdoption: true,
+        brandTheming: false,
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription:
+          "Strip it away and use the stock menubar theming from the jamroast-components project.",
+      });
+      assert.equal(phaseNeedsDesign(root, phaseId), false);
+
+      // Explicitly forced visuals still win for a generative sub-ask.
+      writePhaseDoc(
+        root,
+        phaseId,
+        `# Phase ${phaseId}\n\nRequires design pass: yes\n\n## Scope\nx\n`,
+      );
+      assert.equal(phaseNeedsDesign(root, phaseId), true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("phaseNeedsDesign skips design for assetSwap intents (existing asset)", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-design-swap-"));
+    try {
+      ensureSlopcontrolDir(root);
+      const phaseId = "23-asset-swap";
+      writePhaseDoc(
+        root,
+        phaseId,
+        `# Phase ${phaseId}
+
+Requires design pass: no
+
+## Scope
+Point menubar at jamlight-circular-mark-v1.png instead of the alpha variant.
+
+## File Changes
+- src/components/jamlight-menubar.tsx
+
+## Success Criteria
+Pinned mark renders
+
+## Automated Checks
+\`\`\`bash
+npx vitest run
+\`\`\`
+`,
+      );
+      writeChangeIntent(root, phaseId, {
+        title: "Swap menubar logo to pinned mark",
+        goal: "Use jamlight-circular-mark-v1.png rather than the alpha variant",
+        uiMount: "page",
+        changeKind: "other",
+        assetSwap: true,
+        brandTheming: false,
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription:
+          "Make sure jamlight-circular-mark-v1.png is used rather than the alpha logo.",
+      });
+      assert.equal(phaseNeedsDesign(root, phaseId), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("phaseHasUsableLogo: pinned selection or brand-dir mark counts; empty project does not", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-usable-logo-"));
+    try {
+      ensureSlopcontrolDir(root);
+      const phaseId = "24-logos";
+      assert.equal(phaseHasUsableLogo(root, phaseId), false);
+
+      // Project brand dir with a mark → usable
+      mkdirSync(join(root, "public", "brand"), { recursive: true });
+      writeFileSync(join(root, "public", "brand", "jamlight-circular-mark-v1.png"), "png");
+      assert.equal(phaseHasUsableLogo(root, phaseId), true);
+
+      // Pinned logo selection in the phase design pack → usable even without files
+      const root2 = mkdtempSync(join(tmpdir(), "slop-usable-logo-2-"));
+      try {
+        ensureSlopcontrolDir(root2);
+        mkdirSync(join(root2, ".slopcontrol", "phases", phaseId, "design"), {
+          recursive: true,
+        });
+        writeFileSync(
+          join(root2, ".slopcontrol", "phases", phaseId, "design", "DESIGN_PACK.json"),
+          JSON.stringify({
+            selections: [{ slot: "logo", asset: "pinned-logo.png" }],
+          }),
+        );
+        assert.equal(phaseHasUsableLogo(root2, phaseId), true);
+      } finally {
+        rmSync(root2, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("phaseNeedsDesign routes by changeKind (chrome-hide/backend skip unless forced)", () => {    const root = mkdtempSync(join(tmpdir(), "slop-design-kind-"));
     try {
       ensureSlopcontrolDir(root);
       const phaseId = "57-chrome";

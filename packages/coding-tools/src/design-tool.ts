@@ -27,9 +27,12 @@ export interface GenerateImageOptions {
 export function isLogoAssetBrief(brief: {
   name: string;
   filename: string;
-  prompt: string;
+  prompt?: string;
 }): boolean {
-  const blob = `${brief.name} ${brief.filename} ${brief.prompt}`;
+  // Name + filename only: the free-text prompt mentions "logo" constantly
+  // (e.g. "mock reference showing the pinned logo") and must not turn
+  // non-generative briefs into fail-closed logo blockers.
+  const blob = `${brief.name} ${brief.filename}`;
   return /\b(logo|wordmark|mark|favicon|app.?icon|brand\s*mark|lockup)\b/i.test(
     blob,
   );

@@ -16,6 +16,8 @@ Return ONLY a JSON object with these fields:
 - needsInteraction (boolean): true only when fill/submit (or equivalent) must be proven
 - brandTheming (boolean): true when the ask is brand identity, palette, logo, wordmark, visual identity, or applying sibling theming/design that needs a design pass
 - themeWiringOnly (boolean): true when the ask is only wiring a theme toggle / data-theme / light-dark switch with no new brand identity (coding only — not a design pass). Mutually exclusive with brandTheming.
+- stockAdoption (boolean): true when the ask strips custom/hand-rolled UI in favor of STOCK components/theming from the project's shared component library (e.g. "strip it away and use the stock menubar theming from jamroast-components"). Design-by-reference: the design already exists in the library, so NO design pass is needed. When stockAdoption is true, brandTheming MUST be false. Contrast: porting another app's bespoke look-and-feel is sibling theme adoption (brandTheming=true, stockAdoption=false); adopting the shared library's stock widgets is stockAdoption=true.
+- assetSwap (boolean): true when the ask wires/swaps/points at an EXISTING asset by filename (e.g. "make sure jamlight-circular-mark-v1.png is used rather than the alpha logo", "use the pinned logo in the footer too"). No new artwork is created — pure coding. When assetSwap is true, brandTheming MUST be false. Contrast: "new logo", "generate an icon", "redesign the mark" is creation (brandTheming=true, assetSwap=false).
 - requestsMissingThemeControl (boolean): true when the operator says a menubar day/night or theme toggle is missing / not appearing / must be added or shown
 - mustNot (optional string[]): extra constraints
 - refinementOf (optional string or string[]): prior phase id hint if refining a mount
@@ -25,7 +27,7 @@ Classification rules:
 - engagement: broken or missing fill/submit / populate / validate on forms at a mount. Set needsInteraction true.
 - backend: non-UI / infrastructure / API-only (DB, migrations, env, servers). needsInteraction false; uiMount usually "n/a". Never brand/theming/logo.
 - other: UI or product change that is neither chrome-hide nor engagement — INCLUDING brand, theming, logo, palette, design-system, look-and-feel, theme toggle / light-dark switch, landing-page chrome. Never classify brand/theming/logo as backend. Set needsInteraction false unless fill/submit is required.
-- brandTheming=true for new logos, palettes, sibling theme adoption, visual identity. themeWiringOnly=true only for toggle/data-theme wiring without new identity (then brandTheming=false).
+- brandTheming=true for new logos, palettes, sibling theme adoption, visual identity. themeWiringOnly=true only for toggle/data-theme wiring without new identity (then brandTheming=false). stockAdoption=true for strip-and-adopt-stock-library-component asks (then brandTheming=false); asset derivation like an alpha icon pack from the existing logo is a coding task, not a design pass. assetSwap=true for pointing the UI at an existing named asset file (then brandTheming=false); existing tests asserting the superseded asset path are updated as part of the swap.
 - Multilingual OK (Afrikaans, English, mixed).
 - Do NOT invent needsInteraction=true for chrome-hide or backend.
 - Do NOT set needsInteraction for non-form clicks (theme toggle, nav links, decorative controls) — clickable ≠ fill/submit form contract.

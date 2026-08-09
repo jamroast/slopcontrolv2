@@ -806,6 +806,45 @@ export function isDesignComplete(projectRoot: string, phaseId: string): boolean 
   return /DESIGN_COMPLETE/m.test(readFileSync(path, "utf-8"));
 }
 
+/**
+ * True when the phase already has a usable logo mark: an operator-pinned
+ * logo selection in the design pack, or any logo/mark file in the phase
+ * design assets dir or the project brand dir. Lets the design stage skip
+ * generative logo briefs for non-identity phases instead of failing closed.
+ */
+export function phaseHasUsableLogo(
+  projectRoot: string,
+  phaseId: string,
+): boolean {
+  try {
+    const pack = readPhaseDesignPack(projectRoot, phaseId);
+    if (pack?.selections?.some((s) => s.slot === "logo" && s.asset)) {
+      return true;
+    }
+  } catch {
+    /* fall through to filesystem probe */
+  }
+  const dirs = [
+    join(projectRoot, ".slopcontrol", "phases", phaseId, "design", "assets"),
+    join(projectRoot, "public", "brand"),
+  ];
+  for (const dir of dirs) {
+    try {
+      if (!existsSync(dir)) continue;
+      const hit = readdirSync(dir).some(
+        (n) =>
+          /logo|wordmark|mark/i.test(n) &&
+          /\.(png|svg|webp|jpe?g)$/i.test(n) &&
+          !n.startsWith("."),
+      );
+      if (hit) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
 /** PHASE explicitly asks for a visual design pass (Brand / Assets / Requires yes). */
 export function phaseForcesVisualDesign(phaseDoc: string): boolean {
   if (!phaseDoc.trim()) return false;
@@ -825,7 +864,9 @@ export function phaseForcesVisualDesign(phaseDoc: string): boolean {
 /**
  * True when this phase should run the design stage before coding.
  * Brand identity / sibling theming Intents need design. Theme-toggle wiring
- * alone does not. chrome-hide / backend skip unless PHASE forces visuals.
+ * alone does not. Stock component-library adoption is design-by-reference
+ * (the design lives in the library) and skips the generative design pass.
+ * chrome-hide / backend skip unless PHASE forces visuals.
  * Other kinds keep UI-SPEC / real Brand / Assets signals.
  */
 export function phaseNeedsDesign(
@@ -842,6 +883,14 @@ export function phaseNeedsDesign(
   const kind = intent?.changeKind;
   const brandAsk = intent ? changeIntentIsBrandTheming(intent) : false;
   const themeWiringOnly = intent ? changeIntentIsThemeWiringOnly(intent) : false;
+
+  // Stock component-library adoption: the design already exists in the
+  // library; coding adopts it. No generative design pass (unless PHASE was
+  // explicitly written to force visuals for a genuinely generative sub-ask).
+  if (intent?.stockAdoption === true) return forcedVisual;
+
+  // Asset swap: wire/point at an EXISTING named asset — pure coding.
+  if (intent?.assetSwap === true) return forcedVisual;
 
   // Brand identity / apply sibling theming needs design (even if mislabeled
   // backend). Theme toggle / data-theme wiring alone does not.
@@ -861,12 +910,43 @@ export interface DesignAssetBrief {
   name: string;
   prompt: string;
   filename: string;
+  /**
+   * Existing asset to DERIVE from (4th `Source` column in ## Assets tables).
+   * Derivative briefs never hit generative image models — they run through
+   * deterministic asset ops (alpha cut-out / icon pack resize).
+   */
+  source?: string;
+}
+
+/** Derivative ops: icon pack / alpha / resize from an existing asset. */
+const DERIVATIVE_ASSET_RE =
+  /\b(?:icon\s*pack|favicon|alpha(?:[- ]channel)?|transparent|cut\s*out|resize|sizes)\b/i;
+
+/** Documentation-only rows: name or prompt marks the asset as reference. */
+const REFERENCE_ROW_NAME_RE =
+  /(?:\(|\b)(?:authority|reference|existing|pinned|do[- ]not[- ]generate)(?:\)|\b)/i;
+const REFERENCE_ROW_PROMPT_RE =
+  /\b(?:already\s+on\s+disk|do\s+not\s+generate|not\s+(?:to\s+be\s+)?(?:re)?-?generated?|reference\s+only|for\s+reference)\b/i;
+
+/**
+ * True when the brief describes deriving new files from an EXISTING asset
+ * (icon pack, alpha cut-out, resize) rather than generating new artwork.
+ */
+export function isDerivativeAssetBrief(brief: {
+  name: string;
+  filename: string;
+  prompt?: string;
+  source?: string;
+}): boolean {
+  if (brief.source?.trim()) return true;
+  return DERIVATIVE_ASSET_RE.test(`${brief.name} ${brief.filename}`);
 }
 
 /**
  * Parse asset rows from UI-SPEC or PHASE ## Assets tables / logo brief.
  * Caps at `max` entries (default 3).
  * Only reads the ## Assets section (and Logo brief fallback) — never Palette tables.
+ * Optional 4th column `Source` names an existing asset to derive from.
  */
 export function parseDesignAssetBriefs(
   markdown: string,
@@ -880,12 +960,13 @@ export function parseDesignAssetBriefs(
   const tableSource = assetsSection?.trim() ? assetsSection : "";
 
   const tableRow =
-    /^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|/gm;
+    /^\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|(?:[ \t]*([^|\n]+?)[ \t]*\|)?/gm;
   let match: RegExpExecArray | null;
   while (tableSource && (match = tableRow.exec(tableSource)) !== null) {
     const col1 = match[1]?.trim() ?? "";
     const col2 = match[2]?.trim() ?? "";
     const col3 = match[3]?.trim() ?? "";
+    const col4 = match[4]?.trim() ?? "";
     if (/^[-:]+$/.test(col1.replace(/\s/g, ""))) continue;
     if (/^name$/i.test(col1) || /^asset$/i.test(col1)) continue;
     // Skip palette-ish rows that lack a filename and look like color tokens
@@ -907,7 +988,19 @@ export function parseDesignAssetBriefs(
           !/^name$/i.test(c) &&
           !/^#?[0-9a-fA-F]{3,8}$/.test(c),
       ) ?? col1;
+    // Documentation rows (pinned/authority/reference/existing assets) are
+    // not generation requests — skip them entirely.
+    if (
+      REFERENCE_ROW_NAME_RE.test(col1) ||
+      REFERENCE_ROW_PROMPT_RE.test(prompt)
+    ) {
+      continue;
+    }
     const name = col1 || filenameGuess;
+    const col4Clean = col4.replace(/^`+|`+$/g, "").trim();
+    const source = /\.(png|svg|webp|jpe?g)$/i.test(col4Clean)
+      ? col4Clean
+      : undefined;
     const key = filenameGuess.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -917,6 +1010,7 @@ export function parseDesignAssetBriefs(
       filename: filenameGuess.includes(".")
         ? filenameGuess
         : `${filenameGuess}.png`,
+      ...(source ? { source } : {}),
     });
     if (briefs.length >= max) return briefs;
   }

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { OllamaImagesDesignTool, writeSvgFallback } from "./design-tool.js";
+import { OllamaImagesDesignTool, writeSvgFallback, isLogoAssetBrief } from "./design-tool.js";
 import { getDesignTool } from "./registry.js";
 
 describe("DesignTool", () => {
@@ -66,5 +66,35 @@ describe("DesignTool", () => {
   it("getDesignTool returns ollama-images by default", () => {
     assert.equal(getDesignTool().id, "ollama-images");
     assert.equal(getDesignTool("ollama-images").id, "ollama-images");
+  });
+
+  it("isLogoAssetBrief matches name/filename only — prompt text is ignored", () => {
+    // Regression: "Mock reference (from Phase 21)" with a logo-mentioning
+    // prompt must NOT become a fail-closed logo blocker.
+    assert.equal(
+      isLogoAssetBrief({
+        name: "Mock reference (from Phase 21)",
+        filename: "mock-reference.png",
+        prompt: "mock dashboard showing the pinned logo in the menubar",
+      }),
+      false,
+    );
+    assert.equal(
+      isLogoAssetBrief({
+        name: "Alpha-channel logo",
+        filename: "logo-alpha.png",
+        prompt: "cut out the pinned mark",
+      }),
+      true,
+    );
+    // Plain "icon pack" is a derivative asset, not a generative logo brief.
+    assert.equal(
+      isLogoAssetBrief({ name: "Icon pack", filename: "icon-pack.png" }),
+      false,
+    );
+    assert.equal(
+      isLogoAssetBrief({ name: "App icon", filename: "app-icon.png" }),
+      true,
+    );
   });
 });

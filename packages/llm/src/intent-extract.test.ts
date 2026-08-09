@@ -103,4 +103,44 @@ describe("intent-extract (mocked chatJson path)", () => {
     assert.ok(intent.interaction);
     assert.equal(chatJsonMock.mock.callCount(), 1);
   });
+
+  it("stockAdoption=true forces brandTheming=false (design-by-reference)", () => {
+    const parsed = ChangeIntentLlmOutputSchema.parse({
+      title: "Adopt stock jamroast-components menubar",
+      goal: "Strip custom menubars and mount the stock menubar theming.",
+      uiMount: "page",
+      changeKind: "other",
+      needsInteraction: false,
+      brandTheming: true, // misclassified by the model alongside
+      stockAdoption: true,
+    });
+    const intent = finalizeChangeIntent(parsed, {
+      description:
+        "Strip the custom menubar and use the stock menubar theming from the jamroast-components project.",
+    });
+    assert.equal(intent.stockAdoption, true);
+    assert.equal(intent.brandTheming, false);
+    assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /stockAdoption/);
+    assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /design-by-reference/i);
+  });
+
+  it("assetSwap=true forces brandTheming=false (existing asset, pure coding)", () => {
+    const parsed = ChangeIntentLlmOutputSchema.parse({
+      title: "Swap menubar logo to pinned mark",
+      goal: "Use jamlight-circular-mark-v1.png rather than the alpha variant.",
+      uiMount: "page",
+      changeKind: "other",
+      needsInteraction: false,
+      brandTheming: true, // misclassified by the model alongside
+      assetSwap: true,
+    });
+    const intent = finalizeChangeIntent(parsed, {
+      description:
+        "Make sure jamlight-circular-mark-v1.png is used rather than the alpha logo currently on the site.",
+    });
+    assert.equal(intent.assetSwap, true);
+    assert.equal(intent.brandTheming, false);
+    assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /assetSwap/);
+    assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /EXISTING asset by filename/i);
+  });
 });

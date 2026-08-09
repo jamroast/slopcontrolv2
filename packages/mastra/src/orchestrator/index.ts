@@ -45,6 +45,7 @@ import {
   mergePhaseIntoBlueprint,
   envModelFailureAppendix,
   parseDesignAssetBriefs,
+  isDerivativeAssetBrief,
   phaseDocWatchPaths,
   phaseNeedsDesign,
   promoteLearning,
@@ -74,6 +75,8 @@ import {
   descriptionMentionsBrandTheming,
   changeIntentIsBrandTheming,
   changeIntentIsThemeWiringOnly,
+  phaseHasUsableLogo,
+  readChangeIntent,
   phaseDocAlignsWithChangeIntent,
   researchEngagementQuality,
   formatAntiAuditThemeDeliveryNote,
@@ -4505,6 +4508,8 @@ Phase id: ${phase.id}`;
     const adjacentPack = buildAdjacentPhaseContextPack(project.rootPath, 5);
     const brandDesignAsk = changeIntentIsBrandTheming(intent);
     const themeWiringOnly = changeIntentIsThemeWiringOnly(intent);
+    const stockAdoptionAsk = intent.stockAdoption === true;
+    const assetSwapAsk = intent.assetSwap === true;
     const designRoutingNote =
       intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
         ? brandDesignAsk
@@ -4521,7 +4526,22 @@ Design routing (Change Intent changeKind=${intent.changeKind}):
 - Do NOT add ## Brand or ## Assets unless the operator explicitly asked for a visual/brand change.
 - Put behaviour/state tables under Scope / Success Criteria — not as design-asset briefs.
 `
-        : brandDesignAsk
+        : stockAdoptionAsk
+          ? `
+Design routing (stock component-library adoption — design-by-reference, NOT a new design):
+- Near the top of PHASE.md include \`Requires design pass: no\`.
+- Do NOT add ## Brand or ## Assets — the design already exists in the component library; adoption is coding work (Scope / File Changes).
+- Asset derivation from an EXISTING asset (e.g. alpha-channel icon pack from the pinned logo) is a deterministic implement-step task — list it under Scope/File Changes, never as a generative design brief.
+- Automated Checks must prove stock components are mounted (grep imports from the library package) and stripped custom chrome is gone.
+`
+          : assetSwapAsk
+          ? `
+Design routing (existing-asset swap — pure coding, NOT a new design):
+- Near the top of PHASE.md include \`Requires design pass: no\`.
+- Do NOT add ## Brand or ## Assets — the named asset already exists on disk; this is a path/reference change in Scope / File Changes.
+- IMPORTANT: existing tests asserting the SUPERSEDED asset path must be updated to the new path as part of the swap — list this explicitly under Automated Checks.
+`
+          : brandDesignAsk
           ? `
 Design routing (brand/theming):
 - Near the top of PHASE.md include \`Requires design pass: yes\`.
@@ -5194,6 +5214,8 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     const intentBlock = formatChangeIntentPromptBlock(intent);
     const brandAsk = changeIntentIsBrandTheming(intent);
     const themeWiringOnly = changeIntentIsThemeWiringOnly(intent);
+    const stockAdoptionAsk = intent.stockAdoption === true;
+    const assetSwapAsk = intent.assetSwap === true;
     const designRoutingNote =
       intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
         ? brandAsk
@@ -5208,7 +5230,21 @@ Design routing (Change Intent changeKind=${intent.changeKind}):
 - Do NOT add ## Brand or ## Assets unless the operator feedback explicitly asks for a visual/brand change.
 - Behaviour/state tables belong under Scope / Success Criteria — not as design-asset briefs.
 `
-        : brandAsk
+        : stockAdoptionAsk
+          ? `
+Design routing (stock component-library adoption — design-by-reference, NOT a new design):
+- Keep or add \`Requires design pass: no\` near the top of PHASE.md.
+- Remove ## Brand / ## Assets invented for a generative design pass; stock component adoption belongs in Scope / File Changes.
+- Asset derivation from an EXISTING asset (e.g. alpha icon pack from the pinned logo) is a deterministic implement-step task — not a generative design brief.
+`
+          : assetSwapAsk
+            ? `
+Design routing (existing-asset swap — pure coding, NOT a new design):
+- Keep or add \`Requires design pass: no\` near the top of PHASE.md.
+- Remove ## Brand / ## Assets invented for a generative design pass; the named asset already exists on disk — this is a path/reference change in Scope / File Changes.
+- IMPORTANT: existing tests asserting the SUPERSEDED asset path must be updated to the new path — state this under Automated Checks.
+`
+            : brandAsk
           ? `
 Design routing (brand/theming):
 - Keep \`Requires design pass: yes\` and ## Brand / ## Assets.
@@ -5366,7 +5402,10 @@ ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
 ${mockContractBlock}
 Write UI-SPEC to ${canonicalUiSpecPath} (start with # UI-SPEC).
 Write tokens.css to ${canonicalTokensPath}.
-Include ## Assets table (Name | Filename | Prompt), max 3 assets.
+Include ## Assets table (Name | Filename | Prompt | Source), max 3 assets.
+The ## Assets table lists ONLY assets to produce. Reference/authority assets (pinned marks, files already on disk) belong in prose — never as table rows.
+Assets DERIVED from an existing file (icon pack, alpha cut-out, resize) MUST name the existing asset in the Source column — they are produced deterministically, never generated. Only genuinely new artwork leaves Source empty.
+When the operator pinned a logo, derived assets (alpha/icon pack) use that pinned file as Source; do not brief a NEW logo.
 End with UI_SPEC_COMPLETE.
 
 Phase description: ${phase.description}
@@ -5458,6 +5497,45 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       extractSection(phaseDoc, /Brand/i)?.split("\n")[0]?.replace(/^[#*\-\s]+/, "").trim() ||
       project.name;
 
+    // Derivative briefs (icon pack / alpha cut-out) run deterministic ops on
+    // an EXISTING asset — never the generative model, never fail-closed.
+    const phaseAssetsRel = `.slopcontrol/phases/${phase.id}/design/assets`;
+    const phaseAssetsAbs = join(project.rootPath, phaseAssetsRel);
+    mkdirSync(phaseAssetsAbs, { recursive: true });
+    const pinnedLogoAsset = (() => {
+      try {
+        const pack = readPhaseDesignPack(project.rootPath, phase.id);
+        return (
+          pack?.selections?.find((s) => s.slot === "logo" && s.asset)?.asset ??
+          null
+        );
+      } catch {
+        return null;
+      }
+    })();
+    const resolveDerivativeSource = (brief: {
+      name: string;
+      filename: string;
+      source?: string;
+    }): string | null => {
+      const candidates = [brief.source, pinnedLogoAsset].filter(
+        (c): c is string => Boolean(c?.trim()),
+      );
+      for (const name of candidates) {
+        const base = basename(name);
+        for (const dir of [phaseAssetsAbs, join(project.rootPath, assetDirRel)]) {
+          const abs = join(dir, base);
+          if (existsSync(abs)) {
+            if (dir !== phaseAssetsAbs) {
+              copyFileSync(abs, join(phaseAssetsAbs, base));
+            }
+            return base;
+          }
+        }
+      }
+      return null;
+    };
+
     const generatedPaths: string[] = [];
     const logoBlockers: string[] = [];
     for (const brief of briefs) {
@@ -5468,6 +5546,59 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       );
       const wtOut = join(worktree.path, assetDirRel, brief.filename);
       mkdirSync(dirname(wtOut), { recursive: true });
+
+      if (isDerivativeAssetBrief(brief)) {
+        const sourceName = resolveDerivativeSource(brief);
+        if (!sourceName) {
+          log(
+            project,
+            run,
+            `--- Asset ${brief.name}: derivative brief but no source asset found — skipped (non-blocking) ---`,
+          );
+          continue;
+        }
+        try {
+          if (/\bicon\s*pack\b|favicon|\bsizes\b/i.test(`${brief.name} ${brief.filename}`)) {
+            const pack = await deriveIconPackFromAsset({
+              projectRoot: project.rootPath,
+              assetsDir: phaseAssetsRel,
+              sourceFilename: sourceName,
+              preferredFilename: pinnedLogoAsset ?? undefined,
+            });
+            for (const f of pack.files) {
+              const abs = join(phaseAssetsAbs, f.filename);
+              copyFileSync(abs, join(worktree.path, assetDirRel, f.filename));
+              generatedPaths.push(f.relativePath);
+            }
+            log(
+              project,
+              run,
+              `--- Asset ${brief.name}: derived icon pack from ${pack.sourceFilename} (${pack.files.length} sizes) ---`,
+            );
+          } else {
+            const derived = await makeTransparentDesignAsset({
+              projectRoot: project.rootPath,
+              assetsDir: phaseAssetsRel,
+              sourceFilename: sourceName,
+              filename: brief.filename,
+            });
+            copyFileSync(derived.absolutePath, wtOut);
+            generatedPaths.push(derived.relativePath);
+            log(
+              project,
+              run,
+              `--- Asset ${brief.name}: derived alpha from ${derived.sourceFilename} → ${derived.relativePath} ---`,
+            );
+          }
+        } catch (error) {
+          log(
+            project,
+            run,
+            `--- Asset ${brief.name}: derivative op failed — skipped (non-blocking): ${error instanceof Error ? error.message : String(error)} ---`,
+          );
+        }
+        continue;
+      }
 
       const logoFailClosed = isLogoAssetBrief(brief);
       const result = await designTool.generateImage({
@@ -5513,19 +5644,40 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     }
 
     if (logoBlockers.length > 0) {
-      const msg = `Design cannot complete: logo/mark asset(s) [${logoBlockers.join(", ")}] require a bound designImage role (openai-images). Pull e.g. x/flux2-klein, add ollama-image endpoint, bind roles.designImage. svg_fallback is not accepted for logos.`;
-      log(project, run, `ERROR: ${msg}`);
-      appendAppendix(
-        project.rootPath,
-        phase.id,
-        `## Design blocked — designImage required\n\n${msg}\n`,
-      );
-      writePhaseStatus(project.rootPath, phase.id, "accepted");
-      return {
-        stage: "failed",
-        worktreePath: worktree.path,
-        worktreeBranch: worktree.branch,
-      };
+      // Fail soft when this is NOT a genuine identity-creation phase and the
+      // project already has a usable mark (pinned selection / brand asset):
+      // the phase must not die because a generative model is unbound for an
+      // asset the operator has already chosen.
+      const stageIntent = readChangeIntent(project.rootPath, phase.id);
+      const identityAsk =
+        stageIntent != null &&
+        changeIntentIsBrandTheming(stageIntent) &&
+        stageIntent.assetSwap !== true &&
+        stageIntent.stockAdoption !== true;
+      const hasUsableLogo = phaseHasUsableLogo(project.rootPath, phase.id);
+      if (!identityAsk && hasUsableLogo) {
+        const note = `Skipping generative logo brief(s) [${logoBlockers.join(", ")}]: no designImage role bound, and the pinned/existing mark is authoritative for this phase.`;
+        log(project, run, `--- ${note} ---`);
+        appendAppendix(
+          project.rootPath,
+          phase.id,
+          `## Design note — generative logo skipped\n\n${note}\n`,
+        );
+      } else {
+        const msg = `Design cannot complete: logo/mark asset(s) [${logoBlockers.join(", ")}] require a bound designImage role (openai-images). Pull e.g. x/flux2-klein, add ollama-image endpoint, bind roles.designImage. svg_fallback is not accepted for logos.`;
+        log(project, run, `ERROR: ${msg}`);
+        appendAppendix(
+          project.rootPath,
+          phase.id,
+          `## Design blocked — designImage required\n\n${msg}\n`,
+        );
+        writePhaseStatus(project.rootPath, phase.id, "accepted");
+        return {
+          stage: "failed",
+          worktreePath: worktree.path,
+          worktreeBranch: worktree.branch,
+        };
+      }
     }
 
     const vision = this.ctx.registry.tryResolveDesignVision(config.roleBindings);

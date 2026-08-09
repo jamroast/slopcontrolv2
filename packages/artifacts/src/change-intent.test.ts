@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
   allocateWorktreeDbPort,
   applyWorktreeComposeIsolation,
+  changeIntentIsBrandTheming,
   clipBlueprintForPrompt,
   ensureChangeIntent,
   extractChangeIntent,
@@ -632,5 +633,126 @@ Hello
     const clip = clipBlueprintForPrompt(bp, 2000);
     assert.match(clip, /verified/i);
     assert.match(clip, /BD-COMPOSER-FORM-MODE/);
+  });
+
+  it("stock adoption ask classifies stockAdoption, not brandTheming (heuristic)", () => {
+    const intent = extractChangeIntent(
+      "I need you to please review the menu bar. We are not using the correct menubar theming. Strip it away and use the stock menubar theming from the jamroast-components project. Keep the current logo and create an icon pack for it with an alpha channel.",
+    );
+    assert.equal(intent.stockAdoption, true);
+    assert.equal(intent.brandTheming, false);
+    assert.equal(changeIntentIsBrandTheming(intent), false);
+  });
+
+  it("sibling bespoke theme port stays brandTheming (not stockAdoption)", () => {
+    const intent = extractChangeIntent(
+      "Apply the same layout and look and feel from the JamPress and JamRoast projects to this app. We also need a new icon based on a similar concept.",
+    );
+    assert.equal(intent.stockAdoption, false);
+    assert.equal(intent.brandTheming, true);
+    assert.equal(changeIntentIsBrandTheming(intent), true);
+  });
+
+  it("changeIntentIsBrandTheming honors structured stockAdoption over brandTheming", () => {
+    assert.equal(
+      changeIntentIsBrandTheming({
+        title: "Adopt stock menubar",
+        goal: "Use stock jamroast-components menubar theming",
+        uiMount: "page",
+        changeKind: "other",
+        brandTheming: true,
+        stockAdoption: true,
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: "use the stock menubar theming from jamroast-components",
+      }),
+      false,
+    );
+  });
+
+  it("asset-swap ask classifies assetSwap, not brandTheming (heuristic)", () => {
+    const intent = extractChangeIntent(
+      "Please can you make sure the following log jamlight-circular-mark-v1.png is used rather than the alpha logo that is current on the site. It is the pinned one right now",
+    );
+    assert.equal(intent.assetSwap, true);
+    assert.equal(intent.brandTheming, false);
+    assert.equal(changeIntentIsBrandTheming(intent), false);
+  });
+
+  it("new-logo creation ask is NOT an asset swap", () => {
+    const intent = extractChangeIntent(
+      "I need you to design a new logo. Make it circular and symbolic, generate 7 different styles.",
+    );
+    assert.equal(intent.assetSwap, false);
+    assert.equal(intent.brandTheming, true);
+    assert.equal(changeIntentIsBrandTheming(intent), true);
+  });
+
+  it("changeIntentIsBrandTheming honors structured assetSwap over brandTheming", () => {
+    assert.equal(
+      changeIntentIsBrandTheming({
+        title: "Swap menubar logo to pinned mark",
+        goal: "Use jamlight-circular-mark-v1.png rather than the alpha variant",
+        uiMount: "page",
+        changeKind: "other",
+        brandTheming: true,
+        assetSwap: true,
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: "use jamlight-circular-mark-v1.png rather than the alpha logo",
+      }),
+      false,
+    );
+  });
+
+  it("isChangeIntentWeak flags brand-misclassified asset swap for refresh", () => {
+    const existing = extractChangeIntent("Add a logo", {});
+    const misclassified = {
+      ...existing,
+      brandTheming: true,
+      assetSwap: undefined,
+    };
+    assert.equal(
+      isChangeIntentWeak(
+        misclassified,
+        "Make sure jamlight-circular-mark-v1.png is used rather than the alpha logo currently on the site.",
+      ),
+      true,
+    );
+    const refreshed = { ...misclassified, brandTheming: false, assetSwap: true };
+    assert.equal(
+      isChangeIntentWeak(
+        refreshed,
+        "Make sure jamlight-circular-mark-v1.png is used rather than the alpha logo currently on the site.",
+      ),
+      false,
+    );
+  });
+
+  it("isChangeIntentWeak flags brand-misclassified stock adoption for refresh", () => {
+    const existing = extractChangeIntent("Add a logo", {});
+    const misclassified = {
+      ...existing,
+      brandTheming: true,
+      stockAdoption: undefined,
+    };
+    assert.equal(
+      isChangeIntentWeak(
+        misclassified,
+        "Strip the custom menubar and use the stock menubar theming from the jamroast-components project.",
+      ),
+      true,
+    );
+    // Once refreshed to stockAdoption, no longer weak on that axis.
+    const refreshed = { ...misclassified, brandTheming: false, stockAdoption: true };
+    assert.equal(
+      isChangeIntentWeak(
+        refreshed,
+        "Strip the custom menubar and use the stock menubar theming from the jamroast-components project.",
+      ),
+      false,
+    );
   });
 });

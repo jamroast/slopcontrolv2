@@ -8,6 +8,26 @@ function claimsAlphaInName(name: string): boolean {
   return /(?:^|[-_.])alpha(?:[-_.]|$)|transparent|rgba/i.test(name);
 }
 
+/**
+ * Asset scope: a design loop (`loopId`) or an arbitrary project-relative dir
+ * (`assetsDir`, e.g. a phase design dir during the design stage).
+ */
+export type AssetScope = {
+  projectRoot: string;
+  loopId?: string;
+  assetsDir?: string;
+};
+
+function scopeAssetsDir(scope: AssetScope): string {
+  if (scope.assetsDir) {
+    return resolve(resolve(scope.projectRoot), scope.assetsDir);
+  }
+  if (!scope.loopId) {
+    throw new Error("loopId or assetsDir required for design asset op");
+  }
+  return resolve(designLoopAssetsDir(scope.projectRoot, scope.loopId));
+}
+
 async function assetHasAlpha(absolutePath: string): Promise<boolean> {
   const meta = await sharp(absolutePath).metadata();
   return meta.hasAlpha === true;
@@ -19,12 +39,14 @@ async function assetHasAlpha(absolutePath: string): Promise<boolean> {
  */
 export async function resolveIconPackSourceFilename(opts: {
   projectRoot: string;
-  loopId: string;
+  loopId?: string;
+  /** Project-relative assets dir — alternative to loopId (design stage). */
+  assetsDir?: string;
   sourceFilename?: string;
   /** Pinned or preferred mark (used when source missing / invalid). */
   preferredFilename?: string;
 }): Promise<{ filename: string; hasAlpha: boolean; redirectedFrom?: string }> {
-  const dir = resolve(designLoopAssetsDir(opts.projectRoot, opts.loopId));
+  const dir = scopeAssetsDir(opts);
   mkdirSync(dir, { recursive: true });
 
   const tryFile = async (
@@ -134,13 +156,12 @@ function safeBasename(name: string): string {
   return base;
 }
 
-function resolveLoopAsset(
-  projectRoot: string,
-  loopId: string,
+function resolveScopedAsset(
+  scope: AssetScope,
   filename: string,
 ): { absolutePath: string; relativePath: string; name: string } {
   const name = safeBasename(filename);
-  const dir = resolve(designLoopAssetsDir(projectRoot, loopId));
+  const dir = scopeAssetsDir(scope);
   mkdirSync(dir, { recursive: true });
   const absolutePath = resolve(dir, name);
   if (!absolutePath.startsWith(dir + sep) && absolutePath !== dir) {
@@ -151,7 +172,7 @@ function resolveLoopAsset(
   }
   return {
     absolutePath,
-    relativePath: relative(resolve(projectRoot), absolutePath).replace(
+    relativePath: relative(resolve(scope.projectRoot), absolutePath).replace(
       /\\/g,
       "/",
     ),
@@ -159,13 +180,12 @@ function resolveLoopAsset(
   };
 }
 
-function outPath(
-  projectRoot: string,
-  loopId: string,
+function outPathScoped(
+  scope: AssetScope,
   filename: string,
 ): { absolutePath: string; relativePath: string; name: string } {
   const name = safeBasename(filename);
-  const dir = resolve(designLoopAssetsDir(projectRoot, loopId));
+  const dir = scopeAssetsDir(scope);
   mkdirSync(dir, { recursive: true });
   const absolutePath = resolve(dir, name);
   if (!absolutePath.startsWith(dir + sep) && absolutePath !== dir) {
@@ -173,12 +193,28 @@ function outPath(
   }
   return {
     absolutePath,
-    relativePath: relative(resolve(projectRoot), absolutePath).replace(
+    relativePath: relative(resolve(scope.projectRoot), absolutePath).replace(
       /\\/g,
       "/",
     ),
     name,
   };
+}
+
+function resolveLoopAsset(
+  projectRoot: string,
+  loopId: string,
+  filename: string,
+): { absolutePath: string; relativePath: string; name: string } {
+  return resolveScopedAsset({ projectRoot, loopId }, filename);
+}
+
+function outPath(
+  projectRoot: string,
+  loopId: string,
+  filename: string,
+): { absolutePath: string; relativePath: string; name: string } {
+  return outPathScoped({ projectRoot, loopId }, filename);
 }
 
 export type MakeTransparentResult = {
@@ -216,6 +252,14 @@ export function preferNonAlphaSiblingFilename(
   loopId: string,
   name: string,
 ): string {
+  return preferNonAlphaSiblingInScope({ projectRoot, loopId }, name);
+}
+
+/** Scope variant: works for design loops and phase design dirs alike. */
+export function preferNonAlphaSiblingInScope(
+  scope: AssetScope,
+  name: string,
+): string {
   const base = safeBasename(name);
   if (
     !/(?:-alpha)+\.png$/i.test(base) &&
@@ -227,7 +271,7 @@ export function preferNonAlphaSiblingFilename(
     .replace(/(?:-alpha)+\.png$/i, ".png")
     .replace(/-cutout\.png$/i, ".png");
   if (sibling === base) return base;
-  const dir = resolve(designLoopAssetsDir(projectRoot, loopId));
+  const dir = scopeAssetsDir(scope);
   if (existsSync(resolve(dir, sibling))) return sibling;
   return base;
 }
@@ -374,7 +418,9 @@ async function writeRgbaPng(
  */
 export async function makeTransparentDesignAsset(opts: {
   projectRoot: string;
-  loopId: string;
+  loopId?: string;
+  /** Project-relative assets dir — alternative to loopId (design stage). */
+  assetsDir?: string;
   sourceFilename: string;
   /** Output filename (default: stable *-alpha.png, never *-alpha-alpha) */
   filename?: string;
@@ -386,21 +432,14 @@ export async function makeTransparentDesignAsset(opts: {
   /** When true (default), apply circular soft mask if chroma leaves opaque corners. */
   circularFallback?: boolean;
 }): Promise<MakeTransparentResult> {
-  const resolvedName = preferNonAlphaSiblingFilename(
-    opts.projectRoot,
-    opts.loopId,
-    opts.sourceFilename,
-  );
-  const src = resolveLoopAsset(
-    opts.projectRoot,
-    opts.loopId,
-    resolvedName,
-  );
-  const out = outPath(
-    opts.projectRoot,
-    opts.loopId,
-    alphaOutputFilename(src.name, opts.filename),
-  );
+  const scope: AssetScope = {
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
+  };
+  const resolvedName = preferNonAlphaSiblingInScope(scope, opts.sourceFilename);
+  const src = resolveScopedAsset(scope, resolvedName);
+  const out = outPathScoped(scope, alphaOutputFilename(src.name, opts.filename));
   const soft = opts.softEdge ?? 8;
 
   const { data, info } = await sharp(src.absolutePath)
@@ -589,7 +628,9 @@ export type DeriveIconPackResult = {
 /** Resize source into favicon/icon pack sizes (deterministic). */
 export async function deriveIconPackFromAsset(opts: {
   projectRoot: string;
-  loopId: string;
+  loopId?: string;
+  /** Project-relative assets dir — alternative to loopId (design stage). */
+  assetsDir?: string;
   sourceFilename?: string;
   preferredFilename?: string;
   sizes?: number[];
@@ -601,9 +642,15 @@ export async function deriveIconPackFromAsset(opts: {
    */
   requireRealAlphaIfClaimed?: boolean;
 }): Promise<DeriveIconPackResult> {
+  const scope: AssetScope = {
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
+  };
   const resolved = await resolveIconPackSourceFilename({
     projectRoot: opts.projectRoot,
     loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
     sourceFilename: opts.sourceFilename,
     preferredFilename: opts.preferredFilename,
   });
@@ -619,11 +666,7 @@ export async function deriveIconPackFromAsset(opts: {
   const sizes = opts.sizes?.length
     ? opts.sizes
     : [16, 24, 32, 48, 64, 128, 192, 512];
-  const src = resolveLoopAsset(
-    opts.projectRoot,
-    opts.loopId,
-    resolved.filename,
-  );
+  const src = resolveScopedAsset(scope, resolved.filename);
   const packPrefix = (opts.prefix?.trim() || "icon-pack").replace(
     /[^a-z0-9_-]+/gi,
     "-",
@@ -631,7 +674,7 @@ export async function deriveIconPackFromAsset(opts: {
   const files: DeriveIconPackResult["files"] = [];
   for (const size of sizes) {
     const filename = `${packPrefix}-${size}.png`;
-    const out = outPath(opts.projectRoot, opts.loopId, filename);
+    const out = outPathScoped(scope, filename);
     await sharp(src.absolutePath)
       .ensureAlpha()
       .resize(size, size, {

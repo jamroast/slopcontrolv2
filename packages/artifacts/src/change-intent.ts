@@ -28,6 +28,19 @@ export type ChangeIntent = {
    */
   themeWiringOnly?: boolean;
   /**
+   * Strip custom UI and adopt stock components/theming from the project's
+   * component library (design-by-reference). When true, overrides
+   * brandTheming — no generative design pass; the design already exists
+   * in the library.
+   */
+  stockAdoption?: boolean;
+  /**
+   * Wire/swap/point at an EXISTING asset by filename (e.g. "use
+   * jamlight-circular-mark-v1.png rather than the alpha logo"). No new
+   * artwork is created — pure coding. Overrides brandTheming.
+   */
+  assetSwap?: boolean;
+  /**
    * Operator asked to add/show a missing menubar theme control (anti-audit delivery).
    */
   requestsMissingThemeControl?: boolean;
@@ -48,6 +61,8 @@ export const ChangeIntentLlmOutputSchema = z.object({
   needsInteraction: z.boolean(),
   brandTheming: z.boolean().optional(),
   themeWiringOnly: z.boolean().optional(),
+  stockAdoption: z.boolean().optional(),
+  assetSwap: z.boolean().optional(),
   requestsMissingThemeControl: z.boolean().optional(),
   mustNot: z.array(z.string()).optional(),
   /** Optional prior phase id hint(s) for mount refinement. */
@@ -109,11 +124,51 @@ const BRAND_THEMING_RE =
 const LOGO_TYPO_RE = /\bnew\s+logs?\b/i;
 
 /**
+ * Stock / component-library adoption: strip custom UI in favor of the shared
+ * library's stock widgets (design-by-reference — no generative design pass).
+ */
+const STOCK_ADOPTION_RE =
+  /\b(?:stock\s+(?:[\w-]+\s+){0,3}(?:component|widget|menubar|theme|theming|ui)|component\s+library|from\s+(?:the\s+)?[\w@/-]*components(?:\s+project)?\b|[\w@/-]*components\s+project|jamroast-components)\b/i;
+const STOCK_ADOPTION_VERB_RE =
+  /\b(?:strip|replace|adopt|use|switch\s+to|reset\s+to|standardi[sz]e\s+on|pull\s+in)\b/i;
+
+/**
+ * Offline/heuristic: strip-and-adopt stock component-library UI.
+ * Prefer the LLM `stockAdoption` field when INTENT.json exists.
+ */
+export function isStockAdoptionAsk(description: string): boolean {
+  const text = description ?? "";
+  return STOCK_ADOPTION_RE.test(text) && STOCK_ADOPTION_VERB_RE.test(text);
+}
+
+/**
+ * Asset-swap language: the ask references an existing asset by filename and
+ * wants it mounted/swapped/pointed at — no new artwork is requested.
+ */
+const ASSET_FILENAME_RE = /\b[\w][\w-]*\.(?:png|svg|webp|jpe?g|ico)\b/i;
+const ASSET_SWAP_VERB_RE =
+  /\b(?:use|swap|rather\s+than|instead\s+of|replace|mount|point|wire|reference|switch\s+to|show|display)\b/i;
+const ASSET_CREATION_RE =
+  /\b(?:new\s+(?:logo|icon|mark|wordmark)|generate|design\s+a|create\s+a\s+(?:new\s+)?(?:logo|icon)|redesign|re-?brand)\b/i;
+
+/**
+ * Offline/heuristic: wire/swap an EXISTING asset by filename — pure coding.
+ * Prefer the LLM `assetSwap` field when INTENT.json exists.
+ */
+export function isAssetSwapAsk(description: string): boolean {
+  const text = description ?? "";
+  if (ASSET_CREATION_RE.test(text)) return false;
+  return ASSET_FILENAME_RE.test(text) && ASSET_SWAP_VERB_RE.test(text);
+}
+
+/**
  * Offline/heuristic: brand, theming, logo, or palette ask.
  * Prefer changeIntentIsBrandTheming when INTENT.json exists.
  */
 export function isBrandThemingAsk(description: string): boolean {
   const text = description ?? "";
+  if (isStockAdoptionAsk(text)) return false;
+  if (isAssetSwapAsk(text)) return false;
   return BRAND_THEMING_RE.test(text) || LOGO_TYPO_RE.test(text);
 }
 
@@ -122,6 +177,8 @@ export function isBrandThemingAsk(description: string): boolean {
  */
 export function changeIntentIsBrandTheming(intent: ChangeIntent): boolean {
   if (intent.themeWiringOnly === true) return false;
+  if (intent.stockAdoption === true) return false;
+  if (intent.assetSwap === true) return false;
   if (typeof intent.brandTheming === "boolean") return intent.brandTheming;
   const text = `${intent.title}\n${intent.goal}\n${intent.rawDescription}`;
   return isBrandThemingAsk(text) && !isThemeWiringAsk(text);
@@ -442,9 +499,12 @@ export function finalizeChangeIntent(
     : undefined;
 
   const themeWiringOnly = Boolean(raw.themeWiringOnly);
-  const brandTheming = themeWiringOnly
-    ? false
-    : Boolean(raw.brandTheming);
+  const stockAdoption = Boolean(raw.stockAdoption);
+  const assetSwap = Boolean(raw.assetSwap);
+  const brandTheming =
+    themeWiringOnly || stockAdoption || assetSwap
+      ? false
+      : Boolean(raw.brandTheming);
 
   return {
     title,
@@ -453,6 +513,8 @@ export function finalizeChangeIntent(
     changeKind,
     brandTheming,
     themeWiringOnly,
+    stockAdoption,
+    assetSwap,
     requestsMissingThemeControl: Boolean(raw.requestsMissingThemeControl),
     refinementOf,
     supersedes,
@@ -548,8 +610,13 @@ export function extractChangeIntent(
   );
 
   const themeWiringOnly = isThemeWiringAsk(heuristicText);
+  const stockAdoption = isStockAdoptionAsk(heuristicText);
+  const assetSwap = isAssetSwapAsk(heuristicText);
   const brandTheming =
-    !themeWiringOnly && isBrandThemingAsk(heuristicText);
+    !stockAdoption &&
+    !assetSwap &&
+    !themeWiringOnly &&
+    isBrandThemingAsk(heuristicText);
   const changeKind: ChangeKind = chromeOnly
     ? "chrome-hide"
     : wantsIx
@@ -569,6 +636,8 @@ export function extractChangeIntent(
       needsInteraction: wantsIx,
       brandTheming,
       themeWiringOnly,
+      stockAdoption,
+      assetSwap,
       requestsMissingThemeControl: false,
       refinementOf,
     },
@@ -596,6 +665,12 @@ export function formatChangeIntentPromptBlock(intent: ChangeIntent): string {
     intent.changeKind ? `- **changeKind:** ${intent.changeKind}` : null,
     intent.brandTheming ? `- **brandTheming:** true` : null,
     intent.themeWiringOnly ? `- **themeWiringOnly:** true` : null,
+    intent.stockAdoption
+      ? `- **stockAdoption:** true (design-by-reference — no generative design pass)`
+      : null,
+    intent.assetSwap
+      ? `- **assetSwap:** true (wire/swap an existing asset — no generative design pass)`
+      : null,
     intent.requestsMissingThemeControl
       ? `- **requestsMissingThemeControl:** true`
       : null,
@@ -664,6 +739,14 @@ export function isChangeIntentWeak(
   const chromeOnly =
     isChromeHideAsk(op) && !ENGAGEMENT_FAILURE_RE.test(op);
   const brandAsk = isBrandThemingAsk(op);
+  const stockAdoptMisclassed =
+    isStockAdoptionAsk(op) &&
+    existing.stockAdoption !== true &&
+    existing.brandTheming === true;
+  const assetSwapMisclassed =
+    isAssetSwapAsk(op) &&
+    existing.assetSwap !== true &&
+    existing.brandTheming === true;
   const weakMustNot =
     needsIx &&
     (existing.uiMount === "composer" || existing.uiMount === "n/a") &&
@@ -685,6 +768,8 @@ export function isChangeIntentWeak(
     (chromeOnly && Boolean(existing.interaction)) ||
     (chromeOnly && existing.changeKind !== "chrome-hide") ||
     (brandAsk && existing.changeKind === "backend") ||
+    stockAdoptMisclassed ||
+    assetSwapMisclassed ||
     spuriousInteraction ||
     weakMustNot ||
     weakTitle

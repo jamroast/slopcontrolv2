@@ -262,6 +262,46 @@ describe("design-image-edit", () => {
     assert.equal(promptLooksLikeImageEdit("invent a new logo mark"), false);
   });
 
+  it("assetsDir scope: icon pack + alpha derive without a loopId (design stage)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-phase-assets-"));
+    roots.push(root);
+    const assetsDir = ".slopcontrol/phases/22-x/design/assets";
+    const dir = join(root, assetsDir);
+    mkdirSync(dir, { recursive: true });
+    await sharp({
+      create: {
+        width: 64,
+        height: 64,
+        channels: 4,
+        background: { r: 232, g: 67, b: 10, alpha: 1 },
+      },
+    })
+      .png()
+      .toFile(join(dir, "pinned-logo.png"));
+
+    const pack = await deriveIconPackFromAsset({
+      projectRoot: root,
+      assetsDir,
+      sourceFilename: "pinned-logo.png",
+      sizes: [16, 32],
+      prefix: "icon-pack",
+    });
+    assert.equal(pack.files.length, 2);
+    assert.ok(
+      pack.files.every((f) =>
+        f.relativePath.startsWith(".slopcontrol/phases/22-x/design/assets/"),
+      ),
+    );
+
+    const alpha = await makeTransparentDesignAsset({
+      projectRoot: root,
+      assetsDir,
+      sourceFilename: "pinned-logo.png",
+    });
+    assert.equal(alpha.hasAlpha, true);
+    assert.match(alpha.relativePath, /22-x\/design\/assets\/pinned-logo-alpha\.png$/);
+  });
+
   it("deriveIconPack redirects fake-alpha RGB to true RGBA sibling", async () => {
     const root = mkdtempSync(join(tmpdir(), "slop-fake-alpha-"));
     roots.push(root);
