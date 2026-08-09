@@ -74,6 +74,7 @@ export * from "./design-share.js";
 export * from "./design-element.js";
 export * from "./npm-registry.js";
 export * from "./build-toolchain.js";
+export * from "./test-services.js";
 export * from "./build-process-config.js";
 export * from "./ci-workflows.js";
 export * from "./library-propagate.js";

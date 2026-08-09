@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   LlmEndpointSchema,
+  ProjectConfigSchema,
   RunActionSchema,
   formatDurationMs,
   log,
@@ -26,6 +27,13 @@ describe("@slopcontrol/types", () => {
     });
 
     assert.equal(parsed.id, "vercel-glm");
+  });
+
+  it("ProjectConfigSchema accepts optional testServices", () => {
+    const defaults = ProjectConfigSchema.parse({});
+    assert.equal(defaults.testServices, undefined);
+    const parsed = ProjectConfigSchema.parse({ testServices: ["db", "redis"] });
+    assert.deepEqual(parsed.testServices, ["db", "redis"]);
   });
 
   it("validates run actions", () => {

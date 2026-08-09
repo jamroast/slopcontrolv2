@@ -499,6 +499,12 @@ export const ProjectConfigSchema = z.object({
    */
   verifyPreflightCommand: z.string().optional(),
   /**
+   * Compose service names to bring up (docker compose up -d --wait) before
+   * testCommand during success checks. When unset, infra-named services
+   * (db/postgres/redis/…) in the project compose file are auto-detected.
+   */
+  testServices: z.array(z.string()).optional(),
+  /**
    * When true (default), run testCommand during development success checks.
    * With autoMergeOnComplete, tests run on the project root after merge
    * (where gitignored env files like .env.docker live).

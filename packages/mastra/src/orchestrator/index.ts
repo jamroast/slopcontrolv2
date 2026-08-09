@@ -77,6 +77,7 @@ import {
   changeIntentIsThemeWiringOnly,
   phaseHasUsableLogo,
   readChangeIntent,
+  ensureTestServices,
   phaseDocAlignsWithChangeIntent,
   researchEngagementQuality,
   formatAntiAuditThemeDeliveryNote,
@@ -1567,6 +1568,28 @@ export async function runSuccessChecks(
   if (runTestStep) {
     const installFail = await tryDepsInstall();
     if (installFail) return installFail;
+
+    // Bring up declared/infra test backing services (db, redis, …) so a
+    // stopped container does not fail tests with ECONNREFUSED.
+    if (opts?.runner === undefined) {
+      const svc = await ensureTestServices({
+        projectRoot: project.rootPath,
+        configured: config.testServices,
+      });
+      if (svc.attempted) {
+        const step: SuccessCheckStep = {
+          name: "test-services",
+          command: `docker compose up -d --wait ${svc.services.join(" ")}`,
+          exitCode: svc.ok ? 0 : 1,
+          output: svc.detail,
+        };
+        parts.push(`test-services: ${svc.detail}`);
+        steps.push(step);
+        if (!svc.ok) {
+          return failResult(parts.slice(0, -1), steps.slice(0, -1), step);
+        }
+      }
+    }
   }
 
   if (
