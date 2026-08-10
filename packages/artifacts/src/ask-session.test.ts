@@ -190,7 +190,23 @@ More chatter.`,
       ),
       true,
     );
+    // The thrown message embeds the agent name "Ask Agent" — the exact
+    // production message from the JamLane 6f771839 timeout.
+    assert.equal(
+      isAskAgentTimeoutError(
+        new Error("Agent Ask Agent timed out after 240000ms"),
+      ),
+      true,
+    );
+    assert.equal(
+      isAskAgentTimeoutError(new Error("Agent Plan Agent timed out after 600000ms")),
+      true,
+    );
     assert.equal(isAskAgentTimeoutError(new Error("boom")), false);
+    assert.equal(
+      isAskAgentTimeoutError(new Error("timed out waiting for user")),
+      false,
+    );
     assert.match(ASK_TIMEOUT_RECOVERY_MESSAGE, /Ask timed out/i);
     assert.match(ASK_TIMEOUT_RECOVERY_MESSAGE, /narrower question/i);
   });

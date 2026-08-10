@@ -1663,7 +1663,10 @@ app.post("/projects/:id/asks", async (req, res) => {
     }
 
     if (isAskAgentTimeoutError(error)) {
-      const recovery = ASK_TIMEOUT_RECOVERY_MESSAGE;
+      const partial = workingStubFromBound(bound);
+      const recovery = partial
+        ? `${partial}\n\n---\n${ASK_TIMEOUT_RECOVERY_MESSAGE}`
+        : ASK_TIMEOUT_RECOVERY_MESSAGE;
       const assistantAt = new Date().toISOString();
       if (workingStubStarted) {
         ask =

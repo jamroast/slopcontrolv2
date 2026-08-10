@@ -83,7 +83,9 @@ export function writeAskArtifacts(
 /** True when askTurn / runAgent rejected with the Ask agent wall-clock timeout. */
 export function isAskAgentTimeoutError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error ?? "");
-  return /Agent\s+Ask\s+timed\s+out\s+after/i.test(msg);
+  // Thrown as `Agent ${name} timed out after Nms` where the name itself is
+  // "Ask Agent" — so the word "Agent" appears between "Ask" and "timed".
+  return /Agent\s+.*\btimed\s+out\s+after\s+\d+\s*ms/i.test(msg);
 }
 
 export const ASK_TIMEOUT_RECOVERY_MESSAGE = `Ask timed out before a complete answer.

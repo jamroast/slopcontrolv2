@@ -827,7 +827,7 @@ async function runAgentLiveTurn(
     (agent as { id?: string }).id ??
     "agent";
   const maxSteps = opts?.maxSteps ?? 12;
-  const timeoutMs = opts?.timeoutMs ?? 240_000;
+  const timeoutMs = opts?.timeoutMs ?? resolveAskTurnTimeoutMs();
   const onProgress = opts?.onProgress;
   const signal = opts?.abortSignal;
   const memoryOpt = resolveAgentMemoryOption(resourceId, threadId);
@@ -1119,6 +1119,11 @@ export type CommandRunner = (
 export function resolveCheckTimeoutMs(): number {
   const n = Number(process.env.SLOPCONTROL_CHECK_MS ?? 60_000);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 60_000;
+}
+
+export function resolveAskTurnTimeoutMs(): number {
+  const n = Number(process.env.SLOPCONTROL_ASK_TURN_MS ?? 240_000);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 240_000;
 }
 
 /**
