@@ -546,6 +546,46 @@ describe("runSuccessChecks", () => {
     }
   });
 
+  it("failing multi-line check reports the full body, not just the first line", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-multiline-check-"));
+    try {
+      mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+      writeConfig(root, {
+        buildCommand: "echo build",
+        testCommand: "echo tests-ok",
+      });
+
+      // First line passes and prints matches; the LAST line fails — the
+      // phase-29 attribution bug labeled the cell by the first line only.
+      const phaseDoc = validPhaseDoc(`grep -n "handleNewChat" file.ts | head -5
+awk '/x/,/y/' file.ts | grep -q 'a.*b.*c' || exit 1`);
+      const result = await runSuccessChecks(fakeProject(root), phaseDoc, root, {
+        mode: "verify",
+        // Legacy doc written before the brittle-chain guard existed.
+        skipPhaseDocValidation: true,
+        runner: async (command) =>
+          // Only the automated check (run via bash '...') fails.
+          /^bash\s+'/.test(command)
+            ? { output: "52: match\n", exitCode: 1 }
+            : { output: "ok\n", exitCode: 0 },
+      });
+      assert.equal(result.ok, false);
+      assert.ok(result.firstFailure, "expected a firstFailure step");
+      assert.match(
+        result.firstFailure!.command ?? "",
+        /full check body/,
+        "failing step should embed the full check body",
+      );
+      assert.match(result.firstFailure!.command ?? "", /awk '\/x\/,\/y\/'/);
+      assert.match(
+        result.firstFailure!.output,
+        /failing line is the LAST command/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("build mode runs build but skips testCommand and automated checks", async () => {
     const root = mkdtempSync(join(tmpdir(), "slop-build-gate-"));
     try {

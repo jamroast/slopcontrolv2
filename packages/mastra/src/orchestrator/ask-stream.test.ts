@@ -77,6 +77,26 @@ describe("ask-stream helpers", () => {
     );
   });
 
+  it("dangling fragment mentioning root cause is narration (JamLight regression)", () => {
+    // The exact fragment that leaked through as a final answer: "root cause"
+    // phrase with no length floor vetoed both the heuristic and the judge.
+    const fragment =
+      "Now I can see the root cause clearly. Let me verify one more thing — the `ai` package exports:";
+    assert.equal(hasSubstantiveReplyMarkers(fragment), false);
+    assert.equal(isAskNarrationOnlyReply(fragment), true);
+  });
+
+  it("length-gated markers still accept real analyses", () => {
+    const longAnalysis = `## Root cause\n\n${"The chat route builds ModelMessage[] incorrectly. ".repeat(12)}\nFixed in src/app/api/chat/route.ts.`;
+    assert.equal(hasSubstantiveReplyMarkers(longAnalysis), true);
+    assert.equal(isAskNarrationOnlyReply(longAnalysis), false);
+    // Short mention without narration intent or dangling colon is an answer.
+    assert.equal(
+      isAskNarrationOnlyReply("The root cause is X. Fixed in y.ts."),
+      false,
+    );
+  });
+
   it("exports LiveTurnInterruptedError", () => {
     const err = new LiveTurnInterruptedError("Live turn interrupted", "partial");
     assert.equal(isLiveTurnInterruptedError(err), true);
@@ -116,6 +136,18 @@ describe("decideNarrationSynthesis", () => {
     });
     assert.equal(decision.synthesize, true);
     assert.equal(decision.judgeOverrode, false);
+  });
+
+  it("fragment that names root cause mid-narration reaches the judge", async () => {
+    const decision = await decideNarrationSynthesis({
+      reply:
+        "Now I can see the root cause clearly. Let me verify one more thing — the `ai` package exports:",
+      toolCallCount: 22,
+      synthesizeIfNarration: true,
+      judgeFn: async () => ({ narrationOnly: true, reason: "dangling" }),
+    });
+    assert.equal(decision.synthesize, true);
+    assert.equal(decision.heuristicFlagged, true);
   });
 
   it("judge deny path skips synthesis", async () => {
@@ -169,8 +201,7 @@ describe("decideNarrationSynthesis", () => {
       judgeCalls += 1;
       return { narrationOnly: true, reason: "x" };
     };
-    const substantive =
-      "## Root cause\n\nThemeToggle is mounted in `menubar.tsx` but playground CSS lacks `@source`.";
+    const substantive = `## Root cause\n\n${"ThemeToggle is mounted in menubar.tsx but playground CSS lacks @source coverage. ".repeat(8)}`;
     const decision = await decideNarrationSynthesis({
       reply: substantive,
       toolCallCount: 3,

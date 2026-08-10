@@ -1627,14 +1627,27 @@ export async function runSuccessChecks(
         cwd,
         env: checkEnv,
       });
+      // Attribution: multi-line cells must surface the FULL body on failure —
+      // labeling by the first line alone misattributes the failing command
+      // and sends the failure classifier chasing the wrong cause.
+      const bodyLines = cell.body.split("\n").filter((l) => l.trim()).length;
+      const fullBody = cell.body.trim().slice(0, 600);
+      const stepCommand =
+        bodyLines > 1 ? `${label}\n--- full check body ---\n${fullBody}` : label;
       const step: SuccessCheckStep = {
         name: "automatedCheck",
-        command: label,
+        command: stepCommand,
         exitCode: result.exitCode,
         output: result.output,
       };
       parts.push(`automatedCheck (${label}):\n${result.output}`);
       if (result.exitCode !== 0) {
+        if (bodyLines > 1) {
+          step.output = [
+            result.output,
+            `Check cell (${bodyLines} lines) exited ${result.exitCode}; the failing line is the LAST command before any || exit 1 / echo — full body above.`,
+          ].join("\n");
+        }
         return failResult(parts.slice(0, -1), steps, step);
       }
       if (automatedCheckReportedFailure(result.output)) {
@@ -4697,6 +4710,7 @@ If you use write_file, write ONLY to ${canonicalPath} (never project-root PHASE.
 Include ## Blueprint Deltas for durable design changes.
 MUST include ## Automated Checks with at least one runnable command in a \`\`\`bash fence
 (e.g. npm test -- path/to/regression.test.ts). Manual-only success criteria are not enough.
+Match tokens independently: one \`grep -q\` per token joined by \`&&\` — never require multiple tokens on a single line via \`.*\` chains (code formatting varies across lines).
 When finished, include PHASE_COMPLETE on its own line.
 Do NOT narrate that you wrote the file — output the document itself.
 ${learningsBlock ? `\n${learningsBlock}\n` : ""}
@@ -4888,7 +4902,7 @@ ${alignBlock}${intentBlockRepair}
 ${formatChangeIntentPromptBlock(intent)}
 Rewrite the FULL PHASE.md starting with # Title — output ONLY the markdown document (no "here is what changed").
 If you use write_file, path must be exactly: ${canonicalPath}
-Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence, no curl with API keys), ## Blueprint Deltas.
+Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence, no curl with API keys; one \`grep -q\` per token joined by \`&&\` — never same-line \`.*\` chains), ## Blueprint Deltas.
 Base Scope/File Changes ONLY on the RESEARCH below — do not copy a prior phase's host-routing plan.
 Obey Change Intent uiMount / interaction contract — do not substitute chips for a fillable mount.
 When Change Intent has an engagement interaction: ## Success Criteria and ## Automated Checks MUST prove fill+submit at the locked mount AND live AI SDK static tool-part name resolution (type: "tool-<name>" / parseToolResult / extractActiveForm) — not only tool-invocation + toolName fixtures. Put those proofs in Success Criteria / Automated Checks, not only in File Changes or Known limitations.
@@ -5426,7 +5440,8 @@ ${mockContractBlock}
 Write UI-SPEC to ${canonicalUiSpecPath} (start with # UI-SPEC).
 Write tokens.css to ${canonicalTokensPath}.
 Include ## Assets table (Name | Filename | Prompt | Source), max 3 assets.
-The ## Assets table lists ONLY assets to produce. Reference/authority assets (pinned marks, files already on disk) belong in prose — never as table rows.
+The ## Assets table lists ONLY assets to produce. Reference/authority assets (pinned marks, files already on disk) belong in prose — never as table rows. If you document existing assets in a table, it MUST NOT use Name/Filename column headers (use e.g. Asset | Path | Status) — only the production table uses Name | Filename | Prompt | Source.
+When no assets are produced, omit the production table entirely — do not emit a placeholder row of dashes.
 Assets DERIVED from an existing file (icon pack, alpha cut-out, resize) MUST name the existing asset in the Source column — they are produced deterministically, never generated. Only genuinely new artwork leaves Source empty.
 When the operator pinned a logo, derived assets (alpha/icon pack) use that pinned file as Source; do not brief a NEW logo.
 End with UI_SPEC_COMPLETE.
@@ -5667,18 +5682,12 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     }
 
     if (logoBlockers.length > 0) {
-      // Fail soft when this is NOT a genuine identity-creation phase and the
-      // project already has a usable mark (pinned selection / brand asset):
-      // the phase must not die because a generative model is unbound for an
-      // asset the operator has already chosen.
-      const stageIntent = readChangeIntent(project.rootPath, phase.id);
-      const identityAsk =
-        stageIntent != null &&
-        changeIntentIsBrandTheming(stageIntent) &&
-        stageIntent.assetSwap !== true &&
-        stageIntent.stockAdoption !== true;
+      // Fail soft whenever the project already has a usable mark (pinned
+      // selection or brand asset on disk): an unbound generative model must
+      // not kill a phase whose logo already exists. Fail closed only when
+      // there is no mark anywhere — a genuine new-identity phase.
       const hasUsableLogo = phaseHasUsableLogo(project.rootPath, phase.id);
-      if (!identityAsk && hasUsableLogo) {
+      if (hasUsableLogo) {
         const note = `Skipping generative logo brief(s) [${logoBlockers.join(", ")}]: no designImage role bound, and the pinned/existing mark is authoritative for this phase.`;
         log(project, run, `--- ${note} ---`);
         appendAppendix(

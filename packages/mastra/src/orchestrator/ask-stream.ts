@@ -114,8 +114,8 @@ export function summarizeToolResult(toolName: string, result: unknown): string {
 export function hasSubstantiveReplyMarkers(text: string): boolean {
   const body = (text ?? "").trim();
   if (!body) return false;
-  if (/##\s*Task brief/i.test(body)) return true;
-  if (/\broot cause\b/i.test(body)) return true;
+  if (/##\s*Task brief/i.test(body) && body.length > 200) return true;
+  if (/\broot cause\b/i.test(body) && body.length > 400) return true;
   if (/\bdiagnosis\b/i.test(body) && body.length > 200) return true;
   if (/^#{1,3}\s+/m.test(body) && body.length > 280) return true;
   const pathHits = (body.match(/[`']?[a-zA-Z0-9_./-]+\.(tsx?|jsx?|css|md)/g) ?? [])
@@ -133,15 +133,19 @@ export function hasSubstantiveReplyMarkers(text: string): boolean {
 export function isAskNarrationOnlyReply(text: string): boolean {
   const body = (text ?? "").trim();
   if (!body) return true;
-  if (hasSubstantiveReplyMarkers(body)) return false;
 
   const letMe =
     (body.match(/\bLet me (?:investigate|check|verify|look|start|confirm)\b/gi) ??
       []).length;
+  // Dangling fragment: ends mid-list-intro (":") while still narrating intent.
+  // Checked before substantive markers so a stray keyword cannot veto it.
+  if (/:\s*$/.test(body) && letMe >= 1) return true;
+
+  if (hasSubstantiveReplyMarkers(body)) return false;
+
   const sentences = body.split(/(?<=[.!?])\s+|\n+/).filter((s) => s.trim());
   if (letMe >= 2 && body.length < 1200) return true;
   if (letMe >= 1 && sentences.length <= 4 && body.length < 900) return true;
-  if (/:\s*$/.test(body) && letMe >= 1) return true;
   return false;
 }
 

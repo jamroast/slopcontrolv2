@@ -1300,6 +1300,43 @@ true
     }
   });
 
+  it("parseDesignAssetBriefs ignores inventory tables and placeholder rows (phase-26 regression)", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-briefs-inv-"));
+    try {
+      ensureSlopcontrolDir(root);
+      // Exact shape of JamLight phase 26 ## Assets: inventory table with
+      // Asset|Path|Status headers + production table with a "—" placeholder.
+      const briefs = parseDesignAssetBriefs(`## Assets
+
+No new brand assets are produced in this phase. The existing authoritative assets remain at \`public/brand/\`:
+
+| Asset | Path | Status |
+|-------|------|--------|
+| Circular mark | \`public/brand/jamlight-circular-mark-v1.png\` | Authoritative — mounted in menubar and footer |
+| Circular mark (alpha) | \`public/brand/jamlight-circular-mark-v1-alpha.png\` | Derived alpha cut-out of circular mark |
+| Design-pack mark | \`public/brand/jamlight-logo-modern-v4-alpha.png\` | Deprecated on disk — not mounted |
+
+### Assets to produce
+
+| Name | Filename | Prompt | Source |
+|------|----------|--------|--------|
+| — | — | No new raster/vector assets are required for this phase. | — |
+`);
+      assert.deepEqual(briefs, []);
+
+      // A real production table still parses (Name + Filename headers).
+      const real = parseDesignAssetBriefs(`## Assets
+| Name | File | Prompt |
+| --- | --- | --- |
+| Hero artwork | hero.png | generate a wide jam-making hero banner |
+`);
+      assert.equal(real.length, 1);
+      assert.equal(real[0]?.filename, "hero.png");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("phaseNeedsDesign skips design for stockAdoption intents (design-by-reference)", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-design-stock-"));
     try {

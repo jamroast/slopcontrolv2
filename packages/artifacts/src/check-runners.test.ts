@@ -15,6 +15,7 @@ import {
   hasGnuTimeoutInCheck,
   hasLongLivedServerInCheck,
   hasBackgroundWaitHangAntipattern,
+  hasBrittleSameLineGrepChain,
 } from "./index.js";
 
 function phaseWithCheck(body: string): string {
@@ -346,6 +347,34 @@ wait $VITE_PID 2>/dev/null`;
     assert.ok(
       gate.issues.some((i) => /wait|background|long-lived/i.test(i)),
       gate.issues.join("; "),
+    );
+  });
+
+  it("flags brittle same-line grep chains (phase-29 regression)", () => {
+    // The exact brittle line from JamLight phase 29 Check 2.
+    const brittle = `awk '/handleNewChat *= *useCallback/,/^  \\},/' src/components/chat/chat-session-provider.tsx | grep -q 'fetch.*\\/api\\/conversations.*method.*POST' || exit 1`;
+    assert.equal(hasBrittleSameLineGrepChain(brittle), true);
+    const gate = validatePhaseDocForDev(phaseWithCheck(brittle));
+    assert.equal(gate.ok, false);
+    assert.ok(
+      gate.issues.some((i) => /one line|tokens independently/i.test(i)),
+      gate.issues.join("; "),
+    );
+
+    // Per-token checks and single-join patterns are fine.
+    assert.equal(
+      hasBrittleSameLineGrepChain(
+        'grep -q \'fetch("/api/conversations"\' f.ts && grep -q \'method: "POST"\' f.ts',
+      ),
+      false,
+    );
+    assert.equal(
+      hasBrittleSameLineGrepChain("grep -q 'handleNewChat' f.ts"),
+      false,
+    );
+    assert.equal(
+      hasBrittleSameLineGrepChain("grep -qE 'className=\".*\"' f.ts"),
+      false,
     );
   });
 });

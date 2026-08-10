@@ -960,16 +960,51 @@ export function parseDesignAssetBriefs(
   const assetsSection = extractSection(markdown, "Assets");
   const tableSource = assetsSection?.trim() ? assetsSection : "";
 
-  const tableRow =
-    /^\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|\s*([^|\n]+?)\s*\|(?:[ \t]*([^|\n]+?)[ \t]*\|)?/gm;
-  let match: RegExpExecArray | null;
-  while (tableSource && (match = tableRow.exec(tableSource)) !== null) {
-    const col1 = match[1]?.trim() ?? "";
-    const col2 = match[2]?.trim() ?? "";
-    const col3 = match[3]?.trim() ?? "";
-    const col4 = match[4]?.trim() ?? "";
+  // Header-aware table gating: only tables with BOTH a Name and a
+  // Filename/File column are generation-brief tables. Inventory tables
+  // (Asset | Path | Status) document existing files — never briefs.
+  const splitRow = (line: string): string[] =>
+    line
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((c) => c.trim());
+  const isSeparatorRow = (line: string): boolean =>
+    /^\|[\s:|-]+\|?\s*$/.test(line.trim()) && /-{2,}/.test(line);
+  const PLACEHOLDER_CELL_RE = /^[-–—\s`]*$/;
+
+  const lines = tableSource.split("\n");
+  const briefRows: string[][] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const headerLine = lines[i] ?? "";
+    if (!headerLine.trim().startsWith("|")) continue;
+    const sepLine = lines[i + 1] ?? "";
+    if (!sepLine.trim().startsWith("|") || !isSeparatorRow(sepLine)) continue;
+    const headers = splitRow(headerLine);
+    const hasName = headers.some((h) => /^name$/i.test(h));
+    const hasFile = headers.some((h) => /^file(?:name)?$/i.test(h));
+    const body: string[][] = [];
+    let j = i + 2;
+    while (j < lines.length && (lines[j] ?? "").trim().startsWith("|")) {
+      body.push(splitRow(lines[j] ?? ""));
+      j++;
+    }
+    i = j - 1;
+    if (!hasName || !hasFile) continue;
+    briefRows.push(...body);
+  }
+
+  for (const cols of briefRows) {
+    const col1 = cols[0] ?? "";
+    const col2 = cols[1] ?? "";
+    const col3 = cols[2] ?? "";
+    const col4 = cols[3] ?? "";
     if (/^[-:]+$/.test(col1.replace(/\s/g, ""))) continue;
-    if (/^name$/i.test(col1) || /^asset$/i.test(col1)) continue;
+    // Placeholder rows ("— | — | No new assets …") are not briefs.
+    if (PLACEHOLDER_CELL_RE.test(col1) || PLACEHOLDER_CELL_RE.test(col2)) {
+      continue;
+    }
     // Skip palette-ish rows that lack a filename and look like color tokens
     if (
       !/\.(png|svg|webp|jpe?g)$/i.test(`${col1} ${col2} ${col3}`) &&

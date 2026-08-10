@@ -212,6 +212,28 @@ export function hasBackgroundWaitHangAntipattern(body: string): boolean {
   return hasBg && hasWait;
 }
 
+/**
+ * Brittle check: a grep pattern chaining 2+ `.*` joins between literal
+ * tokens requires all tokens on ONE line — code formatting varies, so the
+ * check false-negatives on multi-line constructs.
+ */
+export function hasBrittleSameLineGrepChain(body: string): boolean {
+  const grepPattern = /\bgrep\b[^\n|&;]*?(['"])((?:(?!\1).)*)\1/g;
+  let match: RegExpExecArray | null;
+  while ((match = grepPattern.exec(body)) !== null) {
+    const expr = match[2] ?? "";
+    // 2+ `.*` joins with literal text on both sides = multi-token same-line.
+    const joins = expr.split(".*");
+    if (
+      joins.length >= 3 &&
+      joins.filter((j) => /[a-zA-Z0-9]/.test(j)).length >= 3
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function shellValidate(cell: CheckCell): string[] {
   const issues: string[] = [];
   if (!cell.body.trim()) {
@@ -253,6 +275,11 @@ function shellValidate(cell: CheckCell): string[] {
   if (hasBackgroundWaitHangAntipattern(normalized)) {
     issues.push(
       `Broken Automated Check backgrounds a process (\`&\`) and then \`wait\` — children often outlive kill and hang verify. Do not background servers in Automated Checks: ${normalized.slice(0, 120)}`,
+    );
+  }
+  if (hasBrittleSameLineGrepChain(normalized)) {
+    issues.push(
+      `Brittle Automated Check requires multiple tokens on ONE line via \`.*\` chains — code formatting varies. Match tokens independently: one \`grep -q\` per token joined by \`&&\` (or \`grep -Pzo\` for multi-line), e.g. \`grep -q 'fetch("/api/conversations"' f && grep -q 'method: "POST"' f\`: ${normalized.slice(0, 120)}`,
     );
   }
   return issues;
