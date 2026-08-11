@@ -242,6 +242,7 @@ import {
   deriveIconPackFromAsset,
   makeTransparentDesignAsset,
   circularMaskDesignAsset,
+  OpenCodeAckTimeoutError,
 } from "@slopcontrol/coding-tools";
 import {
   chatWithImages,
@@ -1124,6 +1125,34 @@ export function resolveCheckTimeoutMs(): number {
 export function resolveAskTurnTimeoutMs(): number {
   const n = Number(process.env.SLOPCONTROL_ASK_TURN_MS ?? 240_000);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 240_000;
+}
+
+/**
+ * Retry session creation when the ack turn stalls (provider wedge), with
+ * stall-strike semantics. Returns null after maxStalls so callers can end
+ * the run as blocked instead of failed. Non-ack errors propagate.
+ */
+export async function withSessionCreateRetry<T>(
+  create: () => Promise<T>,
+  opts?: {
+    maxStalls?: number;
+    onStall?: (
+      err: OpenCodeAckTimeoutError,
+      attempt: number,
+      maxStalls: number,
+    ) => void;
+  },
+): Promise<T | null> {
+  const maxStalls = opts?.maxStalls ?? 3;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await create();
+    } catch (err) {
+      if (!(err instanceof OpenCodeAckTimeoutError)) throw err;
+      if (attempt > maxStalls) return null;
+      opts?.onStall?.(err, attempt, maxStalls);
+    }
+  }
 }
 
 /**
@@ -5891,7 +5920,29 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         },
       });
 
-    let session = await createCodingSession();
+    // An ack-turn stall means the provider endpoint is wedged — recreate the
+    // session and retry (stall-strike semantics) instead of failing the run.
+    const MAX_SESSION_CREATE_STALLS = 3;
+    const createCodingSessionWithRetry = () =>
+      withSessionCreateRetry(createCodingSession, {
+        maxStalls: MAX_SESSION_CREATE_STALLS,
+        onStall: (err, attempt) => {
+          log(
+            project,
+            run,
+            `--- Session ack stalled (${err.abortReason}); recreating session (attempt ${attempt}/${MAX_SESSION_CREATE_STALLS}) ---`,
+          );
+          appendAppendix(
+            project.rootPath,
+            phase.id,
+            `## Session create — ack turn ${err.abortReason}\n\n${err.message}\n\nCoding LLM endpoint did not finish the trivial ack turn; recreating session. Likely provider stall/rate-limit, not a product issue.`,
+          );
+        },
+      });
+
+    // Session is created lazily just before the develop loop (after
+    // finishDevelop is in scope) — see createCodingSessionWithRetry below.
+    let session: Awaited<ReturnType<typeof createCodingSession>> | null = null;
 
     const blueprint = readBlueprint(project.rootPath);
     let phaseDoc = readPhaseDoc(project.rootPath, phase.id);
@@ -6126,6 +6177,20 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       });
     };
 
+    session = await createCodingSessionWithRetry();
+    if (!session) {
+      log(
+        project,
+        run,
+        "--- Session ack stalled repeatedly — blocking for operator ---",
+      );
+      writePhaseStatus(project.rootPath, phase.id, "blocked");
+      return finishDevelop("blocked", {
+        worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+      });
+    }
+
     try {
       while (iteration < MAX_ITERATIONS) {
         if (signal?.aborted) {
@@ -6190,7 +6255,20 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         if (needsFreshSession) {
           log(project, run, "--- Recreating OpenCode session after abort/fetch failure ---");
           await codingTool.abort(session).catch(() => undefined);
-          session = await createCodingSession();
+          const fresh = await createCodingSessionWithRetry();
+          if (!fresh) {
+            log(
+              project,
+              run,
+              "--- Session ack stalled repeatedly on recreate — blocking for operator ---",
+            );
+            writePhaseStatus(project.rootPath, phase.id, "blocked");
+            return finishDevelop("blocked", {
+              worktreePath: worktree.path,
+              worktreeBranch: worktree.branch,
+            });
+          }
+          session = fresh;
           needsFreshSession = false;
         }
 

@@ -45,6 +45,20 @@ const DEFAULT_IDLE_MS = Number(
   process.env.SLOPCONTROL_CODING_IDLE_MS ?? 90_000,
 );
 
+// The trivial session-ack turn must fail fast: a stuck endpoint is detected
+// in ~2 minutes instead of burning the full coding budget.
+const DEFAULT_ACK_TIMEOUT_MS = Number(
+  process.env.SLOPCONTROL_ACK_TURN_MS ?? 120_000,
+);
+
+/** Thrown when the session-ack turn aborts — callers retry with a fresh session. */
+export class OpenCodeAckTimeoutError extends Error {
+  constructor(readonly abortReason: string) {
+    super(`OpenCode session ack aborted: ${abortReason}`);
+    this.name = "OpenCodeAckTimeoutError";
+  }
+}
+
 function extractTextOutput(parts: Array<{ type?: string; text?: string }>): string {
   return parts
     .filter((part) => part.type === "text" && part.text)
@@ -514,15 +528,13 @@ export class OpenCodeAdapter implements CodingTool {
           },
         ],
       },
-      DEFAULT_TURN_TIMEOUT_MS,
+      DEFAULT_ACK_TIMEOUT_MS,
       DEFAULT_IDLE_MS,
     );
     if (ack.aborted) {
       state.eventAbort?.abort();
       sessions.delete(session.id);
-      throw new Error(
-        `OpenCode session ack aborted: ${ack.abortReason ?? "unknown"}`,
-      );
+      throw new OpenCodeAckTimeoutError(ack.abortReason ?? "unknown");
     }
 
     return session;
