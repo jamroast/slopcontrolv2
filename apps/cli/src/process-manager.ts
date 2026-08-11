@@ -10,6 +10,7 @@ import {
 import {
   clearPidFile,
   isProcessAlive,
+  pidListeningOnHealthUrl,
   stopProcess,
   writePidFile,
   type StackPidFile,
@@ -99,13 +100,26 @@ export async function ensureService(
     : await checkHttpHealth(spec.healthUrl, spec.healthMode);
 
   if (already && spec.skipIfHealthy !== false) {
-    prefixLine(spec.label, `already healthy at ${spec.healthUrl}`, "stdout", {
-      serviceId: spec.id,
-      quietConsole: opts?.quietConsole,
-    });
+    // Adopt the real pid so `slopcontrol down` can stop this process later;
+    // foreground Ctrl+C (stopManagedServices) still skips external services.
+    const pid = pidListeningOnHealthUrl(spec.healthUrl);
+    prefixLine(
+      spec.label,
+      `already healthy at ${spec.healthUrl}${
+        pid
+          ? ` — pid=${pid} not started by this CLI; \`slopcontrol down\` will stop it, Ctrl+C here will not`
+          : ""
+      }`,
+      "stdout",
+      {
+        serviceId: spec.id,
+        quietConsole: opts?.quietConsole,
+      },
+    );
     return {
       id: spec.id,
       label: spec.label,
+      pid,
       external: true,
       healthUrl: spec.healthUrl,
       healthMode: spec.healthMode,
@@ -236,6 +250,8 @@ export async function stopManagedServices(
   services: RunningService[],
 ): Promise<void> {
   for (const s of [...services].reverse()) {
+    // External services (adopted, not spawned by us) survive Ctrl+C;
+    // explicit `slopcontrol down` (cmd-down.ts) is what stops them.
     if (s.external || !s.pid) continue;
     prefixLine(s.label, `stopping pid=${s.pid}`, "stdout", {
       serviceId: s.id,
