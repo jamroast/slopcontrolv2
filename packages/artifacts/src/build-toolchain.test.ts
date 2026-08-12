@@ -22,6 +22,46 @@ function tmp(name: string): string {
 }
 
 describe("build-toolchain defaults + detect", () => {
+  it("normalizes drifted persisted specs: appends --no-git-tag-version", () => {
+    const drifted = BuildToolchainSpecSchema.parse({
+      ...defaultToolchainSpec("node-pnpm"),
+      bumpVersionCmd: ["pnpm", "version", "{bump}"],
+    });
+    const { spec, source } = resolveProjectToolchain({
+      projectRoot: "/nonexistent",
+      configured: drifted,
+    });
+    assert.equal(source, "config");
+    assert.deepEqual(spec?.bumpVersionCmd, [
+      "pnpm",
+      "version",
+      "{bump}",
+      "--no-git-tag-version",
+    ]);
+  });
+
+  it("normalization is a no-op when the flag is already present", () => {
+    const current = defaultToolchainSpec("node-pnpm");
+    const { spec } = resolveProjectToolchain({
+      projectRoot: "/nonexistent",
+      configured: current,
+    });
+    assert.deepEqual(spec?.bumpVersionCmd, current?.bumpVersionCmd);
+  });
+
+  it("normalization leaves non-node kinds untouched", () => {
+    const cargo = BuildToolchainSpecSchema.parse({
+      kind: "rust-cargo",
+      bumpVersionCmd: ["cargo", "version", "{bump}"],
+      lockfiles: ["Cargo.lock"],
+    });
+    const { spec } = resolveProjectToolchain({
+      projectRoot: "/nonexistent",
+      configured: cargo,
+    });
+    assert.deepEqual(spec?.bumpVersionCmd, ["cargo", "version", "{bump}"]);
+  });
+
   it("default specs exist for node-pnpm and node-npm", () => {
     const pnpm = defaultToolchainSpec("node-pnpm");
     assert.ok(pnpm);

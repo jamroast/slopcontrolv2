@@ -98,6 +98,7 @@ import {
   resolveProjectEnv,
   writeResolvedEnvToWorktree,
   writeDiagnosis,
+  type PersistedDiagnosis,
   buildPlanningFailureDiagnosis,
   readDiagnosis,
   readLatestDiagnosisForPhase,
@@ -242,7 +243,7 @@ import {
   deriveIconPackFromAsset,
   makeTransparentDesignAsset,
   circularMaskDesignAsset,
-  OpenCodeAckTimeoutError,
+  CodingSessionAckError,
 } from "@slopcontrol/coding-tools";
 import {
   chatWithImages,
@@ -394,6 +395,37 @@ export function summarizeLibraryPublishResponse(
   return {
     ok: true,
     summary: `${body.name}@${body.version} published${consumerPart}`,
+  };
+}
+
+/**
+ * Advisory diagnosis written when the post-completion auto-publish fails.
+ * The phase is already complete — this exists so the failure is visible via
+ * get_run / operator suggestions instead of only the run log. Pure/testable.
+ */
+export function buildLibraryPublishFailureDiagnosis(opts: {
+  summary: string;
+  phaseId: string;
+  runId: string;
+}): PersistedDiagnosis {
+  return {
+    audience: "operator",
+    operatorActions: [
+      `Component library auto-publish failed: ${opts.summary.slice(0, 300)}`,
+      "Re-run via MCP design_library_publish (or POST /projects/:id/design-library/publish) — the registry freshness check will flag this library until then.",
+    ],
+    class: "process",
+    confidence: "high",
+    title: "Component library publish failed (phase complete)",
+    rootCause: opts.summary.slice(0, 1_000),
+    evidence: "Auto-publish hook after phase completion.",
+    nextActions:
+      "Re-run design_library_publish; the phase itself completed successfully.",
+    fingerprint: "component-library-publish-failed",
+    codingAgentShouldFix: false,
+    phaseId: opts.phaseId,
+    runId: opts.runId,
+    updatedAt: new Date().toISOString(),
   };
 }
 
@@ -1137,7 +1169,7 @@ export async function withSessionCreateRetry<T>(
   opts?: {
     maxStalls?: number;
     onStall?: (
-      err: OpenCodeAckTimeoutError,
+      err: CodingSessionAckError,
       attempt: number,
       maxStalls: number,
     ) => void;
@@ -1148,7 +1180,7 @@ export async function withSessionCreateRetry<T>(
     try {
       return await create();
     } catch (err) {
-      if (!(err instanceof OpenCodeAckTimeoutError)) throw err;
+      if (!(err instanceof CodingSessionAckError)) throw err;
       if (attempt > maxStalls) return null;
       opts?.onStall?.(err, attempt, maxStalls);
     }
@@ -5887,11 +5919,45 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         `--- Worktree compose isolation: COMPOSE_PROJECT_NAME=${isolation.projectName} DB_PORT=${isolation.dbPort} ---`,
       );
     }
-    const codingTool = getCodingToolForProject({
+    let codingTool = getCodingToolForProject({
       toolId: config.codingToolId,
       projectId: project.id,
       projectRoot: project.rootPath,
     });
+
+    // Re-resolve on every (re)create so an operator codingToolId switch
+    // (e.g. opencode -> pi) applies to a running develop loop instead of
+    // waiting for a brand-new run.
+    let activeCodingToolId = codingTool.id;
+    const resolveCodingTool = () => {
+      let freshId = activeCodingToolId;
+      try {
+        freshId = readProjectConfig(project.rootPath).codingToolId ?? freshId;
+      } catch {
+        // keep current tool if config is momentarily unreadable
+      }
+      if (freshId !== activeCodingToolId) {
+        codingTool = getCodingToolForProject({
+          toolId: freshId,
+          projectId: project.id,
+          projectRoot: project.rootPath,
+        });
+        log(
+          project,
+          run,
+          `--- Coding tool switched mid-run: ${activeCodingToolId} -> ${freshId} ---`,
+        );
+        slog.info("development", "coding tool switched mid-run", {
+          projectId: project.id,
+          phaseId: phase.id,
+          runId: run.id,
+          from: activeCodingToolId,
+          to: freshId,
+        });
+        activeCodingToolId = freshId;
+      }
+      return codingTool;
+    };
     const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
       "coding",
       config.roleBindings,
@@ -5906,8 +5972,12 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       worktree: worktree.path,
     });
 
-    const createCodingSession = async () =>
-      codingTool.createSession({
+    // The session belongs to the tool that created it — prompt/abort calls
+    // must route to that owner even after a mid-run tool switch.
+    let sessionOwner = codingTool;
+    const createCodingSession = async () => {
+      const tool = resolveCodingTool();
+      const created = await tool.createSession({
         projectDir: worktree.path,
         endpoint,
         modelId,
@@ -5915,10 +5985,13 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
           log(
             project,
             run,
-            `[opencode:${event.type}] ${safeJsonForLog(event.payload, 500)}`,
+            `[${tool.id}:${event.type}] ${safeJsonForLog(event.payload, 500)}`,
           );
         },
       });
+      sessionOwner = tool;
+      return created;
+    };
 
     // An ack-turn stall means the provider endpoint is wedged — recreate the
     // session and retry (stall-strike semantics) instead of failing the run.
@@ -6253,8 +6326,8 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         );
 
         if (needsFreshSession) {
-          log(project, run, "--- Recreating OpenCode session after abort/fetch failure ---");
-          await codingTool.abort(session).catch(() => undefined);
+          log(project, run, `--- Recreating ${sessionOwner.id} session after abort/fetch failure ---`);
+          await sessionOwner.abort(session).catch(() => undefined);
           const fresh = await createCodingSessionWithRetry();
           if (!fresh) {
             log(
@@ -6348,11 +6421,11 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         let codingResult;
         const codingTurnMs = resolveCodingTurnTimeoutMs(config);
         try {
-          codingResult = await (codingTool.runPromptWithSystem
-            ? codingTool.runPromptWithSystem(session, prompt, systemOverride, {
+          codingResult = await (sessionOwner.runPromptWithSystem
+            ? sessionOwner.runPromptWithSystem(session, prompt, systemOverride, {
                 timeoutMs: codingTurnMs,
               })
-            : codingTool.runPrompt(session, prompt, {
+            : sessionOwner.runPrompt(session, prompt, {
                 timeoutMs: codingTurnMs,
               }));
         } catch (error) {
@@ -6499,7 +6572,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
 
         stallStrikeCount = 0;
 
-        const sessionChanged = await codingTool.getChangedFiles(session);
+        const sessionChanged = await sessionOwner.getChangedFiles(session);
         const gitChanged = listWorktreeChangedFiles(worktree.path);
         const changed = [
           ...new Set([...sessionChanged, ...gitChanged].filter(Boolean)),
@@ -6993,11 +7066,13 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             const publish =
               this.ctx.publishComponentLibrary ??
               defaultPublishComponentLibrary;
+            let publishFailure: string | null = null;
             try {
               const outcome = await publish({
                 projectId: project.id,
                 projectRoot: project.rootPath,
               });
+              if (!outcome.ok) publishFailure = outcome.summary;
               log(
                 project,
                 run,
@@ -7006,12 +7081,24 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                   : `--- Component library auto-publish failed (phase still complete): ${outcome.summary} ---`,
               );
             } catch (error) {
+              publishFailure =
+                error instanceof Error ? error.message : String(error);
               log(
                 project,
                 run,
-                `--- Component library auto-publish failed (phase still complete): ${
-                  error instanceof Error ? error.message : String(error)
-                } ---`,
+                `--- Component library auto-publish failed (phase still complete): ${publishFailure} ---`,
+              );
+            }
+            if (publishFailure) {
+              writeDiagnosis(
+                project.rootPath,
+                run.id,
+                buildLibraryPublishFailureDiagnosis({
+                  summary: publishFailure,
+                  phaseId: phase.id,
+                  runId: run.id,
+                }),
+                phase.id,
               );
             }
           }
@@ -7342,7 +7429,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         lastErrorCount = currentErrorCount;
       }
     } finally {
-      await codingTool.abort(session).catch(() => undefined);
+      await sessionOwner.abort(session).catch(() => undefined);
     }
 
     if (signal?.aborted) {

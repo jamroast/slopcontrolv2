@@ -2,8 +2,12 @@ import type { CodingTool } from "./index.js";
 import type { DesignTool } from "./design-tool.js";
 import { OllamaImagesDesignTool } from "./design-tool.js";
 import { OpenCodeAdapter } from "./opencode-adapter.js";
+import { PiAdapter } from "./pi-adapter.js";
 
-const tools = new Map<string, CodingTool>([["opencode", new OpenCodeAdapter()]]);
+const tools = new Map<string, CodingTool>([
+  ["opencode", new OpenCodeAdapter()],
+  ["pi", new PiAdapter()],
+]);
 
 const designTools = new Map<string, DesignTool>([
   ["ollama-images", new OllamaImagesDesignTool()],

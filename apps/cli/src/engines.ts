@@ -44,16 +44,26 @@ export function buildOpenCodeHealthUrl(hostname: string, port: number): string {
   return `http://${hostname}:${port}/global/health`;
 }
 
+/**
+ * Resolve the CLI start plan for the configured coding engine, or `null`
+ * when the engine runs in-process inside the server (e.g. pi) and there is
+ * no daemon for the CLI to spawn or health-check.
+ */
 export function resolveCodingEngine(
   config: SlopcontrolYaml,
   baseEnv: NodeJS.ProcessEnv = process.env,
-): EngineStartPlan {
+): EngineStartPlan | null {
   const engineId = config.coding.engine.trim() || "opencode";
   const known = listCodingTools().map((t) => t.id);
   if (!known.includes(engineId)) {
     throw new Error(
       `Unknown coding engine "${engineId}". Registered: ${known.join(", ") || "(none)"}`,
     );
+  }
+
+  if (engineId === "pi") {
+    // Pi runs in-process via its SDK — no daemon, no port, no health URL.
+    return null;
   }
 
   if (engineId === "opencode") {

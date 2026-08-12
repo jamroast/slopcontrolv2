@@ -65,21 +65,38 @@ export async function cmdUp(
   try {
     if (codingMode === "shared") {
       const coding = resolveCodingEngine(config);
-      const codingSpec: ManagedService = {
-        id: coding.serviceId,
-        label: coding.label,
-        command: coding.command,
-        cwd: rootDir,
-        env: coding.env,
-        healthUrl: coding.healthUrl,
-        healthMode: coding.healthMode,
-        isHealthy: coding.isHealthy,
-        skipIfHealthy: true,
-      };
-      services.push(
-        await ensureService(codingSpec, { quietConsole, detach }),
-      );
-      codingHealthNote = `  coding  ${coding.healthUrl} (${coding.engineId}, shared)`;
+      if (coding) {
+        const codingSpec: ManagedService = {
+          id: coding.serviceId,
+          label: coding.label,
+          command: coding.command,
+          cwd: rootDir,
+          env: coding.env,
+          healthUrl: coding.healthUrl,
+          healthMode: coding.healthMode,
+          isHealthy: coding.isHealthy,
+          skipIfHealthy: true,
+        };
+        services.push(
+          await ensureService(codingSpec, { quietConsole, detach }),
+        );
+        codingHealthNote = `  coding  ${coding.healthUrl} (${coding.engineId}, shared)`;
+      } else {
+        const engineId = config.coding.engine.trim() || "opencode";
+        if (!quietConsole) {
+          console.log(
+            `coding.engine=${engineId} — runs in-process inside the server (no daemon to start)`,
+          );
+        }
+        codingHealthNote = `  coding  ${engineId} (in-process SDK — no daemon)`;
+      }
+    } else if (config.coding.engine.trim() === "pi") {
+      if (!quietConsole) {
+        console.log(
+          "coding.engine=pi — in-process SDK; no per-project daemons needed",
+        );
+      }
+      codingHealthNote = "  coding  pi (in-process SDK — no daemon)";
     } else if (!quietConsole) {
       console.log(
         "coding.mode=per_project — OpenCode daemons start lazily per project (ports 4100+)",

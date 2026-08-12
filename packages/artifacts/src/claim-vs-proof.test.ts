@@ -3,10 +3,12 @@ import { describe, it } from "node:test";
 import {
   automatedChecksHaveFiniteResolveProof,
   automatedChecksProveContentAlignedMenubar,
+  automatedChecksProveFullWidthMenubar,
   automatedChecksProveThemeToggleMounted,
   automatedChecksProveThemeToggleStyleVisibility,
   formatClaimProofChecksGuidance,
   phaseClaimsContentAlignedMenubar,
+  phaseClaimsFullWidthMenubar,
   phaseClaimsMenubarThemeToggle,
   phaseClaimsThemeToggleVisible,
   successCriteriaClaimsModuleResolve,
@@ -320,6 +322,92 @@ describe("claim-vs-proof shell content-width layout", () => {
       validatePhaseDocForDev(doc).ok,
       true,
       validatePhaseDocForDev(doc).issues.join("; "),
+    );
+  });
+
+  it("detects full-width menubar intent", () => {
+    assert.equal(
+      phaseClaimsFullWidthMenubar(
+        "Make the menubar full-width, edge to edge across the viewport",
+      ),
+      true,
+    );
+    assert.equal(
+      phaseClaimsFullWidthMenubar("Menubar should be full screen"),
+      true,
+    );
+    assert.equal(
+      phaseClaimsFullWidthMenubar(
+        "Remove the --content-max inner wrapper from the menubar",
+      ),
+      true,
+    );
+    assert.equal(
+      phaseClaimsFullWidthMenubar(
+        "Centre the menubar over page content at --content-max",
+      ),
+      false,
+    );
+    assert.equal(phaseClaimsFullWidthMenubar("Add ViewSwitcher prop"), false);
+  });
+
+  it("full-width intent: accepts negative-proof checks (JamLight phase 33 regression)", () => {
+    // The run that looped 1350x: full-width ask, validator demanded the very
+    // tokens the change removes. Negative greps + w-full + mount must pass.
+    const doc = phaseDoc({
+      scope: "Make the dashboard menubar full-width (no --content-max constraint)",
+      successCriteria:
+        "- Menubar spans the full viewport width; content-max wrapper removed",
+      checks: [
+        "! grep -q 'var(--content-max)' src/components/jamlight-menubar.tsx && ! grep -q '\"mx-auto\"' src/components/jamlight-menubar.tsx && echo PASS",
+        "grep -q 'w-full' src/components/jamlight-menubar.tsx && echo 'PASS: full-width'",
+        "grep -q 'JamLightMenubar\\|Menubar' src/components/dashboard-app-shell.tsx || exit 1",
+        "pnpm test || exit 1",
+      ],
+    });
+    assert.deepEqual(
+      validateShellContentWidthClaimProof(doc),
+      [],
+      "full-width intent must accept negative proofs",
+    );
+    assert.equal(
+      validatePhaseDocForDev(doc).ok,
+      true,
+      validatePhaseDocForDev(doc).issues.join("; "),
+    );
+  });
+
+  it("full-width intent: rejects checks with no full-width proof at all", () => {
+    const doc = phaseDoc({
+      scope: "Make the dashboard menubar full-width",
+      successCriteria: "- Menubar spans the viewport",
+      checks: [
+        "grep -n 'viewSwitcher' src/components/shell/menubar.tsx || exit 1",
+        "pnpm test || exit 1",
+      ],
+    });
+    const issues = validateShellContentWidthClaimProof(doc);
+    assert.ok(
+      issues.some((i) => /full-width/i.test(i)),
+      issues.join("; ") || "expected full-width guidance",
+    );
+    assert.equal(validatePhaseDocForDev(doc).ok, false);
+  });
+
+  it("content-aligned claim still rejects checks that only game the tokens", () => {
+    // Negative greps mentioning --content-max must NOT satisfy a genuine
+    // content-aligned claim — only a full-width intent unlocks them.
+    const doc = phaseDoc({
+      scope: "Centre the menubar over page content at --content-max",
+      successCriteria: "- Inner bar matches content width",
+      checks: [
+        "! grep -q 'var(--content-max)' src/components/shell/menubar.tsx && echo PASS",
+        "grep -n '<Menubar' playground/src/App.tsx || exit 1",
+      ],
+    });
+    assert.ok(
+      validateShellContentWidthClaimProof(doc).length > 0,
+      "negative greps must not satisfy a content-aligned claim",
     );
   });
 

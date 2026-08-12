@@ -55,12 +55,20 @@ describe("coding engine starters", () => {
       PATH: "/usr/bin",
       EXA_API_KEY: "exa",
     });
+    assert.ok(plan);
     assert.equal(plan.engineId, "opencode");
     assert.equal(plan.serviceId, "coding");
     assert.equal(plan.healthMode, "opencode");
     assert.match(plan.healthUrl, /4100/);
     assert.match(plan.command[0] ?? "", /(^|[/\\])opencode$/);
     assert.equal(plan.env.OPENCODE_ENABLE_EXA, "1");
+  });
+
+  it("resolveCodingEngine returns null for pi (in-process — no daemon)", () => {
+    const config = SlopcontrolYamlSchema.parse({
+      coding: { engine: "pi" },
+    });
+    assert.equal(resolveCodingEngine(config), null);
   });
 
   it("rejects unknown coding engine", () => {

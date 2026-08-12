@@ -52,10 +52,23 @@ const DEFAULT_ACK_TIMEOUT_MS = Number(
 );
 
 /** Thrown when the session-ack turn aborts — callers retry with a fresh session. */
-export class OpenCodeAckTimeoutError extends Error {
-  constructor(readonly abortReason: string) {
-    super(`OpenCode session ack aborted: ${abortReason}`);
+export class CodingSessionAckError extends Error {
+  constructor(
+    readonly toolId: string,
+    readonly abortReason: string,
+  ) {
+    super(`${toolId} session ack aborted: ${abortReason}`);
+    this.name = "CodingSessionAckError";
+  }
+}
+
+/** @deprecated Use CodingSessionAckError — kept as alias for existing catch sites. */
+export class OpenCodeAckTimeoutError extends CodingSessionAckError {
+  constructor(abortReason: string) {
+    super("opencode", abortReason);
     this.name = "OpenCodeAckTimeoutError";
+    // Preserve the historical log-greppable message shape.
+    this.message = `OpenCode session ack aborted: ${abortReason}`;
   }
 }
 

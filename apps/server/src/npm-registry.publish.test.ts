@@ -124,7 +124,7 @@ describe("publishLibraryToRegistry", () => {
       assert.equal(report.toolchainKind, "node-pnpm");
 
       const stepKinds = report.steps.map((s) => s.step);
-      assert.deepEqual(stepKinds, ["build", "bump", "publish"]);
+      assert.deepEqual(stepKinds, ["build", "bump", "publish", "release-commit"]);
       assert.deepEqual(calls[0], ["pnpm", "run", "build"]);
       assert.deepEqual(calls[1], [
         "pnpm",
@@ -133,6 +133,13 @@ describe("publishLibraryToRegistry", () => {
         "--no-git-tag-version",
       ]);
       assert.match(calls[2]?.join(" ") ?? "", /pnpm publish --registry/);
+      const releaseCommit = calls[3];
+      assert.equal(releaseCommit?.[0], "git");
+      assert.equal(releaseCommit?.[1], "commit");
+      assert.match(
+        releaseCommit?.join(" ") ?? "",
+        /chore\(release\): @jamroast\/components@0\.0\.1/,
+      );
 
       // Evidence recorded in REGISTRY.json.
       const meta = readNpmRegistryMeta(dataDir);
@@ -183,10 +190,61 @@ describe("publishLibraryToRegistry", () => {
 
       assert.equal(report.version, "0.0.2");
       const stepKinds = report.steps.map((s) => s.step);
-      assert.deepEqual(stepKinds, ["build", "bump", "publish", "bump", "publish"]);
+      assert.deepEqual(stepKinds, [
+        "build",
+        "bump",
+        "publish",
+        "bump",
+        "publish",
+        "release-commit",
+      ]);
       assert.equal(report.steps[0]?.note, "dist up to date — skipped");
       const publishCalls = calls.filter((c) => c.includes("publish"));
       assert.equal(publishCalls.length, 2);
+      assert.match(
+        report.steps[report.steps.length - 1]?.command.join(" ") ?? "",
+        /chore\(release\): @jamroast\/components@0\.0\.2/,
+      );
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(lib, { recursive: true, force: true });
+    }
+  });
+
+  it("release-commit failure is advisory — publish still succeeds", async () => {
+    const dataDir = tmp("data-rc");
+    const lib = tmp("lib-rc");
+    try {
+      const meta0 = ensureNpmRegistryLayout(dataDir);
+      mkdirSync(join(lib, "dist"), { recursive: true });
+      writeFileSync(join(lib, "dist", "index.js"), "export {};\n", "utf-8");
+      await new Promise((r) => setTimeout(r, 20));
+      writeLibPkg(lib, "0.0.0");
+      const { runner } = fakeRunner({});
+      const failingRunner: typeof runToolchainCommand = async (run) => {
+        if (run.cmd[0] === "git") {
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "fatal: not a git repository",
+            durationMs: 1,
+            timedOut: false,
+          };
+        }
+        return runner(run);
+      };
+      const report = await publishLibraryToRegistry({
+        dataDir,
+        packageDir: lib,
+        toolchain: defaultToolchainSpec("node-pnpm")!,
+        projects: [],
+        runner: failingRunner,
+        ensureRegistry: async () => meta0,
+      });
+      assert.equal(report.ok, true);
+      assert.equal(report.version, "0.0.1");
+      const commitStep = report.steps.find((s) => s.step === "release-commit");
+      assert.match(commitStep?.note ?? "", /left uncommitted/);
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(lib, { recursive: true, force: true });

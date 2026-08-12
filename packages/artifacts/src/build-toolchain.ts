@@ -158,6 +158,26 @@ export function toolchainConsumeUpdateCmd(
 }
 
 /**
+ * Persisted specs drifted before the defaults gained `--no-git-tag-version`:
+ * without it `npm/pnpm version` demands a clean git tree, which is never true
+ * right after a phase merge, so auto-publish bump steps fail. Normalize at
+ * resolve time so drifted configs keep working.
+ */
+function normalizeToolchainSpec(spec: BuildToolchainSpec): BuildToolchainSpec {
+  if (
+    (spec.kind === "node-pnpm" || spec.kind === "node-npm") &&
+    spec.bumpVersionCmd &&
+    !spec.bumpVersionCmd.includes("--no-git-tag-version")
+  ) {
+    return {
+      ...spec,
+      bumpVersionCmd: [...spec.bumpVersionCmd, "--no-git-tag-version"],
+    };
+  }
+  return spec;
+}
+
+/**
  * Resolve the effective spec for a project: persisted config wins, else the
  * detected-kind default (when one exists), else null (needs the LLM
  * configurator).
@@ -168,7 +188,7 @@ export function resolveProjectToolchain(opts: {
 }): { spec: BuildToolchainSpec | null; source: "config" | "default" | "none" } {
   if (opts.configured) {
     return {
-      spec: BuildToolchainSpecSchema.parse(opts.configured),
+      spec: normalizeToolchainSpec(BuildToolchainSpecSchema.parse(opts.configured)),
       source: "config",
     };
   }

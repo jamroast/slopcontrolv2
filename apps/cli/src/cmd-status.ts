@@ -32,17 +32,24 @@ export async function cmdStatus(cwd: string = process.cwd()): Promise<void> {
 
     if (codingMode === "shared") {
       const coding = resolveCodingEngine(config);
-      const codingHealthy = coding.isHealthy
-        ? await coding.isHealthy()
-        : await checkHttpHealth(coding.healthUrl, coding.healthMode);
-      const codingPid = pid?.services.coding;
-      console.log(
-        `coding (${coding.engineId}): ${statusWord(
-          codingHealthy,
-          codingPid ? isProcessAlive(codingPid.pid) : undefined,
-        )}  ${coding.healthUrl}` +
-          (codingPid?.pid ? `  pid=${codingPid.pid}` : ""),
-      );
+      if (coding) {
+        const codingHealthy = coding.isHealthy
+          ? await coding.isHealthy()
+          : await checkHttpHealth(coding.healthUrl, coding.healthMode);
+        const codingPid = pid?.services.coding;
+        console.log(
+          `coding (${coding.engineId}): ${statusWord(
+            codingHealthy,
+            codingPid ? isProcessAlive(codingPid.pid) : undefined,
+          )}  ${coding.healthUrl}` +
+            (codingPid?.pid ? `  pid=${codingPid.pid}` : ""),
+        );
+      } else {
+        const engineId = config.coding.engine.trim() || "opencode";
+        console.log(`coding (${engineId}): in-process (no daemon)`);
+      }
+    } else if (config.coding.engine.trim() === "pi") {
+      console.log("coding (pi): in-process (no daemon)");
     } else {
       console.log(
         "coding: per_project (lazy OpenCode per project — check develop logs for port)",

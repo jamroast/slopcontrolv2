@@ -16,6 +16,7 @@ import {
   phaseNeedsDesign,
   isDesignComplete,
   readProjectConfig,
+  writeProjectConfig,
   resolveProjectToolchain,
   readUiSpec,
   readRunHandoff,
@@ -155,6 +156,7 @@ import {
   importDesignImageById,
   resolveServableDesignAsset,
   reviewDesignLoopLook,
+  listCodingTools,
 } from "@slopcontrol/coding-tools";
 import {
   classifyDependencyIntentViaLlm,
@@ -999,14 +1001,18 @@ app.post("/projects/open", async (req, res) => {
 
 app.get("/projects", (_req, res) => {
   res.json({
-    projects: store.listProjects().map((project) => ({
-      ...project,
-      buildProcessConfigured:
-        resolveProjectToolchain({
-          projectRoot: project.rootPath,
-          configured: readProjectConfig(project.rootPath).toolchain ?? null,
-        }).source !== "none",
-    })),
+    projects: store.listProjects().map((project) => {
+      const config = readProjectConfig(project.rootPath);
+      return {
+        ...project,
+        buildProcessConfigured:
+          resolveProjectToolchain({
+            projectRoot: project.rootPath,
+            configured: config.toolchain ?? null,
+          }).source !== "none",
+        codingToolId: config.codingToolId ?? "opencode",
+      };
+    }),
   });
 });
 
@@ -1228,6 +1234,36 @@ app.post("/projects/:id/build-process/verify", async (req, res) => {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+});
+
+/** Hermes/operator override of the per-project coding agent (opencode|pi). */
+app.put("/projects/:id/coding-tool", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const body = (req.body ?? {}) as { toolId?: unknown };
+  const toolId = typeof body.toolId === "string" ? body.toolId.trim() : "";
+  if (!toolId) {
+    res.status(400).json({ error: "toolId is required" });
+    return;
+  }
+  const known = listCodingTools().map((t) => t.id);
+  if (!known.includes(toolId)) {
+    res.status(400).json({
+      error: `Unknown coding tool "${toolId}". Registered: ${known.join(", ")}`,
+    });
+    return;
+  }
+  const config = readProjectConfig(project.rootPath);
+  config.codingToolId = toolId;
+  writeProjectConfig(project.rootPath, config);
+  log.info("project", "coding tool switched", {
+    projectId: project.id,
+    codingToolId: toolId,
+  });
+  res.json({ projectId: project.id, codingToolId: toolId, knownTools: known });
 });
 
 /**

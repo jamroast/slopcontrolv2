@@ -467,6 +467,50 @@ export function phaseClaimsContentAlignedMenubar(text: string): boolean {
   );
 }
 
+/** True when a check line asserts ABSENCE (`! grep -q …`) rather than presence. */
+function lineAssertsAbsence(line: string): boolean {
+  return /(?:^|&&|\|\||;)\s*!\s*(?:grep|command\s+grep|\[|\[\[|test)/.test(line);
+}
+
+/**
+ * Negated mentions of content-max ("no --content-max", "remove the
+ * --content-max wrapper") are full-width intent, not a content-aligned
+ * claim — strip them before claim detection.
+ */
+function stripNegatedContentMax(text: string): string {
+  return (text ?? "")
+    .replace(
+      /\b(?:no|not|never|without|remove|removed|removing|drop|dropped|dropping|strip|stripped|absent|lacks?|lacking)\b[^\n.;]{0,60}?-{0,2}content-?max/gi,
+      "",
+    )
+    .replace(
+      /-{0,2}content-?max\b[^\n.;]{0,40}?\b(?:removed?|removal|dropped|stripped|absent|gone|deleted|no\s+longer|free)\b/gi,
+      "",
+    );
+}
+
+/**
+ * PHASE prose asks for a FULL-WIDTH menubar — the opposite outcome of the
+ * content-aligned claim. When present, this intent overrides pack/mock-derived
+ * content-max assumptions (the design loop may predate the operator's
+ * full-width ask) and makes negative proofs legitimate.
+ */
+export function phaseClaimsFullWidthMenubar(text: string): boolean {
+  const t = text ?? "";
+  return (
+    /menubar|menu\s*bar|top\s*bar|nav\s*bar|header/i.test(t) &&
+    (/\bfull[-\s]?(?:width|screen|bleed)\b/i.test(t) ||
+      /\bedge[-\s]to[-\s]edge\b/i.test(t) ||
+      /\bviewport[-\s]width\b/i.test(t) ||
+      /\bspan(?:s|ning)?\b.{0,40}\b(?:full|entire|whole)\b.{0,30}\b(?:width|screen|viewport)\b/i.test(
+        t,
+      ) ||
+      /\b(?:remove|drop|strip)\b.{0,50}\b(?:--content-max|content\s*max|max-?width|inner\s+(?:bar|container|wrapper)|centred|centered)\b/i.test(
+        t,
+      ))
+  );
+}
+
 function phaseHasAppliedShellWithContentAlignedMenubar(
   opts?: ClaimProofOpts,
 ): boolean {
@@ -505,10 +549,55 @@ function shellContentWidthClaimApplies(
   opts?: ClaimProofOpts,
 ): boolean {
   const claimSurface = claimSurfaceFromPhaseDoc(phaseDoc);
+  const alignedSurface = stripNegatedContentMax(claimSurface);
+  // Full-width intent with no positive aligned claim wins over everything —
+  // including pack/mock-derived content-max claims — because the operator is
+  // explicitly replacing the inherited layout.
+  if (
+    phaseClaimsFullWidthMenubar(claimSurface) &&
+    !phaseClaimsContentAlignedMenubar(alignedSurface)
+  ) {
+    return false;
+  }
   return (
-    phaseClaimsContentAlignedMenubar(claimSurface) ||
+    phaseClaimsContentAlignedMenubar(alignedSurface) ||
     phaseHasAppliedShellWithContentAlignedMenubar(opts)
   );
+}
+
+/**
+ * Full-width counterpart: checks prove the menubar is NOT constrained by a
+ * content-max/mx-auto inner wrapper (negative grep) AND uses a full-width
+ * class/width, with the same mount-proof requirement.
+ */
+export function automatedChecksProveFullWidthMenubar(
+  checksText: string,
+): boolean {
+  const body = checksText ?? "";
+  const lines = body.split("\n");
+  const negativeConstraint = lines.some(
+    (line) =>
+      /!\s*(?:\[|\[\[|test|grep|command\s+grep)/.test(line) &&
+      /--content-max|content-max|mx-auto|menubar__inner|landing-header-inner|maxWidth/i.test(
+        line,
+      ) &&
+      /menubar|menu-bar|navbar|nav-bar|header/i.test(line),
+  );
+  const positiveFullWidth = lines.some(
+    (line) =>
+      /grep|test|\[\[/.test(line) &&
+      /w-full|width:\s*100%|100vw|full-width|full_bleed|full-bleed/i.test(
+        line,
+      ) &&
+      /menubar|menu-bar|navbar|nav-bar|header/i.test(line),
+  );
+  const playgroundMount =
+    (/playground/i.test(body) || /App\.(tsx|jsx)/i.test(body)) &&
+    (/<Menubar\b/.test(body) ||
+      /Menubar/.test(body) ||
+      /from\s+['"][^'"]*menubar/i.test(body));
+  const productMount = automatedChecksProveProductShellMenubarMount(body);
+  return negativeConstraint && positiveFullWidth && (playgroundMount || productMount);
 }
 
 /** Automated Checks prove menubar uses content-max inner layout + Menubar mount. */
@@ -516,12 +605,17 @@ export function automatedChecksProveContentAlignedMenubar(
   checksText: string,
 ): boolean {
   const body = checksText ?? "";
+  // Token mentions only count as proof on lines that assert PRESENCE — a
+  // `! grep -q -- '--content-max'` line asserts the opposite and must not
+  // satisfy (or be gamed into) a content-aligned claim.
+  const positiveLines = body.split("\n").filter((l) => !lineAssertsAbsence(l));
+  const positiveBody = positiveLines.join("\n");
   const contentMax =
-    /--content-max/i.test(body) ||
-    /maxWidth:\s*['"]?var\(--content-max\)/i.test(body) ||
-    /max-w-\[var\(--content-max\)\]/i.test(body) ||
-    /menubar__inner/i.test(body) ||
-    /landing-header-inner/i.test(body);
+    /--content-max/i.test(positiveBody) ||
+    /maxWidth:\s*['"]?var\(--content-max\)/i.test(positiveBody) ||
+    /max-w-\[var\(--content-max\)\]/i.test(positiveBody) ||
+    /menubar__inner/i.test(positiveBody) ||
+    /landing-header-inner/i.test(positiveBody);
   const menubarFile =
     /menubar\.(tsx|jsx|ts|js|vue)/i.test(body) ||
     /shell\/menubar/i.test(body) ||
@@ -540,17 +634,36 @@ export function automatedChecksProveContentAlignedMenubar(
  * When design-bound applied_shell has a content-aligned menubar (or PHASE claims
  * it), Automated Checks must prove Menubar implements `--content-max` inner
  * layout — ViewSwitcher-only greps are insufficient.
+ * When PHASE instead asks for a FULL-WIDTH menubar, the requirement flips:
+ * checks must prove the constraint's absence + a full-width class, with the
+ * same mount proof.
  */
 export function validateShellContentWidthClaimProof(
   phaseDoc: string,
   opts?: ClaimProofOpts,
 ): string[] {
+  const claimSurface = claimSurfaceFromPhaseDoc(phaseDoc);
+  const cells = extractCheckCells(phaseDoc);
+  const checksText = cells.map((c) => c.body).join("\n");
+
+  // Negation-aware: "no --content-max" is full-width intent, not an aligned
+  // claim. Dual-chrome docs (landing content-max + dashboard full-width)
+  // still carry a positive aligned claim and stay on the strict path.
+  const alignedSurface = stripNegatedContentMax(claimSurface);
+  const contentAlignedClaim = phaseClaimsContentAlignedMenubar(alignedSurface);
+  const fullWidthClaim = phaseClaimsFullWidthMenubar(claimSurface);
+
+  if (fullWidthClaim && !contentAlignedClaim) {
+    if (automatedChecksProveFullWidthMenubar(checksText)) return [];
+    return [
+      "PHASE asks for a full-width menubar, but Automated Checks lack proofs. Require: (1) a negative grep proving the menubar source does NOT use `--content-max` / `mx-auto` / inner-wrapper (e.g. `! grep -q -- '--content-max' src/components/<menubar>.tsx`), (2) a positive grep for a full-width class (`w-full` / `width: 100%`) on the menubar, (3) Menubar mount in playground App **or** product layout shell.",
+    ];
+  }
+
   if (!shellContentWidthClaimApplies(phaseDoc, opts)) {
     return [];
   }
 
-  const cells = extractCheckCells(phaseDoc);
-  const checksText = cells.map((c) => c.body).join("\n");
   if (automatedChecksProveContentAlignedMenubar(checksText)) {
     return [];
   }
@@ -717,6 +830,7 @@ export function formatClaimProofChecksGuidance(
     "- Visibility: `pnpm build` / `next build` plus grep `globals.css` or package tokens / built CSS for `text-text-secondary` or `--text-secondary`.",
     "- Content-max: `--content-max` on menubar + product shell mount greps above.",
     "- Module resolve: `pnpm build` / `next build` counts as a finite resolve proof (not only `vite build`).",
+    "- Full-width menubar intent (operator asked full-width/edge-to-edge or content-max removal): prove the OPPOSITE — a negative grep `! grep -q -- '--content-max' <menubar>` (absence) plus a positive `w-full` / `width: 100%` grep on the menubar, plus the usual mount proof.",
   ];
   if (dual || opts?.designShellOrTheme) {
     lines.push(

@@ -1226,6 +1226,22 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "project_set_coding_tool",
+      description:
+        "Switch the coding agent used for a project's development/design loops (opencode|pi). Takes effect on the next coding session.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          toolId: {
+            type: "string",
+            description: "Registered coding tool id (opencode|pi)",
+          },
+        },
+        required: ["projectId", "toolId"],
+      },
+    },
+    {
       name: "list_design_elements",
       description:
         "List shared design elements in the project library (.slopcontrol/elements) and the global registry (~/.slopcontrol/shared-elements). Use before design_element_import.",
@@ -3004,6 +3020,22 @@ export function createSlopcontrolMcpServer(
               packageName: args.packageName,
               ...(args.version ? { version: args.version } : {}),
             }),
+          },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "project_set_coding_tool") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/coding-tool`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ toolId: args.toolId }),
           },
         );
         const body = await res.text();

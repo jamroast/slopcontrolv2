@@ -335,7 +335,7 @@ export async function publishToNpmRegistry(opts: {
 }
 
 export type LibraryPublishStep = {
-  step: "build" | "bump" | "publish";
+  step: "build" | "bump" | "publish" | "release-commit";
   command: string[];
   code: number;
   durationMs: number;
@@ -484,6 +484,32 @@ export async function publishLibraryToRegistry(opts: {
     throw new Error(
       `library publish failed (${publish.code}): ${(publish.stderr || publish.stdout).slice(0, 1_500)}`,
     );
+  }
+
+  // 3b. Commit the version bump (package.json + lockfiles) so git stays in
+  // step with the registry; an uncommitted bump leaves the tree dirty, which
+  // breaks the next bump and drifts git away from the published version.
+  // Advisory: commit failure degrades to a step note, publish still counts.
+  {
+    const bumpFiles = ["package.json", ...spec.lockfiles];
+    const commit = await run("release-commit", [
+      "git",
+      "commit",
+      "-m",
+      `chore(release): ${name}@${version}`,
+      "--",
+      ...bumpFiles,
+    ]);
+    if (commit.code !== 0) {
+      const commitStep = steps[steps.length - 1];
+      if (commitStep) {
+        commitStep.note = /nothing to commit/i.test(
+          `${commit.stdout}\n${commit.stderr}`,
+        )
+          ? "no version changes to commit"
+          : `WARNING: version bump left uncommitted (${(commit.stderr || commit.stdout).trim().slice(0, 200)})`;
+      }
+    }
   }
 
   // 4. Evidence in REGISTRY.json.
