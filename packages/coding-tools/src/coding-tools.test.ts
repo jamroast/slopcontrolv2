@@ -1126,7 +1126,7 @@ None.
     }
   });
 
-  it("refuses to push OLLAMA_TIER=free over root paid env", () => {
+  it("paid→free guard rewrites OLLAMA_TIER back but still syncs other keys", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-env-paid-"));
     const wt = mkdtempSync(join(tmpdir(), "slop-wt-free-"));
     try {
@@ -1136,15 +1136,18 @@ None.
       );
       writeFileSync(
         join(wt, ".env.docker"),
-        "OLLAMA_TIER=free\nAI_CHAT_MODEL=glm-5.2\n",
+        "OLLAMA_TIER=free\nAI_CHAT_MODEL=glm-5.2\nNEW_KEY=hello\n",
       );
       const pushed = syncLocalFilesFromWorktree({
         projectRoot: root,
         worktreePath: wt,
         relativePaths: [".env.docker"],
       });
-      assert.deepEqual(pushed, []);
-      assert.match(readFileSync(join(root, ".env.docker"), "utf-8"), /OLLAMA_TIER=paid/);
+      assert.deepEqual(pushed, [".env.docker"]);
+      const body = readFileSync(join(root, ".env.docker"), "utf-8");
+      assert.match(body, /^OLLAMA_TIER=paid$/m);
+      assert.doesNotMatch(body, /OLLAMA_TIER=free/);
+      assert.match(body, /^NEW_KEY=hello$/m);
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(wt, { recursive: true, force: true });

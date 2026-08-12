@@ -7,6 +7,7 @@ import {
   commandTemplateComplete,
   defaultToolchainSpec,
   detectBuildToolchain,
+  detectEnvSyncCmd,
   resolveProjectToolchain,
   runToolchainCommand,
   substituteCommandArgs,
@@ -95,6 +96,76 @@ describe("build-toolchain defaults + detect", () => {
       const hint = detectBuildToolchain(root);
       assert.equal(hint.kind, "rust-cargo");
       assert.equal(hint.hasDefaultSpec, false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("detectEnvSyncCmd finds a manage script; resolveProjectToolchain overlays it", () => {
+    const root = tmp("envsync");
+    try {
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({
+          scripts: { manage: "tsx scripts/cli.ts" },
+        }),
+        "utf-8",
+      );
+      writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: 9\n", "utf-8");
+
+      assert.deepEqual(detectEnvSyncCmd(root, "node-pnpm"), [
+        "pnpm",
+        "run",
+        "manage",
+        "--",
+        "env",
+        "sync",
+      ]);
+      assert.deepEqual(detectEnvSyncCmd(root, "node-npm"), [
+        "npm",
+        "run",
+        "manage",
+        "--",
+        "env",
+        "sync",
+      ]);
+      assert.equal(detectEnvSyncCmd(root, "rust-cargo"), null);
+
+      // Overlay attaches the detected command when the spec lacks one.
+      const resolved = resolveProjectToolchain({ projectRoot: root });
+      assert.equal(resolved.source, "default");
+      assert.deepEqual(resolved.spec?.envSyncCmd, [
+        "pnpm",
+        "run",
+        "manage",
+        "--",
+        "env",
+        "sync",
+      ]);
+
+      // Persisted config envSyncCmd wins over detection.
+      const configured = resolveProjectToolchain({
+        projectRoot: root,
+        configured: BuildToolchainSpecSchema.parse({
+          ...defaultToolchainSpec("node-pnpm"),
+          envSyncCmd: ["./scripts/env.sh"],
+        }),
+      });
+      assert.deepEqual(configured.spec?.envSyncCmd, ["./scripts/env.sh"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("detectEnvSyncCmd returns null without a manage script", () => {
+    const root = tmp("envsync-none");
+    try {
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({ scripts: { build: "tsc" } }),
+        "utf-8",
+      );
+      assert.equal(detectEnvSyncCmd(root, "node-pnpm"), null);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

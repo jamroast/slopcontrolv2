@@ -184,6 +184,7 @@ import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, re
 import { mountMcpHttp } from "./mcp-http.js";
 import { createStore, defaultDataDir } from "./store.js";
 import { DevelopLock } from "./develop-lock.js";
+import { NO_ENV_SYNC_HINT, runProjectEnvSync } from "./env-sync.js";
 
 const PORT = Number(process.env.SLOPCONTROL_PORT ?? 3020);
 const app = express();
@@ -1174,7 +1175,35 @@ app.post("/projects/:id/build-process/configure", async (req, res) => {
   }
 });
 
-/** Hermes manual override of the resolved toolchain (schema-validated). */
+/**
+ * Run the project-native env sync (envSyncCmd) at the project root. The
+ * project owns merge semantics; SlopControl only orchestrates. 409 when no
+ * envSyncCmd is resolved (project needs a `manage` script or a persisted
+ * toolchain envSyncCmd).
+ */
+app.post("/projects/:id/env/sync", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  try {
+    const result = await runProjectEnvSync({ projectRoot: project.rootPath });
+    if ("reason" in result) {
+      res.status(409).json({ error: NO_ENV_SYNC_HINT });
+      return;
+    }
+    log.info("project", "env sync", {
+      projectId: project.id,
+      code: result.code,
+    });
+    res.status(result.ok ? 200 : 500).json(result);
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
 app.put("/projects/:id/build-process/toolchain", (req, res) => {
   const project = store.getProject(req.params.id);
   if (!project) {

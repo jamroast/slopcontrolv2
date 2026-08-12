@@ -427,8 +427,13 @@ export function syncLocalFilesFromWorktree(opts: {
         continue;
       }
       if (isPaidToFreeEnvRegression(destText, srcText)) {
-        // Keep root paid-tier config; do not let coding agent push free-tier regression
-        continue;
+        // Per-key guard: keep root's paid tier but still sync the rest of
+        // the file — a whole-file skip silently drops unrelated new keys.
+        srcText = srcText.replace(
+          /^OLLAMA_TIER\s*=\s*free\b.*$/im,
+          `OLLAMA_TIER=${readEnvAssignment(destText, "OLLAMA_TIER") ?? "paid"}`,
+        );
+        srcBody = Buffer.from(srcText, "utf-8");
       }
     }
     mkdirSync(dirname(dest), { recursive: true });

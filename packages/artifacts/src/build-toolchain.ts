@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   BuildToolchainSpecSchema,
@@ -178,6 +178,31 @@ function normalizeToolchainSpec(spec: BuildToolchainSpec): BuildToolchainSpec {
 }
 
 /**
+ * Detect a project-native env sync command: the project ships a `manage`
+ * script (scripts/cli.ts convention) — invoke its `env sync` subcommand
+ * with the kind-appropriate runner. Returns null when the project has none.
+ */
+export function detectEnvSyncCmd(
+  projectRoot: string,
+  kind: string,
+): string[] | null {
+  if (kind !== "node-pnpm" && kind !== "node-npm") return null;
+  const pkgPath = join(projectRoot, "package.json");
+  if (!existsSync(pkgPath)) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
+      scripts?: Record<string, string>;
+    };
+    if (!pkg.scripts?.manage) return null;
+    return kind === "node-pnpm"
+      ? ["pnpm", "run", "manage", "--", "env", "sync"]
+      : ["npm", "run", "manage", "--", "env", "sync"];
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Resolve the effective spec for a project: persisted config wins, else the
  * detected-kind default (when one exists), else null (needs the LLM
  * configurator).
@@ -186,15 +211,24 @@ export function resolveProjectToolchain(opts: {
   projectRoot: string;
   configured?: BuildToolchainSpec | null;
 }): { spec: BuildToolchainSpec | null; source: "config" | "default" | "none" } {
+  const withDetectedEnvSync = (
+    spec: BuildToolchainSpec,
+  ): BuildToolchainSpec => {
+    if (spec.envSyncCmd) return spec;
+    const detected = detectEnvSyncCmd(opts.projectRoot, spec.kind);
+    return detected ? { ...spec, envSyncCmd: detected } : spec;
+  };
   if (opts.configured) {
     return {
-      spec: normalizeToolchainSpec(BuildToolchainSpecSchema.parse(opts.configured)),
+      spec: withDetectedEnvSync(
+        normalizeToolchainSpec(BuildToolchainSpecSchema.parse(opts.configured)),
+      ),
       source: "config",
     };
   }
   const hint = detectBuildToolchain(opts.projectRoot);
   const def = defaultToolchainSpec(hint.kind);
-  if (def) return { spec: def, source: "default" };
+  if (def) return { spec: withDetectedEnvSync(def), source: "default" };
   return { spec: null, source: "none" };
 }
 

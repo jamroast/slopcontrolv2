@@ -432,6 +432,13 @@ export const BuildToolchainSpecSchema = z.object({
   publishCmd: z.array(z.string().min(1)).optional(),
   /** {dep} placeholder → name@^version. */
   consumeUpdateCmd: z.array(z.string().min(1)).optional(),
+  /**
+   * Project-native env sync: regenerates/merges gitignored runtime env
+   * files (.env.local / .env.docker) from the project's templates. Must
+   * preserve existing values (merge, not overwrite). SlopControl invokes
+   * this post-merge when env templates changed and via POST env/sync.
+   */
+  envSyncCmd: z.array(z.string().min(1)).optional(),
   lockfiles: z.array(z.string().min(1)).default([]),
   registryEnvKeys: z.array(z.string().min(1)).default([]),
 });

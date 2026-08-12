@@ -28,6 +28,7 @@ SlopControl capability checklist the build process must support:
 3. CONSUME — consumer projects install the library via their package manager so the lockfile refreshes natively.
 4. DOCKER — container builds reach the registry via build ARGs / env (never hard-coded localhost; containers use host.docker.internal).
 5. CI — the same commands must run from CI with registry URL/token supplied via env/secrets.
+6. ENV SYNC — when the project ships an env-manager (e.g. a "manage" script with an "env sync" subcommand), wire it as envSyncCmd so SlopControl can refresh gitignored runtime env files (.env.local/.env.docker) from templates after phases change them.
 
 Return ONLY a JSON object with these fields:
 - toolchain: {
@@ -38,6 +39,7 @@ Return ONLY a JSON object with these fields:
     bumpVersionCmd?: string[] with literal "{bump}" placeholder (patch|minor|major),
     publishCmd?: string[] with literal "{registryUrl}" placeholder,
     consumeUpdateCmd?: string[] with literal "{dep}" placeholder (name@^version),
+    envSyncCmd?: string[] (project-native env sync, e.g. ["pnpm","run","manage","--","env","sync"] — merge semantics, must preserve existing values),
     lockfiles: string[],
     registryEnvKeys: string[] (e.g. ["SLOPCONTROL_NPM_REGISTRY_URL","SLOPCONTROL_NPM_REGISTRY_DOCKER_URL","SLOPCONTROL_NPM_REGISTRY_TOKEN"])
   }

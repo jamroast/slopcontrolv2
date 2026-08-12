@@ -1242,6 +1242,18 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "project_env_sync",
+      description:
+        "Run the project-native env sync (toolchain envSyncCmd) at the project root: merges gitignored runtime env files (.env.local/.env.docker) from the project's templates, preserving existing values. Fails with a hint when the project has no envSyncCmd.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
       name: "list_design_elements",
       description:
         "List shared design elements in the project library (.slopcontrol/elements) and the global registry (~/.slopcontrol/shared-elements). Use before design_element_import.",
@@ -3037,6 +3049,18 @@ export function createSlopcontrolMcpServer(
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ toolId: args.toolId }),
           },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "project_env_sync") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/env/sync`,
+          { method: "POST" },
         );
         const body = await res.text();
         return { content: [{ type: "text", text: body }], isError: !res.ok };

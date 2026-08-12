@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildLibraryPublishFailureDiagnosis,
+  phaseTouchedEnvTemplates,
+  buildEnvSyncFailureDiagnosis,
   summarizeLibraryPublishResponse,
 } from "./index.js";
 
@@ -69,5 +71,45 @@ describe("buildLibraryPublishFailureDiagnosis", () => {
     });
     assert.ok(d.rootCause.length <= 1_000);
     assert.ok(d.operatorActions[0]!.length <= 400);
+  });
+});
+
+describe("phaseTouchedEnvTemplates", () => {
+  it("matches env template basenames", () => {
+    assert.equal(
+      phaseTouchedEnvTemplates([
+        "apps/web/.env.example",
+        "src/index.ts",
+      ]),
+      true,
+    );
+    assert.equal(phaseTouchedEnvTemplates([".env.docker.example"]), true);
+    assert.equal(phaseTouchedEnvTemplates([".env.test.example"]), true);
+  });
+
+  it("ignores runtime env files and non-env changes", () => {
+    assert.equal(
+      phaseTouchedEnvTemplates([".env.local", ".env.docker", "src/app.ts"]),
+      false,
+    );
+    assert.equal(phaseTouchedEnvTemplates([]), false);
+  });
+});
+
+describe("buildEnvSyncFailureDiagnosis", () => {
+  it("produces an operator-facing advisory pointing at project_env_sync", () => {
+    const d = buildEnvSyncFailureDiagnosis({
+      summary: "env sync exited 1: boom",
+      phaseId: "7-x",
+      runId: "run-9",
+    });
+    assert.equal(d.audience, "operator");
+    assert.equal(d.codingAgentShouldFix, false);
+    assert.equal(d.fingerprint, "project-env-sync-failed");
+    assert.match(d.title, /phase complete/i);
+    assert.ok(
+      d.operatorActions.some((a) => /project_env_sync/.test(a)),
+      "operator action points at the re-run path",
+    );
   });
 });

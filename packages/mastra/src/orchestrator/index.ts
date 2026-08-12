@@ -54,6 +54,8 @@ import {
   readBlueprint,
   readPhaseDoc,
   readProjectConfig,
+  resolveProjectToolchain,
+  runToolchainCommand,
   readResearch,
   readRoadmap,
   readRunMemory,
@@ -422,6 +424,53 @@ export function buildLibraryPublishFailureDiagnosis(opts: {
     nextActions:
       "Re-run design_library_publish; the phase itself completed successfully.",
     fingerprint: "component-library-publish-failed",
+    codingAgentShouldFix: false,
+    phaseId: opts.phaseId,
+    runId: opts.runId,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * True when a phase's changed files include env templates — the signal to
+ * re-run the project-native env sync so gitignored runtime env files pick
+ * up new template keys.
+ */
+export function phaseTouchedEnvTemplates(changedFiles: string[]): boolean {
+  return changedFiles.some((f) => {
+    const base = f.replace(/\\/g, "/").split("/").pop() ?? "";
+    return (
+      base === ".env.example" ||
+      base === ".env.docker.example" ||
+      base === ".env.test.example"
+    );
+  });
+}
+
+/**
+ * Advisory diagnosis when the project-native env sync fails post-merge.
+ * The phase is complete — this surfaces the drift so the operator can
+ * re-run via POST /projects/:id/env/sync (or MCP project_env_sync).
+ */
+export function buildEnvSyncFailureDiagnosis(opts: {
+  summary: string;
+  phaseId: string;
+  runId: string;
+}): PersistedDiagnosis {
+  return {
+    audience: "operator",
+    operatorActions: [
+      `Project env sync failed: ${opts.summary.slice(0, 300)}`,
+      "Re-run via MCP project_env_sync (or POST /projects/:id/env/sync) — runtime env files may be missing template keys until then.",
+    ],
+    class: "process",
+    confidence: "high",
+    title: "Project env sync failed (phase complete)",
+    rootCause: opts.summary.slice(0, 1_000),
+    evidence: "Post-merge env sync after env-template change.",
+    nextActions:
+      "Re-run project_env_sync; the phase itself completed successfully.",
+    fingerprint: "project-env-sync-failed",
     codingAgentShouldFix: false,
     phaseId: opts.phaseId,
     runId: opts.runId,
@@ -6766,6 +6815,49 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                   run,
                   `--- Pushed worktree env to project root: ${pushedEnv.join(", ")} ---`,
                 );
+              }
+              // Project-native env sync: when the phase touched env
+              // templates, refresh gitignored runtime env files via the
+              // project's own envSyncCmd (merge semantics — preserves
+              // existing values, adds new template keys).
+              if (phaseTouchedEnvTemplates(listWorktreeChangedFiles(worktree.path))) {
+                const envSyncSpec = resolveProjectToolchain({
+                  projectRoot: project.rootPath,
+                  configured: config.toolchain,
+                }).spec;
+                if (envSyncSpec?.envSyncCmd) {
+                  const envSyncRun = await runToolchainCommand({
+                    cmd: envSyncSpec.envSyncCmd,
+                    cwd: project.rootPath,
+                    timeoutMs: 120_000,
+                  });
+                  if (envSyncRun.code === 0) {
+                    log(
+                      project,
+                      run,
+                      `--- Ran project env sync (${envSyncSpec.envSyncCmd.join(" ")}) after env-template change ---`,
+                    );
+                  } else {
+                    const detail = (
+                      envSyncRun.stderr || envSyncRun.stdout
+                    ).slice(0, 300);
+                    log(
+                      project,
+                      run,
+                      `--- Project env sync failed (${envSyncRun.code}) — runtime env files may be missing template keys: ${detail} ---`,
+                    );
+                    writeDiagnosis(
+                      project.rootPath,
+                      run.id,
+                      buildEnvSyncFailureDiagnosis({
+                        summary: `env sync exited ${envSyncRun.code}: ${detail}`,
+                        phaseId: phase.id,
+                        runId: run.id,
+                      }),
+                      phase.id,
+                    );
+                  }
+                }
               }
               // Sync may re-touch env files — force canonical ports again before verify
               const healedAfterSync = restoreCanonicalRuntimeEnv(
