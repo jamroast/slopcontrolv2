@@ -21,6 +21,7 @@ import type {
   ChatEvent,
   ChatEventListener,
   ChatToolDispatch,
+  ChatTranscriptMessage,
   ConversationStore,
   PendingAction,
 } from "./types.js";
@@ -129,7 +130,32 @@ export class ChatService {
   }
 
   deleteConversation(id: string): boolean {
+    const conversation = this.deps.store.getConversation(id);
+    if (!conversation) return false;
+    void this.deps
+      .getMemory()
+      .deleteThread(conversation.id)
+      .catch(() => {
+        /* thread may not exist yet */
+      });
     return this.deps.store.deleteConversation(id);
+  }
+
+  /**
+   * Replay the Memory thread as a user/assistant transcript. Tool-call
+   * parts and observational-memory status blobs are omitted — those are
+   * agent internals, not operator-facing chat.
+   */
+  async getMessages(id: string): Promise<ChatTranscriptMessage[]> {
+    const conversation = this.getConversation(id);
+    const recalled = await this.deps.getMemory().recall({
+      threadId: conversation.id,
+      resourceId: conversation.projectId ?? "global",
+      perPage: false,
+    });
+    return (recalled.messages ?? [])
+      .map((row) => toTranscriptMessage(row))
+      .filter((m): m is ChatTranscriptMessage => m !== null);
   }
 
   /** Idle sweep: close active conversations past maxIdleMs. Returns closed. */
@@ -445,4 +471,53 @@ export class ChatService {
       clearTimeout(timer);
     }
   }
+}
+
+function toTranscriptMessage(row: unknown): ChatTranscriptMessage | null {
+  if (!row || typeof row !== "object") return null;
+  const msg = row as {
+    role?: string;
+    createdAt?: string | Date | number;
+    content?: unknown;
+  };
+  if (msg.role !== "user" && msg.role !== "assistant") return null;
+  const content = extractTextContent(msg.content);
+  if (!content) return null;
+  return {
+    role: msg.role,
+    content,
+    at: toIso(msg.createdAt),
+  };
+}
+
+function extractTextContent(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!content || typeof content !== "object") return "";
+  const obj = content as { parts?: unknown; text?: unknown; content?: unknown };
+  if (typeof obj.text === "string") return obj.text.trim();
+  if (Array.isArray(obj.parts)) {
+    const texts = obj.parts
+      .filter(
+        (p): p is { type: string; text: string } =>
+          Boolean(p) &&
+          typeof p === "object" &&
+          (p as { type?: string }).type === "text" &&
+          typeof (p as { text?: unknown }).text === "string",
+      )
+      .map((p) => p.text);
+    return texts.join("\n").trim();
+  }
+  if (typeof obj.content === "string") return obj.content.trim();
+  return "";
+}
+
+function toIso(value: string | Date | number | undefined): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "number") return new Date(value).toISOString();
+  if (typeof value === "string" && value) {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+    return value;
+  }
+  return new Date().toISOString();
 }

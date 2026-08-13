@@ -392,6 +392,73 @@ describe("ChatService lifecycle", () => {
     }
   });
 
+  it("getMessages returns user/assistant text and drops tool internals", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-chat-svc-"));
+    const store = makeStore();
+    const service = new ChatService({
+      store,
+      getMemory: () =>
+        ({
+          recall: async () => ({
+            messages: [
+              {
+                role: "user",
+                createdAt: "2026-08-13T09:23:20.000Z",
+                content: {
+                  format: 2,
+                  parts: [{ type: "text", text: "How is the current run going?" }],
+                },
+              },
+              {
+                role: "assistant",
+                createdAt: "2026-08-13T09:23:30.000Z",
+                content: {
+                  format: 2,
+                  parts: [
+                    { type: "data-om-status", data: { windows: {} } },
+                    { type: "tool-invocation", toolName: "list_runs" },
+                    { type: "text", text: "No active runs." },
+                  ],
+                },
+              },
+              { role: "system", content: "ignore me" },
+            ],
+            total: 3,
+            page: 0,
+            perPage: false,
+            hasMore: false,
+          }),
+          deleteThread: async () => {},
+        }) as never,
+      dispatch: async () => ({ content: [{ type: "text", text: "{}" }] }),
+      context: {
+        listProjects: () => [],
+        listPhases: () => [],
+        listRuns: () => [],
+        getProject: () => undefined,
+      },
+      endpointsPath: makeEndpointsPath(dir),
+    });
+    try {
+      const conv = service.createConversation({ projectId: null });
+      const messages = await service.getMessages(conv.id);
+      assert.deepEqual(messages, [
+        {
+          role: "user",
+          content: "How is the current run going?",
+          at: "2026-08-13T09:23:20.000Z",
+        },
+        {
+          role: "assistant",
+          content: "No active runs.",
+          at: "2026-08-13T09:23:30.000Z",
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("setConversationModel persists the override", () => {
     const { service, store, cleanup } = makeService();
     try {

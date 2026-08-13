@@ -1921,6 +1921,16 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "chat_get",
+      description:
+        "Get a chat conversation's metadata plus its operator-facing transcript (user/assistant text; tool internals omitted).",
+      inputSchema: {
+        type: "object",
+        properties: { conversationId: { type: "string" } },
+        required: ["conversationId"],
+      },
+    },
+    {
       name: "chat_send",
       description:
         "Send a message to a chat-service conversation and stream the turn. Returns the agent reply plus a transcript of tool calls and confirmation requests.",
@@ -4223,6 +4233,19 @@ export async function dispatchSlopcontrolTool(
           url = `${SERVER_URL}/chats?all=1${status ? `&status=${encodeURIComponent(status)}` : ""}`;
         }
         const res = await fetch(url);
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_get") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/chats/${encodeURIComponent(args.conversationId as string)}`,
+        );
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

@@ -34,6 +34,13 @@ export interface ChatEvent {
 
 export type ChatEventListener = (event: ChatEvent) => void;
 
+/** User-facing transcript row (GET /chats/:id). Tool-call parts are dropped. */
+export interface ChatTranscriptMessage {
+  role: "user" | "assistant";
+  content: string;
+  at: string;
+}
+
 /** Structural interface satisfied by SlopStore (apps/server). */
 export interface ConversationStore {
   listConversations(opts?: {

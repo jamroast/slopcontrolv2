@@ -7449,9 +7449,26 @@ app.get("/chats/models", async (_req, res) => {
   }
 });
 
-app.get("/chats/:id", (req, res) => {
+app.get("/chats/:id", async (req, res) => {
   try {
-    res.json({ conversation: getChatService().getConversation(req.params.id) });
+    const service = getChatService();
+    const conversation = service.getConversation(req.params.id);
+    const messages = await service.getMessages(req.params.id);
+    res.json({ conversation, messages });
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+/** Compatibility alias — some clients hit /chat/:id (singular). */
+app.get("/chat/:id", async (req, res) => {
+  try {
+    const service = getChatService();
+    const conversation = service.getConversation(req.params.id);
+    const messages = await service.getMessages(req.params.id);
+    res.json({ conversation, messages });
   } catch (err) {
     res
       .status(chatErrorStatus(err))
