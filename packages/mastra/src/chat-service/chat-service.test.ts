@@ -197,6 +197,26 @@ describe("chat tool allowlist", () => {
     assert.equal(seenArgs?.dryRun, true);
   });
 
+  it("truncates oversized tool results so context stays bounded", async () => {
+    let seenArgs: Record<string, unknown> | undefined;
+    const big = "x".repeat(20_000);
+    const tools = buildChatTools({
+      dispatch: async (_name, args) => {
+        seenArgs = args;
+        return { content: [{ type: "text", text: big }] };
+      },
+      conversationId: "c1",
+      projectId: "p1",
+      requestConfirmation: () => ({ token: "t" }),
+    });
+    const result = (await tools.list_runs!.execute!({}, undefined as never)) as {
+      result: string;
+    };
+    assert.ok(seenArgs !== undefined);
+    assert.ok(result.result.length < 5_000);
+    assert.match(result.result, /truncated/);
+  });
+
   it("gated tools park as pending_confirmation instead of dispatching", async () => {
     let dispatched = false;
     const confirmations: { tool: string; args: Record<string, unknown> }[] = [];

@@ -5,6 +5,7 @@ import type { Memory } from "@mastra/memory";
 import { LlmRegistry, toMastraModelConfig } from "@slopcontrol/llm";
 import type { ChatConversation } from "@slopcontrol/types";
 import { askProgressFromStreamChunk } from "../orchestrator/ask-stream.js";
+import { isPromptTooLongError } from "../supervisor-enrich.js";
 import { buildChatTools, listChatToolNames } from "./chat-tools.js";
 import {
   buildGlobalChatPrompt,
@@ -372,12 +373,12 @@ export class ChatService {
       abort.abort(new Error(`chat turn timed out after ${this.turnTimeoutMs}ms`));
     }, this.turnTimeoutMs);
 
-    try {
+    const runStreamOn = async (threadId: string): Promise<void> => {
       const streamResult = await agent.stream(text, {
         maxSteps: MAX_STEPS,
         abortSignal: abort.signal,
         memory: {
-          thread: conversation.id,
+          thread: threadId,
           resource: conversation.projectId ?? "global",
         },
       });
@@ -414,7 +415,29 @@ export class ChatService {
       ).catch(() => "");
       const trimmed = (finalText || reply).trim();
       this.emit(conversation, { type: "done", text: trimmed });
+    };
+
+    try {
+      await runStreamOn(conversation.id);
     } catch (err) {
+      if (isPromptTooLongError(err)) {
+        // The Memory thread accumulated oversized tool payloads — retry once
+        // on a fresh thread so the conversation recovers instead of failing
+        // forever. History is bypassed, not deleted.
+        this.emit(conversation, {
+          type: "status",
+          summary: "context overflow — retrying on a fresh thread (history bypassed)",
+        });
+        try {
+          await runStreamOn(`${conversation.id}-fresh-${Date.now()}`);
+          return;
+        } catch (retryErr) {
+          const message =
+            retryErr instanceof Error ? retryErr.message : String(retryErr);
+          this.emit(conversation, { type: "error", error: message });
+          throw retryErr;
+        }
+      }
       const message = err instanceof Error ? err.message : String(err);
       this.emit(conversation, { type: "error", error: message });
       throw err;

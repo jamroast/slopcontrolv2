@@ -4256,6 +4256,7 @@ export async function dispatchSlopcontrolTool(
         // Consume the chat SSE stream: accumulate reply text, log progress,
         // and surface confirm_request tokens so the operator can approve.
         let reply = "";
+        let lastError: string | undefined;
         const transcript: string[] = [];
         const confirmations: Record<string, unknown>[] = [];
         const body = res.body;
@@ -4299,13 +4300,18 @@ export async function dispatchSlopcontrolTool(
                 } else if (event.type === "done" && event.text) {
                   reply = event.text;
                 } else if (event.type === "error") {
-                  transcript.push(`error: ${event.error ?? "unknown"}`);
+                  lastError = event.error ?? "unknown";
+                  transcript.push(`error: ${lastError}`);
                 }
               } catch {
                 /* ignore malformed frames */
               }
             }
           }
+        }
+
+        if (!reply.trim() && lastError) {
+          reply = `The chat turn failed before a reply was generated: ${lastError}`;
         }
 
         return {

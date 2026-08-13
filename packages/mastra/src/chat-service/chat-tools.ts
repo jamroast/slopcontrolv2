@@ -134,8 +134,19 @@ function previewArgs(args: Record<string, unknown>): string {
   return json.length <= 400 ? json : `${json.slice(0, 400)}…`;
 }
 
+/**
+ * Hard cap on tool-result text fed back into the agent loop. Lifecycle
+ * payloads (development reports, run lists with stage timings) can run to
+ * tens of KB each; untruncated they accumulate across steps and blow the
+ * model's context — and they persist into the Memory thread, poisoning
+ * every later turn of the conversation.
+ */
+export const CHAT_TOOL_RESULT_MAX_CHARS = 4_000;
+
 function resultText(result: ChatToolResult): string {
-  return result.content.map((c) => c.text).join("\n");
+  const text = result.content.map((c) => c.text).join("\n");
+  if (text.length <= CHAT_TOOL_RESULT_MAX_CHARS) return text;
+  return `${text.slice(0, CHAT_TOOL_RESULT_MAX_CHARS)}\n…(truncated ${text.length - CHAT_TOOL_RESULT_MAX_CHARS} chars — narrow the query or ask for a specific item)`;
 }
 
 /**
