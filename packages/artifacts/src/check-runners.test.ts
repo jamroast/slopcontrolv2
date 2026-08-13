@@ -325,6 +325,24 @@ test "$BUILD_EXIT" -eq 0 || exit 1`),
       ),
       false,
     );
+    // Finite compose probe: detached up + guaranteed EXIT-trap teardown.
+    assert.equal(
+      hasLongLivedServerInCheck(`set -euo pipefail
+trap 'docker compose down' EXIT
+docker compose up -d app 2>&1 | tail -3
+sleep 8
+docker compose exec -T app wget -qO- http://localhost:3000/sign-in | grep -q 'Clerk' || exit 1`),
+      false,
+    );
+    // Detached up with a trap that does NOT tear compose down → still banned.
+    assert.equal(
+      hasLongLivedServerInCheck(`trap 'echo done' EXIT
+docker compose up -d app
+sleep 8`),
+      true,
+    );
+    // Bare foreground up → always banned.
+    assert.equal(hasLongLivedServerInCheck("docker compose up app"), true);
     const gate = validatePhaseDocForDev(
       phaseWithCheck("cd playground && pnpm dev 2>&1 &"),
     );

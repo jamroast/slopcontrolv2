@@ -172,3 +172,4 @@ export function clearSlopcontrolRuntimeCache(): void {
 export * from "./agents/index.js";
 export * from "./orchestrator/index.js";
 export * from "./tools/project-tools.js";
+export * from "./chat-service/index.js";

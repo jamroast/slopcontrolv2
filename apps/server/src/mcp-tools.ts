@@ -48,7 +48,7 @@ function askProgressLogLine(event: Record<string, unknown>): string | null {
 }
 
 async function consumeLiveTurnSse(
-  server: Server,
+  sendLog: ((logger: string, line: string) => Promise<void>) | undefined,
   logger: string,
   body: ReadableStream<Uint8Array> | null,
 ): Promise<{
@@ -59,12 +59,9 @@ async function consumeLiveTurnSse(
   return consumeAskSseStream(body, async (event) => {
     const line = askProgressLogLine(event);
     if (!line) return;
+    if (!sendLog) return;
     try {
-      await server.sendLoggingMessage({
-        level: "info",
-        logger,
-        data: line,
-      });
+      await sendLog(logger, line);
     } catch {
       /* ignore */
     }
@@ -1254,6 +1251,22 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "project_runs_compact",
+      description:
+        "Flatten a project's old terminal runs into a single archive run: digests + unified change stats are kept, raw run dirs are tar.gz'd under .slopcontrol/archive, and the runs list collapses to one synthetic archive row. Never touches active runs or the latest run per phase. Pass dryRun=true to preview the merge set.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          dryRun: {
+            type: "boolean",
+            description: "Preview the merge set without writing (default false)",
+          },
+        },
+        required: ["projectId"],
+      },
+    },
+    {
       name: "list_design_elements",
       description:
         "List shared design elements in the project library (.slopcontrol/elements) and the global registry (~/.slopcontrol/shared-elements). Use before design_element_import.",
@@ -1874,38 +1887,156 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
         required: ["projectId"],
       },
     },
-  ];
-
-export function createSlopcontrolMcpServer(
-  opts?: CreateSlopcontrolMcpServerOptions,
-): Server {
-  const SERVER_URL = opts?.serverUrl ?? defaultSlopcontrolServerUrl();
-
-  const server = new Server(
     {
-      name: "slopcontrol",
-      version: "0.1.0",
-    },
-    {
-      capabilities: {
-        tools: {},
-        logging: {},
+      name: "chat_start",
+      description:
+        "Start a chat-service conversation. Pass projectId for a project-scoped operator chat (lifecycle-aware, project tools pinned); omit for a global cross-project control chat. Returns the conversation id.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          title: { type: "string" },
+          endpointId: {
+            type: "string",
+            description: "Optional model override endpoint",
+          },
+          modelId: {
+            type: "string",
+            description: "Optional model override model",
+          },
+        },
       },
     },
-  );
+    {
+      name: "chat_list",
+      description:
+        "List chat-service conversations. projectId filters to one project; global=true lists global-scope chats; omit both for all.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          global: { type: "boolean" },
+          status: { type: "string", enum: ["active", "closed"] },
+        },
+      },
+    },
+    {
+      name: "chat_send",
+      description:
+        "Send a message to a chat-service conversation and stream the turn. Returns the agent reply plus a transcript of tool calls and confirmation requests.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          conversationId: { type: "string" },
+          message: { type: "string" },
+        },
+        required: ["conversationId", "message"],
+      },
+    },
+    {
+      name: "chat_confirm",
+      description:
+        "Approve or deny a pending confirmation-gated action in a chat conversation (token comes from a confirm_request event / chat_send transcript).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          conversationId: { type: "string" },
+          token: { type: "string" },
+          approve: { type: "boolean" },
+        },
+        required: ["conversationId", "token", "approve"],
+      },
+    },
+    {
+      name: "chat_close",
+      description: "Close a chat conversation (keeps history; idle chats auto-close).",
+      inputSchema: {
+        type: "object",
+        properties: { conversationId: { type: "string" } },
+        required: ["conversationId"],
+      },
+    },
+    {
+      name: "chat_delete",
+      description: "Delete a chat conversation and its metadata.",
+      inputSchema: {
+        type: "object",
+        properties: { conversationId: { type: "string" } },
+        required: ["conversationId"],
+      },
+    },
+    {
+      name: "chat_models_list",
+      description:
+        "List chat-usable models per configured LLM endpoint (live provider listing when available, else the configured default).",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "chat_model_set",
+      description:
+        "Set the model override for one chat conversation (endpointId + modelId from chat_models_list).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          conversationId: { type: "string" },
+          endpointId: { type: "string" },
+          modelId: { type: "string" },
+        },
+        required: ["conversationId", "endpointId", "modelId"],
+      },
+    },
+    {
+      name: "chat_endpoint_model_update",
+      description:
+        "Update an endpoint's default model in endpoints.json (affects new turns platform-wide).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          endpointId: { type: "string" },
+          modelId: { type: "string" },
+        },
+        required: ["endpointId", "modelId"],
+      },
+    },
+  ];
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: SLOPCONTROL_MCP_TOOLS,
-  }));
+export type DispatchSlopcontrolToolOptions = {
+  serverUrl?: string;
+  /** MCP `_meta.progressToken` from the incoming request, when present. */
+  progressToken?: string | number;
+  /** Progress-line sink (MCP logging when serving; omitted in-process). */
+  sendLog?: (logger: string, line: string) => Promise<void>;
+  /** MCP progress notification sink (only when progressToken is set). */
+  sendProgress?: (
+    progressToken: string | number,
+    progress: number,
+    message: string,
+  ) => Promise<void>;
+};
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const name = request.params.name;
-    const args = (request.params.arguments ?? {}) as Record<string, unknown>;
-    const started = Date.now();
-    log.info("mcp", `tool ${name}`, {
-      projectId: typeof args.projectId === "string" ? args.projectId : undefined,
-      rootPath: typeof args.rootPath === "string" ? args.rootPath : undefined,
-    });
+export type SlopcontrolToolResult = {
+  content: { type: string; text: string }[];
+  isError?: boolean;
+};
+
+/**
+ * Single source of truth for every SlopControl tool: the MCP transport
+ * (createSlopcontrolMcpServer) and in-process callers (the chat service)
+ * both dispatch through here. Handlers call the REST API over loopback.
+ */
+export async function dispatchSlopcontrolTool(
+  name: string,
+  args: Record<string, unknown>,
+  opts?: DispatchSlopcontrolToolOptions,
+): Promise<SlopcontrolToolResult> {
+  const SERVER_URL = opts?.serverUrl ?? defaultSlopcontrolServerUrl();
+  const sendLog = opts?.sendLog;
+  const sendProgress = opts?.sendProgress;
+  const started = Date.now();
+  log.info("mcp", `tool ${name}`, {
+    projectId: typeof args.projectId === "string" ? args.projectId : undefined,
+    rootPath: typeof args.rootPath === "string" ? args.rootPath : undefined,
+  });
 
     const wrap = async (
       work: () => Promise<{ content: { type: string; text: string }[]; isError?: boolean }>,
@@ -2437,7 +2568,7 @@ export function createSlopcontrolMcpServer(
             isError: !res.ok,
           };
         }
-        const consumed = await consumeLiveTurnSse(server, "plan_loop", res.body);
+        const consumed = await consumeLiveTurnSse(sendLog, "plan_loop", res.body);
         if (!consumed.ok || !consumed.done) {
           return {
             content: [
@@ -2501,7 +2632,7 @@ export function createSlopcontrolMcpServer(
             isError: !res.ok,
           };
         }
-        const consumed = await consumeLiveTurnSse(server, "plan_loop", res.body);
+        const consumed = await consumeLiveTurnSse(sendLog, "plan_loop", res.body);
         if (!consumed.ok || !consumed.done) {
           return {
             content: [
@@ -2722,7 +2853,7 @@ export function createSlopcontrolMcpServer(
           };
         }
         const consumed = await consumeLiveTurnSse(
-          server,
+          sendLog,
           "design_loop",
           res.body,
         );
@@ -2790,7 +2921,7 @@ export function createSlopcontrolMcpServer(
           };
         }
         const consumed = await consumeLiveTurnSse(
-          server,
+          sendLog,
           "design_loop",
           res.body,
         );
@@ -3061,6 +3192,22 @@ export function createSlopcontrolMcpServer(
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/env/sync`,
           { method: "POST" },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "project_runs_compact") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/runs/compact`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ dryRun: args.dryRun === true }),
+          },
         );
         const body = await res.text();
         return { content: [{ type: "text", text: body }], isError: !res.ok };
@@ -3685,37 +3832,21 @@ export function createSlopcontrolMcpServer(
           };
         }
 
-        const progressToken = (
-          request.params as {
-            _meta?: { progressToken?: string | number };
-          }
-        )._meta?.progressToken;
+        const progressToken = opts?.progressToken;
         let progressN = 0;
 
         const consumed = await consumeAskSseStream(res.body, async (event) => {
           const line = askProgressLogLine(event);
           if (line) {
             try {
-              await server.sendLoggingMessage({
-                level: "info",
-                logger: "ask",
-                data: line,
-              });
+              await sendLog?.("ask", line);
             } catch {
               /* client may not support logging */
             }
             if (progressToken !== undefined) {
               progressN += 1;
               try {
-                await server.notification({
-                  method: "notifications/progress",
-                  params: {
-                    progressToken,
-                    progress: progressN,
-                    total: undefined,
-                    message: line,
-                  },
-                });
+                await sendProgress?.(progressToken, progressN, line);
               } catch {
                 /* optional */
               }
@@ -3930,36 +4061,21 @@ export function createSlopcontrolMcpServer(
           };
         }
 
-        const progressToken = (
-          request.params as {
-            _meta?: { progressToken?: string | number };
-          }
-        )._meta?.progressToken;
+        const progressToken = opts?.progressToken;
         let progressN = 0;
 
         const consumed = await consumeAskSseStream(res.body, async (event) => {
           const line = askProgressLogLine(event);
           if (line) {
             try {
-              await server.sendLoggingMessage({
-                level: "info",
-                logger: "agent",
-                data: line,
-              });
+              await sendLog?.("agent", line);
             } catch {
               /* ignore */
             }
             if (progressToken !== undefined) {
               progressN += 1;
               try {
-                await server.notification({
-                  method: "notifications/progress",
-                  params: {
-                    progressToken,
-                    progress: progressN,
-                    message: line,
-                  },
-                });
+                await sendProgress?.(progressToken, progressN, line);
               } catch {
                 /* ignore */
               }
@@ -4068,11 +4184,301 @@ export function createSlopcontrolMcpServer(
       });
     }
 
+    if (name === "chat_start") {
+      return wrap(async () => {
+        const projectId = args.projectId as string | undefined;
+        const endpointId = args.endpointId as string | undefined;
+        const modelId = args.modelId as string | undefined;
+        const url = projectId
+          ? `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/chats`
+          : `${SERVER_URL}/chats`;
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title: args.title,
+            modelOverride:
+              endpointId && modelId ? { endpointId, modelId } : undefined,
+          }),
+        });
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_list") {
+      return wrap(async () => {
+        const projectId = args.projectId as string | undefined;
+        const status = args.status as string | undefined;
+        const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+        let url: string;
+        if (projectId) {
+          url = `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/chats${qs}`;
+        } else if (args.global === true) {
+          url = `${SERVER_URL}/chats${qs}`;
+        } else {
+          url = `${SERVER_URL}/chats?all=1${status ? `&status=${encodeURIComponent(status)}` : ""}`;
+        }
+        const res = await fetch(url);
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_send") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/chats/${encodeURIComponent(args.conversationId as string)}/messages`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            },
+            body: JSON.stringify({ message: args.message }),
+          },
+        );
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          const body = await res.text();
+          return {
+            content: [{ type: "text", text: body }],
+            isError: !res.ok,
+          };
+        }
+
+        // Consume the chat SSE stream: accumulate reply text, log progress,
+        // and surface confirm_request tokens so the operator can approve.
+        let reply = "";
+        const transcript: string[] = [];
+        const confirmations: Record<string, unknown>[] = [];
+        const body = res.body;
+        if (body) {
+          const reader = body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const frames = buffer.split("\n\n");
+            buffer = frames.pop() ?? "";
+            for (const frame of frames) {
+              const dataLine = frame
+                .split("\n")
+                .find((l) => l.startsWith("data: "));
+              if (!dataLine) continue;
+              try {
+                const event = JSON.parse(dataLine.slice(6)) as {
+                  type?: string;
+                  text?: string;
+                  tool?: string;
+                  summary?: string;
+                  token?: string;
+                  error?: string;
+                };
+                if (event.type === "delta" && event.text) {
+                  reply += event.text;
+                } else if (event.type === "tool_call") {
+                  transcript.push(`→ ${event.tool}: ${event.summary ?? ""}`);
+                  await sendLog?.("chat", `tool ${event.tool}: ${event.summary ?? ""}`);
+                } else if (event.type === "confirm_request") {
+                  transcript.push(
+                    `⚠ confirmation required: ${event.tool} (token ${event.token})`,
+                  );
+                  confirmations.push({
+                    token: event.token,
+                    tool: event.tool,
+                  });
+                } else if (event.type === "done" && event.text) {
+                  reply = event.text;
+                } else if (event.type === "error") {
+                  transcript.push(`error: ${event.error ?? "unknown"}`);
+                }
+              } catch {
+                /* ignore malformed frames */
+              }
+            }
+          }
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  reply,
+                  transcript,
+                  pendingConfirmations: confirmations,
+                  hint:
+                    confirmations.length > 0
+                      ? "Approve or deny with chat_confirm (conversationId + token + approve)."
+                      : undefined,
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      });
+    }
+
+    if (name === "chat_confirm") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/chats/${encodeURIComponent(args.conversationId as string)}/confirm`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token: args.token, approve: args.approve }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_close" || name === "chat_delete") {
+      return wrap(async () => {
+        const id = encodeURIComponent(args.conversationId as string);
+        const res =
+          name === "chat_close"
+            ? await fetch(`${SERVER_URL}/chats/${id}/close`, { method: "POST" })
+            : await fetch(`${SERVER_URL}/chats/${id}`, { method: "DELETE" });
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_models_list") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/chats/models`);
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_model_set") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/chats/${encodeURIComponent(args.conversationId as string)}/model`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              endpointId: args.endpointId,
+              modelId: args.modelId,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_endpoint_model_update") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/chats/endpoints/${encodeURIComponent(args.endpointId as string)}/model`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ modelId: args.modelId }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
     log.warn("mcp", `unknown tool ${name}`);
     return {
       content: [{ type: "text", text: `Unknown tool: ${name}` }],
       isError: true,
     };
+}
+
+export function createSlopcontrolMcpServer(
+  opts?: CreateSlopcontrolMcpServerOptions,
+): Server {
+  const server = new Server(
+    {
+      name: "slopcontrol",
+      version: "0.1.0",
+    },
+    {
+      capabilities: {
+        tools: {},
+        logging: {},
+      },
+    },
+  );
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: SLOPCONTROL_MCP_TOOLS,
+  }));
+
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const progressToken = (
+      request.params as { _meta?: { progressToken?: string | number } }
+    )._meta?.progressToken;
+    return dispatchSlopcontrolTool(
+      request.params.name,
+      (request.params.arguments ?? {}) as Record<string, unknown>,
+      {
+        serverUrl: opts?.serverUrl,
+        progressToken,
+        sendLog: async (logger, line) => {
+          try {
+            await server.sendLoggingMessage({
+              level: "info",
+              logger,
+              data: line,
+            });
+          } catch {
+            /* client may not support logging */
+          }
+        },
+        sendProgress: async (token, progress, message) => {
+          try {
+            await server.notification({
+              method: "notifications/progress",
+              params: {
+                progressToken: token,
+                progress,
+                total: undefined,
+                message,
+              },
+            });
+          } catch {
+            /* optional */
+          }
+        },
+      },
+    );
   });
 
   return server;

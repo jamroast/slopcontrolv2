@@ -195,11 +195,17 @@ export function hasLongLivedServerInCheck(body: string): boolean {
   if (/(?:^|[\n;&|])\s*vite(?:\s|$)/im.test(body) && !/\bvite\s+build\b/im.test(body)) {
     return true;
   }
-  // docker compose up without one-shot abort
-  if (
-    /\bdocker\s+compose\s+up\b/im.test(body) &&
-    !/--abort-on-container-exit\b/im.test(body)
-  ) {
+  // docker compose up: legal only when provably finite —
+  // (a) one-shot --abort-on-container-exit, or
+  // (b) detached (-d/--detach) with a guaranteed EXIT-trap teardown.
+  if (/\bdocker\s+compose\s+up\b/im.test(body)) {
+    if (/--abort-on-container-exit\b/im.test(body)) return false;
+    const detached = /\bdocker\s+compose\s+up\b[^\n;&|]*(?:\s-d\b|--detach\b)/im.test(body);
+    const trapTeardown =
+      /trap\s+['"]?[^'"\n]*\bdocker\s+compose\s+(?:down|stop)\b[^'"\n]*['"]?\s+(?:EXIT|0)\b/im.test(
+        body,
+      );
+    if (detached && trapTeardown) return false;
     return true;
   }
   return false;
@@ -269,7 +275,7 @@ function shellValidate(cell: CheckCell): string[] {
   }
   if (hasLongLivedServerInCheck(normalized)) {
     issues.push(
-      `Broken Automated Check starts a long-lived server (pnpm/npm/yarn/bun dev|start|serve, vite, next dev, docker compose up). Automated Checks must be finite — use structural asserts (grep alias/config) or a short Node one-shot: ${normalized.slice(0, 120)}`,
+      `Broken Automated Check starts a long-lived server (pnpm/npm/yarn/bun dev|start|serve, vite, next dev, docker compose up). Automated Checks must be finite — use structural asserts (grep alias/config), a short Node one-shot, or a finite compose probe: \`docker compose up -d app\` plus \`trap 'docker compose down' EXIT\` then probe: ${normalized.slice(0, 120)}`,
     );
   }
   if (hasBackgroundWaitHangAntipattern(normalized)) {

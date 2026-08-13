@@ -1,6 +1,6 @@
 import "./load-env.js";
 
-import { existsSync, readFileSync, rmSync, openSync, readSync, closeSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import cors from "cors";
 import express from "express";
@@ -162,7 +162,7 @@ import {
   classifyDependencyIntentViaLlm,
   loadEndpointsConfig,
 } from "@slopcontrol/llm";
-import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError } from "@slopcontrol/mastra";
+import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError } from "@slopcontrol/mastra";
 import {
   bindLiveTurn,
   wantsLiveStream,
@@ -185,6 +185,10 @@ import { mountMcpHttp } from "./mcp-http.js";
 import { createStore, defaultDataDir } from "./store.js";
 import { DevelopLock } from "./develop-lock.js";
 import { NO_ENV_SYNC_HINT, runProjectEnvSync } from "./env-sync.js";
+import { compactProjectRuns, compactRuns, planCompaction } from "./run-compaction.js";
+import { startRunCompactionWatcher } from "./run-compaction-watcher.js";
+import { startChatConversationWatcher } from "./chat-conversation-watcher.js";
+import { dispatchSlopcontrolTool } from "./mcp-tools.js";
 
 const PORT = Number(process.env.SLOPCONTROL_PORT ?? 3020);
 const app = express();
@@ -193,6 +197,26 @@ const activeRuns = new Set<string>();
 const abortControllers = new Map<string, AbortController>();
 /** One live develop (design→develop / retry) job per project. */
 const developLock = new DevelopLock((runId) => activeRuns.has(runId));
+
+let chatServiceInstance: ChatService | null = null;
+function getChatService(): ChatService {
+  if (!chatServiceInstance) {
+    const dataDir = defaultDataDir();
+    chatServiceInstance = new ChatService({
+      store,
+      getMemory: () => getSlopcontrolRuntime(dataDir, dataDir).memory,
+      dispatch: (name, args) => dispatchSlopcontrolTool(name, args),
+      context: {
+        listProjects: () => store.listProjects(),
+        listPhases: (projectId) => store.listPhases(projectId),
+        listRuns: (projectId) => store.listRuns(projectId),
+        getProject: (id) => store.getProject(id),
+      },
+      endpointsPath: join(dataDir, "endpoints.json"),
+    });
+  }
+  return chatServiceInstance;
+}
 
 app.use(cors());
 app.use(express.json());
@@ -839,6 +863,44 @@ function buildRunPayload(run: Run) {
   const phase = store.getPhase(run.phaseId);
   if (!project) return null;
 
+  // Tombstone row: merged into an archive run — no fs reads, cheap listing.
+  if (run.archived && run.archivedInto) {
+    return {
+      id: run.id,
+      archived: true,
+      archived_into: run.archivedInto,
+      project_id: run.projectId,
+      phase_id: run.phaseId,
+      stage: run.stage,
+      created_at: run.createdAt,
+      updated_at: run.updatedAt,
+      researchRunning: false,
+      devRunning: false,
+    };
+  }
+
+  // Synthetic archive run: surface the compaction manifest.
+  let archiveManifest: unknown = null;
+  if (run.archived && run.mergedRunIds) {
+    const archiveRoot = join(project.rootPath, ".slopcontrol", "archive");
+    try {
+      for (const dir of readdirSync(archiveRoot)) {
+        if (!dir.startsWith("runs-compact-")) continue;
+        const manifestPath = join(archiveRoot, dir, "ARCHIVE.json");
+        if (!existsSync(manifestPath)) continue;
+        const parsed = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
+          archiveRunId?: string;
+        };
+        if (parsed.archiveRunId === run.id) {
+          archiveManifest = parsed;
+          break;
+        }
+      }
+    } catch {
+      /* archive dir missing or unreadable — payload still works */
+    }
+  }
+
   let devOutput = "";
   const logPath = join(project.rootPath, ".slopcontrol", "runs", run.id, "log.txt");
   if (existsSync(logPath)) {
@@ -861,9 +923,12 @@ function buildRunPayload(run: Run) {
 
   return {
     id: run.id,
-    idea: phase?.description ?? "",
+    idea: run.archiveTitle ?? phase?.description ?? "",
     project_dir: project.rootPath,
     stage: run.stage,
+    archived: run.archived === true ? true : undefined,
+    merged_run_ids: run.mergedRunIds,
+    archive: archiveManifest,
     research_output: phase ? safeReadResearch(project.rootPath, phase.id) : "",
     dev_output: devOutput,
     phase_doc: phaseDoc,
@@ -1204,6 +1269,46 @@ app.post("/projects/:id/env/sync", async (req, res) => {
     });
   }
 });
+
+/**
+ * Run compaction: flatten old terminal runs into a single archive run.
+ * dryRun returns the plan without writing anything.
+ */
+app.post("/projects/:id/runs/compact", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  try {
+    const config = readProjectConfig(project.rootPath);
+    const result = await compactProjectRuns({
+      projectId: project.id,
+      projectRoot: project.rootPath,
+      store,
+      activeRunIds: activeRuns,
+      dryRun: req.body?.dryRun === true,
+      config: config.runCompaction ?? {},
+    });
+    if (result.status === 409) {
+      res.status(409).json({ error: result.error });
+      return;
+    }
+    if (result.body.compacted === true) {
+      log.info("runs", "compacted", {
+        projectId: project.id,
+        archiveRunId: result.body.archiveRunId,
+        merged: (result.body.mergedRunIds as string[]).length,
+      });
+    }
+    res.json(result.body);
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
 app.put("/projects/:id/build-process/toolchain", (req, res) => {
   const project = store.getProject(req.params.id);
   if (!project) {
@@ -6025,10 +6130,16 @@ app.patch("/projects/:projectId/phases/:phaseId/dependencies", (req, res) => {
 });
 
 app.get("/runs/:id", (req, res) => {
-  const run = store.getRun(req.params.id);
+  let run = store.getRun(req.params.id);
   if (!run) {
     res.status(404).json({ error: "Run not found" });
     return;
+  }
+  // Tombstone: redirect to the archive run it was merged into.
+  let mergedFrom: string | undefined;
+  if (run.archived && run.archivedInto) {
+    mergedFrom = run.id;
+    run = store.getRun(run.archivedInto) ?? run;
   }
   const payload = buildRunPayload(run);
   if (!payload) {
@@ -6037,6 +6148,7 @@ app.get("/runs/:id", (req, res) => {
   }
   res.json({
     ...payload,
+    merged_from: mergedFrom,
     active: activeRuns.has(run.id),
   });
 });
@@ -7228,8 +7340,253 @@ app.post("/runs", async (req, res) => {
   res.status(400).json({ error: "Unhandled action" });
 });
 
+// ---- Chat service (per-project + global operator chat) ----
+
+function chatErrorStatus(err: unknown): number {
+  if (err instanceof ConversationNotFoundError) return 404;
+  if (err instanceof ConversationClosedError) return 409;
+  return 500;
+}
+
+function sseHeaders(res: express.Response): void {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+}
+
+app.post("/projects/:id/chats", (req, res) => {
+  try {
+    const project = store.getProject(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const { title, modelOverride } = req.body ?? {};
+    const conversation = getChatService().createConversation({
+      projectId: project.id,
+      title: typeof title === "string" ? title : undefined,
+      modelOverride,
+    });
+    res.status(201).json({ conversation });
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/projects/:id/chats", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const status = req.query.status === "closed" ? "closed" : req.query.status === "active" ? "active" : undefined;
+  res.json({
+    conversations: getChatService().listConversations({
+      projectId: project.id,
+      status,
+    }),
+  });
+});
+
+app.get("/projects/:id/chats/events", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  sseHeaders(res);
+  const unsubscribe = getChatService().subscribe((event) => {
+    if (event.projectId !== project.id) return;
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  });
+  req.on("close", unsubscribe);
+});
+
+app.post("/chats", (req, res) => {
+  try {
+    const { title, modelOverride } = req.body ?? {};
+    const conversation = getChatService().createConversation({
+      projectId: null,
+      title: typeof title === "string" ? title : undefined,
+      modelOverride,
+    });
+    res.status(201).json({ conversation });
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/chats", (req, res) => {
+  const status = req.query.status === "closed" ? "closed" : req.query.status === "active" ? "active" : undefined;
+  const all = req.query.all === "1" || req.query.all === "true";
+  res.json({
+    conversations: all
+      ? getChatService().listConversations({ status })
+      : getChatService().listConversations({ projectId: null, status }),
+  });
+});
+
+app.get("/chats/events", (req, res) => {
+  sseHeaders(res);
+  const unsubscribe = getChatService().subscribe((event) => {
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  });
+  req.on("close", unsubscribe);
+});
+
+app.get("/chats/models", async (_req, res) => {
+  try {
+    res.json({ endpoints: await getChatService().listModels() });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/chats/:id", (req, res) => {
+  try {
+    res.json({ conversation: getChatService().getConversation(req.params.id) });
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.delete("/chats/:id", (req, res) => {
+  const deleted = getChatService().deleteConversation(req.params.id);
+  if (!deleted) {
+    res.status(404).json({ error: "Conversation not found" });
+    return;
+  }
+  res.json({ deleted: true });
+});
+
+app.post("/chats/:id/close", (req, res) => {
+  try {
+    res.json({ conversation: getChatService().closeConversation(req.params.id) });
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/chats/:id/model", (req, res) => {
+  try {
+    const { endpointId, modelId } = req.body ?? {};
+    if (typeof endpointId !== "string" || typeof modelId !== "string") {
+      res.status(400).json({ error: "endpointId and modelId required" });
+      return;
+    }
+    const conversation = getChatService().setConversationModel(req.params.id, {
+      endpointId,
+      modelId,
+    });
+    res.json({ conversation });
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/chats/endpoints/:endpointId/model", (req, res) => {
+  try {
+    const { modelId } = req.body ?? {};
+    if (typeof modelId !== "string" || !modelId.trim()) {
+      res.status(400).json({ error: "modelId required" });
+      return;
+    }
+    const config = getChatService().updateEndpointDefaultModel(
+      req.params.endpointId,
+      modelId.trim(),
+    );
+    res.json({ ok: true, endpoints: config.endpoints });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    res
+      .status(message.startsWith("Unknown endpoint") ? 404 : 500)
+      .json({ error: message });
+  }
+});
+
+app.post("/chats/:id/confirm", async (req, res) => {
+  try {
+    const { token, approve } = req.body ?? {};
+    if (typeof token !== "string" || typeof approve !== "boolean") {
+      res.status(400).json({ error: "token and approve (boolean) required" });
+      return;
+    }
+    const result = await getChatService().confirm({
+      conversationId: req.params.id,
+      token,
+      approve,
+    });
+    if (!result.ok && result.error === "Unknown or expired confirmation token") {
+      res.status(404).json({ error: result.error });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/chats/:id/messages", async (req, res) => {
+  const { message } = req.body ?? {};
+  if (typeof message !== "string" || !message.trim()) {
+    res.status(400).json({ error: "message required" });
+    return;
+  }
+  try {
+    getChatService().getConversation(req.params.id);
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+
+  sseHeaders(res);
+  try {
+    for await (const event of getChatService().sendMessage(
+      req.params.id,
+      message,
+    )) {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+  } catch (err) {
+    res.write(
+      `data: ${JSON.stringify({
+        type: "error",
+        error: err instanceof Error ? err.message : String(err),
+      })}\n\n`,
+    );
+  } finally {
+    res.end();
+  }
+});
+
 app.listen(PORT, () => {
   startLiveTurnWatcher();
+  startRunCompactionWatcher({
+    store,
+    isRunActive: (runId) => activeRuns.has(runId),
+    projectBusy: (projectId) =>
+      store
+        .listRuns(projectId)
+        .some((run) => activeRuns.has(run.id)),
+  });
+  startChatConversationWatcher(getChatService());
   log.info("server", `listening on http://localhost:${PORT}`, {
     dataDir: defaultDataDir(),
     logLevel: process.env.SLOPCONTROL_LOG_LEVEL ?? "info",

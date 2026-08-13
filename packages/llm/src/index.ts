@@ -96,6 +96,10 @@ function bindingForRole(
   if (role === "design" || role === "classification") {
     return roles.planning;
   }
+  // Chat-service operator agent falls back to supervisor when unbound.
+  if (role === "chat") {
+    return roles.supervisor;
+  }
 
   if (role === "designVision" || role === "designImage") {
     throw new Error(
@@ -182,6 +186,9 @@ export class LlmRegistry {
       return (
         Boolean(this.roles.classification) || Boolean(this.roles.planning)
       );
+    }
+    if (role === "chat") {
+      return Boolean(this.roles.chat) || Boolean(this.roles.supervisor);
     }
     const binding = this.roles[role as keyof RoleModelBindings];
     return Boolean(binding);

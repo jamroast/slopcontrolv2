@@ -9,6 +9,7 @@ import type {
   AskMessage,
   AskSession,
   AskStatus,
+  ChatConversation,
   Phase,
   Project,
   Run,
@@ -43,6 +44,7 @@ export interface SlopStoreData {
   runs: Run[];
   asks: AskSession[];
   agents: AgentSession[];
+  conversations: ChatConversation[];
 }
 
 export class SlopStore {
@@ -55,7 +57,14 @@ export class SlopStore {
 
   private load(): SlopStoreData {
     if (!existsSync(this.dbPath)) {
-      return { projects: [], phases: [], runs: [], asks: [], agents: [] };
+      return {
+        projects: [],
+        phases: [],
+        runs: [],
+        asks: [],
+        agents: [],
+        conversations: [],
+      };
     }
     const raw = JSON.parse(readFileSync(this.dbPath, "utf-8")) as Partial<SlopStoreData>;
     return {
@@ -64,6 +73,7 @@ export class SlopStore {
       runs: raw.runs ?? [],
       asks: raw.asks ?? [],
       agents: raw.agents ?? [],
+      conversations: raw.conversations ?? [],
     };
   }
 
@@ -204,6 +214,36 @@ export class SlopStore {
 
   deleteRun(id: string): void {
     this.data.runs = this.data.runs.filter((run) => run.id !== id);
+    this.save();
+  }
+
+  /**
+   * Run compaction swap: replace the merged run rows with lightweight
+   * tombstones and insert the synthetic archive run, in a single save().
+   */
+  replaceRunsWithArchive(
+    mergedIds: string[],
+    archiveRun: Run,
+    now: string,
+  ): void {
+    const merged = new Set(mergedIds);
+    this.data.runs = this.data.runs.map((run) =>
+      merged.has(run.id)
+        ? {
+            id: run.id,
+            phaseId: run.phaseId,
+            projectId: run.projectId,
+            stage: "complete" as const,
+            iterationCount: 0,
+            createdAt: run.createdAt,
+            updatedAt: now,
+            stageTimings: [],
+            archived: true,
+            archivedInto: archiveRun.id,
+          }
+        : run,
+    );
+    this.data.runs.push(archiveRun);
     this.save();
   }
 
@@ -357,6 +397,81 @@ export class SlopStore {
     return n;
   }
 
+  listConversations(opts?: {
+    projectId?: string | null;
+    status?: ChatConversation["status"];
+  }): ChatConversation[] {
+    return this.data.conversations
+      .filter((c) => {
+        if (opts?.projectId === null) return c.projectId === null;
+        if (opts?.projectId !== undefined) return c.projectId === opts.projectId;
+        return true;
+      })
+      .filter((c) => (opts?.status ? c.status === opts.status : true))
+      .sort((a, b) => b.lastActiveAt.localeCompare(a.lastActiveAt));
+  }
+
+  getConversation(id: string): ChatConversation | undefined {
+    return this.data.conversations.find((c) => c.id === id);
+  }
+
+  createConversation(input: {
+    projectId: string | null;
+    title?: string;
+    modelOverride?: ChatConversation["modelOverride"];
+  }): ChatConversation {
+    const now = new Date().toISOString();
+    const conversation: ChatConversation = {
+      id: randomUUID(),
+      projectId: input.projectId,
+      title: sanitizeAskTitle(input.title),
+      status: "active",
+      modelOverride: input.modelOverride,
+      createdAt: now,
+      lastActiveAt: now,
+    };
+    this.data.conversations.push(conversation);
+    this.save();
+    return conversation;
+  }
+
+  updateConversation(conversation: ChatConversation): void {
+    const index = this.data.conversations.findIndex((c) => c.id === conversation.id);
+    if (index >= 0) {
+      this.data.conversations[index] = conversation;
+      this.save();
+    }
+  }
+
+  /** Bump activity stamp (also auto-title from the first user message). */
+  touchConversation(id: string, titleHint?: string): ChatConversation | undefined {
+    const conversation = this.getConversation(id);
+    if (!conversation) return undefined;
+    conversation.lastActiveAt = new Date().toISOString();
+    if (!conversation.title && titleHint) {
+      conversation.title = sanitizeAskTitle(titleHint);
+    }
+    this.updateConversation(conversation);
+    return conversation;
+  }
+
+  closeConversation(id: string): ChatConversation | undefined {
+    const conversation = this.getConversation(id);
+    if (!conversation || conversation.status === "closed") return conversation;
+    conversation.status = "closed";
+    conversation.closedAt = new Date().toISOString();
+    this.updateConversation(conversation);
+    return conversation;
+  }
+
+  deleteConversation(id: string): boolean {
+    const before = this.data.conversations.length;
+    this.data.conversations = this.data.conversations.filter((c) => c.id !== id);
+    if (this.data.conversations.length === before) return false;
+    this.save();
+    return true;
+  }
+
   listAgents(projectId: string): AgentSession[] {
     return this.data.agents
       .filter((agent) => agent.projectId === projectId)
@@ -412,20 +527,25 @@ export class SlopStore {
     }
   }
 
-  /** Remove phases/runs/agents; archive asks (keep history for list_asks / fork). */
+  /** Remove phases/runs/agents/conversations; archive asks (keep history for list_asks / fork). */
   clearProjectWork(projectId: string): {
     phasesRemoved: number;
     runsRemoved: number;
     asksRemoved: number;
     asksArchived: number;
     agentsRemoved: number;
+    conversationsRemoved: number;
   } {
     const phasesBefore = this.data.phases.length;
     const runsBefore = this.data.runs.length;
     const agentsBefore = this.data.agents.length;
+    const conversationsBefore = this.data.conversations.length;
     this.data.phases = this.data.phases.filter((p) => p.projectId !== projectId);
     this.data.runs = this.data.runs.filter((r) => r.projectId !== projectId);
     this.data.agents = this.data.agents.filter((a) => a.projectId !== projectId);
+    this.data.conversations = this.data.conversations.filter(
+      (c) => c.projectId !== projectId,
+    );
     const asksArchived = this.archiveProjectAsks(projectId);
     this.save();
     return {
@@ -434,6 +554,7 @@ export class SlopStore {
       asksRemoved: 0,
       asksArchived,
       agentsRemoved: agentsBefore - this.data.agents.length,
+      conversationsRemoved: conversationsBefore - this.data.conversations.length,
     };
   }
 

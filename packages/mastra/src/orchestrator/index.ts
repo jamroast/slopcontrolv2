@@ -4826,6 +4826,8 @@ Include ## Blueprint Deltas for durable design changes.
 MUST include ## Automated Checks with at least one runnable command in a \`\`\`bash fence
 (e.g. npm test -- path/to/regression.test.ts). Manual-only success criteria are not enough.
 Match tokens independently: one \`grep -q\` per token joined by \`&&\` — never require multiple tokens on a single line via \`.*\` chains (code formatting varies across lines).
+Automated Checks must be finite: no dev servers (\`next dev\`, \`pnpm dev\`), no bare \`docker compose up\`. A runtime probe against a dockerized app is legal ONLY as: \`docker compose up -d <svc>\` plus \`trap 'docker compose down' EXIT\`, then probe (wget/curl/node one-shot).
+When Change Intent has an engagement interaction, prove fill+submit at the locked mount; only chat mounts (composer/bubble) also need live AI SDK static tool-part proofs (type: "tool-<name>" / parseToolResult / extractActiveForm).
 When finished, include PHASE_COMPLETE on its own line.
 Do NOT narrate that you wrote the file — output the document itself.
 ${learningsBlock ? `\n${learningsBlock}\n` : ""}
@@ -4858,7 +4860,8 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
             runId: run.id,
             kind: "change-intent-scaffold-refused",
             operatorActions: [
-              "Retry draft so Success Criteria / Automated Checks prove fill+submit at the locked mount and live AI SDK static tool-part name resolution (type: tool-<name> / parseToolResult / extractActiveForm).",
+              "Retry draft so Success Criteria / Automated Checks prove fill+submit at the locked mount (chat mounts also need live AI SDK static tool-part name resolution: type: tool-<name> / parseToolResult / extractActiveForm).",
+              "Runtime proofs on dockerized apps must be finite: docker compose up -d <svc> + trap 'docker compose down' EXIT, then probe — never a bare compose up or dev server.",
               "Do not rely on summary-chip-only or tool-invocation+toolName fixtures.",
             ],
           }),
@@ -5020,7 +5023,7 @@ If you use write_file, path must be exactly: ${canonicalPath}
 Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence, no curl with API keys; one \`grep -q\` per token joined by \`&&\` — never same-line \`.*\` chains), ## Blueprint Deltas.
 Base Scope/File Changes ONLY on the RESEARCH below — do not copy a prior phase's host-routing plan.
 Obey Change Intent uiMount / interaction contract — do not substitute chips for a fillable mount.
-When Change Intent has an engagement interaction: ## Success Criteria and ## Automated Checks MUST prove fill+submit at the locked mount AND live AI SDK static tool-part name resolution (type: "tool-<name>" / parseToolResult / extractActiveForm) — not only tool-invocation + toolName fixtures. Put those proofs in Success Criteria / Automated Checks, not only in File Changes or Known limitations.
+When Change Intent has an engagement interaction: ## Success Criteria and ## Automated Checks MUST prove fill+submit at the locked mount. For chat mounts (composer/bubble) they MUST ALSO prove live AI SDK static tool-part name resolution (type: "tool-<name>" / parseToolResult / extractActiveForm) — not only tool-invocation + toolName fixtures. Put those proofs in Success Criteria / Automated Checks, not only in File Changes or Known limitations. Runtime proofs on dockerized apps must be finite: use \`docker compose up -d <svc>\` plus \`trap 'docker compose down' EXIT\`, then probe — never a bare \`docker compose up\` or dev server.
 End with PHASE_COMPLETE.
 
 Description:

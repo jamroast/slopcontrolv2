@@ -1477,7 +1477,7 @@ export function buildPlanningFailureDiagnosis(opts: {
   const defaultActions =
     opts.stage === "draft"
       ? [
-          "Retry draft after fixing PHASE.md Success Criteria / Automated Checks to match Change Intent (engagement mounts need fill+submit proof; live AI SDK static tool parts need type: tool-<name> / parseToolResult / extractActiveForm — not only tool-invocation fixtures).",
+          "Retry draft after fixing PHASE.md Success Criteria / Automated Checks to match Change Intent (engagement mounts need fill+submit proof; chat mounts (composer/bubble) also need live AI SDK static tool parts: type: tool-<name> / parseToolResult / extractActiveForm — not only tool-invocation fixtures). Runtime proofs on dockerized apps must be finite: docker compose up -d <svc> + trap 'docker compose down' EXIT, then probe.",
           "Inspect get_run.dev_output / diagnosis.evidence for the exact gate issues.",
         ]
       : [
@@ -2324,7 +2324,7 @@ export function scaffoldPhaseDoc(opts: {
 
   const successBlock = engagement
     ? `- Fillable UI at locked mount (${mount}) with enabled input and submit
-- Automated Checks prove fill+submit (incl. live AI SDK \`type: tool-<name>\` name resolution via parseToolResult / extractActiveForm)
+- Automated Checks prove fill+submit (chat mounts also prove live AI SDK \`type: tool-<name>\` name resolution via parseToolResult / extractActiveForm)
 - Manual smoke of the reported failure path succeeds when applicable`
     : designBoundShell
       ? `- ThemeToggle mounted in shell menubar and visible (utilities / tokens resolve)
@@ -2359,7 +2359,7 @@ grep -qE 'text-text-secondary|--text-secondary' src/app/globals.css node_modules
 ${testCmd}
 \`\`\`
 
-Structural (engagement — live tool-part shape, not chip-only):
+Structural (engagement — fill+submit at mount; chat mounts also prove live tool-part shape, not chip-only):
 
 \`\`\`bash
 grep -qE 'parseToolResult|extractActiveForm|tool-' . || exit 1

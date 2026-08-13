@@ -280,6 +280,76 @@ Fixtures use type: "tool-invocation" with toolName set.
     assert.ok(align.issues.some((i) => /live|tool-<|parseToolResult/i.test(i)));
   });
 
+  it("accepts page-mount engagement PHASE without AI SDK tool-part language", () => {
+    // JamPress phase 87 class: Clerk sign-in page — mount=page engagement
+    // must not be trapped by the composer-only live tool-part proof demand.
+    const intent = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "Fix JamPress login buttons",
+        goal: "Make the sign-in page render the Clerk SignIn component so users can submit the login form.",
+        uiMount: "page",
+        changeKind: "engagement",
+        needsInteraction: true,
+      }),
+      { description: "Login buttons do not work on the sign-in page" },
+    );
+    assert.equal(intent.interaction?.mount, "page");
+    const doc = `# Phase
+
+## Scope
+Add NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY to the Compose .env so the sign-in page mounts Clerk <SignIn> with an enabled submit action.
+
+## Success Criteria
+- Sign-in page mounts the Clerk <SignIn> component (not the fallback)
+- Primary action (submit form via OAuth button) is reachable and enabled
+
+## Automated Checks
+\`\`\`bash
+grep -q '^NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_' .env || exit 1
+grep -q '<SignIn' src/app/sign-in/page.tsx || exit 1
+\`\`\`
+
+## Blueprint Deltas
+- **BD-87-COMPOSE-DOTENV:** NEXT_PUBLIC_* vars live in Compose .env
+`;
+    const align = phaseDocAlignsWithChangeIntent(doc, intent);
+    assert.deepEqual(align.issues, []);
+    assert.equal(align.ok, true);
+  });
+
+  it("still rejects composer-mount engagement without live tool-part proof", () => {
+    const intent = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "Fix composer form submit",
+        goal: "Users must fill and submit skill params in the composer.",
+        uiMount: "composer",
+        changeKind: "engagement",
+        needsInteraction: true,
+      }),
+      { description: "Unable to submit form in composer" },
+    );
+    const doc = `# Phase
+
+## Scope
+Fix composer form engagement with fillable inputs and submit.
+
+## Success Criteria
+- composer-form has enabled input and submit
+
+## Automated Checks
+\`\`\`bash
+npm test -- tests/active-form.test.ts
+\`\`\`
+Fixtures use type: "tool-invocation" with toolName set.
+
+## Blueprint Deltas
+- **BD-COMPOSER-FORM-ENGAGEMENT:** composer mount
+`;
+    const align = phaseDocAlignsWithChangeIntent(doc, intent);
+    assert.equal(align.ok, false);
+    assert.ok(align.issues.some((i) => /chat mount|tool-<|parseToolResult/i.test(i)));
+  });
+
   it("accepts engagement PHASE with live static tool-part proof", () => {
     const intent = extractChangeIntent(
       'Unable to submit the form — stuck at "Superseded by a newer form". Fix so I can fill and submit.',

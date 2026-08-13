@@ -967,17 +967,26 @@ export function phaseDocAlignsWithChangeIntent(
     }
     // Live AI SDK static tool parts encode the name in type: "tool-<name>" —
     // fixtures that only use tool-invocation + toolName miss the live break.
-    const proofSurface = `${checks}\n${success}`;
-    const hasLiveShapeProof =
-      /tool-<|live\s+static|parseToolResult|extractActiveForm|no\s+toolName|without\s+toolName|derive.*(?:tool\s*)?name|toolName.*from\s+type|slice\(["']tool-/i.test(
-        proofSurface,
-      ) ||
-      (/type\s*[:=]\s*["'`]tool-(?!invocation)/i.test(proofSurface) &&
-        !/tool-invocation/i.test(proofSurface));
-    if (!hasLiveShapeProof) {
-      issues.push(
-        "Engagement Change Intent requires Automated Checks / Success Criteria that prove live AI SDK static tool-part name resolution (type: tool-<name> / parseToolResult / extractActiveForm) — not only tool-invocation + toolName fixtures",
-      );
+    // This proof only applies to AI chat surfaces (composer/bubble mounts);
+    // page/modal engagements (e.g. a Clerk sign-in) have no tool parts.
+    const chatMount =
+      intent.interaction.mount === "composer" ||
+      intent.interaction.mount === "bubble" ||
+      intent.uiMount === "composer" ||
+      intent.uiMount === "bubble";
+    if (chatMount) {
+      const proofSurface = `${checks}\n${success}`;
+      const hasLiveShapeProof =
+        /tool-<|live\s+static|parseToolResult|extractActiveForm|no\s+toolName|without\s+toolName|derive.*(?:tool\s*)?name|toolName.*from\s+type|slice\(["']tool-/i.test(
+          proofSurface,
+        ) ||
+        (/type\s*[:=]\s*["'`]tool-(?!invocation)/i.test(proofSurface) &&
+          !/tool-invocation/i.test(proofSurface));
+      if (!hasLiveShapeProof) {
+        issues.push(
+          "Engagement Change Intent on a chat mount (composer/bubble) requires Automated Checks / Success Criteria that prove live AI SDK static tool-part name resolution (type: tool-<name> / parseToolResult / extractActiveForm) — not only tool-invocation + toolName fixtures",
+        );
+      }
     }
   }
 

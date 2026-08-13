@@ -57,6 +57,8 @@ export const AgentRoleSchema = z.enum([
   "designImage",
   /** Structured JSON classification (continue-intent, change-intent) */
   "classification",
+  /** Chat-service operator agent — defaults to supervisor when omitted */
+  "chat",
 ]);
 
 export type AgentRole = z.infer<typeof AgentRoleSchema>;
@@ -84,6 +86,8 @@ export const RoleModelBindingsSchema = z.object({
    * Defaults to planning when omitted.
    */
   classification: RoleBindingSchema.optional(),
+  /** Chat-service operator agent. Defaults to supervisor when omitted. */
+  chat: RoleBindingSchema.optional(),
 });
 
 export type RoleModelBindings = z.infer<typeof RoleModelBindingsSchema>;
@@ -258,6 +262,36 @@ export const AgentSessionSchema = z.object({
 
 export type AgentSession = z.infer<typeof AgentSessionSchema>;
 
+export const ChatConversationStatusSchema = z.enum(["active", "closed"]);
+
+export type ChatConversationStatus = z.infer<typeof ChatConversationStatusSchema>;
+
+export const ChatModelOverrideSchema = z.object({
+  endpointId: z.string().min(1),
+  modelId: z.string().min(1),
+});
+
+export type ChatModelOverride = z.infer<typeof ChatModelOverrideSchema>;
+
+/**
+ * Chat-service conversation metadata. Message bodies live in the Mastra
+ * Memory thread (mastra.db) keyed by conversation id — this row is the
+ * lifecycle/lookup record (scope, status, model override, idle tracking).
+ * projectId null = global-scope conversation (cross-project control chat).
+ */
+export const ChatConversationSchema = z.object({
+  id: z.string().min(1),
+  projectId: z.string().min(1).nullable(),
+  title: z.string().optional(),
+  status: ChatConversationStatusSchema,
+  modelOverride: ChatModelOverrideSchema.optional(),
+  createdAt: z.string().datetime(),
+  lastActiveAt: z.string().datetime(),
+  closedAt: z.string().datetime().optional(),
+});
+
+export type ChatConversation = z.infer<typeof ChatConversationSchema>;
+
 export const PhaseSchema = z.object({
   id: z.string().min(1),
   projectId: z.string().min(1),
@@ -337,6 +371,14 @@ export const RunSchema = z.object({
   totalDurationMs: z.number().int().nonnegative().optional(),
   /** Per-stage timing segments (closed when the stage changes) */
   stageTimings: z.array(StageTimingSchema).default([]),
+  /** True for synthetic archive rows and tombstones created by run compaction. */
+  archived: z.boolean().optional(),
+  /** Tombstone pointer: the archive run this row was merged into. */
+  archivedInto: z.string().optional(),
+  /** Synthetic archive row: the run IDs it replaces. */
+  mergedRunIds: z.array(z.string().min(1)).optional(),
+  /** Synthetic archive row display title. */
+  archiveTitle: z.string().optional(),
 });
 
 export type Run = z.infer<typeof RunSchema>;
@@ -591,6 +633,19 @@ export const ProjectConfigSchema = z.object({
    * Overrides SLOPCONTROL_CODING_TURN_MS when set. Default elsewhere is 600000.
    */
   codingTurnTimeoutMs: z.number().int().positive().optional(),
+  /**
+   * Background run compaction: when terminal runs exceed maxRuns, the
+   * oldest are flattened into a single archive run (digest + tar.gz under
+   * .slopcontrol/archive). keepLatest recent terminal runs and the latest
+   * run per phase are never compacted. Absent = server defaults.
+   */
+  runCompaction: z
+    .object({
+      maxRuns: z.number().int().positive().default(50),
+      keepLatest: z.number().int().positive().default(20),
+      minAgeDays: z.number().int().nonnegative().default(7),
+    })
+    .optional(),
   roleBindings: RoleModelBindingsSchema.partial().optional(),
   /** DesignTool id (default ollama-images). */
   designToolId: z.string().default("ollama-images"),
