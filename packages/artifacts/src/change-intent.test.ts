@@ -14,6 +14,9 @@ import {
   finalizeChangeIntent,
   formatChangeIntentPromptBlock,
   ChangeIntentLlmOutputSchema,
+  interactionProofKind,
+  isClickNavigateAsk,
+  needsInteractionContract,
   garbageCollectSupersededMountBds,
   isChangeIntentWeak,
   isWorktreeIsolationPort,
@@ -679,6 +682,156 @@ None.
     assert.equal(intent.uiMount, "composer");
     assert.equal(intent.changeKind, "engagement");
     assert.ok(intent.interaction);
+  });
+
+  const phase88Ask =
+    'Investigate why the sign-in button (UserPill showing "?") on the landing page does nothing when clicked. Add onClick={() => router.push("/sign-in")}.';
+
+  it("phase-88 click-to-navigate ask is other with no form contract", () => {
+    assert.equal(isClickNavigateAsk(phase88Ask), true);
+    assert.equal(needsInteractionContract(phase88Ask), false);
+    const intent = extractChangeIntent(phase88Ask);
+    assert.equal(intent.changeKind, "other");
+    assert.equal(intent.interaction, undefined);
+    assert.equal(interactionProofKind(intent), "none");
+  });
+
+  it("finalize coerces LLM engagement on a click-to-navigate ask off the form contract", () => {
+    const intent = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "Wire landing UserPill to sign-in",
+        goal: "Clicking UserPill should navigate to /sign-in.",
+        uiMount: "page",
+        changeKind: "engagement",
+        needsInteraction: true,
+      }),
+      { description: phase88Ask },
+    );
+    assert.equal(intent.changeKind, "other");
+    assert.equal(intent.interaction, undefined);
+    assert.equal(intent.uiMount, "page");
+  });
+
+  it("inert button without form words does not invent a fill/submit contract", () => {
+    const inertButton = "The landing Sign In control is inert and does nothing when clicked.";
+    assert.equal(needsInteractionContract(inertButton), false);
+    const intent = extractChangeIntent(inertButton);
+    assert.equal(intent.interaction, undefined);
+  });
+
+  it("unable to submit the form still needs an interaction contract", () => {
+    const formFail = "Unable to submit the form — stuck at superseded.";
+    assert.equal(needsInteractionContract(formFail), true);
+    const intent = extractChangeIntent(formFail);
+    assert.equal(intent.changeKind, "engagement");
+    assert.ok(intent.interaction);
+    assert.match(intent.interaction!.primaryAction, /submit form/i);
+  });
+
+  it("click-to-navigate PHASE.md passes when Intent has no form contract", () => {
+    const intent = extractChangeIntent(phase88Ask);
+    const doc = `# Phase
+
+## Scope
+Wire landing UserPill loggedOut onClick to router.push("/sign-in").
+
+## Success Criteria
+- Clicking the landing UserPill navigates to /sign-in
+- UserPill loggedOut has onClick
+
+## Automated Checks
+\`\`\`bash
+grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
+grep -q 'router.push("/sign-in")' src/components/layout/user-pill.tsx || exit 1
+\`\`\`
+
+## Blueprint Deltas
+- **BD-88-USERPILL-SIGNIN:** landing UserPill navigates to /sign-in
+`;
+    const align = phaseDocAlignsWithChangeIntent(doc, intent);
+    assert.deepEqual(align.issues, []);
+    assert.equal(align.ok, true);
+  });
+
+  it("form-engagement PHASE without fill+submit still fails align", () => {
+    const intent = extractChangeIntent(
+      "Unable to submit the form in the composer. Fix so I can fill and submit.",
+    );
+    assert.equal(interactionProofKind(intent), "form-submit");
+    const doc = `# Phase
+
+## Scope
+Wire landing UserPill loggedOut onClick to router.push("/sign-in").
+
+## Success Criteria
+- Clicking the landing UserPill navigates to /sign-in
+
+## Automated Checks
+\`\`\`bash
+grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
+grep -q 'router.push("/sign-in")' src/components/layout/user-pill.tsx || exit 1
+\`\`\`
+
+## Blueprint Deltas
+- **BD-88-USERPILL-SIGNIN:** landing UserPill navigates to /sign-in
+`;
+    const align = phaseDocAlignsWithChangeIntent(doc, intent);
+    assert.equal(align.ok, false);
+    assert.ok(
+      align.issues.some((i) => /fill\+submit/i.test(i)),
+      align.issues.join("; "),
+    );
+  });
+
+  it("click-navigate interaction contract requires click proofs not fill+submit", () => {
+    const intent = {
+      ...extractChangeIntent(phase88Ask),
+      interaction: {
+        mount: "page" as const,
+        primaryAction: "click / navigate",
+        proof: ["onClick or Link at locked control"],
+        forbiddenSubstitutes: ["fill+submit form proofs"],
+      },
+    };
+    assert.equal(interactionProofKind(intent), "click-navigate");
+    const good = `# Phase
+
+## Scope
+Wire UserPill onClick.
+
+## Success Criteria
+- Click navigates to /sign-in
+
+## Automated Checks
+\`\`\`bash
+grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
+grep -q 'router.push("/sign-in")' src/components/layout/user-pill.tsx || exit 1
+\`\`\`
+
+## Blueprint Deltas
+- none
+`;
+    assert.equal(phaseDocAlignsWithChangeIntent(good, intent).ok, true);
+    const bad = `# Phase
+
+## Scope
+Wire UserPill.
+
+## Success Criteria
+- Control is present
+
+## Automated Checks
+\`\`\`bash
+npm test
+\`\`\`
+
+## Blueprint Deltas
+- none
+`;
+    const align = phaseDocAlignsWithChangeIntent(bad, intent);
+    assert.equal(align.ok, false);
+    assert.ok(align.issues.some((i) => /click \/ onClick/i.test(i)));
+    assert.ok(!align.issues.some((i) => /fill\+submit/i.test(i)));
   });
 
   it("extractLiveDecisions reads verified + claimed sections", () => {

@@ -290,6 +290,7 @@ Rules:
 - From project: … (when reusing from a sibling)
 
 Keep the Task brief to a title plus 2–5 bullets so promote_ask can seed start_research.
+- Clickable chrome (control does nothing on click / should navigate) is not form engagement. Success criteria must be "click navigates to route X" — not fill/submit/form-populate. A destination sign-in page is not the thing being filled in this phase. Intent engagement is only for fill/submit at a mount.
 - If the question is purely informational / investigate-only, answer without a Task brief.
 - If the operator needs several separate investigations, recommend MCP/HTTP \`ask_sub_research\` with a short topics list (max 4). Do not pretend sub-research ran unless that API was invoked.
 - Cite paths you inspected. Do not claim work is implemented unless you verified it.`,

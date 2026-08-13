@@ -186,6 +186,8 @@ describe("ask / agent chat tool split", () => {
       assert.match(instr, /not appearing|invisible|can't see/i);
       assert.match(instr, /style visibility|@source/i);
       assert.match(instr, /Confirm \*\*mount\*\*|Confirm mount/i);
+      assert.match(instr, /click navigates to route X/i);
+      assert.match(instr, /Intent engagement is only for fill\/submit/i);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

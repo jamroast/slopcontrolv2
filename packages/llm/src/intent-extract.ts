@@ -31,6 +31,7 @@ Classification rules:
 - Multilingual OK (Afrikaans, English, mixed).
 - Do NOT invent needsInteraction=true for chrome-hide or backend.
 - Do NOT set needsInteraction for non-form clicks (theme toggle, nav links, decorative controls) — clickable ≠ fill/submit form contract.
+- Example: an inert landing UserPill / Sign In control that should navigate to /sign-in is changeKind "other" with needsInteraction false. Clerk / <SignIn> existing as a destination page does not make the landing click a form engagement.
 - Do NOT use status/roadmap questions or promote boilerplate ("generate a task to promote…") as the title — use the product work (e.g. "Port JamPress theming + cleaner logo").`;
 
 export interface ExtractChangeIntentViaLlmOptions {

@@ -37,6 +37,26 @@ describe("intent-extract (mocked chatJson path)", () => {
     assert.ok(CHANGE_INTENT_SYSTEM_PROMPT.includes("chrome-hide"));
     assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /theme toggle/i);
     assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /clickable/i);
+    assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /UserPill/i);
+    assert.match(CHANGE_INTENT_SYSTEM_PROMPT, /destination page/i);
+  });
+
+  it("finalize coerces engagement+needsInteraction on click-to-navigate UserPill asks", () => {
+    const intent = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "Wire landing UserPill to sign-in",
+        goal: "Clicking UserPill should navigate to /sign-in.",
+        uiMount: "page",
+        changeKind: "engagement",
+        needsInteraction: true,
+      }),
+      {
+        description:
+          'Investigate why the sign-in button (UserPill showing "?") on the landing page does nothing when clicked.',
+      },
+    );
+    assert.equal(intent.changeKind, "other");
+    assert.equal(intent.interaction, undefined);
   });
 
   it("finalize trusts LLM needsInteraction for other (no description regex veto)", () => {

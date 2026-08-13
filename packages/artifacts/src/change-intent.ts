@@ -87,9 +87,13 @@ const MOVE_RE =
   /\b(move|relocate|put\s+(?:it|the\s+form)\s+in|switch\s+to|own\s+the\s+composer|from\s+the\s+bubble\s+to)\b/i;
 const MODAL_RE = /\b(modal|dialog)\b/i;
 const PAGE_RE = /\b(full[- ]?page|dedicated\s+page|new\s+route)\b/i;
-/** Failure language: cannot fill / inert / superseded. */
+/** Failure language: cannot fill / superseded. Bare `inert` is not enough. */
 const ENGAGEMENT_FAILURE_RE =
-  /\b(unable\s+to\s+(?:input|fill|submit|edit|enter)|can'?t\s+(?:input|fill|submit|edit|enter)|not\s+active|inert|unsubmittable|not\s+(?:fillable|editable|submittable)|superseded\s+by|stuck\s+at\s+[\"']?superseded)\b/i;
+  /\b(unable\s+to\s+(?:input|fill|submit|edit|enter)|can'?t\s+(?:input|fill|submit|edit|enter)|not\s+active|unsubmittable|not\s+(?:fillable|editable|submittable)|superseded\s+by|stuck\s+at\s+[\"']?superseded)\b/i;
+
+/** `inert` only with form/input/submit context — not an inert nav button. */
+const INERT_FORM_RE =
+  /\b(?:inert\s+(?:form|input|textarea|field)|(?:form|input|textarea|field).{0,40}inert|inert.{0,40}(?:form|input|textarea|submit))\b/i;
 
 /**
  * Capability language: operator wants populate / submit / validate on forms
@@ -311,10 +315,70 @@ function clipAtWord(text: string, maxLen: number): string {
   return (sp > maxLen * 0.6 ? slice.slice(0, sp) : slice).trim();
 }
 
+/** True when the operator body is fill/populate/submit/validate on a form. */
+export function isFormFillAsk(description: string): boolean {
+  const text = description ?? "";
+  if (
+    /\b(?:unable\s+to|can'?t)\s+(?:input|fill|submit|edit|enter)\b/i.test(text)
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:unsubmittable|not\s+(?:fillable|editable|submittable)|stuck\s+at\s+[\"']?superseded)\b/i.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  if (INERT_FORM_RE.test(text)) return true;
+  return FORM_CAPABILITY_RE.test(text) && FORM_CONTEXT_RE.test(text);
+}
+
+/**
+ * Click-to-navigate chrome (UserPill / Sign In / onClick / router.push) that
+ * is not a form fill+submit ask. Destination Clerk/`<SignIn>` pages do not
+ * make the landing click a form engagement.
+ */
+export function isClickNavigateAsk(description: string): boolean {
+  const text = description ?? "";
+  if (isFormFillAsk(text)) return false;
+  return (
+    /\b(?:onClick|onclick|router\.push)\b/.test(text) ||
+    /\bhref\s*=/.test(text) ||
+    /\bnavigate(?:s|d)?\s+to\b/i.test(text) ||
+    /\bdoes\s+nothing\s+when\s+clicked\b/i.test(text) ||
+    /\bnothing\s+happens\s+when\s+(?:(?:it|the\s+\w+)\s+)?(?:is\s+)?clicked\b/i.test(
+      text,
+    ) ||
+    /\bno\s+onClick\b/i.test(text) ||
+    /\b(?:userpill|sign[- ]?in).{0,160}(?:click|onclick|inert|does\s+nothing|navigate)/i.test(
+      text,
+    ) ||
+    /\b(?:click|onclick|inert|does\s+nothing|navigate).{0,160}(?:userpill|sign[- ]?in)\b/i.test(
+      text,
+    )
+  );
+}
+
+export type InteractionProofKind = "form-submit" | "click-navigate" | "none";
+
+/** Which draft proofs PHASE.md must include for this Intent's interaction. */
+export function interactionProofKind(
+  intent: ChangeIntent,
+): InteractionProofKind {
+  if (!intent.interaction || intent.interaction.mount === "n/a") return "none";
+  const action = (intent.interaction.primaryAction ?? "").toLowerCase();
+  if (/\bclick\b|\bnavigate\b/.test(action) && !/submit\s+form/.test(action)) {
+    return "click-navigate";
+  }
+  return "form-submit";
+}
+
 /** True when the ask needs a fill/submit interaction contract. */
 export function needsInteractionContract(description: string): boolean {
   const text = description ?? "";
-  if (ENGAGEMENT_FAILURE_RE.test(text)) return true;
+  if (isClickNavigateAsk(text)) return false;
+  if (ENGAGEMENT_FAILURE_RE.test(text) || INERT_FORM_RE.test(text)) return true;
   // Hide-empty-form / tab-strip UX: composer mount yes, fill/submit contract no
   if (isChromeHideAsk(text)) return false;
   // Capability ask only when it is clearly about forms / skills / workflows.
@@ -428,7 +492,8 @@ function normalizeRefinementOf(
 /**
  * Deterministic post-process for LLM or heuristic Intent fields.
  * Clips lengths, applies mount side effects, and sets interaction from
- * structured changeKind / needsInteraction (no description regex veto).
+ * structured changeKind / needsInteraction. Click-to-navigate asks that the
+ * LLM labelled engagement are coerced off the fill+submit contract.
  */
 export function finalizeChangeIntent(
   raw: ChangeIntentLlmOutput,
@@ -442,11 +507,19 @@ export function finalizeChangeIntent(
   let uiMount = raw.uiMount;
   let refinementOf = normalizeRefinementOf(raw.refinementOf);
 
-  const changeKind = raw.changeKind;
+  const operatorBody = operatorRequestBody(description) || description;
+  let changeKind = raw.changeKind;
+  let needsInteraction = Boolean(raw.needsInteraction);
+  if (isClickNavigateAsk(operatorBody) && changeKind !== "chrome-hide") {
+    changeKind = "other";
+    needsInteraction = false;
+    if (uiMount === "n/a") uiMount = "page";
+  }
+
   const allowInteraction =
     changeKind !== "chrome-hide" &&
     changeKind !== "backend" &&
-    (changeKind === "engagement" || Boolean(raw.needsInteraction));
+    (changeKind === "engagement" || needsInteraction);
 
   const resolvePriorMount = (): void => {
     if (!opts.projectRoot || refinementOf.length > 0) return;
@@ -535,7 +608,8 @@ export function extractChangeIntent(
   const raw = (description ?? "").trim();
   const operatorBody = operatorRequestBody(raw);
   const heuristicText = operatorBody || raw;
-  const failureEngagement = ENGAGEMENT_FAILURE_RE.test(heuristicText);
+  const failureEngagement =
+    ENGAGEMENT_FAILURE_RE.test(heuristicText) || INERT_FORM_RE.test(heuristicText);
   const chromeOnly = isChromeHideAsk(heuristicText) && !failureEngagement;
   const wantsIx = needsInteractionContract(heuristicText);
 
@@ -617,11 +691,13 @@ export function extractChangeIntent(
     !assetSwap &&
     !themeWiringOnly &&
     isBrandThemingAsk(heuristicText);
+  const clickNav = isClickNavigateAsk(heuristicText);
+  if (clickNav && uiMount === "n/a") uiMount = "page";
   const changeKind: ChangeKind = chromeOnly
     ? "chrome-hide"
     : wantsIx
       ? "engagement"
-      : brandTheming || themeWiringOnly
+      : brandTheming || themeWiringOnly || clickNav
         ? "other"
         : uiMount === "n/a"
           ? "backend"
@@ -942,7 +1018,9 @@ export function phaseDocAlignsWithChangeIntent(
     }
   }
 
-  if (intent.interaction && intent.interaction.mount !== "n/a") {
+  const proofKind = interactionProofKind(intent);
+  const contract = intent.interaction;
+  if (proofKind === "form-submit" && contract) {
     const engagementBody = `${scope}\n${success}\n${checks}\n${deltas}`;
     const chipOnly =
       /summary\s*chip|transcript.*chip|classification|getformpartstate|superseded.*chip/i.test(
@@ -970,8 +1048,8 @@ export function phaseDocAlignsWithChangeIntent(
     // This proof only applies to AI chat surfaces (composer/bubble mounts);
     // page/modal engagements (e.g. a Clerk sign-in) have no tool parts.
     const chatMount =
-      intent.interaction.mount === "composer" ||
-      intent.interaction.mount === "bubble" ||
+      contract.mount === "composer" ||
+      contract.mount === "bubble" ||
       intent.uiMount === "composer" ||
       intent.uiMount === "bubble";
     if (chatMount) {
@@ -987,6 +1065,14 @@ export function phaseDocAlignsWithChangeIntent(
           "Engagement Change Intent on a chat mount (composer/bubble) requires Automated Checks / Success Criteria that prove live AI SDK static tool-part name resolution (type: tool-<name> / parseToolResult / extractActiveForm) — not only tool-invocation + toolName fixtures",
         );
       }
+    }
+  } else if (proofKind === "click-navigate") {
+    const hasClickProof =
+      /onclick|href|router\.push|navigate|click/i.test(`${checks}\n${success}`);
+    if (!hasClickProof) {
+      issues.push(
+        "Click-to-navigate Change Intent requires Automated Checks / Success Criteria that prove click / onClick / href / router.push at the locked control",
+      );
     }
   }
 

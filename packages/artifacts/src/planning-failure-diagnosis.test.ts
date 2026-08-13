@@ -149,4 +149,30 @@ Prove live static shape: type tool-start-workflow-draft, no toolName; parseToolR
     const align = phaseDocAlignsWithChangeIntent(good, withInteraction);
     assert.equal(align.ok, true, align.issues.join("; "));
   });
+
+  it("click-to-navigate PHASE.md passes when Intent has no form contract", () => {
+    const intent = extractChangeIntent(
+      'Investigate why the sign-in button (UserPill) on the landing page does nothing when clicked. Wire onClick to router.push("/sign-in").',
+    );
+    assert.equal(intent.interaction, undefined);
+    const doc = `# Phase
+
+## Scope
+Wire landing UserPill onClick to router.push("/sign-in").
+
+## Success Criteria
+- Clicking UserPill navigates to /sign-in
+
+## Automated Checks
+\`\`\`bash
+grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
+grep -q 'router.push("/sign-in")' src/components/layout/user-pill.tsx || exit 1
+\`\`\`
+
+## Blueprint Deltas
+- **BD-88-USERPILL-SIGNIN:** landing UserPill navigates to /sign-in
+`;
+    const align = phaseDocAlignsWithChangeIntent(doc, intent);
+    assert.equal(align.ok, true, align.issues.join("; "));
+  });
 });
