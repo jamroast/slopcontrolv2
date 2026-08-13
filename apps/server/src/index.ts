@@ -162,7 +162,7 @@ import {
   classifyDependencyIntentViaLlm,
   loadEndpointsConfig,
 } from "@slopcontrol/llm";
-import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError } from "@slopcontrol/mastra";
+import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError, clearSlopcontrolRuntimeCache } from "@slopcontrol/mastra";
 import {
   bindLiveTurn,
   wantsLiveStream,
@@ -213,6 +213,7 @@ function getChatService(): ChatService {
         getProject: (id) => store.getProject(id),
       },
       endpointsPath: join(dataDir, "endpoints.json"),
+      onEndpointsChanged: () => clearSlopcontrolRuntimeCache(),
     });
   }
   return chatServiceInstance;
@@ -7348,6 +7349,12 @@ function chatErrorStatus(err: unknown): number {
   return 500;
 }
 
+function routeParam(req: express.Request, name: string): string {
+  const value = req.params[name];
+  if (Array.isArray(value)) return value[0] ?? "";
+  return value ?? "";
+}
+
 function sseHeaders(res: express.Response): void {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
@@ -7376,7 +7383,7 @@ app.post("/projects/:id/chats", (req, res) => {
   }
 });
 
-app.get("/projects/:id/chats", (req, res) => {
+app.get("/projects/:id/chats", async (req, res) => {
   const project = store.getProject(req.params.id);
   if (!project) {
     res.status(404).json({ error: "Project not found" });
@@ -7384,7 +7391,7 @@ app.get("/projects/:id/chats", (req, res) => {
   }
   const status = req.query.status === "closed" ? "closed" : req.query.status === "active" ? "active" : undefined;
   res.json({
-    conversations: getChatService().listConversations({
+    conversations: await getChatService().listConversationsDetailed({
       projectId: project.id,
       status,
     }),
@@ -7421,13 +7428,13 @@ app.post("/chats", (req, res) => {
   }
 });
 
-app.get("/chats", (req, res) => {
+app.get("/chats", async (req, res) => {
   const status = req.query.status === "closed" ? "closed" : req.query.status === "active" ? "active" : undefined;
   const all = req.query.all === "1" || req.query.all === "true";
   res.json({
     conversations: all
-      ? getChatService().listConversations({ status })
-      : getChatService().listConversations({ projectId: null, status }),
+      ? await getChatService().listConversationsDetailed({ status })
+      : await getChatService().listConversationsDetailed({ projectId: null, status }),
   });
 });
 
@@ -7440,6 +7447,30 @@ app.get("/chats/events", (req, res) => {
 });
 
 app.get("/chats/models", async (_req, res) => {
+  try {
+    res.json({ endpoints: await getChatService().listModels() });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/chat-models", async (_req, res) => {
+  try {
+    res.json({ endpoints: await getChatService().listModels() });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/projects/:id/chat-models", async (req, res) => {
+  if (!store.getProject(req.params.id)) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
   try {
     res.json({ endpoints: await getChatService().listModels() });
   } catch (err) {
@@ -7495,14 +7526,14 @@ app.post("/chats/:id/close", (req, res) => {
   }
 });
 
-app.post("/chats/:id/model", (req, res) => {
+function setChatModelHandler(req: express.Request, res: express.Response): void {
   try {
     const { endpointId, modelId } = req.body ?? {};
     if (typeof endpointId !== "string" || typeof modelId !== "string") {
       res.status(400).json({ error: "endpointId and modelId required" });
       return;
     }
-    const conversation = getChatService().setConversationModel(req.params.id, {
+    const conversation = getChatService().setConversationModel(routeParam(req, "id"), {
       endpointId,
       modelId,
     });
@@ -7512,17 +7543,21 @@ app.post("/chats/:id/model", (req, res) => {
       .status(chatErrorStatus(err))
       .json({ error: err instanceof Error ? err.message : String(err) });
   }
-});
+}
 
-app.post("/chats/endpoints/:endpointId/model", (req, res) => {
+app.post("/chats/:id/model", setChatModelHandler);
+app.put("/chats/:id/model", setChatModelHandler);
+
+function updateEndpointModelHandler(req: express.Request, res: express.Response): void {
   try {
     const { modelId } = req.body ?? {};
     if (typeof modelId !== "string" || !modelId.trim()) {
       res.status(400).json({ error: "modelId required" });
       return;
     }
+    const endpointId = routeParam(req, "endpointId");
     const config = getChatService().updateEndpointDefaultModel(
-      req.params.endpointId,
+      endpointId,
       modelId.trim(),
     );
     res.json({ ok: true, endpoints: config.endpoints });
@@ -7532,7 +7567,10 @@ app.post("/chats/endpoints/:endpointId/model", (req, res) => {
       .status(message.startsWith("Unknown endpoint") ? 404 : 500)
       .json({ error: message });
   }
-});
+}
+
+app.post("/chats/endpoints/:endpointId/model", updateEndpointModelHandler);
+app.put("/config/endpoints/:endpointId/model", updateEndpointModelHandler);
 
 app.post("/chats/:id/confirm", async (req, res) => {
   try {
@@ -7558,14 +7596,14 @@ app.post("/chats/:id/confirm", async (req, res) => {
   }
 });
 
-app.post("/chats/:id/messages", async (req, res) => {
+async function streamChatTurn(req: express.Request, res: express.Response): Promise<void> {
   const { message } = req.body ?? {};
   if (typeof message !== "string" || !message.trim()) {
     res.status(400).json({ error: "message required" });
     return;
   }
   try {
-    getChatService().getConversation(req.params.id);
+    getChatService().getConversation(routeParam(req, "id"));
   } catch (err) {
     res
       .status(chatErrorStatus(err))
@@ -7576,7 +7614,7 @@ app.post("/chats/:id/messages", async (req, res) => {
   sseHeaders(res);
   try {
     for await (const event of getChatService().sendMessage(
-      req.params.id,
+      routeParam(req, "id"),
       message,
     )) {
       res.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -7591,7 +7629,11 @@ app.post("/chats/:id/messages", async (req, res) => {
   } finally {
     res.end();
   }
-});
+}
+
+app.post("/chats/:id/messages", streamChatTurn);
+app.post("/chat/:id/messages", streamChatTurn);
+app.post("/chat/:id/send", streamChatTurn);
 
 app.listen(PORT, () => {
   startLiveTurnWatcher();

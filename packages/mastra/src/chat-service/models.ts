@@ -23,7 +23,15 @@ function endpointOrigin(baseUrl: string): string {
 }
 
 function isLocalOllama(baseUrl: string): boolean {
-  return /^https?:\/\/(localhost|127\.0\.0\.1):11434\b/i.test(baseUrl);
+  try {
+    const url = new URL(baseUrl);
+    return (
+      (url.hostname === "localhost" || url.hostname === "127.0.0.1") &&
+      url.port === "11434"
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

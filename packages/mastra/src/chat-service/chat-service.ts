@@ -38,6 +38,8 @@ export interface ChatServiceDeps {
   context: ChatContextDeps;
   /** Path to endpoints.json — re-read per turn so model edits apply live. */
   endpointsPath: string;
+  /** Called after endpoints.json is rewritten so cached runtimes pick up the new default. */
+  onEndpointsChanged?: () => void;
   confirmTimeoutMs?: number;
   turnTimeoutMs?: number;
 }
@@ -116,6 +118,24 @@ export class ChatService {
     return this.deps.store.listConversations(opts);
   }
 
+  /** List plus Memory-backed messageCount for operator-facing chat lists. */
+  async listConversationsDetailed(opts?: {
+    projectId?: string | null;
+    status?: ChatConversation["status"];
+  }): Promise<Array<ChatConversation & { messageCount: number }>> {
+    const rows = this.listConversations(opts);
+    return Promise.all(
+      rows.map(async (conversation) => {
+        try {
+          const messages = await this.getMessages(conversation.id);
+          return { ...conversation, messageCount: messages.length };
+        } catch {
+          return { ...conversation, messageCount: 0 };
+        }
+      }),
+    );
+  }
+
   getConversation(id: string): ChatConversation {
     const conversation = this.deps.store.getConversation(id);
     if (!conversation) throw new ConversationNotFoundError(id);
@@ -191,11 +211,13 @@ export class ChatService {
   }
 
   updateEndpointDefaultModel(endpointId: string, modelId: string) {
-    return updateEndpointModel({
+    const config = updateEndpointModel({
       endpointsPath: this.deps.endpointsPath,
       endpointId,
       modelId,
     });
+    this.deps.onEndpointsChanged?.();
+    return config;
   }
 
   listToolSurface() {

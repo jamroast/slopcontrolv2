@@ -129,6 +129,62 @@ export function listChatToolNames(): { free: string[]; gated: string[] } {
   };
 }
 
+const optionalProject = z.string().min(1).optional();
+
+/** Structured input schemas so the model fills required ids instead of guessing. */
+export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
+  get_run: z.object({
+    runId: z.string().min(1),
+    projectId: optionalProject,
+  }),
+  get_run_steps: z.object({
+    runId: z.string().min(1),
+    projectId: optionalProject,
+  }),
+  get_phase_status: z.object({
+    phaseId: z.string().min(1),
+    projectId: optionalProject,
+  }),
+  get_development_report: z.object({
+    runId: z.string().min(1).optional(),
+    projectId: optionalProject,
+  }),
+  list_runs: z.object({ projectId: optionalProject }).passthrough(),
+  list_phases: z.object({ projectId: optionalProject }).passthrough(),
+};
+
+const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
+  get_run:
+    "Get one run by runId (from list_runs). Requires runId — do not call this without a specific run id.",
+  get_run_steps:
+    "Structured verify steps for one run. Requires runId.",
+  get_phase_status:
+    "Status and diagnosis for one phase. Requires phaseId.",
+  list_runs:
+    "List runs for the project (id, stage, phase). Call this before get_run.",
+  list_phases:
+    "List phases for the project (id, status, title).",
+  get_operator_suggestions:
+    "Operator next-actions for the current project state.",
+  get_development_report:
+    "Development report for a run. Prefer list_runs first, then pass runId.",
+};
+
+function toolInputSchema(name: string): z.ZodType {
+  return (
+    CHAT_TOOL_INPUT_SCHEMA[name] ??
+    z.object({ projectId: optionalProject }).passthrough()
+  );
+}
+
+function toolDescription(name: string, gated: boolean): string {
+  const extra = CHAT_TOOL_DESCRIPTION[name];
+  const gate = gated
+    ? " Mutating — requires operator confirmation before it executes."
+    : " Read-only.";
+  return extra ? `${extra}${gate}` : `SlopControl ${name}.${gate}`;
+}
+
 function previewArgs(args: Record<string, unknown>): string {
   const json = JSON.stringify(args);
   return json.length <= 400 ? json : `${json.slice(0, 400)}…`;
@@ -172,8 +228,8 @@ export function buildChatTools(opts: {
   for (const name of CHAT_FREE_TOOLS) {
     tools[name] = createTool({
       id: name,
-      description: `SlopControl ${name} (read-only).`,
-      inputSchema: z.record(z.string(), z.unknown()),
+      description: toolDescription(name, false),
+      inputSchema: toolInputSchema(name),
       execute: async (input) => {
         const args = withPinnedProject(
           (input ?? {}) as Record<string, unknown>,
@@ -189,8 +245,8 @@ export function buildChatTools(opts: {
   for (const name of CHAT_GATED_TOOLS) {
     tools[name] = createTool({
       id: name,
-      description: `SlopControl ${name} (mutating — requires operator confirmation).`,
-      inputSchema: z.record(z.string(), z.unknown()),
+      description: toolDescription(name, true),
+      inputSchema: toolInputSchema(name),
       execute: async (input) => {
         const args = withPinnedProject(
           (input ?? {}) as Record<string, unknown>,

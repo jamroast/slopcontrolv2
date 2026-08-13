@@ -10,6 +10,7 @@ import {
   buildChatTools,
   CHAT_FREE_TOOLS,
   CHAT_GATED_TOOLS,
+  CHAT_TOOL_INPUT_SCHEMA,
   type ChatEvent,
   type ConversationStore,
   type ChatToolResult,
@@ -474,5 +475,109 @@ describe("ChatService lifecycle", () => {
     } finally {
       cleanup();
     }
+  });
+
+  it("publishes closed events with conversationId and projectId for aggregate streams", () => {
+    const { service, events, cleanup } = makeService();
+    try {
+      const projectChat = service.createConversation({ projectId: "p1" });
+      const globalChat = service.createConversation({ projectId: null });
+      service.closeConversation(projectChat.id);
+      service.closeConversation(globalChat.id);
+      const projectClosed = events.filter(
+        (e) => e.type === "closed" && e.conversationId === projectChat.id,
+      );
+      const globalClosed = events.filter(
+        (e) => e.type === "closed" && e.conversationId === globalChat.id,
+      );
+      assert.equal(projectClosed.length, 1);
+      assert.equal(projectClosed[0]!.projectId, "p1");
+      assert.equal(globalClosed.length, 1);
+      assert.equal(globalClosed[0]!.projectId, null);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("listConversationsDetailed includes Memory messageCount", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-chat-svc-"));
+    const store = makeStore();
+    const service = new ChatService({
+      store,
+      getMemory: () =>
+        ({
+          recall: async () => ({
+            messages: [
+              { role: "user", createdAt: "2026-08-13T09:00:00.000Z", content: "hi" },
+              { role: "assistant", createdAt: "2026-08-13T09:00:01.000Z", content: "hello" },
+            ],
+            total: 2,
+            page: 0,
+            perPage: false,
+            hasMore: false,
+          }),
+          deleteThread: async () => {},
+        }) as never,
+      dispatch: async () => ({ content: [{ type: "text", text: "{}" }] }),
+      context: {
+        listProjects: () => [],
+        listPhases: () => [],
+        listRuns: () => [],
+        getProject: () => undefined,
+      },
+      endpointsPath: makeEndpointsPath(dir),
+    });
+    try {
+      const conv = service.createConversation({ projectId: null });
+      const listed = await service.listConversationsDetailed({ projectId: null });
+      assert.equal(listed.length, 1);
+      assert.equal(listed[0]!.id, conv.id);
+      assert.equal(listed[0]!.messageCount, 2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("updateEndpointDefaultModel notifies onEndpointsChanged", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-chat-ep-"));
+    let calls = 0;
+    try {
+      const store = makeStore();
+      const svc = new ChatService({
+        store,
+        getMemory: () => {
+          throw new Error("unused");
+        },
+        dispatch: async () => ({ content: [{ type: "text", text: "{}" }] }),
+        context: {
+          listProjects: () => [],
+          listPhases: () => [],
+          listRuns: () => [],
+          getProject: () => undefined,
+        },
+        endpointsPath: makeEndpointsPath(dir),
+        onEndpointsChanged: () => {
+          calls += 1;
+        },
+      });
+      svc.updateEndpointDefaultModel("dead", "other-model");
+      assert.equal(calls, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("chat tool input schemas", () => {
+  it("requires runId for get_run and get_run_steps", () => {
+    assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.get_run!.parse({}));
+    assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.get_run!.parse({ runId: "" }));
+    const parsed = CHAT_TOOL_INPUT_SCHEMA.get_run!.parse({ runId: "abc" }) as {
+      runId: string;
+    };
+    assert.equal(parsed.runId, "abc");
+    assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.get_run_steps!.parse({}));
+    assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.get_phase_status!.parse({}));
+    assert.ok(CHAT_TOOL_INPUT_SCHEMA.get_phase_status!.parse({ phaseId: "01" }));
   });
 });
