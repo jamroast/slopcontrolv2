@@ -27,6 +27,23 @@ export function sanitizeAskTitle(
 }
 
 /**
+ * Auto-title for chat conversations: date prefix + first-message gist,
+ * e.g. "Aug 13 — wire up the login flow". Falls back to the bare date
+ * when there is no usable hint.
+ */
+export function chatConversationTitle(
+  hint?: string,
+  at: Date = new Date(),
+): string {
+  const date = at.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+  const gist = sanitizeAskTitle(hint, 60);
+  return gist ? `${date} — ${gist}` : date;
+}
+
+/**
  * Single-line title for phases. Ask-derived descriptions start with a
  * "## Operator request" wrapper and may contain markdown/newlines; a raw
  * slice leaks all of that into the title (and on into the roadmap row).
@@ -449,7 +466,7 @@ export class SlopStore {
     if (!conversation) return undefined;
     conversation.lastActiveAt = new Date().toISOString();
     if (!conversation.title && titleHint) {
-      conversation.title = sanitizeAskTitle(titleHint);
+      conversation.title = chatConversationTitle(titleHint);
     }
     this.updateConversation(conversation);
     return conversation;

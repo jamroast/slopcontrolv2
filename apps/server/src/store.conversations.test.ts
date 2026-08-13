@@ -35,7 +35,7 @@ describe("SlopStore conversations", () => {
     });
   });
 
-  it("touch bumps lastActiveAt and auto-titles from first message", () => {
+  it("touch bumps lastActiveAt and auto-titles from first message with date", () => {
     withStore((store) => {
       const c = store.createConversation({ projectId: "p1" });
       const before = c.lastActiveAt;
@@ -45,10 +45,11 @@ describe("SlopStore conversations", () => {
       );
       assert.ok(touched);
       assert.ok(touched.lastActiveAt >= before);
-      assert.equal(touched.title, "How do I promote an ask?");
+      // "Mar 5 — How do I promote an ask?"
+      assert.match(touched.title!, /^[A-Z][a-z]{2} \d{1,2} — How do I promote an ask\?$/);
       // Title sticks — later touches don't overwrite
       const again = store.touchConversation(c.id, "different topic");
-      assert.equal(again?.title, "How do I promote an ask?");
+      assert.equal(again?.title, touched.title);
     });
   });
 
