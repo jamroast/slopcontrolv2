@@ -5,6 +5,11 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { formatDurationMs, log } from "@slopcontrol/types";
+import {
+  advanceRun,
+  formatAdvanceRunResult,
+  stageFromDispatchText,
+} from "@slopcontrol/mastra";
 
 export type CreateSlopcontrolMcpServerOptions = {
   serverUrl?: string;
@@ -344,6 +349,34 @@ export function formatAskMcpEnvelope(body: string, ok: boolean): string {
   }
 }
 
+export function formatAgentMcpEnvelope(opts: {
+  agent?: unknown;
+  reply?: string;
+  error?: string;
+}): string {
+  const agent = opts.agent as { id?: string; status?: string } | undefined;
+  const agentId = typeof agent?.id === "string" ? agent.id : "";
+  const status = typeof agent?.status === "string" ? agent.status : "";
+  const reply = (opts.reply ?? "").trim();
+  if (opts.error) {
+    return [
+      agentId ? `agentId: ${agentId}` : null,
+      `error: ${opts.error}`,
+      reply ? `reply:\n${reply}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  return [
+    agentId ? `agentId: ${agentId}` : null,
+    status ? `status: ${status}` : null,
+    "---",
+    reply,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "open_project",
@@ -624,6 +657,22 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "wait_for_run",
+      description:
+        "Poll a run until it leaves researching/drafting/designing/developing (or times out). Use after start_change / start_development / start_design instead of repeating get_run. Returns the settled stage (in_review, complete, blocked, failed, …) or timedOut still busy.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+          timeoutMs: {
+            type: "number",
+            description: "How long to wait (default 90000, max 180000).",
+          },
+        },
+        required: ["runId"],
+      },
+    },
+    {
       name: "get_run_steps",
       description:
         "List structured develop verify steps for a run (id, name, command, exitCode, ok, outputExcerpt) plus firstFailure. Prefer this over scraping logs after a blocked/failed develop verify. Diagnose, then call retry_verify (full suite) or retry_development (coding+verify+merge).",
@@ -677,9 +726,41 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "submit_review",
+      description:
+        "Approve or request changes on an in_review research/draft. decision=approve accepts PHASE.md so coding can start. decision=request_changes re-drafts with feedback. Chat should call this (gated) instead of sending the operator to the dashboard. Confirming start_development while still in_review also accepts the review, then starts coding.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+          decision: {
+            type: "string",
+            enum: ["approve", "request_changes"],
+          },
+          feedback: {
+            type: "string",
+            description: "Required context when requesting changes.",
+          },
+        },
+        required: ["runId", "decision"],
+      },
+    },
+    {
+      name: "advance_run",
+      description:
+        "Walk a parked run until work is actually running. in_review → approve review → start_development (start_design if required). Use when the operator says go ahead / accept / start development / continue. Does not auto-merge. Stops at researching/drafting/designing/developing, complete, blocked, failed, or interrupted.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+        },
+        required: ["runId"],
+      },
+    },
+    {
       name: "start_design",
       description:
-        "Optional design stage for UI/brand phases: UI-SPEC/tokens + Ollama image gen + vision review (capability-routed). Ends in design_complete (not accepted). Skip for non-visual phases. Run after approve, before start_development (path B). Idempotent when design is already complete unless force=true.",
+        "Optional design stage for UI/brand phases: UI-SPEC/tokens + Ollama image gen + vision review (capability-routed). Ends in design_complete (not accepted). Skip for non-visual phases. Run after approve, before start_development (path B). Idempotent when design is already complete unless force=true. If the run is still in_review, this accepts the review first.",
       inputSchema: {
         type: "object",
         properties: {
@@ -696,7 +777,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "start_development",
       description:
-        "Starts coding from accepted (path A, no design) or design_complete (path B). For UI/brand phases still lacking design, run start_design first (or pass autoDesign: true). Returns design_required if design is needed and incomplete. After it finishes, call get_development_report for operator requirements and knowledge.",
+        "Starts coding from accepted (path A, no design) or design_complete (path B). If the run is still in_review, this accepts the research review first, then starts coding — the operator does not need a separate dashboard Approve. For UI/brand phases still lacking design, run start_design first (or pass autoDesign: true). Returns design_required if design is needed and incomplete. After it finishes, call get_development_report for operator requirements and knowledge. Use submit_review when they only want to approve or request changes without coding.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1978,13 +2059,13 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "chat_models_list",
       description:
-        "List chat-usable models per configured LLM endpoint (live provider listing when available, else the configured default).",
+        "List platform functions (research, planning, coding, classification, chat, …) with the model currently bound to each, plus the models providers advertise. Use this before chat_function_bind. Do not treat endpoint ids like ollama-cloud-kimi as the thing to switch.",
       inputSchema: { type: "object", properties: {} },
     },
     {
       name: "chat_model_set",
       description:
-        "Set the model override for one chat conversation (endpointId + modelId from chat_models_list).",
+        "Override the model for one chat conversation only (endpointId + modelId from chat_models_list). Does not change platform function mappings — use chat_function_bind for that.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1996,16 +2077,25 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
-      name: "chat_endpoint_model_update",
+      name: "chat_function_bind",
       description:
-        "Update an endpoint's default model in endpoints.json (affects new turns platform-wide).",
+        "Map a platform function (role) to a model. If that model has no endpoint entry yet, clone the provider credentials, create the mapping, and bind the function to it. Pass endpointId only when the same model exists on more than one provider or the model is not in the list yet.",
       inputSchema: {
         type: "object",
         properties: {
-          endpointId: { type: "string" },
+          function: {
+            type: "string",
+            description:
+              "Function to bind: research, planning, supervisor, coding, design, designVision, designImage, classification, chat.",
+          },
           modelId: { type: "string" },
+          endpointId: {
+            type: "string",
+            description:
+              "Optional provider handle from chat_models_list when the model is new or ambiguous.",
+          },
         },
-        required: ["endpointId", "modelId"],
+        required: ["function", "modelId"],
       },
     },
   ];
@@ -2034,6 +2124,47 @@ export type SlopcontrolToolResult = {
  * (createSlopcontrolMcpServer) and in-process callers (the chat service)
  * both dispatch through here. Handlers call the REST API over loopback.
  */
+
+/** 409 from start_development / start_design when the run is still in_review. */
+export function isReviewRequiredConflict(status: number, body: string): boolean {
+  if (status !== 409) return false;
+  let error = body;
+  let stage = "";
+  let phaseStatus = "";
+  try {
+    const parsed = JSON.parse(body) as {
+      error?: unknown;
+      stage?: unknown;
+      phaseStatus?: unknown;
+    };
+    if (typeof parsed.error === "string") error = parsed.error;
+    if (typeof parsed.stage === "string") stage = parsed.stage;
+    if (typeof parsed.phaseStatus === "string") phaseStatus = parsed.phaseStatus;
+  } catch {
+    /* raw body */
+  }
+  if (!/must be accepted or design_complete/i.test(error)) return false;
+  return stage === "in_review" || phaseStatus === "in_review" || !stage;
+}
+
+/**
+ * When coding/design is confirmed while research is still in_review, accept
+ * the review then retry. Confirming start_development is accepting the plan.
+ */
+export async function retryAfterImpliedReviewApprove(opts: {
+  firstStatus: number;
+  firstBody: string;
+  approve: () => Promise<{ status: number; body: string }>;
+  retry: () => Promise<{ status: number; body: string }>;
+}): Promise<{ status: number; body: string }> {
+  if (!isReviewRequiredConflict(opts.firstStatus, opts.firstBody)) {
+    return { status: opts.firstStatus, body: opts.firstBody };
+  }
+  const approved = await opts.approve();
+  if (approved.status >= 400) return approved;
+  return opts.retry();
+}
+
 export async function dispatchSlopcontrolTool(
   name: string,
   args: Record<string, unknown>,
@@ -2086,6 +2217,27 @@ export async function dispatchSlopcontrolTool(
       return wrap(async () => {
         const runId = String(args.runId ?? "");
         const res = await fetch(`${SERVER_URL}/runs/${encodeURIComponent(runId)}`);
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "wait_for_run") {
+      return wrap(async () => {
+        const runId = String(args.runId ?? "");
+        const timeoutMs =
+          typeof args.timeoutMs === "number" ? args.timeoutMs : undefined;
+        const res = await fetch(
+          `${SERVER_URL}/runs/${encodeURIComponent(runId)}/wait`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ timeoutMs }),
+          },
+        );
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],
@@ -2167,41 +2319,132 @@ export async function dispatchSlopcontrolTool(
       });
     }
 
+    const postRuns = async (payload: Record<string, unknown>) => {
+      const res = await fetch(`${SERVER_URL}/runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      return { status: res.status, body: await res.text() };
+    };
+    const asToolResult = (result: { status: number; body: string }) => ({
+      content: [{ type: "text" as const, text: result.body }],
+      isError: result.status >= 400,
+    });
+    const withImpliedReview = (
+      runId: unknown,
+      payload: Record<string, unknown>,
+      first: { status: number; body: string },
+    ) =>
+      retryAfterImpliedReviewApprove({
+        firstStatus: first.status,
+        firstBody: first.body,
+        approve: () =>
+          postRuns({
+            action: "submit_review",
+            runId,
+            decision: "approve",
+          }),
+        retry: () => postRuns(payload),
+      });
+
+    if (name === "submit_review") {
+      return wrap(async () => {
+        const decision = args.decision;
+        if (decision !== "approve" && decision !== "request_changes") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "decision must be approve or request_changes",
+              },
+            ],
+            isError: true,
+          };
+        }
+        return asToolResult(
+          await postRuns({
+            action: "submit_review",
+            runId: args.runId,
+            decision,
+            feedback:
+              typeof args.feedback === "string" ? args.feedback : undefined,
+          }),
+        );
+      });
+    }
+
+    if (name === "advance_run") {
+      return wrap(async () => {
+        const runId = String(args.runId ?? "").trim();
+        if (!runId) {
+          return {
+            content: [{ type: "text" as const, text: "runId is required" }],
+            isError: true,
+          };
+        }
+        const projectId =
+          typeof args.projectId === "string" ? args.projectId : undefined;
+        const advanced = await advanceRun({
+          runId,
+          projectId,
+          getStage: async () => {
+            const res = await fetch(
+              `${SERVER_URL}/runs/${encodeURIComponent(runId)}`,
+            );
+            if (!res.ok) return undefined;
+            return stageFromDispatchText(await res.text());
+          },
+          dispatch: async (tool, toolArgs) => {
+            if (tool === "advance_run") {
+              return {
+                text: "advance_run cannot nest",
+                isError: true,
+              };
+            }
+            const nested = await dispatchSlopcontrolTool(tool, toolArgs, opts);
+            return {
+              text: nested.content.map((c) => c.text).join("\n"),
+              isError: Boolean(nested.isError),
+            };
+          },
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                ...advanced,
+                message: formatAdvanceRunResult(advanced),
+              }),
+            },
+          ],
+          isError: advanced.kind === "error",
+        };
+      });
+    }
+
     if (name === "start_design") {
       return wrap(async () => {
-        const res = await fetch(`${SERVER_URL}/runs`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "start_design",
-            runId: args.runId,
-            force: args.force === true ? true : undefined,
-          }),
-        });
-        const body = await res.text();
-        return {
-          content: [{ type: "text", text: body }],
-          isError: !res.ok,
+        const payload = {
+          action: "start_design",
+          runId: args.runId,
+          force: args.force === true ? true : undefined,
         };
+        const first = await postRuns(payload);
+        return asToolResult(await withImpliedReview(args.runId, payload, first));
       });
     }
 
     if (name === "start_development") {
       return wrap(async () => {
-        const res = await fetch(`${SERVER_URL}/runs`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            action: "start_development",
-            runId: args.runId,
-            autoDesign: args.autoDesign === true,
-          }),
-        });
-        const body = await res.text();
-        return {
-          content: [{ type: "text", text: body }],
-          isError: !res.ok,
+        const payload = {
+          action: "start_development",
+          runId: args.runId,
+          autoDesign: args.autoDesign === true,
         };
+        const first = await postRuns(payload);
+        return asToolResult(await withImpliedReview(args.runId, payload, first));
       });
     }
 
@@ -4118,9 +4361,12 @@ export async function dispatchSlopcontrolTool(
           content: [
             {
               type: "text",
-              text: JSON.stringify({
+              text: formatAgentMcpEnvelope({
                 agent: consumed.done.agent,
-                reply: consumed.done.reply,
+                reply:
+                  typeof consumed.done.reply === "string"
+                    ? consumed.done.reply
+                    : "",
               }),
             },
           ],
@@ -4395,7 +4641,7 @@ export async function dispatchSlopcontrolTool(
 
     if (name === "chat_models_list") {
       return wrap(async () => {
-        const res = await fetch(`${SERVER_URL}/chats/models`);
+        const res = await fetch(`${SERVER_URL}/chats/function-mappings`);
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],
@@ -4425,16 +4671,19 @@ export async function dispatchSlopcontrolTool(
       });
     }
 
-    if (name === "chat_endpoint_model_update") {
+    if (name === "chat_function_bind") {
       return wrap(async () => {
-        const res = await fetch(
-          `${SERVER_URL}/chats/endpoints/${encodeURIComponent(args.endpointId as string)}/model`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ modelId: args.modelId }),
-          },
-        );
+        const res = await fetch(`${SERVER_URL}/chats/function-mappings`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            function: args.function,
+            modelId: args.modelId,
+            ...(typeof args.endpointId === "string"
+              ? { endpointId: args.endpointId }
+              : {}),
+          }),
+        });
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

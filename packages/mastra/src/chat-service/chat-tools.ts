@@ -9,7 +9,8 @@ import type { ChatToolDispatch, ChatToolResult } from "./types.js";
  * - FREE: read-only / conversational — the agent may call autonomously.
  * - GATED: mutating lifecycle actions — the wrapper parks the call as a
  *   pending action and returns `pending_confirmation`; it only executes
- *   after the operator confirms via REST/MCP confirm.
+ *   after the operator confirms in this chat (LLM-classified next message)
+ *   or via REST/MCP confirm.
  * - Everything else (delete_project, remove_worktree, resolve_conflicts,
  *   the raw `slopcontrol` passthrough, …) is not exposed to the agent.
  */
@@ -20,6 +21,7 @@ export const CHAT_FREE_TOOLS: ReadonlySet<string> = new Set([
   "get_run",
   "get_run_steps",
   "get_phase_status",
+  "wait_for_run",
   "get_operator_suggestions",
   "get_development_report",
   "list_runs",
@@ -63,6 +65,8 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   "promote_ask",
   "fork_ask",
   "start_design",
+  "submit_review",
+  "advance_run",
   "start_development",
   "retry_development",
   "retry_verify",
@@ -137,6 +141,10 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     runId: z.string().min(1),
     projectId: optionalProject,
   }),
+  wait_for_run: z.object({
+    runId: z.string().min(1),
+    projectId: optionalProject,
+  }),
   get_run_steps: z.object({
     runId: z.string().min(1),
     projectId: optionalProject,
@@ -147,6 +155,104 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   }),
   get_development_report: z.object({
     runId: z.string().min(1).optional(),
+    phaseId: z.string().min(1).optional(),
+    projectId: optionalProject,
+  }),
+  get_ask: z.object({
+    askId: z.string().min(1),
+    projectId: optionalProject,
+  }),
+  get_agent: z.object({
+    agentId: z.string().min(1),
+    projectId: optionalProject,
+  }),
+  design_loop_get: z.object({
+    loopId: z.string().min(1),
+    projectId: optionalProject,
+  }),
+  plan_loop_get: z.object({
+    loopId: z.string().min(1),
+    projectId: optionalProject,
+  }),
+  ask: z.object({
+    message: z.string().min(1),
+    askId: z.string().min(1).optional(),
+    title: z.string().optional(),
+    newAsk: z.boolean().optional(),
+    projectId: optionalProject,
+  }),
+  agent: z.object({
+    message: z.string().min(1),
+    agentId: z.string().min(1).optional(),
+    title: z.string().optional(),
+    projectId: optionalProject,
+  }),
+  ask_sub_research: z.object({
+    askId: z.string().min(1),
+    topics: z.array(z.string().min(1)).min(1),
+    projectId: optionalProject,
+  }),
+  promote_ask: z.object({
+    askId: z.string().min(1),
+    description: z.string().optional(),
+    dependsOn: z.array(z.string()).optional(),
+    projectId: optionalProject,
+  }),
+  fork_ask: z.object({
+    askId: z.string().min(1),
+    title: z.string().optional(),
+    projectId: optionalProject,
+  }),
+  design_loop_continue: z
+    .object({
+      loopId: z.string().min(1),
+      message: z.string().min(1),
+      projectId: optionalProject,
+    })
+    .passthrough(),
+  plan_loop_continue: z
+    .object({
+      loopId: z.string().min(1),
+      message: z.string().min(1),
+      projectId: optionalProject,
+    })
+    .passthrough(),
+  start_development: z
+    .object({
+      runId: z.string().min(1),
+      autoDesign: z.boolean().optional(),
+      projectId: optionalProject,
+    })
+    .passthrough(),
+  submit_review: z
+    .object({
+      runId: z.string().min(1),
+      decision: z.enum(["approve", "request_changes"]),
+      feedback: z.string().optional(),
+      projectId: optionalProject,
+    })
+    .passthrough(),
+  advance_run: z
+    .object({
+      runId: z.string().min(1),
+      projectId: optionalProject,
+    })
+    .passthrough(),
+  retry_development: z
+    .object({
+      runId: z.string().min(1),
+      projectId: optionalProject,
+    })
+    .passthrough(),
+  retry_verify: z
+    .object({
+      runId: z.string().min(1),
+      projectId: optionalProject,
+    })
+    .passthrough(),
+  stop_session: z.object({
+    kind: z.enum(["ask", "agent", "design_loop", "plan_loop"]),
+    id: z.string().min(1),
     projectId: optionalProject,
   }),
   list_runs: z.object({ projectId: optionalProject }).passthrough(),
@@ -156,6 +262,8 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
 const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   get_run:
     "Get one run by runId (from list_runs). Requires runId — do not call this without a specific run id.",
+  wait_for_run:
+    "Poll a run until it leaves researching/drafting/designing/developing (or times out). Requires runId from list_runs or a just-started lifecycle tool. Use this instead of repeatedly calling get_run. When it returns a settled stage, brief the operator — do not invent progress.",
   get_run_steps:
     "Structured verify steps for one run. Requires runId.",
   get_phase_status:
@@ -168,6 +276,26 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Operator next-actions for the current project state.",
   get_development_report:
     "Development report for a run. Prefer list_runs first, then pass runId.",
+  get_ask:
+    "One ask session. Requires askId from list_asks. Returns latest messages, not the full history dump.",
+  get_agent:
+    "One agent session. Requires agentId from list_agents. Returns latest messages, not the full history dump.",
+  design_loop_get:
+    "One design loop. Requires loopId from list_design_loops. Use notes; do not paste HTML into the operator reply.",
+  plan_loop_get:
+    "One plan loop. Requires loopId from list_plan_loops.",
+  ask: "Investigate the project (read source, explain why something is broken). Prefer this over gated agent for read-only traces. Requires message.",
+  agent:
+    "Start a mutating coding-agent session. Do not use this to read source or explain a bug — use ask. Requires message.",
+  start_development:
+    "Start coding in a worktree. Requires runId. Confirming this (or advance_run) keeps walking the run until coding/design is actually running — including accepting in_review first. Stay in this chat; do not send the operator to the dashboard. Use submit_review request_changes to send the plan back.",
+  advance_run:
+    "Preferred proceed tool. Requires runId. Confirming it walks the current gate until work is running: in_review → approve review → start_development (or start_design if required). Use this when the operator says go ahead / accept / start development / continue. Never auto-merges. Stay in this chat.",
+  submit_review:
+    "Approve or request changes on an in_review research/draft. Requires runId and decision (approve | request_changes). Confirming approve then keeps advancing until work is running (same continuer as advance_run). Prefer advance_run when they want to proceed. Stay in this chat — do not send the operator to a dashboard Approve button.",
+  promote_ask: "Promote an ask into a phase. Requires askId from list_asks.",
+  stop_session:
+    "Interrupt a live ask/agent/design_loop/plan_loop turn. Requires kind and id.",
 };
 
 function toolInputSchema(name: string): z.ZodType {
@@ -199,10 +327,255 @@ function previewArgs(args: Record<string, unknown>): string {
  */
 export const CHAT_TOOL_RESULT_MAX_CHARS = 4_000;
 
-function resultText(result: ChatToolResult): string {
-  const text = result.content.map((c) => c.text).join("\n");
+function clipChatToolText(text: string): string {
   if (text.length <= CHAT_TOOL_RESULT_MAX_CHARS) return text;
   return `${text.slice(0, CHAT_TOOL_RESULT_MAX_CHARS)}\n…(truncated ${text.length - CHAT_TOOL_RESULT_MAX_CHARS} chars — narrow the query or ask for a specific item)`;
+}
+
+/**
+ * Ask/agent MCP payloads put the operator-facing `reply` after a session dump.
+ * Truncating the raw JSON from the front drops the answer. Prefer `reply`.
+ */
+export function extractDispatchedReply(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return raw;
+  const envelope = splitMcpEnvelope(trimmed);
+  if (envelope?.body) return envelope.body;
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    if (typeof parsed.reply === "string" && parsed.reply.trim()) {
+      return parsed.reply.trim();
+    }
+    if (typeof parsed.notes === "string" && parsed.notes.trim()) {
+      return parsed.notes.trim();
+    }
+  } catch {
+    /* not JSON */
+  }
+  return raw;
+}
+
+function splitMcpEnvelope(
+  raw: string,
+): { header: string; body: string } | null {
+  const dashed = raw.indexOf("\n---\n");
+  if (dashed < 0) return null;
+  const header = raw.slice(0, dashed);
+  if (!/^(askId|agentId|loopId):/m.test(header)) return null;
+  return { header, body: raw.slice(dashed + 5).trim() };
+}
+
+function clipText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n…(clipped)`;
+}
+
+function messageText(row: unknown): string {
+  if (!row || typeof row !== "object") return "";
+  const m = row as { role?: unknown; content?: unknown };
+  const role = typeof m.role === "string" ? m.role : "unknown";
+  const content =
+    typeof m.content === "string"
+      ? m.content
+      : m.content != null
+        ? JSON.stringify(m.content)
+        : "";
+  const clipped = clipText(content.trim(), 1_500);
+  if (!clipped) return "";
+  return `${role}:\n${clipped}`;
+}
+
+function compactSession(
+  session: Record<string, unknown>,
+  kind: string,
+): string {
+  const id = typeof session.id === "string" ? session.id : "";
+  const status = typeof session.status === "string" ? session.status : "";
+  const title = typeof session.title === "string" ? session.title : "";
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  const latest = messages.slice(-2).map(messageText).filter(Boolean);
+  return [
+    `${kind} ${id}`.trim(),
+    status ? `status: ${status}` : null,
+    title ? `title: ${title}` : null,
+    messages.length ? `messageCount: ${messages.length}` : null,
+    latest.length ? `latest:\n${latest.join("\n\n")}` : "(no messages)",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function compactHandoff(report: Record<string, unknown>): string {
+  const lines: string[] = [];
+  for (const key of ["outcome", "phaseId", "runId"] as const) {
+    if (typeof report[key] === "string") lines.push(`${key}: ${report[key]}`);
+  }
+  if (typeof report.summary === "string" && report.summary.trim()) {
+    lines.push("", report.summary.trim());
+  }
+  const reqs = Array.isArray(report.operatorRequirements)
+    ? report.operatorRequirements.filter((x): x is string => typeof x === "string")
+    : [];
+  if (reqs.length) {
+    lines.push("", "Operator requirements:");
+    for (const r of reqs.slice(0, 12)) lines.push(`- ${r}`);
+  }
+  const next = Array.isArray(report.nextSteps)
+    ? report.nextSteps.filter((x): x is string => typeof x === "string")
+    : [];
+  if (next.length) {
+    lines.push("", "Next steps:");
+    for (const r of next.slice(0, 12)) lines.push(`- ${r}`);
+  }
+  if (typeof report.checksSummary === "string" && report.checksSummary.trim()) {
+    lines.push("", clipText(report.checksSummary.trim(), 800));
+  }
+  return lines.join("\n").trim();
+}
+
+function compactList(items: unknown, label: string): string | null {
+  if (!Array.isArray(items)) return null;
+  const rows = items.slice(0, 40).map((item) => {
+    if (!item || typeof item !== "object") return String(item);
+    const o = item as Record<string, unknown>;
+    const id = typeof o.id === "string" ? o.id : "";
+    const status = typeof o.status === "string" ? o.status : "";
+    const title =
+      typeof o.title === "string"
+        ? o.title
+        : typeof o.name === "string"
+          ? o.name
+          : "";
+    const extra =
+      typeof o.stage === "string"
+        ? o.stage
+        : typeof o.messageCount === "number"
+          ? `${o.messageCount} msgs`
+          : "";
+    return `- ${id} ${status} ${title} ${extra}`.replace(/\s+/g, " ").trim();
+  });
+  return `${label} (${items.length}):\n${rows.join("\n")}`;
+}
+
+/**
+ * Drop session dumps / HTML / nested reports so a 4k clip cannot hide the
+ * operator-facing answer (same class of bug as agent `{ reply }` last).
+ */
+export function compactChatToolPayload(raw: string, _toolName?: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return raw;
+
+  const envelope = splitMcpEnvelope(trimmed);
+  if (envelope) {
+    const header = envelope.header.trim();
+    const body = envelope.body;
+    if (!body) return header;
+    const notesHit = /^notes:\s*(.+)$/m.exec(header);
+    const notesLen = notesHit?.[1]?.length ?? 0;
+    const bodyBudget =
+      notesLen >= 200
+        ? Math.min(1_200, CHAT_TOOL_RESULT_MAX_CHARS)
+        : CHAT_TOOL_RESULT_MAX_CHARS - header.length - 16;
+    return `${header}\n---\n${clipText(body, Math.max(400, bodyBudget))}`;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    const shaped = shapeJsonForChat(parsed);
+    if (shaped) return shaped;
+  } catch {
+    /* not JSON */
+  }
+
+  return extractDispatchedReply(raw);
+}
+
+function shapeJsonForChat(parsed: unknown): string | null {
+  if (!parsed || typeof parsed !== "object") return null;
+  const obj = parsed as Record<string, unknown>;
+
+  if (typeof obj.reply === "string" && obj.reply.trim()) {
+    const id =
+      (typeof obj.askId === "string" && obj.askId) ||
+      (typeof obj.agentId === "string" && obj.agentId) ||
+      (typeof obj.loopId === "string" && obj.loopId) ||
+      "";
+    return id ? `${id}\n\n${obj.reply.trim()}` : obj.reply.trim();
+  }
+
+  if (obj.ask && typeof obj.ask === "object" && !Array.isArray(obj.ask)) {
+    return compactSession(obj.ask as Record<string, unknown>, "ask");
+  }
+  if (obj.agent && typeof obj.agent === "object" && !Array.isArray(obj.agent)) {
+    return compactSession(obj.agent as Record<string, unknown>, "agent");
+  }
+  if (Array.isArray(obj.messages) && typeof obj.id === "string") {
+    return compactSession(obj, "session");
+  }
+
+  if (obj.report && typeof obj.report === "object" && !Array.isArray(obj.report)) {
+    const handoff = compactHandoff(obj.report as Record<string, unknown>);
+    if (handoff) {
+      const msg =
+        typeof obj.message === "string" && obj.message.trim()
+          ? obj.message.trim()
+          : "";
+      return [msg, handoff].filter(Boolean).join("\n\n");
+    }
+  }
+  if (typeof obj.message === "string" && obj.report === null) {
+    return obj.message;
+  }
+
+  if (
+    typeof obj.message === "string" &&
+    typeof obj.runId === "string" &&
+    typeof obj.settled === "boolean"
+  ) {
+    return obj.message;
+  }
+
+  if (typeof obj.notes === "string" && obj.notes.trim()) {
+    const loopId =
+      typeof obj.loopId === "string"
+        ? obj.loopId
+        : obj.loop && typeof obj.loop === "object"
+          ? String((obj.loop as { id?: string }).id ?? "")
+          : "";
+    const plan =
+      typeof obj.plan === "string" && obj.plan.trim() ? obj.plan.trim() : "";
+    return [
+      loopId ? `loopId: ${loopId}` : null,
+      obj.notes.trim(),
+      plan ? `---\n${clipText(plan, 2_500)}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  for (const [key, label] of [
+    ["asks", "asks"],
+    ["agents", "agents"],
+    ["loops", "loops"],
+    ["phases", "phases"],
+    ["runs", "runs"],
+  ] as const) {
+    const listed = compactList(obj[key], label);
+    if (listed) return listed;
+  }
+
+  return null;
+}
+
+/** Tool result text the chat operator model actually sees. */
+export function formatChatDispatchResult(
+  result: ChatToolResult,
+  toolName?: string,
+): string {
+  const raw = result.content.map((c) => c.text).join("\n");
+  const body = compactChatToolPayload(raw, toolName);
+  const prefixed = result.isError ? `ERROR:\n${body}` : body;
+  return clipChatToolText(prefixed);
 }
 
 /**
@@ -237,7 +610,7 @@ export function buildChatTools(opts: {
         // reconcile_blueprint is only free as a dry-run preview.
         if (name === "reconcile_blueprint") args.dryRun = true;
         const result = await dispatch(name, args);
-        return { ok: !result.isError, result: resultText(result) };
+        return formatChatDispatchResult(result, name);
       },
     });
   }
@@ -258,8 +631,9 @@ export function buildChatTools(opts: {
           tool: name,
           argsPreview: previewArgs(args),
           message:
-            "This action is parked until the operator confirms it. " +
-            "Tell the operator what will happen and ask them to confirm or deny.",
+            "This action is parked until the operator confirms it in this chat. " +
+            "Tell them what will happen and wait for their next message. " +
+            "Do not send them to a dashboard, REST, or MCP confirm.",
         };
       },
     });

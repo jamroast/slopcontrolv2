@@ -8,6 +8,7 @@ describe("MCP verify-steps tools", () => {
     assert.ok(names.has("get_run_steps"));
     assert.ok(names.has("retry_verify"));
     assert.ok(names.has("get_run"));
+    assert.ok(names.has("wait_for_run"));
     assert.ok(names.has("retry_development"));
 
     const steps = SLOPCONTROL_MCP_TOOLS.find((t) => t.name === "get_run_steps");

@@ -9,6 +9,7 @@ import {
   endpointSupportsVision,
   loadEndpointsConfig,
   resolveEndpointSecrets,
+  roleBindingInfo,
   substituteEnv,
 } from "./index.js";
 
@@ -85,6 +86,10 @@ describe("@slopcontrol/llm", () => {
     });
     const cls = registry.resolveEndpointForRole("classification");
     assert.equal(cls.endpoint.id, "plan");
+    const info = roleBindingInfo(registry.getRoleBindings(), "classification");
+    assert.equal(info.explicit, false);
+    assert.equal(info.fallbackFrom, "planning");
+    assert.equal(info.binding?.endpointId, "plan");
   });
 
   it("resolves classification to its own endpoint when bound", () => {

@@ -132,6 +132,63 @@ export const RunStageSchema = z.enum([
 
 export type RunStage = z.infer<typeof RunStageSchema>;
 
+/**
+ * Superstates for the run lifecycle. Busy = work in flight; gate = operator
+ * may proceed; terminal = human-stop (do not invent a next step); idle = not started.
+ * Chat continuer, wait-run, and stage timing all derive from this table.
+ */
+export const RunStageKindSchema = z.enum(["idle", "busy", "gate", "terminal"]);
+export type RunStageKind = z.infer<typeof RunStageKindSchema>;
+
+export const RUN_STAGE_KIND = {
+  idle: "idle",
+  researching: "busy",
+  drafting: "busy",
+  in_review: "gate",
+  accepted: "gate",
+  designing: "busy",
+  design_complete: "gate",
+  developing: "busy",
+  complete: "terminal",
+  blocked: "terminal",
+  failed: "terminal",
+  interrupted: "terminal",
+} as const satisfies Record<RunStage, RunStageKind>;
+
+function stagesWithKind(kind: RunStageKind): Set<RunStage> {
+  return new Set(
+    (Object.keys(RUN_STAGE_KIND) as RunStage[]).filter(
+      (stage) => RUN_STAGE_KIND[stage] === kind,
+    ),
+  );
+}
+
+export const BUSY_RUN_STAGES = stagesWithKind("busy");
+export const GATE_RUN_STAGES = stagesWithKind("gate");
+export const TERMINAL_RUN_STAGES = stagesWithKind("terminal");
+
+export function parseRunStage(value: string | undefined): RunStage | undefined {
+  const parsed = RunStageSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+export function runStageKind(stage: string | undefined): RunStageKind | undefined {
+  const parsed = parseRunStage(stage);
+  return parsed ? RUN_STAGE_KIND[parsed] : undefined;
+}
+
+export function isBusyRunStage(stage: string | undefined): boolean {
+  return runStageKind(stage) === "busy";
+}
+
+export function isGateRunStage(stage: string | undefined): boolean {
+  return runStageKind(stage) === "gate";
+}
+
+export function isTerminalRunStage(stage: string | undefined): boolean {
+  return runStageKind(stage) === "terminal";
+}
+
 export const LearningKindSchema = z.enum([
   "infra",
   "product",
@@ -383,11 +440,7 @@ export const RunSchema = z.object({
 
 export type Run = z.infer<typeof RunSchema>;
 
-const TERMINAL_STAGES = new Set<RunStage>([
-  "complete",
-  "blocked",
-  "failed",
-]);
+const TERMINAL_STAGES = TERMINAL_RUN_STAGES;
 
 /**
  * Close the open stage timing (if any) and start a new segment for `nextStage`.

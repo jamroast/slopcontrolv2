@@ -81,6 +81,72 @@ function providerPrefix(apiType: LlmEndpoint["apiType"]): string {
   }
 }
 
+export type RoleBindingInfo = {
+  role: AgentRole;
+  bound: boolean;
+  explicit: boolean;
+  fallbackFrom: AgentRole | null;
+  binding: RoleBinding | null;
+};
+
+/**
+ * Describe how a function (agent role) is bound in endpoints.json,
+ * including fallbacks (classification/design → planning, chat → supervisor).
+ * Does not throw for unbound optional roles (designVision / designImage).
+ */
+export function roleBindingInfo(
+  roles: RoleModelBindings,
+  role: AgentRole,
+): RoleBindingInfo {
+  const direct = roles[role as keyof RoleModelBindings];
+  if (direct) {
+    return {
+      role,
+      bound: true,
+      explicit: true,
+      fallbackFrom: null,
+      binding: direct,
+    };
+  }
+
+  if (role === "design" || role === "classification") {
+    return {
+      role,
+      bound: true,
+      explicit: false,
+      fallbackFrom: "planning",
+      binding: roles.planning,
+    };
+  }
+  if (role === "chat") {
+    return {
+      role,
+      bound: true,
+      explicit: false,
+      fallbackFrom: "supervisor",
+      binding: roles.supervisor,
+    };
+  }
+  if (role === "designVision" || role === "designImage") {
+    return {
+      role,
+      bound: false,
+      explicit: false,
+      fallbackFrom: null,
+      binding: null,
+    };
+  }
+
+  const required = roles[role as "research" | "planning" | "supervisor" | "coding"];
+  return {
+    role,
+    bound: Boolean(required),
+    explicit: Boolean(required),
+    fallbackFrom: null,
+    binding: required ?? null,
+  };
+}
+
 function bindingForRole(
   roles: RoleModelBindings,
   role: AgentRole,
@@ -89,17 +155,8 @@ function bindingForRole(
   const override = roleOverrides?.[role];
   if (override) return override;
 
-  const direct = roles[role as keyof RoleModelBindings];
-  if (direct) return direct;
-
-  // Text design / classification fall back to planning when unbound.
-  if (role === "design" || role === "classification") {
-    return roles.planning;
-  }
-  // Chat-service operator agent falls back to supervisor when unbound.
-  if (role === "chat") {
-    return roles.supervisor;
-  }
+  const info = roleBindingInfo(roles, role);
+  if (info.binding) return info.binding;
 
   if (role === "designVision" || role === "designImage") {
     throw new Error(
@@ -252,6 +309,7 @@ export * from "./vision-chat.js";
 export * from "./json-chat.js";
 export * from "./intent-extract.js";
 export * from "./continue-intent-llm.js";
+export * from "./chat-confirm-llm.js";
 export * from "./plan-continue-intent-llm.js";
 export * from "./dependency-intent-llm.js";
 export * from "./element-honor-llm.js";

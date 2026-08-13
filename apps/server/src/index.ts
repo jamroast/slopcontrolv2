@@ -162,7 +162,7 @@ import {
   classifyDependencyIntentViaLlm,
   loadEndpointsConfig,
 } from "@slopcontrol/llm";
-import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError, clearSlopcontrolRuntimeCache } from "@slopcontrol/mastra";
+import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError, clearSlopcontrolRuntimeCache, waitForRun, formatWaitForRunResult, DEFAULT_WAIT_TIMEOUT_MS, DEFAULT_WAIT_INTERVAL_MS, HTTP_WAIT_MAX_MS } from "@slopcontrol/mastra";
 import {
   bindLiveTurn,
   wantsLiveStream,
@@ -180,7 +180,7 @@ import {
   verifyProjectBuildProcess,
 } from "./build-process.js";
 import { ObsidianSync } from "@slopcontrol/obsidian";
-import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, type Run, type RunStage } from "@slopcontrol/types";
+import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, AgentRoleSchema, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
 import { createStore, defaultDataDir } from "./store.js";
 import { DevelopLock } from "./develop-lock.js";
@@ -6154,6 +6154,33 @@ app.get("/runs/:id", (req, res) => {
   });
 });
 
+app.post("/runs/:id/wait", async (req, res) => {
+  const runId = routeParam(req, "id");
+  if (!store.getRun(runId)) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  const requested =
+    typeof req.body?.timeoutMs === "number" ? req.body.timeoutMs : DEFAULT_WAIT_TIMEOUT_MS;
+  const timeoutMs = Math.min(Math.max(1_000, requested), HTTP_WAIT_MAX_MS);
+  try {
+    const result = await waitForRun({
+      runId,
+      getRun: () => store.getRun(runId),
+      timeoutMs,
+      intervalMs: DEFAULT_WAIT_INTERVAL_MS,
+    });
+    res.json({
+      ...result,
+      message: formatWaitForRunResult(result),
+    });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 app.get("/runs/:id/steps", (req, res) => {
   const run = store.getRun(req.params.id);
   if (!run) {
@@ -7453,6 +7480,59 @@ app.get("/chats/models", async (_req, res) => {
     res
       .status(500)
       .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/chats/function-mappings", async (_req, res) => {
+  try {
+    res.json(await getChatService().listFunctionMappings());
+  } catch (err) {
+    res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post("/chats/function-mappings", async (req, res) => {
+  try {
+    const { modelId, endpointId } = req.body ?? {};
+    const parsedFn = AgentRoleSchema.safeParse(req.body?.function);
+    if (!parsedFn.success) {
+      res.status(400).json({
+        error:
+          "function must be one of: research, planning, supervisor, coding, design, designVision, designImage, classification, chat",
+      });
+      return;
+    }
+    if (typeof modelId !== "string" || !modelId.trim()) {
+      res.status(400).json({ error: "modelId required" });
+      return;
+    }
+    if (endpointId !== undefined && typeof endpointId !== "string") {
+      res.status(400).json({ error: "endpointId must be a string" });
+      return;
+    }
+    const result = await getChatService().bindFunctionMapping({
+      function: parsedFn.data,
+      modelId: modelId.trim(),
+      ...(endpointId?.trim() ? { endpointId: endpointId.trim() } : {}),
+    });
+    res.json({
+      ok: true,
+      function: result.function,
+      modelId: result.modelId,
+      endpointId: result.endpointId,
+      createdEndpoint: result.createdEndpoint,
+      roles: result.config.roles,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = message.startsWith("Unknown endpoint")
+      ? 404
+      : message.includes("Pass endpointId") || message.includes("modelId required")
+        ? 400
+        : 500;
+    res.status(status).json({ error: message });
   }
 });
 

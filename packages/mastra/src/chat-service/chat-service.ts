@@ -2,20 +2,60 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { Agent } from "@mastra/core/agent";
 import type { Memory } from "@mastra/memory";
-import { LlmRegistry, toMastraModelConfig } from "@slopcontrol/llm";
-import type { ChatConversation } from "@slopcontrol/types";
-import { askProgressFromStreamChunk } from "../orchestrator/ask-stream.js";
+import {
+  classifyChatConfirmViaLlm,
+  LlmRegistry,
+  toMastraModelConfig,
+  type ChatConfirmClassification,
+  type ParkedChatAction,
+} from "@slopcontrol/llm";
+import {
+  isGateRunStage,
+  isTerminalRunStage,
+  type AgentRole,
+  type ChatConversation,
+} from "@slopcontrol/types";
+import {
+  ASK_SYNTHESIS_PROMPT_PREFIX,
+  askProgressFromStreamChunk,
+  decideNarrationSynthesis,
+} from "../orchestrator/ask-stream.js";
 import { isPromptTooLongError } from "../supervisor-enrich.js";
-import { buildChatTools, listChatToolNames } from "./chat-tools.js";
+import {
+  buildChatTools,
+  formatChatDispatchResult,
+  listChatToolNames,
+} from "./chat-tools.js";
 import {
   buildGlobalChatPrompt,
   buildProjectChatPrompt,
 } from "./lifecycle-context.js";
 import {
-  listEndpointModels,
+  bindFunctionToModel,
+  buildFunctionMappingList,
+  listUniqueProviderModels,
   updateEndpointModel,
+  type BindFunctionResult,
   type EndpointModelList,
+  type FunctionMappingList,
 } from "./models.js";
+import {
+  advanceRun,
+  formatAdvanceRunResult,
+  runIdFromLifecycle,
+  shouldAdvanceAfterConfirm,
+  stageFromDispatchText,
+} from "./advance-run.js";
+import {
+  DEFAULT_FOLLOW_UP_WAIT_MS,
+  DEFAULT_WAIT_INTERVAL_MS,
+  DEFAULT_WAIT_TIMEOUT_MS,
+  LIFECYCLE_WAIT_TOOLS,
+  extractBusyRunFromLifecycleResult,
+  formatWaitForRunResult,
+  isBusyRunStage,
+  waitForRun,
+} from "./wait-run.js";
 import type {
   ChatContextDeps,
   ChatEvent,
@@ -40,8 +80,22 @@ export interface ChatServiceDeps {
   endpointsPath: string;
   /** Called after endpoints.json is rewritten so cached runtimes pick up the new default. */
   onEndpointsChanged?: () => void;
+  /**
+   * Classify an operator message against parked gated actions.
+   * Injected so tests stub the LLM. Production default uses the
+   * classification role (fail-closed to unrelated).
+   */
+  classifyConfirm?: (opts: {
+    message: string;
+    parked: ParkedChatAction[];
+  }) => Promise<ChatConfirmClassification>;
   confirmTimeoutMs?: number;
   turnTimeoutMs?: number;
+  /** How long confirm/auto-wait blocks for a busy run (default 90s). */
+  waitTimeoutMs?: number;
+  waitPollMs?: number;
+  /** Background follow-up wait after inline wait times out (0 disables). */
+  followUpWaitMs?: number;
 }
 
 export class ConversationClosedError extends Error {
@@ -69,11 +123,24 @@ export class ChatService {
   private readonly pending = new Map<string, PendingAction>();
   private readonly confirmTimeoutMs: number;
   private readonly turnTimeoutMs: number;
+  private readonly waitTimeoutMs: number;
+  private readonly waitPollMs: number;
+  private readonly followUpWaitMs: number;
+  private readonly runWatchers = new Map<string, AbortController>();
+  private readonly busyConversations = new Set<string>();
+  /** Operator said proceed — keep reconciling until busy-or-human-stop. */
+  private readonly proceedLatches = new Map<
+    string,
+    { conversationId: string; runId: string; projectId?: string }
+  >();
 
   constructor(private readonly deps: ChatServiceDeps) {
     this.emitter.setMaxListeners(100);
     this.confirmTimeoutMs = deps.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS;
     this.turnTimeoutMs = deps.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
+    this.waitTimeoutMs = deps.waitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+    this.waitPollMs = deps.waitPollMs ?? DEFAULT_WAIT_INTERVAL_MS;
+    this.followUpWaitMs = deps.followUpWaitMs ?? DEFAULT_FOLLOW_UP_WAIT_MS;
   }
 
   // ---- events ----
@@ -144,6 +211,7 @@ export class ChatService {
 
   closeConversation(id: string): ChatConversation {
     const conversation = this.getConversation(id);
+    this.clearProceedLatchesForConversation(id);
     const closed = this.deps.store.closeConversation(id) ?? conversation;
     this.emit(closed, { type: "closed" });
     return closed;
@@ -152,6 +220,7 @@ export class ChatService {
   deleteConversation(id: string): boolean {
     const conversation = this.deps.store.getConversation(id);
     if (!conversation) return false;
+    this.clearProceedLatchesForConversation(id);
     void this.deps
       .getMemory()
       .deleteThread(conversation.id)
@@ -184,6 +253,7 @@ export class ChatService {
     for (const c of this.deps.store.listConversations({ status: "active" })) {
       const idleMs = now.getTime() - Date.parse(c.lastActiveAt);
       if (idleMs < maxIdleMs) continue;
+      this.clearProceedLatchesForConversation(c.id);
       this.deps.store.closeConversation(c.id);
       this.emit(c, { type: "closed", summary: "idle timeout" });
       closed.push(c.id);
@@ -195,8 +265,19 @@ export class ChatService {
 
   async listModels(): Promise<EndpointModelList[]> {
     const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
-    return Promise.all(
-      registry.listEndpoints().map((endpoint) => listEndpointModels(endpoint)),
+    return listUniqueProviderModels(registry.listEndpoints());
+  }
+
+  async listFunctionMappings(): Promise<FunctionMappingList> {
+    const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
+    const endpoints = registry.listEndpoints();
+    const providers = await listUniqueProviderModels(endpoints);
+    return buildFunctionMappingList(
+      {
+        endpoints,
+        roles: registry.getRoleBindings(),
+      },
+      providers,
     );
   }
 
@@ -218,6 +299,23 @@ export class ChatService {
     });
     this.deps.onEndpointsChanged?.();
     return config;
+  }
+
+  async bindFunctionMapping(opts: {
+    function: AgentRole;
+    modelId: string;
+    endpointId?: string;
+  }): Promise<BindFunctionResult> {
+    const providers = await this.listModels();
+    const result = bindFunctionToModel({
+      endpointsPath: this.deps.endpointsPath,
+      function: opts.function,
+      modelId: opts.modelId,
+      endpointId: opts.endpointId,
+      providers,
+    });
+    this.deps.onEndpointsChanged?.();
+    return result;
   }
 
   listToolSurface() {
@@ -264,12 +362,15 @@ export class ChatService {
   /**
    * Resolve a pending gated action. On approve, dispatches the tool and runs
    * a short synthetic turn so the agent thread records the outcome.
+   * Pass skipSynthetic when the caller will continue the operator turn with
+   * the result in the same prompt (in-chat confirm intercept).
    */
   async confirm(opts: {
     conversationId: string;
     token: string;
     approve: boolean;
-  }): Promise<{ ok: boolean; error?: string }> {
+    skipSynthetic?: boolean;
+  }): Promise<{ ok: boolean; error?: string; reply?: string }> {
     const conversation = this.getConversation(opts.conversationId);
     const action = this.getPendingAction(opts.token);
     if (!action || action.conversationId !== conversation.id) {
@@ -278,21 +379,44 @@ export class ChatService {
     this.pending.delete(opts.token);
 
     if (!opts.approve) {
+      const deniedRunId =
+        typeof action.args.runId === "string" ? action.args.runId.trim() : "";
+      if (deniedRunId) {
+        this.clearProceedLatch(conversation.id, deniedRunId);
+      }
       this.emit(conversation, {
         type: "confirm_resolved",
         tool: action.tool,
         token: opts.token,
         approved: false,
       });
-      await this.runSyntheticTurn(
-        conversation,
-        `[operator DENIED the ${action.tool} action — do not retry it unless they ask]`,
-      );
-      return { ok: true };
+      const reply = `The operator denied the ${action.tool} action. Do not retry it unless they ask.`;
+      if (!opts.skipSynthetic) {
+        await this.runSyntheticTurn(
+          conversation,
+          `[operator DENIED the ${action.tool} action — do not retry it unless they ask]`,
+        );
+      }
+      return { ok: true, reply };
     }
 
     const result = await this.deps.dispatch(action.tool, action.args);
-    const text = result.content.map((c) => c.text).join("\n").slice(0, 4_000);
+    let text = formatChatDispatchResult(result, action.tool);
+    if (!result.isError) {
+      text = await this.maybeWaitForLifecycleRun(conversation, action.tool, text);
+    }
+    let failed = Boolean(result.isError);
+    if (shouldAdvanceAfterConfirm(action.tool, action.args)) {
+      const advanced = await this.maybeAdvanceRun(
+        conversation,
+        action.tool,
+        action.args,
+        text,
+      );
+      text = advanced.text;
+      if (advanced.kind === "error") failed = true;
+      else if (advanced.kind === "working") failed = false;
+    }
     this.emit(conversation, {
       type: "confirm_resolved",
       tool: action.tool,
@@ -302,13 +426,315 @@ export class ChatService {
     this.emit(conversation, {
       type: "tool_result",
       tool: action.tool,
-      summary: result.isError ? `failed: ${text.slice(0, 200)}` : text.slice(0, 200),
+      summary: failed ? `failed: ${text.slice(0, 200)}` : text.slice(0, 200),
     });
-    await this.runSyntheticTurn(
-      conversation,
-      `[operator CONFIRMED ${action.tool}] Result (isError=${Boolean(result.isError)}):\n${text}`,
+    if (!opts.skipSynthetic) {
+      await this.runSyntheticTurn(
+        conversation,
+        `[operator CONFIRMED ${action.tool}] Result (isError=${failed}):\n${text}`,
+      );
+    }
+    return { ok: !failed, error: failed ? text : undefined, reply: text };
+  }
+
+  listPendingForConversation(conversationId: string): PendingAction[] {
+    const now = Date.now();
+    const out: PendingAction[] = [];
+    for (const [token, action] of this.pending) {
+      if (action.conversationId !== conversationId) continue;
+      if (now > action.expiresAt) {
+        this.pending.delete(token);
+        continue;
+      }
+      out.push(action);
+    }
+    return out;
+  }
+
+  /**
+   * When gated actions are parked, classify the operator's next message.
+   * Approve/deny goes through confirm(); unrelated leaves them parked.
+   * Classifier throw → unrelated (never auto-approve).
+   */
+  private async maybeResolvePendingConfirm(
+    conversation: ChatConversation,
+    message: string,
+  ): Promise<string | null> {
+    const parked = this.listPendingForConversation(conversation.id);
+    if (parked.length === 0) return null;
+
+    const parkedForLlm: ParkedChatAction[] = parked.map((p) => ({
+      token: p.token,
+      tool: p.tool,
+      argsPreview: JSON.stringify(p.args).slice(0, 400),
+    }));
+
+    let classified: ChatConfirmClassification;
+    try {
+      classified = this.deps.classifyConfirm
+        ? await this.deps.classifyConfirm({
+            message,
+            parked: parkedForLlm,
+          })
+        : await this.classifyPendingViaLlm(message, parkedForLlm);
+    } catch {
+      return null;
+    }
+    if (classified.decision === "unrelated") return null;
+    const token =
+      classified.token ??
+      (parked.length === 1 ? parked[0]!.token : undefined);
+    if (!token) return null;
+    const action = parked.find((p) => p.token === token);
+    const confirmed = await this.confirm({
+      conversationId: conversation.id,
+      token,
+      approve: classified.decision === "approve",
+      skipSynthetic: true,
+    });
+    if (!confirmed.ok && classified.decision === "approve" && !confirmed.reply) {
+      return buildConfirmedTurnPrefix({
+        tool: action?.tool ?? "tool",
+        approve: false,
+        resultText: confirmed.error ?? "confirmation failed",
+      });
+    }
+    return buildConfirmedTurnPrefix({
+      tool: action?.tool ?? "tool",
+      approve: classified.decision === "approve",
+      resultText: confirmed.reply ?? confirmed.error ?? "",
+    });
+  }
+
+  private async classifyPendingViaLlm(
+    message: string,
+    parked: ParkedChatAction[],
+  ): Promise<ChatConfirmClassification> {
+    const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
+    const { endpoint, modelId } = registry.resolveEndpointForRole(
+      "classification",
     );
-    return { ok: !result.isError, error: result.isError ? text : undefined };
+    return classifyChatConfirmViaLlm({
+      endpoint,
+      modelId,
+      message,
+      parked,
+    });
+  }
+
+  private lookupRun(runId: string) {
+    return this.deps.context.listRuns().find((run) => run.id === runId);
+  }
+
+  private proceedLatchKey(conversationId: string, runId: string): string {
+    return `${conversationId}:${runId}`;
+  }
+
+  private setProceedLatch(
+    conversation: ChatConversation,
+    runId: string,
+    args: Record<string, unknown>,
+  ): void {
+    const projectId =
+      (typeof args.projectId === "string" && args.projectId) ||
+      conversation.projectId ||
+      undefined;
+    this.proceedLatches.set(this.proceedLatchKey(conversation.id, runId), {
+      conversationId: conversation.id,
+      runId,
+      projectId,
+    });
+  }
+
+  private clearProceedLatch(conversationId: string, runId: string): void {
+    this.proceedLatches.delete(this.proceedLatchKey(conversationId, runId));
+  }
+
+  private clearProceedLatchesForConversation(conversationId: string): void {
+    for (const [key, latch] of this.proceedLatches) {
+      if (latch.conversationId === conversationId) {
+        this.proceedLatches.delete(key);
+      }
+    }
+  }
+
+  /**
+   * After the operator confirms a proceed action, keep walking the run
+   * until work is running (or a real stop). Table-driven — do not add
+   * one-off tool pairs here.
+   */
+  private async maybeAdvanceRun(
+    conversation: ChatConversation,
+    tool: string,
+    args: Record<string, unknown>,
+    resultText: string,
+    opts?: { skipFollowUpWait?: boolean },
+  ): Promise<{ text: string; kind: "working" | "stop" | "error"; stage?: string }> {
+    const runId = runIdFromLifecycle(args, resultText);
+    if (!runId) {
+      return { text: resultText, kind: "stop" };
+    }
+    this.setProceedLatch(conversation, runId, args);
+    let knownStage = stageFromDispatchText(resultText);
+    if (!knownStage && tool === "submit_review" && args.decision === "approve") {
+      knownStage = "accepted";
+    }
+    const projectId =
+      (typeof args.projectId === "string" && args.projectId) ||
+      conversation.projectId ||
+      undefined;
+
+    const advanced = await advanceRun({
+      runId,
+      projectId,
+      stageHint: knownStage,
+      seedError: resultText.startsWith("ERROR:") ? resultText : undefined,
+      getStage: () => this.lookupRun(runId)?.stage ?? knownStage,
+      dispatch: async (nextTool, nextArgs) => {
+        const follow = await this.deps.dispatch(nextTool, nextArgs);
+        let followText = formatChatDispatchResult(follow, nextTool);
+        if (!follow.isError) {
+          followText = await this.maybeWaitForLifecycleRun(
+            conversation,
+            nextTool,
+            followText,
+            { skipFollowUp: opts?.skipFollowUpWait },
+          );
+          knownStage =
+            stageFromDispatchText(followText) ??
+            this.lookupRun(runId)?.stage ??
+            knownStage;
+        }
+        this.emit(conversation, {
+          type: "tool_result",
+          tool: nextTool,
+          summary: follow.isError
+            ? `failed: ${followText.slice(0, 200)}`
+            : followText.slice(0, 200),
+        });
+        return { text: followText, isError: follow.isError };
+      },
+    });
+
+    if (isTerminalRunStage(advanced.stage)) {
+      this.clearProceedLatch(conversation.id, runId);
+    }
+    if (advanced.steps.length === 0) {
+      return { text: resultText, kind: advanced.kind, stage: advanced.stage };
+    }
+    return {
+      text: `${resultText.trim()}\n\n${formatAdvanceRunResult(advanced)}`,
+      kind: advanced.kind,
+      stage: advanced.stage,
+    };
+  }
+
+  private async maybeWaitForLifecycleRun(
+    conversation: ChatConversation,
+    tool: string,
+    resultText: string,
+    opts?: { skipFollowUp?: boolean },
+  ): Promise<string> {
+    if (!LIFECYCLE_WAIT_TOOLS.has(tool)) return resultText;
+    const extracted = extractBusyRunFromLifecycleResult(resultText);
+    if (!extracted || !isBusyRunStage(extracted.stage)) return resultText;
+
+    const wait = await waitForRun({
+      runId: extracted.runId,
+      getRun: () => this.lookupRun(extracted.runId),
+      timeoutMs: this.waitTimeoutMs,
+      intervalMs: this.waitPollMs,
+      onProgress: (snap) => {
+        this.emit(conversation, {
+          type: "status",
+          summary: `${snap.stage}…`,
+        });
+      },
+    });
+    if (wait.timedOut && this.followUpWaitMs > 0 && !opts?.skipFollowUp) {
+      this.watchRunForFollowUp(conversation, extracted.runId);
+    }
+    return `${resultText.trim()}\n\n${formatWaitForRunResult(wait)}`;
+  }
+
+  private watchRunForFollowUp(
+    conversation: ChatConversation,
+    runId: string,
+  ): void {
+    const key = `${conversation.id}:${runId}`;
+    this.runWatchers.get(key)?.abort();
+    const abort = new AbortController();
+    this.runWatchers.set(key, abort);
+    void (async () => {
+      let reschedule = false;
+      try {
+        const wait = await waitForRun({
+          runId,
+          getRun: () => this.lookupRun(runId),
+          timeoutMs: this.followUpWaitMs,
+          intervalMs: this.waitPollMs,
+          signal: abort.signal,
+          onProgress: (snap) => {
+            this.emit(conversation, {
+              type: "status",
+              summary: `${snap.stage}…`,
+            });
+          },
+        });
+        if (!wait.settled) return;
+        const latest = this.deps.store.getConversation(conversation.id);
+        if (!latest || latest.status === "closed") return;
+        this.emit(latest, {
+          type: "status",
+          summary: `run reached ${wait.stage}`,
+        });
+        while (this.busyConversations.has(latest.id)) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        if (isTerminalRunStage(wait.stage)) {
+          this.clearProceedLatch(latest.id, runId);
+        }
+        const latch = this.proceedLatches.get(
+          this.proceedLatchKey(latest.id, runId),
+        );
+        let extra = "";
+        if (latch && isGateRunStage(wait.stage)) {
+          const advanced = await this.maybeAdvanceRun(
+            latest,
+            "advance_run",
+            {
+              runId,
+              ...(latch.projectId ? { projectId: latch.projectId } : {}),
+            },
+            JSON.stringify({ runId, stage: wait.stage }),
+            { skipFollowUpWait: true },
+          );
+          extra = `\n\n${advanced.text}`;
+          const live = this.lookupRun(runId);
+          if (isTerminalRunStage(live?.stage) || isTerminalRunStage(advanced.stage)) {
+            this.clearProceedLatch(latest.id, runId);
+          } else if (
+            live &&
+            isBusyRunStage(live.stage) &&
+            this.followUpWaitMs > 0
+          ) {
+            reschedule = true;
+          }
+        }
+        await this.runTurn(
+          latest,
+          `[Run ${runId} reached ${wait.stage}. ${formatWaitForRunResult(wait)}]${extra}`,
+          { synthetic: false },
+        );
+      } catch {
+        /* aborted or follow-up turn failed — operator can ask */
+      } finally {
+        this.runWatchers.delete(key);
+      }
+      if (reschedule) {
+        this.watchRunForFollowUp(conversation, runId);
+      }
+    })();
   }
 
   /** Keep the Memory thread truthful after a gated action resolves. */
@@ -348,7 +774,14 @@ export class ChatService {
     });
 
     try {
-      const turn = this.runTurn(conversation, text, { synthetic: false });
+      const confirmPrefix = await this.maybeResolvePendingConfirm(
+        conversation,
+        text,
+      );
+      const turnText = confirmPrefix
+        ? `${confirmPrefix}\n\n---\nOperator message:\n${text}`
+        : text;
+      const turn = this.runTurn(conversation, turnText, { synthetic: false });
       let done = false;
       let turnError: unknown = null;
       void turn
@@ -381,18 +814,42 @@ export class ChatService {
     text: string,
     opts: { synthetic: boolean },
   ): Promise<void> {
+    this.busyConversations.add(conversation.id);
+    try {
+      await this.runTurnBody(conversation, text, opts);
+    } finally {
+      this.busyConversations.delete(conversation.id);
+    }
+  }
+
+  private async runTurnBody(
+    conversation: ChatConversation,
+    text: string,
+    opts: { synthetic: boolean },
+  ): Promise<void> {
     const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
     const override = conversation.modelOverride;
     const model = override
       ? toMastraModelConfig(registry.getEndpoint(override.endpointId), override.modelId)
       : registry.resolve("chat");
 
+    const pendingActions = this.listPendingForConversation(conversation.id).map(
+      (p) => ({
+        token: p.token,
+        tool: p.tool,
+        argsPreview: JSON.stringify(p.args).slice(0, 400),
+      }),
+    );
     const systemPrompt = conversation.projectId
       ? buildProjectChatPrompt({
           project: this.deps.context.getProject(conversation.projectId)!,
           deps: this.deps.context,
+          pendingActions,
         })
-      : buildGlobalChatPrompt({ deps: this.deps.context });
+      : buildGlobalChatPrompt({
+          deps: this.deps.context,
+          pendingActions,
+        });
 
     const tools = buildChatTools({
       dispatch: this.deps.dispatch,
@@ -432,6 +889,7 @@ export class ChatService {
       });
 
       let reply = "";
+      let toolCallCount = 0;
       const fullStream = (
         streamResult as { fullStream?: AsyncIterable<unknown> }
       ).fullStream;
@@ -442,6 +900,7 @@ export class ChatService {
               reply += ev.text;
               this.emit(conversation, { type: "delta", text: ev.text });
             } else if (ev.type === "tool_call") {
+              toolCallCount += 1;
               this.emit(conversation, {
                 type: "tool_call",
                 tool: ev.tool,
@@ -461,7 +920,54 @@ export class ChatService {
       const finalText = await Promise.resolve(
         (streamResult as { text?: Promise<string> | string }).text,
       ).catch(() => "");
-      const trimmed = (finalText || reply).trim();
+      let trimmed = (finalText || reply).trim();
+
+      if (!opts.synthetic) {
+        const narration = await decideNarrationSynthesis({
+          reply: trimmed,
+          toolCallCount,
+          synthesizeIfNarration: true,
+        });
+        if (narration.synthesize) {
+          this.emit(conversation, {
+            type: "status",
+            summary: "synthesizing answer from tool findings",
+          });
+          try {
+            const synthResult = await agent.generate(
+              `${ASK_SYNTHESIS_PROMPT_PREFIX}
+
+---
+${text}
+
+---
+Draft / incomplete reply to replace:
+${trimmed.slice(0, 2_000) || "(empty)"}`,
+              {
+                maxSteps: 1,
+                activeTools: [],
+                abortSignal: abort.signal,
+                memory: {
+                  thread: `${threadId}-synth`,
+                  resource: conversation.projectId ?? "global",
+                },
+              },
+            );
+            const synthText = String(
+              await Promise.resolve(
+                (synthResult as { text?: Promise<string> | string }).text,
+              ).catch(() => ""),
+            ).trim();
+            if (synthText) {
+              this.emit(conversation, { type: "delta", text: synthText });
+              trimmed = synthText;
+            }
+          } catch {
+            /* keep the streamed draft */
+          }
+        }
+      }
+
       this.emit(conversation, { type: "done", text: trimmed });
     };
 
@@ -542,4 +1048,18 @@ function toIso(value: string | Date | number | undefined): string {
     return value;
   }
   return new Date().toISOString();
+}
+
+/** Prefix the operator turn so a just-dispatched gated result is the answer, not a buried memory note. */
+export function buildConfirmedTurnPrefix(opts: {
+  tool: string;
+  approve: boolean;
+  resultText: string;
+}): string {
+  if (!opts.approve) {
+    return `[The parked ${opts.tool} action was denied. Do not retry it unless the operator asks. ${opts.resultText}]`;
+  }
+  return `[The parked ${opts.tool} action was approved and has finished. Answer the operator from this result. Do not call ${opts.tool} again for the same question unless you need a genuine follow-up.]
+
+${opts.resultText.trim()}`;
 }

@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
   consumeAskSseStream,
   formatAskMcpEnvelope,
+  formatAgentMcpEnvelope,
   formatDesignLoopMcpEnvelope,
   parseSseDataLine,
 } from "./mcp-tools.js";
@@ -245,6 +246,18 @@ describe("formatAskMcpEnvelope", () => {
     assert.match(text, /code: ask_timeout/);
     assert.match(text, /hint: retry_ask_or_narrow/);
     assert.match(text, /Ask timed out before a complete answer/);
+  });
+});
+
+describe("formatAgentMcpEnvelope", () => {
+  it("puts reply after --- so truncation cannot hide the answer", () => {
+    const text = formatAgentMcpEnvelope({
+      agent: { id: "ag-1", status: "open" },
+      reply: "UserPill has no onClick",
+    });
+    assert.match(text, /agentId: ag-1/);
+    assert.match(text, /---\nUserPill has no onClick/);
+    assert.ok(!text.startsWith("{"));
   });
 });
 

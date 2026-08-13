@@ -4,7 +4,12 @@ import {
   LlmEndpointSchema,
   ProjectConfigSchema,
   RunActionSchema,
+  RunStageSchema,
+  RUN_STAGE_KIND,
   formatDurationMs,
+  isBusyRunStage,
+  isGateRunStage,
+  isTerminalRunStage,
   log,
   phaseDependenciesSatisfied,
   recordStageTransition,
@@ -248,5 +253,31 @@ describe("@slopcontrol/types", () => {
     assert.equal(run.finishedAt, undefined);
     assert.equal(run.totalDurationMs, undefined);
     assert.equal(run.stage, "designing");
+  });
+
+  it("classifies every RunStage and treats interrupted as terminal", () => {
+    for (const stage of RunStageSchema.options) {
+      assert.ok(stage in RUN_STAGE_KIND, `missing kind for ${stage}`);
+    }
+    assert.equal(isBusyRunStage("developing"), true);
+    assert.equal(isGateRunStage("accepted"), true);
+    assert.equal(isTerminalRunStage("interrupted"), true);
+    assert.equal(isBusyRunStage("not-a-stage"), false);
+
+    const t0 = new Date("2026-07-17T10:00:00.000Z");
+    const tStop = new Date("2026-07-17T10:00:05.000Z");
+    const run: Run = {
+      id: "r3",
+      phaseId: "01-a",
+      projectId: "p1",
+      stage: "idle",
+      iterationCount: 0,
+      createdAt: t0.toISOString(),
+      updatedAt: t0.toISOString(),
+      stageTimings: [{ stage: "idle", startedAt: t0.toISOString() }],
+    };
+    recordStageTransition(run, "developing", t0);
+    recordStageTransition(run, "interrupted", tStop);
+    assert.equal(run.finishedAt, tStop.toISOString());
   });
 });
