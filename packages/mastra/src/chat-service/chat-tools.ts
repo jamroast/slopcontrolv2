@@ -1,4 +1,5 @@
 import { createTool } from "@mastra/core/tools";
+import { isBusyRunStage } from "@slopcontrol/types";
 import { z } from "zod";
 import type { ChatToolDispatch, ChatToolResult } from "./types.js";
 
@@ -512,6 +513,40 @@ function shapeJsonForChat(parsed: unknown): string | null {
   if (!parsed || typeof parsed !== "object") return null;
   const obj = parsed as Record<string, unknown>;
 
+  // Lifecycle responses carry {run|runId, stage}. The session shaping below
+  // (ask/agent/…) would drop that envelope, so keep it extractable for the
+  // chat service's await/follow-up machinery — the trailing JSON is read by
+  // extractBusyRunFromLifecycleResult, so nothing before it may contain "{".
+  const runObj =
+    obj.run && typeof obj.run === "object" && !Array.isArray(obj.run)
+      ? (obj.run as Record<string, unknown>)
+      : null;
+  const runId =
+    (typeof runObj?.id === "string" && runObj.id) ||
+    (typeof obj.runId === "string" && obj.runId) ||
+    "";
+  const runStage =
+    (typeof runObj?.stage === "string" && runObj.stage) ||
+    (typeof obj.stage === "string" && obj.stage) ||
+    "";
+  if (runId && runStage && isBusyRunStage(runStage)) {
+    const askId =
+      obj.ask && typeof obj.ask === "object"
+        ? String((obj.ask as { id?: unknown }).id ?? "")
+        : "";
+    const phaseId =
+      obj.phase && typeof obj.phase === "object"
+        ? String((obj.phase as { id?: unknown }).id ?? "")
+        : "";
+    const refs = [
+      askId ? `ask ${askId}` : null,
+      phaseId ? `phase ${phaseId}` : null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+    return `${refs ? `${refs} — ` : ""}run ${runId} is ${runStage}\n${JSON.stringify({ run: { id: runId, stage: runStage }, stage: runStage })}`;
+  }
+
   if (typeof obj.reply === "string" && obj.reply.trim()) {
     const id =
       (typeof obj.askId === "string" && obj.askId) ||
@@ -613,6 +648,17 @@ export function buildChatTools(opts: {
   requestConfirmation: (tool: string, args: Record<string, unknown>) => {
     token: string;
   };
+  /**
+   * Raw-result tap for free tools (they self-execute inside the agent loop,
+   * so the service never post-processes them). Used to back wait_for_run's
+   * "I'll let you know" with a real follow-up watcher.
+   */
+  onFreeToolResult?: (
+    name: string,
+    args: Record<string, unknown>,
+    rawText: string,
+    isError: boolean,
+  ) => void;
 }) {
   const { dispatch, projectId } = opts;
   const tools: Record<string, ReturnType<typeof createTool>> = {};
@@ -632,6 +678,12 @@ export function buildChatTools(opts: {
         // reconcile_blueprint is only free as a dry-run preview.
         if (name === "reconcile_blueprint") args.dryRun = true;
         const result = await dispatch(name, args);
+        const rawText = result.content.map((c) => c.text).join("\n");
+        try {
+          opts.onFreeToolResult?.(name, args, rawText, Boolean(result.isError));
+        } catch {
+          /* observer must not break the tool */
+        }
         return formatChatDispatchResult(result, name);
       },
     });

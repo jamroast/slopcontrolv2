@@ -80,6 +80,12 @@ export function runWaitKindForTool(tool: string): RunWaitKind | undefined {
   return LIFECYCLE_TOOL_KIND[tool];
 }
 
+/** Infer the wait kind from a live run stage (for wait_for_run, which carries no tool context). */
+export function runWaitKindForStage(stage: string | undefined): RunWaitKind {
+  if (stage === "researching" || stage === "drafting") return "research";
+  return "develop";
+}
+
 export interface WaitConfigOverrides {
   inlineMs?: number;
   followUpMs?: number;

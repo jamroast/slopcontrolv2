@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { AwaitedRun, ChatConversation, Run } from "@slopcontrol/types";
-import { resolveWaitConfig, runWaitKindForTool, WAIT_CONFIG } from "./wait-run.js";
+import { resolveWaitConfig, runWaitKindForTool, WAIT_CONFIG, extractBusyRunFromLifecycleResult } from "./wait-run.js";
 import {
   ChatService,
   chatToolTier,
@@ -1195,6 +1195,42 @@ describe("chat dispatch result shaping", () => {
     assert.equal(shaped.includes("truncated"), false);
   });
 
+  it("keeps the busy-run envelope extractable when a lifecycle payload is session-shaped", () => {
+    // promote_ask returns {ask, phase, run, stage} — the ask session shaping
+    // used to eat the run, so the chat never awaited the research run.
+    const raw = JSON.stringify({
+      ask: { id: "ask-1", status: "promoted", title: "dashboard rework" },
+      phase: { id: "ph-1" },
+      run: { id: "run-1", stage: "researching" },
+      stage: "researching",
+      accepted: true,
+    });
+    const shaped = formatChatDispatchResult(
+      { content: [{ type: "text", text: raw }] },
+      "promote_ask",
+    );
+    assert.match(shaped, /ask ask-1/);
+    assert.match(shaped, /phase ph-1/);
+    const extracted = extractBusyRunFromLifecycleResult(shaped);
+    assert.equal(extracted?.runId, "run-1");
+    assert.equal(extracted?.stage, "researching");
+  });
+
+  it("does not hijack settled run payloads — session shaping still applies", () => {
+    const raw = JSON.stringify({
+      ask: {
+        id: "ask-1",
+        status: "open",
+        messages: [{ role: "assistant", content: "the answer" }],
+      },
+      run: { id: "run-1", stage: "complete" },
+      stage: "complete",
+    });
+    const shaped = compactChatToolPayload(raw, "get_ask");
+    assert.match(shaped, /the answer/);
+    assert.equal(extractBusyRunFromLifecycleResult(shaped), null);
+  });
+
   it("keeps the latest get_ask / get_agent messages, not the history dump", () => {
     const dump = JSON.stringify({
       ask: {
@@ -1527,6 +1563,10 @@ describe("awaited runs + run-settled notifications", () => {
       awaitedRuns: Map<string, AwaitedRun>;
       notificationQueue: Map<string, string[]>;
       drainNotificationQueue: (conversationId: string) => void;
+      maybeWatchFromWaitForRun: (
+        conversation: ChatConversation,
+        rawText: string,
+      ) => void;
     };
   }
 
@@ -1881,6 +1921,110 @@ describe("awaited runs + run-settled notifications", () => {
 
     // followUpMs: 0 is a real value (disables follow-ups), not a default.
     assert.equal(resolveWaitConfig("ask", { followUpMs: 0 }).followUpMs, 0);
+  });
+
+  it("a still-busy wait_for_run result registers the awaited run and watches it to settlement", async () => {
+    const run = makeRun("developing", "run-watched");
+    const { service, store, events, cleanup } = makeService({
+      listRuns: () => [run],
+      waitPollMs: 10,
+      followUpWaitMs: 800,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      internals(service).maybeWatchFromWaitForRun(
+        conv,
+        JSON.stringify({
+          runId: run.id,
+          stage: "developing",
+          settled: false,
+          timedOut: true,
+          projectId: "p1",
+        }),
+      );
+
+      assert.equal(service.getAwaitedRun(conv.id)?.runId, run.id);
+      assert.equal(store.getConversation(conv.id)?.awaitedRun?.runId, run.id);
+      assert.ok(
+        events.some((e) => e.type === "run_awaited" && e.run?.runId === run.id),
+        "expected run_awaited for the wait_for_run-registered watch",
+      );
+
+      run.stage = "complete";
+      const deadline = Date.now() + 1_500;
+      while (
+        !events.some((e) => e.type === "run_settled") &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      assert.ok(
+        events.some(
+          (e) => e.type === "run_settled" && e.run?.runId === run.id,
+        ),
+        "expected run_settled once the watched run completes",
+      );
+      assert.equal(service.getAwaitedRun(conv.id), null);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("a settled wait_for_run result registers nothing", () => {
+    const { service, events, cleanup } = makeService();
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      internals(service).maybeWatchFromWaitForRun(
+        conv,
+        JSON.stringify({
+          runId: "run-x",
+          stage: "in_review",
+          settled: true,
+          projectId: "p1",
+        }),
+      );
+      assert.equal(service.getAwaitedRun(conv.id), null);
+      assert.ok(!events.some((e) => e.type === "run_awaited"));
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("repeated wait_for_run waits on the same run do not double-notify", async () => {
+    const run = makeRun("developing", "run-rewaited");
+    const { service, events, cleanup } = makeService({
+      listRuns: () => [run],
+      waitPollMs: 10,
+      followUpWaitMs: 800,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const payload = JSON.stringify({
+        runId: run.id,
+        stage: "developing",
+        settled: false,
+        timedOut: true,
+        projectId: "p1",
+      });
+      const svc = internals(service);
+      svc.maybeWatchFromWaitForRun(conv, payload);
+      svc.maybeWatchFromWaitForRun(conv, payload);
+
+      run.stage = "complete";
+      const deadline = Date.now() + 1_500;
+      while (
+        !events.some((e) => e.type === "run_settled") &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      const settled = events.filter(
+        (e) => e.type === "run_settled" && e.run?.runId === run.id,
+      );
+      assert.equal(settled.length, 1);
+    } finally {
+      cleanup();
+    }
   });
 });
 

@@ -57,6 +57,7 @@ import {
   formatWaitForRunResult,
   isBusyRunStage,
   resolveWaitConfig,
+  runWaitKindForStage,
   runWaitKindForTool,
   waitForRun,
   type RunWaitKind,
@@ -1131,12 +1132,60 @@ export class ChatService {
     return `${resultText.trim()}\n\n${formatWaitForRunResult(wait)}`;
   }
 
+  /**
+   * wait_for_run is a free tool: it self-executes in the agent loop and its
+   * still-busy result is the model promising "I'll let you know". Back that
+   * promise with the same awaited-run + follow-up watcher machinery the
+   * lifecycle tools get, or the chat goes silent when the run settles.
+   */
+  private maybeWatchFromWaitForRun(
+    conversation: ChatConversation,
+    rawText: string,
+  ): void {
+    let parsed: {
+      runId?: unknown;
+      stage?: unknown;
+      settled?: unknown;
+      projectId?: unknown;
+    };
+    try {
+      parsed = JSON.parse(rawText.trim());
+    } catch {
+      return;
+    }
+    if (parsed.settled !== false) return;
+    const runId = typeof parsed.runId === "string" ? parsed.runId : "";
+    const stage = typeof parsed.stage === "string" ? parsed.stage : "";
+    if (!runId || !isBusyRunStage(stage)) return;
+
+    const kind = runWaitKindForStage(stage);
+    const projectId =
+      conversation.projectId ??
+      (typeof parsed.projectId === "string" ? parsed.projectId : undefined) ??
+      this.lookupRun(runId)?.projectId ??
+      runId;
+    const awaited: AwaitedRun = {
+      runId,
+      projectId,
+      kind,
+      startedAt: new Date().toISOString(),
+    };
+    this.awaitedRuns.set(conversation.id, awaited);
+    this.deps.store.setAwaitedRun?.(conversation.id, awaited);
+    this.emit(conversation, {
+      type: "run_awaited",
+      summary: `waiting for ${kind} run ${runId}…`,
+      run: { runId, projectId, stage, kind },
+    });
+    // Replaces any existing watcher for this run (abort + fresh window).
+    this.watchRunForFollowUp(conversation, runId, kind);
+  }
+
   private watchRunForFollowUp(
     conversation: ChatConversation,
     runId: string,
     kind: RunWaitKind = "develop",
-  ): void {
-    const key = `${conversation.id}:${runId}`;
+  ): void {    const key = `${conversation.id}:${runId}`;
     this.runWatchers.get(key)?.abort();
     const abort = new AbortController();
     this.runWatchers.set(key, abort);
@@ -1178,6 +1227,11 @@ export class ChatService {
         });
 
         const latest = this.deps.store.getConversation(conversation.id);
+        if (abort.signal.aborted) {
+          // Replaced by a newer watcher (or handleRunSettled) mid-poll —
+          // that owner emits the settlement; this one must stay silent.
+          return;
+        }
         if (!latest || latest.status === "closed") {
           this.awaitedRuns.delete(conversation.id);
           this.deps.store.setAwaitedRun?.(conversation.id, null);
@@ -1276,7 +1330,11 @@ export class ChatService {
       } catch {
         /* aborted or follow-up turn failed — operator can ask */
       } finally {
-        this.runWatchers.delete(key);
+        // Only delete if we still own the key — a replacement watcher
+        // registered under the same key must not be clobbered.
+        if (this.runWatchers.get(key) === abort) {
+          this.runWatchers.delete(key);
+        }
       }
       if (reschedule) {
         this.watchRunForFollowUp(conversation, runId, kind);
@@ -1439,6 +1497,10 @@ export class ChatService {
           tool,
           this.fillAskIdFromLatch(conversation.id, tool, args),
         ),
+      onFreeToolResult: (name, _args, rawText, isError) => {
+        if (isError || name !== "wait_for_run") return;
+        this.maybeWatchFromWaitForRun(conversation, rawText);
+      },
     });
 
     const agent = new Agent({
