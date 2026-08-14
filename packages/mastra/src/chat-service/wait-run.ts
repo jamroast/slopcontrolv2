@@ -4,6 +4,7 @@ import {
   type Run,
   type RunStage,
 } from "@slopcontrol/types";
+import type { RunWaitKind } from "./types.js";
 
 export { BUSY_RUN_STAGES, isBusyRunStage };
 
@@ -26,6 +27,78 @@ export const DEFAULT_WAIT_TIMEOUT_MS = 90_000;
 export const DEFAULT_WAIT_INTERVAL_MS = 2_000;
 export const DEFAULT_FOLLOW_UP_WAIT_MS = 30 * 60 * 1_000;
 export const HTTP_WAIT_MAX_MS = 180_000;
+
+// Re-export for convenience (canonical definition is in types.ts)
+export type { RunWaitKind };
+
+/**
+ * Differentiated wait strategies by run kind.
+ * - ask: short inline (30s), brief follow-up (5min)
+ * - research: longer inline (120s), standard follow-up (30min)
+ * - develop: longer inline (120s), extended follow-up (60min)
+ */
+export const WAIT_CONFIG: Record<
+  RunWaitKind,
+  {
+    inlineMs: number;
+    followUpMs: number;
+    progressIntervalMs: number;
+  }
+> = {
+  ask: {
+    inlineMs: 30_000,
+    followUpMs: 5 * 60 * 1_000,
+    progressIntervalMs: 30_000,
+  },
+  research: {
+    inlineMs: 120_000,
+    followUpMs: 30 * 60 * 1_000,
+    progressIntervalMs: 60_000,
+  },
+  develop: {
+    inlineMs: 120_000,
+    followUpMs: 60 * 60 * 1_000,
+    progressIntervalMs: 60_000,
+  },
+};
+
+/** Map lifecycle tools to the kind of run they start. */
+export const LIFECYCLE_TOOL_KIND: Record<string, RunWaitKind> = {
+  ask: "ask",
+  fork_ask: "ask",
+  promote_ask: "research",
+  start_change: "research",
+  start_development: "develop",
+  retry_development: "develop",
+  start_design: "develop",
+  implement_design: "develop",
+  plan_loop_promote: "research",
+  relaunch_design_research: "research",
+};
+
+export function runWaitKindForTool(tool: string): RunWaitKind | undefined {
+  return LIFECYCLE_TOOL_KIND[tool];
+}
+
+export interface WaitConfigOverrides {
+  inlineMs?: number;
+  followUpMs?: number;
+  progressIntervalMs?: number;
+}
+
+/** Per-kind wait defaults with instance overrides applied on top. */
+export function resolveWaitConfig(
+  kind: RunWaitKind,
+  overrides?: WaitConfigOverrides,
+): { inlineMs: number; followUpMs: number; progressIntervalMs: number } {
+  const base = WAIT_CONFIG[kind];
+  return {
+    inlineMs: overrides?.inlineMs ?? base.inlineMs,
+    followUpMs: overrides?.followUpMs ?? base.followUpMs,
+    progressIntervalMs:
+      overrides?.progressIntervalMs ?? base.progressIntervalMs,
+  };
+}
 
 export type RunSnapshot = Pick<Run, "id" | "stage" | "phaseId" | "projectId">;
 

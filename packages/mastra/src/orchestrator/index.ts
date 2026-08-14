@@ -284,6 +284,8 @@ import {
   buildAskAlignJudgePrompt,
   buildDevelopCompletionJudgePrompt,
   buildDevelopJudgePrompt,
+  buildJudgeExtensionPrompt,
+  buildJudgeSteeringCard,
   buildPiInvestigatePrompt,
   formatScreenSeed,
   parseAskInvestigateTool,
@@ -291,6 +293,7 @@ import {
   planningDocsPointerForPresence,
   resolveAskInvestigateEngine,
   seedScreensForAsk,
+  shouldExtendDevelopmentForVerdict,
   type DevelopJudgeVerdict,
 } from "./ask-investigate.js";
 import {
@@ -912,6 +915,13 @@ async function runAgent(
  * Stream an agent live turn with progress + AbortSignal.
  * Optional narration→synthesis for ask-style turns.
  */
+/**
+ * Placeholder returned by runAgentLiveTurn when a stream succeeds but yields
+ * no text. Judges must treat this as "no signal" and fail safe, the same as
+ * a thrown turn.
+ */
+const EMPTY_LIVE_REPLY = "(empty reply)";
+
 async function runAgentLiveTurn(
   agent: Agent,
   prompt: string,
@@ -1139,7 +1149,7 @@ ${out.slice(0, 2_000) || "(empty)"}`;
       synthesized,
     });
     return {
-      reply: out || "(empty reply)",
+      reply: out || EMPTY_LIVE_REPLY,
       toolCallCount,
       synthesized,
     };
@@ -2640,13 +2650,19 @@ ${blueprintContractPromptBlock()}`;
           statusLabel: "ask judging findings",
         },
       );
-      return { reply: judged.reply.trim() || findings || "(empty reply)" };
+      const judgedText = judged.reply.trim();
+      return {
+        reply:
+          judgedText && judgedText !== EMPTY_LIVE_REPLY
+            ? judgedText
+            : findings.trim() || EMPTY_LIVE_REPLY,
+      };
     } catch (error) {
       slog.warn("ask", "judge pass failed; returning investigation findings", {
         askId,
         error: error instanceof Error ? error.message : String(error),
       });
-      return { reply: findings.trim() || "(empty reply)" };
+      return { reply: findings.trim() || EMPTY_LIVE_REPLY };
     }
   }
 
@@ -2692,7 +2708,7 @@ ${blueprintContractPromptBlock()}`;
         },
       );
       const body = judged.reply.trim();
-      if (!body) return null;
+      if (!body || body === EMPTY_LIVE_REPLY) return null;
       appendAppendix(
         project.rootPath,
         phase.id,
@@ -2756,7 +2772,7 @@ ${blueprintContractPromptBlock()}`;
         },
       );
       const body = judged.reply.trim();
-      if (!body) return null;
+      if (!body || body === EMPTY_LIVE_REPLY) return null;
       const verdict = parseDevelopJudgeVerdict(body);
       appendAppendix(
         project.rootPath,
@@ -6790,9 +6806,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             .join("\n\n---\n\n");
         } else if (lastContinueWasJudgeExtension) {
           lastContinueWasJudgeExtension = false;
-          prompt = `Automated checks pass but the pre-merge judge ruled the delivery OFF-TRACK against the phase brief — the phase was NOT merged.
-Close ONLY the judge gaps in the steering note below — do not re-litigate prior diagnoses, do not rework delivered work, do not probe live APIs.
-Run Automated Checks again, update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE.`;
+          prompt = buildJudgeExtensionPrompt();
           systemOverride = [
             contextSystem || null,
             designContext.trim() ? designContext.slice(0, 4_000) : null,
@@ -6828,21 +6842,7 @@ Run Automated Checks again, update \`## Operator handoff\` in APPENDIX, then pri
         if (lastJudgeSteering) {
           const steering = lastJudgeSteering;
           lastJudgeSteering = null;
-          const parts = [
-            `CODING-TURN JUDGE STEERING (verdict: ${steering.verdict ?? "unparsed"}):`,
-          ];
-          if (steering.gaps.length > 0) {
-            parts.push(
-              `Gaps the brief still needs:\n${steering.gaps.map((g) => `- ${g}`).join("\n")}`,
-            );
-          }
-          if (steering.nextCodingTurn) {
-            parts.push(`Judge instruction: ${steering.nextCodingTurn}`);
-          }
-          parts.push(
-            "Address these gaps directly — they outrank stale APPENDIX cards.",
-          );
-          prompt = `${prompt}\n\n${parts.join("\n")}`;
+          prompt = `${prompt}\n\n${buildJudgeSteeringCard(steering)}`;
         }
 
         let codingResult;
@@ -7114,10 +7114,14 @@ Run Automated Checks again, update \`## Operator handoff\` in APPENDIX, then pri
             abortSignal: signal,
           });
           if (
-            preMergeVerdict?.verdict === "off-track" &&
-            preMergeVerdict.gaps.length > 0 &&
-            judgeExtensionCount < MAX_JUDGE_EXTENSIONS &&
-            iteration < MAX_ITERATIONS
+            preMergeVerdict &&
+            shouldExtendDevelopmentForVerdict({
+              verdict: preMergeVerdict,
+              extensionCount: judgeExtensionCount,
+              maxExtensions: MAX_JUDGE_EXTENSIONS,
+              iteration,
+              maxIterations: MAX_ITERATIONS,
+            })
           ) {
             judgeExtensionCount += 1;
             lastContinueWasJudgeExtension = true;

@@ -2080,6 +2080,25 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "chat_get_awaited_run",
+      description:
+        "Get the run a chat conversation is currently awaiting (if any). Returns null when the conversation is not waiting on any run. Includes live stage and elapsed time for dashboard display.",
+      inputSchema: {
+        type: "object",
+        properties: { conversationId: { type: "string" } },
+        required: ["conversationId"],
+      },
+    },
+    {
+      name: "chat_list_awaited_runs",
+      description:
+        "List all active conversations that are currently awaiting a run, with live stage and elapsed time. Useful for a dashboard overview of in-flight work.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
+    {
       name: "chat_models_list",
       description:
         "List platform functions (research, planning, coding, classification, chat, ask, agent, judge, …) with the model currently bound to each, plus the models providers advertise. Use this before chat_function_bind. Do not treat endpoint ids like ollama-cloud-kimi as the thing to switch.",
@@ -2119,6 +2138,18 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           },
         },
         required: ["function", "modelId"],
+      },
+    },
+    {
+      name: "chat_get_run_status",
+      description:
+        "Lightweight run status for dashboard polling. Returns stage, stageKind, and elapsed time without the full run detail or log tail. Use this for progress indicators; use get_run for full detail.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+        },
+        required: ["runId"],
       },
     },
   ];
@@ -4673,6 +4704,43 @@ export async function dispatchSlopcontrolTool(
           name === "chat_close"
             ? await fetch(`${SERVER_URL}/chats/${id}/close`, { method: "POST" })
             : await fetch(`${SERVER_URL}/chats/${id}`, { method: "DELETE" });
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_get_awaited_run") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/chats/${encodeURIComponent(args.conversationId as string)}/awaited-runs`,
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_list_awaited_runs") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/chats/awaited-runs`);
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "chat_get_run_status") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/runs/${encodeURIComponent(args.runId as string)}/status`,
+        );
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

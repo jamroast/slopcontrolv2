@@ -56,7 +56,11 @@ import {
   extractBusyRunFromLifecycleResult,
   formatWaitForRunResult,
   isBusyRunStage,
+  resolveWaitConfig,
+  runWaitKindForTool,
   waitForRun,
+  type RunWaitKind,
+  type WaitConfigOverrides,
 } from "./wait-run.js";
 import {
   applyAskResumeDecision,
@@ -69,6 +73,7 @@ import {
   type AskResumeLatch,
 } from "./ask-routing.js";
 import type {
+  AwaitedRun,
   ChatContextDeps,
   ChatEvent,
   ChatEventListener,
@@ -118,6 +123,8 @@ export interface ChatServiceDeps {
   waitPollMs?: number;
   /** Background follow-up wait after inline wait times out (0 disables). */
   followUpWaitMs?: number;
+  /** Progress-event cadence for watchers (test-only override). */
+  waitProgressIntervalMs?: number;
 }
 
 export class ConversationClosedError extends Error {
@@ -148,6 +155,12 @@ export class ChatService {
   private readonly waitTimeoutMs: number;
   private readonly waitPollMs: number;
   private readonly followUpWaitMs: number;
+  /**
+   * Raw deps overrides for the per-kind WAIT_CONFIG. When present they win
+   * over the per-kind defaults — tests inject millisecond waits and
+   * followUpWaitMs: 0 disables follow-ups entirely.
+   */
+  private readonly waitOverrides: WaitConfigOverrides;
   private readonly runWatchers = new Map<string, AbortController>();
   private readonly busyConversations = new Set<string>();
   /** Operator said proceed — keep reconciling until busy-or-human-stop. */
@@ -159,6 +172,16 @@ export class ChatService {
   private readonly askLatches = new Map<string, AskResumeLatch>();
   /** Operator utterance for the in-flight sendMessage (ask routing). */
   private turnOperatorMessage = "";
+  /**
+   * Runs this conversation is actively awaiting (in-memory, backed by
+   * store.setAwaitedRun for restart recovery). Keyed by conversationId.
+   */
+  private readonly awaitedRuns = new Map<string, AwaitedRun>();
+  /**
+   * Per-conversation notification queue. Background watchers push here
+   * instead of spin-waiting on busyConversations. Drained after each turn.
+   */
+  private readonly notificationQueue = new Map<string, string[]>();
 
   constructor(private readonly deps: ChatServiceDeps) {
     this.emitter.setMaxListeners(100);
@@ -167,6 +190,20 @@ export class ChatService {
     this.waitTimeoutMs = deps.waitTimeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
     this.waitPollMs = deps.waitPollMs ?? DEFAULT_WAIT_INTERVAL_MS;
     this.followUpWaitMs = deps.followUpWaitMs ?? DEFAULT_FOLLOW_UP_WAIT_MS;
+    this.waitOverrides = {
+      inlineMs: deps.waitTimeoutMs,
+      followUpMs: deps.followUpWaitMs,
+      progressIntervalMs: deps.waitProgressIntervalMs,
+    };
+  }
+
+  /** Effective wait windows for a run kind: instance overrides beat WAIT_CONFIG. */
+  private waitConfigFor(kind: RunWaitKind): {
+    inlineMs: number;
+    followUpMs: number;
+    progressIntervalMs: number;
+  } {
+    return resolveWaitConfig(kind, this.waitOverrides);
   }
 
   // ---- events ----
@@ -239,6 +276,9 @@ export class ChatService {
     const conversation = this.getConversation(id);
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
+    this.awaitedRuns.delete(id);
+    this.notificationQueue.delete(id);
+    this.deps.store.setAwaitedRun?.(id, null);
     const closed = this.deps.store.closeConversation(id) ?? conversation;
     this.emit(closed, { type: "closed" });
     return closed;
@@ -249,6 +289,8 @@ export class ChatService {
     if (!conversation) return false;
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
+    this.awaitedRuns.delete(id);
+    this.notificationQueue.delete(id);
     void this.deps
       .getMemory()
       .deleteThread(conversation.id)
@@ -283,11 +325,140 @@ export class ChatService {
       if (idleMs < maxIdleMs) continue;
       this.clearProceedLatchesForConversation(c.id);
       this.askLatches.delete(c.id);
+      this.awaitedRuns.delete(c.id);
+      this.notificationQueue.delete(c.id);
+      this.deps.store.setAwaitedRun?.(c.id, null);
       this.deps.store.closeConversation(c.id);
       this.emit(c, { type: "closed", summary: "idle timeout" });
       closed.push(c.id);
     }
     return closed;
+  }
+
+  /**
+   * Called by the orchestrator (via onRunSettled) when a run reaches a
+   * terminal stage. Delivers notifications to every conversation awaiting
+   * this run. Fire-and-forget — errors are logged via emit, not thrown.
+   */
+  handleRunSettled(run: { id: string; stage: string; phaseId?: string; projectId?: string }): void {
+    // Find all conversations with a proceed latch for this run
+    const latched: Array<{ conversationId: string; runId: string }> = [];
+    for (const [, latch] of this.proceedLatches) {
+      if (latch.runId === run.id) {
+        latched.push({ conversationId: latch.conversationId, runId: latch.runId });
+      }
+    }
+
+    // Find all conversations with an awaitedRun for this run
+    for (const [conversationId, awaited] of this.awaitedRuns) {
+      if (awaited.runId === run.id && !latched.some((l) => l.conversationId === conversationId)) {
+        latched.push({ conversationId, runId: run.id });
+      }
+    }
+
+    for (const { conversationId } of latched) {
+      // Abort any live follow-up watcher for this run — it polls the same
+      // settlement and would emit a duplicate run_settled + notification turn.
+      const watchKey = `${conversationId}:${run.id}`;
+      this.runWatchers.get(watchKey)?.abort();
+      this.runWatchers.delete(watchKey);
+
+      const conversation = this.deps.store.getConversation(conversationId);
+      if (!conversation || conversation.status === "closed") {
+        this.clearProceedLatch(conversationId, run.id);
+        this.awaitedRuns.delete(conversationId);
+        this.deps.store.setAwaitedRun?.(conversationId, null);
+        continue;
+      }
+
+      this.clearProceedLatch(conversationId, run.id);
+      this.awaitedRuns.delete(conversationId);
+      this.deps.store.setAwaitedRun?.(conversationId, null);
+
+      // Emit the settled event immediately so SSE consumers see it
+      this.emit(conversation, {
+        type: "run_settled",
+        summary: `Run ${run.id} finished ${run.stage}`,
+        run: {
+          runId: run.id,
+          projectId: run.projectId,
+          stage: run.stage,
+        },
+      });
+
+      // Queue a notification turn for the next available moment
+      const note = `[Run ${run.id} reached ${run.stage}. ${run.stage === "complete" ? "The run completed successfully." : run.stage === "blocked" || run.stage === "failed" ? "The run did not succeed. Use get_run for details." : "The run has finished."}]`;
+      const existing = this.notificationQueue.get(conversationId) ?? [];
+      existing.push(note);
+      this.notificationQueue.set(conversationId, existing);
+
+      // If the conversation is not busy, deliver immediately
+      if (!this.busyConversations.has(conversationId)) {
+        this.drainNotificationQueue(conversationId);
+      }
+    }
+  }
+
+  /**
+   * Return the run this conversation is currently awaiting (if any).
+   * Enriched with live stage/elapsed for dashboard display.
+   */
+  getAwaitedRun(conversationId: string): (AwaitedRun & { stage?: string; elapsedMs?: number }) | null {
+    const awaited = this.awaitedRuns.get(conversationId);
+    if (!awaited) return null;
+    const run = this.lookupRun(awaited.runId);
+    return {
+      ...awaited,
+      stage: run?.stage,
+      elapsedMs: Date.now() - new Date(awaited.startedAt).getTime(),
+    };
+  }
+
+  /**
+   * List all active conversations that are currently awaiting a run,
+   * enriched with live stage/elapsed for dashboard overview.
+   */
+  listAwaitedRuns(): Array<AwaitedRun & { conversationId: string; stage?: string; elapsedMs?: number }> {
+    const results: Array<AwaitedRun & { conversationId: string; stage?: string; elapsedMs?: number }> = [];
+    for (const [conversationId, awaited] of this.awaitedRuns) {
+      const conversation = this.deps.store.getConversation(conversationId);
+      if (!conversation || conversation.status === "closed") continue;
+      const run = this.lookupRun(awaited.runId);
+      results.push({
+        ...awaited,
+        conversationId,
+        stage: run?.stage,
+        elapsedMs: Date.now() - new Date(awaited.startedAt).getTime(),
+      });
+    }
+    return results;
+  }
+
+  /**
+   * Startup recovery: re-establish watchers for any active conversation
+   * that has a persisted awaitedRun whose run is still busy.
+   */
+  recoverAwaitedRuns(): void {
+    for (const c of this.deps.store.listConversations({ status: "active" })) {
+      const awaited = c.awaitedRun;
+      if (!awaited) continue;
+      const run = this.lookupRun(awaited.runId);
+      if (!run) {
+        this.deps.store.setAwaitedRun?.(c.id, null);
+        continue;
+      }
+      // Populate in-memory state FIRST — handleRunSettled finds conversations
+      // via this map (proceed latches are empty after a restart) and clears
+      // both stores when it delivers.
+      this.awaitedRuns.set(c.id, awaited);
+      if (!isBusyRunStage(run.stage)) {
+        // Run settled while the server was down — deliver the missed notification
+        this.handleRunSettled(run);
+        continue;
+      }
+      // Run still busy — re-establish the watcher
+      this.watchRunForFollowUp(c, awaited.runId, awaited.kind);
+    }
   }
 
   // ---- model management ----
@@ -899,10 +1070,37 @@ export class ChatService {
     const extracted = extractBusyRunFromLifecycleResult(resultText);
     if (!extracted || !isBusyRunStage(extracted.stage)) return resultText;
 
+    const kind = runWaitKindForTool(tool) ?? "develop";
+    const config = this.waitConfigFor(kind);
+
+    // Persist + emit that this conversation is now awaiting a run
+    const projectId =
+      conversation.projectId ??
+      this.lookupRun(extracted.runId)?.projectId ??
+      extracted.runId;
+    const awaited: AwaitedRun = {
+      runId: extracted.runId,
+      projectId,
+      kind,
+      startedAt: new Date().toISOString(),
+    };
+    this.awaitedRuns.set(conversation.id, awaited);
+    this.deps.store.setAwaitedRun?.(conversation.id, awaited);
+    this.emit(conversation, {
+      type: "run_awaited",
+      summary: `waiting for ${kind} run ${extracted.runId}…`,
+      run: {
+        runId: extracted.runId,
+        projectId,
+        stage: extracted.stage,
+        kind,
+      },
+    });
+
     const wait = await waitForRun({
       runId: extracted.runId,
       getRun: () => this.lookupRun(extracted.runId),
-      timeoutMs: this.waitTimeoutMs,
+      timeoutMs: config.inlineMs,
       intervalMs: this.waitPollMs,
       onProgress: (snap) => {
         this.emit(conversation, {
@@ -911,8 +1109,24 @@ export class ChatService {
         });
       },
     });
-    if (wait.timedOut && this.followUpWaitMs > 0 && !opts?.skipFollowUp) {
-      this.watchRunForFollowUp(conversation, extracted.runId);
+
+    if (wait.settled) {
+      // Run finished within inline window — clear awaited state
+      this.awaitedRuns.delete(conversation.id);
+      this.deps.store.setAwaitedRun?.(conversation.id, null);
+      this.emit(conversation, {
+        type: "run_settled",
+        summary: `Run ${extracted.runId} finished ${wait.stage}`,
+        run: {
+          runId: extracted.runId,
+          projectId: wait.projectId,
+          stage: wait.stage,
+          kind,
+          elapsedMs: wait.elapsedMs,
+        },
+      });
+    } else if (wait.timedOut && config.followUpMs > 0 && !opts?.skipFollowUp) {
+      this.watchRunForFollowUp(conversation, extracted.runId, kind);
     }
     return `${resultText.trim()}\n\n${formatWaitForRunResult(wait)}`;
   }
@@ -920,44 +1134,100 @@ export class ChatService {
   private watchRunForFollowUp(
     conversation: ChatConversation,
     runId: string,
+    kind: RunWaitKind = "develop",
   ): void {
     const key = `${conversation.id}:${runId}`;
     this.runWatchers.get(key)?.abort();
     const abort = new AbortController();
     this.runWatchers.set(key, abort);
+    const config = this.waitConfigFor(kind);
+    // Relative to waitForRun's own clock — comparing elapsedMs against a
+    // Date.now() timestamp would suppress progress events forever.
+    let lastProgressEmit = 0;
+
     void (async () => {
       let reschedule = false;
       try {
         const wait = await waitForRun({
           runId,
           getRun: () => this.lookupRun(runId),
-          timeoutMs: this.followUpWaitMs,
+          timeoutMs: config.followUpMs,
           intervalMs: this.waitPollMs,
           signal: abort.signal,
-          onProgress: (snap) => {
+          onProgress: (snap, elapsedMs) => {
+            // Emit periodic run_progress events for dashboard display
+            if (elapsedMs - lastProgressEmit >= config.progressIntervalMs) {
+              lastProgressEmit = elapsedMs;
+              this.emit(conversation, {
+                type: "run_progress",
+                summary: `${snap.stage} (${Math.round(elapsedMs / 1000)}s)`,
+                run: {
+                  runId,
+                  projectId: snap.projectId,
+                  stage: snap.stage,
+                  kind,
+                  elapsedMs,
+                },
+              });
+            }
             this.emit(conversation, {
               type: "status",
               summary: `${snap.stage}…`,
             });
           },
         });
-        if (!wait.settled) return;
+
         const latest = this.deps.store.getConversation(conversation.id);
-        if (!latest || latest.status === "closed") return;
-        this.emit(latest, {
-          type: "status",
-          summary: `run reached ${wait.stage}`,
-        });
-        while (this.busyConversations.has(latest.id)) {
-          await new Promise((resolve) => setTimeout(resolve, 250));
+        if (!latest || latest.status === "closed") {
+          this.awaitedRuns.delete(conversation.id);
+          this.deps.store.setAwaitedRun?.(conversation.id, null);
+          return;
         }
+
+        if (!wait.settled) {
+          // Follow-up timed out — emit progress with timedOut flag so the
+          // dashboard can show "still working (asked 62min ago)" rather than
+          // silence. The operator can still query status via MCP.
+          this.emit(latest, {
+            type: "run_progress",
+            summary: `still ${wait.stage} after ${Math.round(wait.elapsedMs / 1000)}s (follow-up wait exhausted)`,
+            run: {
+              runId,
+              projectId: wait.projectId,
+              stage: wait.stage,
+              kind,
+              elapsedMs: wait.elapsedMs,
+              timedOut: true,
+            },
+          });
+          return;
+        }
+
+        // Run settled — clear awaited state
+        this.awaitedRuns.delete(latest.id);
+        this.deps.store.setAwaitedRun?.(latest.id, null);
+
+        this.emit(latest, {
+          type: "run_settled",
+          summary: `run reached ${wait.stage}`,
+          run: {
+            runId,
+            projectId: wait.projectId,
+            stage: wait.stage,
+            kind,
+            elapsedMs: wait.elapsedMs,
+          },
+        });
+
         if (isTerminalRunStage(wait.stage)) {
           this.clearProceedLatch(latest.id, runId);
         }
+
         const latch = this.proceedLatches.get(
           this.proceedLatchKey(latest.id, runId),
         );
         let extra = "";
+        let advanceError: string | undefined;
         if (latch && isGateRunStage(wait.stage)) {
           const advanced = await this.maybeAdvanceRun(
             latest,
@@ -970,29 +1240,71 @@ export class ChatService {
             { skipFollowUpWait: true },
           );
           extra = `\n\n${advanced.text}`;
+          if (advanced.kind === "error") {
+            advanceError = advanced.text.slice(0, 500);
+          }
           const live = this.lookupRun(runId);
           if (isTerminalRunStage(live?.stage) || isTerminalRunStage(advanced.stage)) {
             this.clearProceedLatch(latest.id, runId);
           } else if (
             live &&
             isBusyRunStage(live.stage) &&
-            this.followUpWaitMs > 0
+            config.followUpMs > 0
           ) {
             reschedule = true;
           }
         }
-        await this.runTurn(
-          latest,
-          `[Run ${runId} reached ${wait.stage}. ${formatWaitForRunResult(wait)}]${extra}`,
-          { synthetic: false },
-        );
+
+        // Queue notification turn instead of spin-waiting on busyConversations
+        const note = [
+          `[Run ${runId} reached ${wait.stage}. ${formatWaitForRunResult(wait)}]`,
+          extra.trim(),
+          advanceError
+            ? `Advance error: ${advanceError}. Use get_run for details.`
+            : null,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const existing = this.notificationQueue.get(latest.id) ?? [];
+        existing.push(note);
+        this.notificationQueue.set(latest.id, existing);
+
+        // If the conversation is not busy, deliver immediately
+        if (!this.busyConversations.has(latest.id)) {
+          this.drainNotificationQueue(latest.id);
+        }
       } catch {
         /* aborted or follow-up turn failed — operator can ask */
       } finally {
         this.runWatchers.delete(key);
       }
       if (reschedule) {
-        this.watchRunForFollowUp(conversation, runId);
+        this.watchRunForFollowUp(conversation, runId, kind);
+      }
+    })();
+  }
+
+  /**
+   * Drain the notification queue for a conversation. Runs pending
+   * notifications as synthetic turns. Called after each operator turn
+   * completes and when a background watcher finds the conversation idle.
+   */
+  private drainNotificationQueue(conversationId: string): void {
+    const notes = this.notificationQueue.get(conversationId);
+    if (!notes || notes.length === 0) return;
+    this.notificationQueue.delete(conversationId);
+
+    const conversation = this.deps.store.getConversation(conversationId);
+    if (!conversation || conversation.status === "closed") return;
+
+    // Fire-and-forget — don't block the caller
+    void (async () => {
+      for (const note of notes) {
+        try {
+          await this.runTurn(conversation, note, { synthetic: false });
+        } catch {
+          /* best-effort notification */
+        }
       }
     })();
   }
@@ -1081,6 +1393,10 @@ export class ChatService {
       await this.runTurnBody(conversation, text, opts);
     } finally {
       this.busyConversations.delete(conversation.id);
+      // Drain any notifications that queued up while this turn was running
+      if (!this.busyConversations.has(conversation.id)) {
+        this.drainNotificationQueue(conversation.id);
+      }
     }
   }
 

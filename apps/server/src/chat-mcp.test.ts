@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import {
   dispatchSlopcontrolTool,
   SLOPCONTROL_MCP_TOOLS,
@@ -85,5 +85,92 @@ describe("chat MCP tool registry", () => {
       result.content[0]?.text.includes("Unknown tool"),
       result.content[0]?.text,
     );
+  });
+});
+
+describe("awaited-run + run-status MCP tools", () => {
+  it("registers all three with the right required params", () => {
+    const byName = new Map(SLOPCONTROL_MCP_TOOLS.map((t) => [t.name, t]));
+    for (const name of [
+      "chat_get_awaited_run",
+      "chat_list_awaited_runs",
+      "chat_get_run_status",
+    ]) {
+      assert.ok(byName.has(name), `missing MCP tool ${name}`);
+    }
+    assert.deepEqual(
+      (byName.get("chat_get_awaited_run")?.inputSchema as { required?: string[] })
+        .required,
+      ["conversationId"],
+    );
+    assert.deepEqual(
+      (byName.get("chat_get_run_status")?.inputSchema as { required?: string[] })
+        .required,
+      ["runId"],
+    );
+    assert.equal(
+      (byName.get("chat_list_awaited_runs")?.inputSchema as { required?: string[] })
+        .required,
+      undefined,
+    );
+  });
+
+  function mockFetch(body: string, ok = true) {
+    return mock.method(globalThis, "fetch", async () => ({
+      ok,
+      text: async () => body,
+    }));
+  }
+
+  it("chat_get_awaited_run GETs /chats/:id/awaited-runs", async () => {
+    const fetchMock = mockFetch('{"awaited":null}');
+    try {
+      const result = await dispatchSlopcontrolTool("chat_get_awaited_run", {
+        conversationId: "conv 1",
+      });
+      assert.equal(result.isError, false);
+      assert.equal(result.content[0]?.text, '{"awaited":null}');
+      const url = String(fetchMock.mock.calls[0]?.arguments[0]);
+      assert.match(url, /\/chats\/conv%201\/awaited-runs$/);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("chat_list_awaited_runs GETs /chats/awaited-runs", async () => {
+    const fetchMock = mockFetch('{"awaited":[]}');
+    try {
+      const result = await dispatchSlopcontrolTool("chat_list_awaited_runs", {});
+      assert.equal(result.isError, false);
+      const url = String(fetchMock.mock.calls[0]?.arguments[0]);
+      assert.match(url, /\/chats\/awaited-runs$/);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("chat_get_run_status GETs /runs/:id/status and surfaces HTTP errors", async () => {
+    const fetchMock = mockFetch('{"stage":"developing","stageKind":"busy"}');
+    try {
+      const result = await dispatchSlopcontrolTool("chat_get_run_status", {
+        runId: "run 1",
+      });
+      assert.equal(result.isError, false);
+      const url = String(fetchMock.mock.calls[0]?.arguments[0]);
+      assert.match(url, /\/runs\/run%201\/status$/);
+    } finally {
+      fetchMock.mock.restore();
+    }
+
+    const failing = mockFetch("not found", false);
+    try {
+      const result = await dispatchSlopcontrolTool("chat_get_run_status", {
+        runId: "run-x",
+      });
+      assert.equal(result.isError, true);
+      assert.equal(result.content[0]?.text, "not found");
+    } finally {
+      failing.mock.restore();
+    }
   });
 });

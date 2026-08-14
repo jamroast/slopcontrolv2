@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import type { ChatConversation, Run } from "@slopcontrol/types";
+import type { AwaitedRun, ChatConversation, Run } from "@slopcontrol/types";
+import { resolveWaitConfig, runWaitKindForTool, WAIT_CONFIG } from "./wait-run.js";
 import {
   ChatService,
   chatToolTier,
@@ -72,6 +73,10 @@ function makeStore(): ConversationStore & { rows: ChatConversation[] } {
       if (i < 0) return false;
       rows.splice(i, 1);
       return true;
+    },
+    setAwaitedRun(conversationId, awaited) {
+      const c = rows.find((r) => r.id === conversationId);
+      if (c) c.awaitedRun = awaited ?? undefined;
     },
   };
 }
@@ -144,6 +149,7 @@ function makeService(opts?: {
   waitTimeoutMs?: number;
   waitPollMs?: number;
   followUpWaitMs?: number;
+  waitProgressIntervalMs?: number;
 }) {
   const dir = mkdtempSync(join(tmpdir(), "slop-chat-svc-"));
   const store = opts?.store ?? makeStore();
@@ -181,6 +187,7 @@ function makeService(opts?: {
     waitTimeoutMs: opts?.waitTimeoutMs,
     waitPollMs: opts?.waitPollMs,
     followUpWaitMs: opts?.followUpWaitMs ?? 0,
+    waitProgressIntervalMs: opts?.waitProgressIntervalMs,
   });
   const unsubscribe = service.subscribe((e) => events.push(e));
   return {
@@ -1496,6 +1503,384 @@ describe("chat ask session routing", () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+describe("awaited runs + run-settled notifications", () => {
+  function makeRun(stage: string, id = "run-1"): Run {
+    const now = new Date().toISOString();
+    return {
+      id,
+      phaseId: "ph-1",
+      projectId: "p1",
+      stage: stage as Run["stage"],
+      iterationCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      stageTimings: [],
+    };
+  }
+
+  function internals(service: ChatService) {
+    return service as unknown as {
+      busyConversations: Set<string>;
+      awaitedRuns: Map<string, AwaitedRun>;
+      notificationQueue: Map<string, string[]>;
+      drainNotificationQueue: (conversationId: string) => void;
+    };
+  }
+
+  it("maps lifecycle tools to run wait kinds", () => {
+    assert.equal(runWaitKindForTool("ask"), "ask");
+    assert.equal(runWaitKindForTool("fork_ask"), "ask");
+    assert.equal(runWaitKindForTool("promote_ask"), "research");
+    assert.equal(runWaitKindForTool("start_change"), "research");
+    assert.equal(runWaitKindForTool("start_development"), "develop");
+    assert.equal(runWaitKindForTool("start_design"), "develop");
+    assert.equal(runWaitKindForTool("get_run"), undefined);
+  });
+
+  it("recovery delivers the missed settlement notification and clears persisted state", async () => {
+    const run = makeRun("complete");
+    const { service, store, events, cleanup } = makeService({
+      listRuns: () => [run],
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      store.setAwaitedRun?.(conv.id, {
+        runId: run.id,
+        projectId: "p1",
+        kind: "develop",
+        startedAt: new Date().toISOString(),
+      });
+      service.recoverAwaitedRuns();
+      await new Promise((r) => setTimeout(r, 30));
+      const settled = events.filter(
+        (e) => e.type === "run_settled" && e.run?.runId === run.id,
+      );
+      assert.equal(settled.length, 1);
+      assert.equal(store.getConversation(conv.id)?.awaitedRun, undefined);
+      assert.equal(service.getAwaitedRun(conv.id), null);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("recovery re-establishes a watcher for a still-busy run", async () => {
+    const run = makeRun("developing");
+    const { service, store, events, cleanup } = makeService({
+      listRuns: () => [run],
+      waitPollMs: 10,
+      followUpWaitMs: 500,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      store.setAwaitedRun?.(conv.id, {
+        runId: run.id,
+        projectId: "p1",
+        kind: "develop",
+        startedAt: new Date().toISOString(),
+      });
+      service.recoverAwaitedRuns();
+      const awaited = service.getAwaitedRun(conv.id);
+      assert.equal(awaited?.runId, run.id);
+      assert.equal(awaited?.stage, "developing");
+
+      run.stage = "complete";
+      const deadline = Date.now() + 800;
+      while (
+        !events.some((e) => e.type === "run_settled") &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      assert.ok(
+        events.some((e) => e.type === "run_settled" && e.run?.runId === run.id),
+        "expected run_settled after the recovered watcher polls",
+      );
+      assert.equal(store.getConversation(conv.id)?.awaitedRun, undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("recovery clears persisted state when the run is gone, without notifying", () => {
+    const { service, store, events, cleanup } = makeService({
+      listRuns: () => [],
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      store.setAwaitedRun?.(conv.id, {
+        runId: "run-gone",
+        projectId: "p1",
+        kind: "research",
+        startedAt: new Date().toISOString(),
+      });
+      service.recoverAwaitedRuns();
+      assert.equal(store.getConversation(conv.id)?.awaitedRun, undefined);
+      assert.ok(!events.some((e) => e.type === "run_settled"));
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("handleRunSettled aborts the follow-up watcher so the operator is not notified twice", async () => {
+    const run = makeRun("developing", "run-dev");
+    const { service, events, cleanup } = makeService({
+      dispatch: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              run: { id: run.id, stage: "developing" },
+              stage: "developing",
+            }),
+          },
+        ],
+      }),
+      listRuns: () => [run],
+      waitTimeoutMs: 40,
+      waitPollMs: 10,
+      followUpWaitMs: 400,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const token = park(service, conv, "start_development", {
+        phaseId: "ph-1",
+      });
+      await service.confirm({
+        conversationId: conv.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+      // Inline wait timed out; the follow-up watcher is now polling.
+      assert.ok(service.getAwaitedRun(conv.id));
+
+      // Choke-point callback wins the race; the run flips in the same tick so
+      // an un-aborted watcher would emit a second run_settled within a poll.
+      run.stage = "complete";
+      service.handleRunSettled(run);
+      await new Promise((r) => setTimeout(r, 120));
+      const settled = events.filter(
+        (e) => e.type === "run_settled" && e.run?.runId === run.id,
+      );
+      assert.equal(settled.length, 1);
+      assert.equal(service.getAwaitedRun(conv.id), null);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("queues the notification while the conversation is busy and drains after", async () => {
+    const { service, cleanup } = makeService();
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const svc = internals(service);
+      svc.awaitedRuns.set(conv.id, {
+        runId: "run-x",
+        projectId: "p1",
+        kind: "develop",
+        startedAt: new Date().toISOString(),
+      });
+      svc.busyConversations.add(conv.id);
+
+      service.handleRunSettled({ id: "run-x", stage: "complete", projectId: "p1" });
+      // Busy — note queued, not yet drained; awaited state cleared regardless.
+      assert.equal(svc.notificationQueue.get(conv.id)?.length, 1);
+      assert.equal(svc.awaitedRuns.has(conv.id), false);
+
+      svc.busyConversations.delete(conv.id);
+      svc.drainNotificationQueue(conv.id);
+      assert.equal(svc.notificationQueue.has(conv.id), false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("emits run_awaited, then run_settled + clears state when the run settles inline", async () => {
+    const run = makeRun("in_review", "run-inline");
+    const { service, store, events, cleanup } = makeService({
+      dispatch: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              run: { id: run.id, stage: "researching" },
+              stage: "researching",
+            }),
+          },
+        ],
+      }),
+      // Already past the busy stage — the inline wait settles on first poll.
+      listRuns: () => [run],
+      waitPollMs: 10,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const token = park(service, conv, "start_change", { phaseId: "ph-1" });
+      await service.confirm({
+        conversationId: conv.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+
+      const awaited = events.filter(
+        (e) => e.type === "run_awaited" && e.run?.runId === run.id,
+      );
+      assert.equal(awaited.length, 1);
+      assert.equal(awaited[0]?.run?.kind, "research");
+
+      const settled = events.filter(
+        (e) => e.type === "run_settled" && e.run?.runId === run.id,
+      );
+      assert.equal(settled.length, 1);
+      assert.equal(settled[0]?.run?.stage, "in_review");
+      assert.equal(service.getAwaitedRun(conv.id), null);
+      assert.equal(store.getConversation(conv.id)?.awaitedRun, undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("emits periodic run_progress events while the follow-up watcher polls", async () => {
+    const run = makeRun("developing", "run-progress");
+    const { service, events, cleanup } = makeService({
+      dispatch: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              run: { id: run.id, stage: "developing" },
+              stage: "developing",
+            }),
+          },
+        ],
+      }),
+      listRuns: () => [run],
+      waitTimeoutMs: 30,
+      waitPollMs: 10,
+      followUpWaitMs: 1_000,
+      waitProgressIntervalMs: 15,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const token = park(service, conv, "start_development", {
+        phaseId: "ph-1",
+      });
+      await service.confirm({
+        conversationId: conv.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+
+      // Let the watcher poll a few intervals, then settle the run.
+      await new Promise((r) => setTimeout(r, 120));
+      run.stage = "complete";
+      const deadline = Date.now() + 800;
+      while (
+        !events.some((e) => e.type === "run_settled") &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+
+      const progress = events.filter(
+        (e) =>
+          e.type === "run_progress" &&
+          e.run?.runId === run.id &&
+          !e.run?.timedOut,
+      );
+      assert.ok(
+        progress.length >= 2,
+        `expected periodic progress events, got ${progress.length}`,
+      );
+      assert.ok(
+        events.some((e) => e.type === "run_settled" && e.run?.runId === run.id),
+        "expected run_settled once the run flips",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("emits a timedOut run_progress when the follow-up wait is exhausted", async () => {
+    const run = makeRun("developing", "run-stuck");
+    const { service, events, cleanup } = makeService({
+      dispatch: async () => ({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              run: { id: run.id, stage: "developing" },
+              stage: "developing",
+            }),
+          },
+        ],
+      }),
+      listRuns: () => [run],
+      waitTimeoutMs: 30,
+      waitPollMs: 10,
+      followUpWaitMs: 60,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const token = park(service, conv, "start_development", {
+        phaseId: "ph-1",
+      });
+      await service.confirm({
+        conversationId: conv.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+
+      const deadline = Date.now() + 800;
+      while (
+        !events.some((e) => e.type === "run_progress" && e.run?.timedOut) &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 15));
+      }
+      const timedOut = events.filter(
+        (e) => e.type === "run_progress" && e.run?.timedOut,
+      );
+      assert.equal(timedOut.length, 1);
+      assert.equal(timedOut[0]?.run?.stage, "developing");
+      // No settlement, and the awaited entry stays so a restart re-watches.
+      assert.ok(!events.some((e) => e.type === "run_settled"));
+      assert.equal(service.getAwaitedRun(conv.id)?.runId, run.id);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("resolveWaitConfig applies per-kind defaults and instance overrides", () => {
+    assert.deepEqual(resolveWaitConfig("ask"), WAIT_CONFIG.ask);
+    assert.deepEqual(resolveWaitConfig("develop"), WAIT_CONFIG.develop);
+
+    const overridden = resolveWaitConfig("ask", {
+      inlineMs: 40,
+      followUpMs: 400,
+      progressIntervalMs: 15,
+    });
+    assert.equal(overridden.inlineMs, 40);
+    assert.equal(overridden.followUpMs, 400);
+    assert.equal(overridden.progressIntervalMs, 15);
+
+    // Partial overrides fall through to the kind default.
+    const partial = resolveWaitConfig("research", { inlineMs: 10 });
+    assert.equal(partial.inlineMs, 10);
+    assert.equal(partial.followUpMs, WAIT_CONFIG.research.followUpMs);
+    assert.equal(
+      partial.progressIntervalMs,
+      WAIT_CONFIG.research.progressIntervalMs,
+    );
+
+    // followUpMs: 0 is a real value (disables follow-ups), not a default.
+    assert.equal(resolveWaitConfig("ask", { followUpMs: 0 }).followUpMs, 0);
   });
 });
 

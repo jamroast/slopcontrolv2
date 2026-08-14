@@ -1,10 +1,16 @@
 import type {
   AskSession,
+  AwaitedRun,
   ChatConversation,
   Phase,
   Project,
   Run,
 } from "@slopcontrol/types";
+
+/** Kind of run the chat is waiting on — drives differentiated wait timeouts. */
+export type RunWaitKind = AwaitedRun["kind"];
+
+export type { AwaitedRun };
 
 /** Events emitted on a conversation stream (per-chat + aggregate SSE). */
 export interface ChatEvent {
@@ -20,7 +26,10 @@ export interface ChatEvent {
     | "status"
     | "done"
     | "error"
-    | "closed";
+    | "closed"
+    | "run_awaited"
+    | "run_progress"
+    | "run_settled";
   at: string;
   /** delta text / done reply. */
   text?: string;
@@ -36,6 +45,16 @@ export interface ChatEvent {
   approved?: boolean;
   /** error message. */
   error?: string;
+  /** run_awaited / run_settled / run_progress payload. */
+  run?: {
+    runId: string;
+    projectId?: string;
+    stage?: string;
+    kind?: RunWaitKind;
+    elapsedMs?: number;
+    timedOut?: boolean;
+    error?: string;
+  };
 }
 
 export type ChatEventListener = (event: ChatEvent) => void;
@@ -66,6 +85,11 @@ export interface ConversationStore {
   ): ChatConversation | undefined;
   closeConversation(id: string): ChatConversation | undefined;
   deleteConversation(id: string): boolean;
+  /** Persist or clear the run this conversation is awaiting. */
+  setAwaitedRun?(
+    conversationId: string,
+    awaited: AwaitedRun | null,
+  ): void;
 }
 
 /** Matches the MCP tool result envelope (dispatchSlopcontrolTool). */

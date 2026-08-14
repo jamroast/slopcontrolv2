@@ -489,6 +489,13 @@ export class SlopStore {
     return true;
   }
 
+  setAwaitedRun(conversationId: string, awaited: import("@slopcontrol/types").AwaitedRun | null): void {
+    const conversation = this.getConversation(conversationId);
+    if (!conversation) return;
+    conversation.awaitedRun = awaited ?? undefined;
+    this.updateConversation(conversation);
+  }
+
   listAgents(projectId: string): AgentSession[] {
     return this.data.agents
       .filter((agent) => agent.projectId === projectId)

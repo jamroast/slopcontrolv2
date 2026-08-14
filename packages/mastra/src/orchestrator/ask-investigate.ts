@@ -262,3 +262,51 @@ ${files}
 Automated checks:
 ${checks}`;
 }
+
+/**
+ * Steering card injected into the next coding prompt after a partial /
+ * off-track judge verdict. Judge gaps outrank stale APPENDIX cards.
+ */
+export function buildJudgeSteeringCard(verdict: DevelopJudgeVerdict): string {
+  const parts = [
+    `CODING-TURN JUDGE STEERING (verdict: ${verdict.verdict ?? "unparsed"}):`,
+  ];
+  if (verdict.gaps.length > 0) {
+    parts.push(
+      `Gaps the brief still needs:\n${verdict.gaps.map((g) => `- ${g}`).join("\n")}`,
+    );
+  }
+  if (verdict.nextCodingTurn) {
+    parts.push(`Judge instruction: ${verdict.nextCodingTurn}`);
+  }
+  parts.push("Address these gaps directly — they outrank stale APPENDIX cards.");
+  return parts.join("\n");
+}
+
+/**
+ * Bounded judge authority: an off-track pre-merge verdict with concrete gaps
+ * forces one more coding iteration WITHOUT merging — but only while the
+ * extension budget and iteration budget both have room. Judge failure
+ * (null verdict) fails open: automated checks remain the hard gate.
+ */
+export function shouldExtendDevelopmentForVerdict(opts: {
+  verdict: DevelopJudgeVerdict | null;
+  extensionCount: number;
+  maxExtensions: number;
+  iteration: number;
+  maxIterations: number;
+}): boolean {
+  return (
+    opts.verdict?.verdict === "off-track" &&
+    opts.verdict.gaps.length > 0 &&
+    opts.extensionCount < opts.maxExtensions &&
+    opts.iteration < opts.maxIterations
+  );
+}
+
+/** Coding prompt for a judge-forced extension iteration (checks were green). */
+export function buildJudgeExtensionPrompt(): string {
+  return `Automated checks pass but the pre-merge judge ruled the delivery OFF-TRACK against the phase brief — the phase was NOT merged.
+Close ONLY the judge gaps in the steering note below — do not re-litigate prior diagnoses, do not rework delivered work, do not probe live APIs.
+Run Automated Checks again, update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE.`;
+}

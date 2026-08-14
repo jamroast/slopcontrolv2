@@ -183,6 +183,7 @@ import { ObsidianSync } from "@slopcontrol/obsidian";
 import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, AgentRoleSchema, AskInvestigateToolSchema, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
 import { createStore, defaultDataDir } from "./store.js";
+import { shouldNotifyRunSettled } from "./run-settled.js";
 import { DevelopLock } from "./develop-lock.js";
 import { NO_ENV_SYNC_HINT, runProjectEnvSync } from "./env-sync.js";
 import { compactProjectRuns, compactRuns, planCompaction } from "./run-compaction.js";
@@ -287,6 +288,20 @@ function touchRunStage(runId: string, stage: RunStage, iterationCount?: number):
     run.iterationCount = iterationCount;
   }
   store.updateRun(run);
+
+  // Choke point for run-settled push notifications: every research/design/
+  // develop stage transition flows through here, so terminal stages notify
+  // awaiting chat conversations regardless of which loop produced them.
+  if (shouldNotifyRunSettled(previous, stage)) {
+    try {
+      getChatService().handleRunSettled(run);
+    } catch (err) {
+      log.warn("chat", "handleRunSettled failed", {
+        runId: run.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   if (previous !== stage) {
     log.info("run", `stage ${previous} → ${stage}`, {
@@ -7760,6 +7775,49 @@ app.post("/chats/:id/messages", streamChatTurn);
 app.post("/chat/:id/messages", streamChatTurn);
 app.post("/chat/:id/send", streamChatTurn);
 
+// Lightweight run status for dashboard polling (no log tail)
+app.get("/runs/:id/status", (req, res) => {
+  const run = store.getRun(req.params.id);
+  if (!run) {
+    res.status(404).json({ error: "Run not found" });
+    return;
+  }
+  res.json({
+    id: run.id,
+    stage: run.stage,
+    stageKind: run.stage,
+    phaseId: run.phaseId,
+    projectId: run.projectId,
+    elapsedMs: run.startedAt
+      ? Date.now() - new Date(run.startedAt).getTime()
+      : undefined,
+    totalDurationMs: run.totalDurationMs ?? null,
+  });
+});
+
+// Awaited runs for a conversation (dashboard polls on mount)
+app.get("/chats/:id/awaited-runs", (req, res) => {
+  try {
+    const awaited = getChatService().getAwaitedRun(req.params.id);
+    res.json({ runs: awaited ? [awaited] : [] });
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.get("/chats/awaited-runs", (_req, res) => {
+  try {
+    const runs = getChatService().listAwaitedRuns();
+    res.json({ runs });
+  } catch (err) {
+    res
+      .status(500)
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 app.listen(PORT, () => {
   startLiveTurnWatcher();
   startRunCompactionWatcher({
@@ -7771,6 +7829,14 @@ app.listen(PORT, () => {
         .some((run) => activeRuns.has(run.id)),
   });
   startChatConversationWatcher(getChatService());
+  // Recover any in-flight awaited runs that survived a server restart
+  try {
+    getChatService().recoverAwaitedRuns();
+  } catch (err) {
+    log.warn("chat", "recoverAwaitedRuns failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   log.info("server", `listening on http://localhost:${PORT}`, {
     dataDir: defaultDataDir(),
     logLevel: process.env.SLOPCONTROL_LOG_LEVEL ?? "info",

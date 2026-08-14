@@ -352,12 +352,22 @@ export type ChatModelOverride = z.infer<typeof ChatModelOverrideSchema>;
  * lifecycle/lookup record (scope, status, model override, idle tracking).
  * projectId null = global-scope conversation (cross-project control chat).
  */
+export const AwaitedRunSchema = z.object({
+  runId: z.string().min(1),
+  projectId: z.string().min(1),
+  kind: z.enum(["ask", "research", "develop"]),
+  startedAt: z.string().datetime(),
+});
+
+export type AwaitedRun = z.infer<typeof AwaitedRunSchema>;
+
 export const ChatConversationSchema = z.object({
   id: z.string().min(1),
   projectId: z.string().min(1).nullable(),
   title: z.string().optional(),
   status: ChatConversationStatusSchema,
   modelOverride: ChatModelOverrideSchema.optional(),
+  awaitedRun: AwaitedRunSchema.nullable().optional(),
   createdAt: z.string().datetime(),
   lastActiveAt: z.string().datetime(),
   closedAt: z.string().datetime().optional(),

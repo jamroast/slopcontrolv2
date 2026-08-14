@@ -5,6 +5,8 @@ import {
   buildAskAlignJudgePrompt,
   buildDevelopCompletionJudgePrompt,
   buildDevelopJudgePrompt,
+  buildJudgeExtensionPrompt,
+  buildJudgeSteeringCard,
   buildPiInvestigatePrompt,
   filterScreensForAsk,
   formatScreenSeed,
@@ -12,6 +14,7 @@ import {
   parseAskInvestigateTool,
   parseDevelopJudgeVerdict,
   resolveAskInvestigateEngine,
+  shouldExtendDevelopmentForVerdict,
 } from "./ask-investigate.js";
 
 function screen(route: string, source = "src/app/page.tsx"): ScreenContent {
@@ -229,5 +232,88 @@ describe("develop pre-merge judge prompt", () => {
     assert.match(prompt, /connector registry/);
     assert.match(prompt, /src\/app\/product\/page\.tsx/);
     assert.match(prompt, /42 tests pass/);
+  });
+});
+
+describe("develop-loop judge decisions", () => {
+  const offTrack = parseDevelopJudgeVerdict(
+    "## Verdict\noff-track\n\n## Gaps\n- no settings page\n- webhook route missing\n\n## Next coding turn\nAdd the settings page first.\n",
+  );
+
+  it("steering card carries verdict, gaps, and the judge instruction", () => {
+    const card = buildJudgeSteeringCard(offTrack);
+    assert.match(card, /verdict: off-track/);
+    assert.match(card, /- no settings page/);
+    assert.match(card, /- webhook route missing/);
+    assert.match(card, /Judge instruction: Add the settings page first\./);
+    assert.match(card, /outrank stale APPENDIX cards/);
+  });
+
+  it("steering card marks an unparsed verdict and omits empty sections", () => {
+    const card = buildJudgeSteeringCard(
+      parseDevelopJudgeVerdict("no template here"),
+    );
+    assert.match(card, /verdict: unparsed/);
+    assert.doesNotMatch(card, /Gaps the brief still needs/);
+    assert.doesNotMatch(card, /Judge instruction:/);
+  });
+
+  it("extends only for off-track with concrete gaps inside both budgets", () => {
+    const base = {
+      verdict: offTrack,
+      extensionCount: 0,
+      maxExtensions: 1,
+      iteration: 1,
+      maxIterations: 6,
+    };
+    assert.equal(shouldExtendDevelopmentForVerdict(base), true);
+
+    // Aligned / partial / unparsed verdicts never extend.
+    for (const verdict of ["aligned", "partial"] as const) {
+      assert.equal(
+        shouldExtendDevelopmentForVerdict({
+          ...base,
+          verdict: { ...offTrack, verdict },
+        }),
+        false,
+      );
+    }
+    assert.equal(
+      shouldExtendDevelopmentForVerdict({ ...base, verdict: null }),
+      false,
+    );
+
+    // Off-track without concrete gaps is not actionable — fail open to merge.
+    assert.equal(
+      shouldExtendDevelopmentForVerdict({
+        ...base,
+        verdict: { ...offTrack, gaps: [] },
+      }),
+      false,
+    );
+
+    // Extension budget spent.
+    assert.equal(
+      shouldExtendDevelopmentForVerdict({ ...base, extensionCount: 1 }),
+      false,
+    );
+
+    // Iteration budget spent.
+    assert.equal(
+      shouldExtendDevelopmentForVerdict({
+        ...base,
+        iteration: 6,
+        maxIterations: 6,
+      }),
+      false,
+    );
+  });
+
+  it("judge extension prompt scopes the coder to the judge gaps only", () => {
+    const prompt = buildJudgeExtensionPrompt();
+    assert.match(prompt, /OFF-TRACK/);
+    assert.match(prompt, /NOT merged/);
+    assert.match(prompt, /Close ONLY the judge gaps/);
+    assert.match(prompt, /DEV_COMPLETE/);
   });
 });
