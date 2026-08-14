@@ -18,7 +18,9 @@ import type {
   CodingEvent,
   CodingResult,
   CodingSession,
+  CodingSessionMode,
   CodingTool,
+  CreateSessionOptions,
   RunPromptOptions,
 } from "./index.js";
 import {
@@ -37,6 +39,7 @@ interface PiSessionState {
   agent: AgentSession;
   modelRuntime: PiModelRuntime;
   projectDir: string;
+  mode: CodingSessionMode;
   onEvent?: CodingEventListener;
   unsubscribe?: () => void;
   /** Rolling text from the tool/event stream for probe detection */
@@ -50,6 +53,50 @@ interface PiSessionState {
   seenTurnStart: boolean;
   /** Context queued via injectContext; folded into the next real prompt */
   pendingContext: string[];
+}
+
+export const PI_INVESTIGATE_SYSTEM_PROMPT = `You are a read-only codebase investigator for SlopControl Ask.
+Walk the project like a code reviewer. Reconstruct what a named page/route shows from source (the route module and its imported sections). Then verify comparison targets the operator named.
+
+Rules:
+- Do NOT write, edit, create, or delete files. Do NOT commit. Do NOT print secrets or .env values.
+- Do NOT treat BLUEPRINT.md Live decisions as evidence of what a page shows.
+- Cite concrete paths you read. Return markdown findings the Ask judge can use.`;
+
+export function piAckPrompt(mode: CodingSessionMode = "implement"): string {
+  return mode === "investigate"
+    ? "Acknowledge you are ready to inspect the codebase. Do not change files."
+    : "Acknowledge you are ready to implement. Do not change files yet.";
+}
+
+export function piSessionPreamble(
+  projectDir: string,
+  mode: CodingSessionMode,
+  endpoint?: LlmEndpoint,
+  modelId?: string,
+): string {
+  const driven =
+    mode === "investigate"
+      ? "You are being driven by SlopControl Ask. Investigate the codebase only. Do not change files, commit, or print secrets."
+      : "You are being driven by SlopControl. Follow PHASE.md / APPENDIX.md. Do not curl APIs with secrets.";
+  return [
+    `Working directory: ${projectDir}`,
+    endpoint
+      ? `Preferred model endpoint: ${endpoint.baseUrl} (${endpoint.apiType}) model=${modelId ?? endpoint.modelId}`
+      : null,
+    driven,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** Operator-facing note when the investigate walker dirtied the tree. */
+export function formatInvestigateDirtyTree(changed: string[]): string | null {
+  const files = changed.map((f) => f.trim()).filter(Boolean);
+  if (files.length === 0) return null;
+  const listed = files.slice(0, 20).join(", ");
+  const extra = files.length > 20 ? ` (+${files.length - 20} more)` : "";
+  return `Investigation walker modified files (must not happen): ${listed}${extra}. Treat findings as untrusted.`;
 }
 
 const sessions = new Map<string, PiSessionState>();
@@ -407,12 +454,8 @@ function runTurnEventDriven(
 export class PiAdapter implements CodingTool {
   readonly id = "pi";
 
-  async createSession(opts: {
-    projectDir: string;
-    endpoint?: LlmEndpoint;
-    modelId?: string;
-    onEvent?: CodingEventListener;
-  }): Promise<CodingSession> {
+  async createSession(opts: CreateSessionOptions): Promise<CodingSession> {
+    const mode: CodingSessionMode = opts.mode === "investigate" ? "investigate" : "implement";
     const model = piModelFor(opts.endpoint, opts.modelId);
     if (!model) {
       throw new Error(
@@ -452,6 +495,7 @@ export class PiAdapter implements CodingTool {
       agent,
       modelRuntime,
       projectDir: opts.projectDir,
+      mode,
       onEvent: opts.onEvent,
       recentEventText: "",
       turnText: "",
@@ -464,19 +508,9 @@ export class PiAdapter implements CodingTool {
     // Subscribe before the ack turn so its completion event cannot be missed.
     this.subscribe(state);
 
-    const contextParts = [
-      `Working directory: ${opts.projectDir}`,
-      opts.endpoint
-        ? `Preferred model endpoint: ${opts.endpoint.baseUrl} (${opts.endpoint.apiType}) model=${opts.modelId ?? opts.endpoint.modelId}`
-        : null,
-      "You are being driven by SlopControl. Follow PHASE.md / APPENDIX.md. Do not curl APIs with secrets.",
-    ]
-      .filter(Boolean)
-      .join("\n");
-
     const ack = await runTurnEventDriven(
       state,
-      `${contextParts}\n\nAcknowledge you are ready to implement. Do not change files yet.`,
+      `${piSessionPreamble(opts.projectDir, mode, opts.endpoint, opts.modelId)}\n\n${piAckPrompt(mode)}`,
       DEFAULT_ACK_TIMEOUT_MS,
       DEFAULT_IDLE_MS,
     );
@@ -531,6 +565,9 @@ export class PiAdapter implements CodingTool {
 
     const parts = [...state.pendingContext];
     state.pendingContext = [];
+    if (state.mode === "investigate") {
+      parts.unshift(PI_INVESTIGATE_SYSTEM_PROMPT);
+    }
     if (system) parts.unshift(system);
     const text = parts.length > 0 ? `${parts.join("\n\n")}\n\n${prompt}` : prompt;
 

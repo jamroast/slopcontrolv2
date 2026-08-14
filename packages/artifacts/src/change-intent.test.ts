@@ -8,6 +8,7 @@ import {
   applyWorktreeComposeIsolation,
   changeIntentIsBrandTheming,
   clipBlueprintForPrompt,
+  clipBlueprintForAskAlign,
   ensureChangeIntent,
   extractChangeIntent,
   extractLiveDecisions,
@@ -856,6 +857,34 @@ Hello
     const clip = clipBlueprintForPrompt(bp, 2000);
     assert.match(clip, /verified/i);
     assert.match(clip, /BD-COMPOSER-FORM-MODE/);
+  });
+
+  it("clipBlueprintForAskAlign prefers Product summary over Live decisions", () => {
+    const bp = `# Blueprint
+
+## Live decisions — verified
+
+- BD-88-LANDING-SIGNIN-CLICK (new)
+
+## Product summary
+
+JamPress is an AI-powered data workflow builder.
+
+## Skills / tools / workflows
+
+excel-reader, marketplace connectors, chat authoring.
+
+## Modules and key paths
+
+src/app/product/page.tsx
+`;
+    const clip = clipBlueprintForAskAlign(bp, 4_000);
+    assert.match(clip, /## Product summary/);
+    assert.match(clip, /workflow builder/);
+    assert.match(clip, /## Skills \/ tools \/ workflows/);
+    assert.match(clip, /## Modules and key paths/);
+    assert.doesNotMatch(clip, /BD-88-LANDING-SIGNIN-CLICK/);
+    assert.doesNotMatch(clip, /Live decisions/);
   });
 
   it("stock adoption ask classifies stockAdoption, not brandTheming (heuristic)", () => {

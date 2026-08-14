@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  AgentRoleSchema,
   LlmEndpointSchema,
   ProjectConfigSchema,
+  RoleModelBindingsSchema,
   RunActionSchema,
   RunStageSchema,
   RUN_STAGE_KIND,
@@ -34,8 +36,27 @@ describe("@slopcontrol/types", () => {
     assert.equal(parsed.id, "vercel-glm");
   });
 
+  it("includes ask, agent, and judge as bindable roles", () => {
+    assert.ok(AgentRoleSchema.options.includes("ask"));
+    assert.ok(AgentRoleSchema.options.includes("agent"));
+    assert.ok(AgentRoleSchema.options.includes("judge"));
+    const parsed = RoleModelBindingsSchema.parse({
+      research: { endpointId: "e1" },
+      planning: { endpointId: "e1" },
+      supervisor: { endpointId: "e1" },
+      coding: { endpointId: "e1" },
+      ask: { endpointId: "e2", modelId: "glm-5.2" },
+      agent: { endpointId: "e2", modelId: "glm-5.2" },
+      judge: { endpointId: "e3", modelId: "kimi-k2.5" },
+    });
+    assert.equal(parsed.ask?.modelId, "glm-5.2");
+    assert.equal(parsed.agent?.modelId, "glm-5.2");
+    assert.equal(parsed.judge?.modelId, "kimi-k2.5");
+  });
+
   it("ProjectConfigSchema accepts optional testServices", () => {
     const defaults = ProjectConfigSchema.parse({});
+    assert.equal(defaults.askInvestigateTool, "auto");
     assert.equal(defaults.testServices, undefined);
     const parsed = ProjectConfigSchema.parse({ testServices: ["db", "redis"] });
     assert.deepEqual(parsed.testServices, ["db", "redis"]);

@@ -35,6 +35,17 @@ describe("chat MCP tool registry", () => {
     );
   });
 
+  it("registers project_set_ask_investigate_tool", () => {
+    const tool = SLOPCONTROL_MCP_TOOLS.find(
+      (t) => t.name === "project_set_ask_investigate_tool",
+    );
+    assert.ok(tool);
+    assert.deepEqual(
+      (tool.inputSchema as { required?: string[] }).required,
+      ["projectId", "tool"],
+    );
+  });
+
   it("does not register chat_endpoint_model_update", () => {
     const names = new Set(SLOPCONTROL_MCP_TOOLS.map((t) => t.name));
     assert.equal(names.has("chat_endpoint_model_update"), false);

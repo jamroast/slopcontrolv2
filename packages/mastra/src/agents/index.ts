@@ -294,7 +294,7 @@ Keep the Task brief to a title plus 2–5 bullets so promote_ask can seed start_
 - If the question is purely informational / investigate-only, answer without a Task brief.
 - If the operator needs several separate investigations, recommend MCP/HTTP \`ask_sub_research\` with a short topics list (max 4). Do not pretend sub-research ran unless that API was invoked.
 - Cite paths you inspected. Do not claim work is implemented unless you verified it.`,
-    model: registry.resolve("research"),
+    model: registry.resolve("ask"),
     memory,
     tools: {
       read_file: tools.readFile,
@@ -303,6 +303,30 @@ Keep the Task brief to a title plus 2–5 bullets so promote_ask can seed start_
       fetch_url: tools.fetchUrl,
       web_search: tools.webSearch,
     },
+  });
+}
+
+/**
+ * No-tools synthesis judge: refines investigation findings or a coding-turn
+ * diff. Bound via the `judge` role (falls back to ask, then research).
+ */
+export function createJudgeAgent(registry: LlmRegistry, memory: Memory): Agent {
+  return new Agent({
+    id: "judge-agent",
+    name: "Judge Agent",
+    description:
+      "Refines investigation findings or coding-turn output into the operator-facing verdict",
+    instructions: `You are the SlopControl judge.
+You receive investigation findings or a coding-turn summary. Write the final answer now.
+
+Rules:
+- Do NOT call tools. You have none.
+- Do NOT say "Let me check" or "I will investigate".
+- Answer the operator's actual question, or score the coding turn against the brief.
+- Cite paths from the findings. Do not invent files.
+- If an implementable fix is in scope, include ## Task brief with Title, Goal, Likely areas.`,
+    model: registry.resolve("judge"),
+    memory,
   });
 }
 
@@ -331,7 +355,7 @@ Rules:
 - Do NOT create phases or claim promote_ask ran.
 - Keep tool use focused (~8–12 calls max), then write findings.
 - Never invent files. Never print secrets/API keys.`,
-    model: registry.resolve("research"),
+    model: registry.resolve("ask"),
     memory,
     tools: {
       read_file: tools.readFile,
@@ -528,7 +552,7 @@ Rules:
 - When DEPENDENCY INTENT / CROSS-PROJECT DEPS appear: follow them. You may run \`pnpm add @jam/…\` only after npm_registry_ensure_rc guidance — never npm/pnpm link or file: sibling installs.
 - Never print secrets/API keys. Never claim DEV_COMPLETE or that a phase merged.
 - Cite paths and command outcomes you actually ran.`,
-    model: registry.resolve("research"),
+    model: registry.resolve("agent"),
     memory,
     tools: {
       read_file: tools.readFile,

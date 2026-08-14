@@ -123,6 +123,124 @@ describe("@slopcontrol/llm", () => {
     assert.equal(cls.modelId, "glm-5.2");
   });
 
+  it("falls ask and agent roles back to research when unbound", () => {
+    const registry = new LlmRegistry({
+      endpoints: [
+        {
+          id: "research",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "kimi-k2.7-code",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+        {
+          id: "plan",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "deepseek",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+      ],
+      roles: {
+        research: { endpointId: "research" },
+        planning: { endpointId: "plan" },
+        supervisor: { endpointId: "plan" },
+        coding: { endpointId: "plan" },
+      },
+    });
+    for (const role of ["ask", "agent"] as const) {
+      const resolved = registry.resolveEndpointForRole(role);
+      assert.equal(resolved.endpoint.id, "research");
+      assert.equal(resolved.modelId, "kimi-k2.7-code");
+      const info = roleBindingInfo(registry.getRoleBindings(), role);
+      assert.equal(info.explicit, false);
+      assert.equal(info.fallbackFrom, "research");
+      assert.equal(registry.hasRoleBinding(role), true);
+    }
+    const judgeUnbound = registry.resolveEndpointForRole("judge");
+    assert.equal(judgeUnbound.endpoint.id, "research");
+    assert.equal(
+      roleBindingInfo(registry.getRoleBindings(), "judge").fallbackFrom,
+      "research",
+    );
+  });
+
+  it("resolves ask and agent to their own endpoints when bound", () => {
+    const registry = new LlmRegistry({
+      endpoints: [
+        {
+          id: "research",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "kimi-k2.7-code",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+        {
+          id: "glm",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "glm-5.2",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+      ],
+      roles: {
+        research: { endpointId: "research" },
+        planning: { endpointId: "research" },
+        supervisor: { endpointId: "research" },
+        coding: { endpointId: "research" },
+        ask: { endpointId: "glm" },
+        agent: { endpointId: "glm" },
+      },
+    });
+    const ask = registry.resolveEndpointForRole("ask");
+    const agent = registry.resolveEndpointForRole("agent");
+    assert.equal(ask.endpoint.id, "glm");
+    assert.equal(ask.modelId, "glm-5.2");
+    assert.equal(agent.endpoint.id, "glm");
+    assert.equal(agent.modelId, "glm-5.2");
+    assert.equal(roleBindingInfo(registry.getRoleBindings(), "ask").explicit, true);
+    assert.equal(roleBindingInfo(registry.getRoleBindings(), "agent").explicit, true);
+    const judgeViaAsk = registry.resolveEndpointForRole("judge");
+    assert.equal(judgeViaAsk.endpoint.id, "glm");
+    assert.equal(
+      roleBindingInfo(registry.getRoleBindings(), "judge").fallbackFrom,
+      "ask",
+    );
+  });
+
+  it("resolves judge to its own endpoint when bound", () => {
+    const registry = new LlmRegistry({
+      endpoints: [
+        {
+          id: "glm",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "glm-5.2",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+        {
+          id: "kimi",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "kimi-k2.5",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+      ],
+      roles: {
+        research: { endpointId: "glm" },
+        planning: { endpointId: "glm" },
+        supervisor: { endpointId: "glm" },
+        coding: { endpointId: "glm" },
+        ask: { endpointId: "glm" },
+        judge: { endpointId: "kimi" },
+      },
+    });
+    const judge = registry.resolveEndpointForRole("judge");
+    assert.equal(judge.endpoint.id, "kimi");
+    assert.equal(judge.modelId, "kimi-k2.5");
+    assert.equal(roleBindingInfo(registry.getRoleBindings(), "judge").explicit, true);
+  });
+
   it("refuses vision on non-vision endpoints", () => {
     const endpoint = {
       id: "glm",

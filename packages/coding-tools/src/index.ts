@@ -22,11 +22,18 @@ export interface CodingResult {
   abortReason?: string;
 }
 
+export type CodingSessionMode = "implement" | "investigate";
+
 export interface CreateSessionOptions {
   projectDir: string;
   endpoint?: LlmEndpoint;
   modelId?: string;
   onEvent?: CodingEventListener;
+  /**
+   * implement (default): development worktree sessions.
+   * investigate: read-only Ask walker — do not change files.
+   */
+  mode?: CodingSessionMode;
 }
 
 export interface RunPromptOptions {

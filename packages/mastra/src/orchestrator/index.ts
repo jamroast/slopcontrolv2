@@ -86,6 +86,7 @@ import {
   formatAntiAuditThemeDeliveryNote,
   phaseDocRejectsMissingThemeAudit,
   clipBlueprintForPrompt,
+  clipBlueprintForAskAlign,
   isUxPlacementKnowledge,
   upsertRoadmapEntry,
   validateBlueprintDocument,
@@ -229,8 +230,10 @@ import {
 import {
   ensureGitInitialized,
   ensurePhaseWorktree,
+  getCodingTool,
   getCodingToolForProject,
   getDesignTool,
+  formatInvestigateDirtyTree,
   isLogoAssetBrief,
   isStallAbortReason,
   listWorktreeChangedFiles,
@@ -255,6 +258,7 @@ import {
   classifyDependencyIntentViaLlm,
   classifyElementHonorViaLlm,
   classifyVerifyFailureViaLlm,
+  classifyAskInvestigateEngineViaLlm,
   judgeClaimProofViaLlm,
   judgeNarrationOnlyViaLlm,
   buildElementHonorSnippets,
@@ -269,12 +273,26 @@ import {
 import {
   ASK_SYNTHESIS_PROMPT_PREFIX,
   askProgressFromStreamChunk,
+  clipAskProgress,
   decideNarrationSynthesis,
   LiveTurnInterruptedError,
   type AskProgressCallback,
   type LiveProgressCallback,
   type NarrationJudgeFn,
 } from "./ask-stream.js";
+import {
+  buildAskAlignJudgePrompt,
+  buildDevelopCompletionJudgePrompt,
+  buildDevelopJudgePrompt,
+  buildPiInvestigatePrompt,
+  formatScreenSeed,
+  parseAskInvestigateTool,
+  parseDevelopJudgeVerdict,
+  planningDocsPointerForPresence,
+  resolveAskInvestigateEngine,
+  seedScreensForAsk,
+  type DevelopJudgeVerdict,
+} from "./ask-investigate.js";
 import {
   buildSupervisorEnrichPrompt,
   extractNextActionsSummary,
@@ -353,6 +371,7 @@ export interface OrchestratorAgents {
   blueprintAgent: Agent;
   askAgent: Agent;
   askSubResearchAgent: Agent;
+  judgeAgent: Agent;
   agentChatAgent: Agent;
 }
 
@@ -523,6 +542,11 @@ export interface AskTurnInput {
   /** Live tool/text progress (SSE / MCP). */
   onProgress?: AskProgressCallback;
   abortSignal?: AbortSignal;
+  /**
+   * Per-turn investigate engine. Overrides project `askInvestigateTool`.
+   * `auto` (and omit) uses message cues then the thorough heuristic.
+   */
+  investigateTool?: "auto" | "mastra" | "pi";
 }
 
 export interface AskSubResearchInput {
@@ -1888,6 +1912,27 @@ export async function runSuccessChecks(
   };
 }
 
+/** Bind the LLM ask-engine classifier to the classification role; null when unbound. */
+function tryBindAskInvestigateEngineClassifier(
+  registry: LlmRegistry,
+): ((message: string) => Promise<"auto" | "mastra" | "pi">) | null {
+  try {
+    const { endpoint, modelId } =
+      registry.resolveEndpointForRole("classification");
+    return async (message) => {
+      const { decision } = await classifyAskInvestigateEngineViaLlm({
+        endpoint,
+        modelId,
+        message,
+        timeoutMs: 90_000,
+      });
+      return decision;
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Bind the LLM verify-failure classifier to the classification role; null when unbound. */
 function tryBindVerifyFailureClassifier(
   registry: LlmRegistry,
@@ -2469,12 +2514,16 @@ ${blueprintContractPromptBlock()}`;
    * One turn of a project-scoped ask conversation (exploratory chat).
    * Does not create a phase — use promote_ask / start_research for that.
    * Streams tool progress via onProgress when provided.
+   *
+   * Investigate engine is project `askInvestigateTool` (auto|mastra|pi),
+   * overridden by this turn's `investigateTool` or LLM engine intent
+   * (thorough vs quick — classified, never keyword-matched). When nothing
+   * picks an engine the fast mastra path runs; there is no regex fallback.
+   * A no-tools judge pass always refines the findings.
    */
   async askTurn(input: AskTurnInput): Promise<{ reply: string }> {
     const { project, askId, message, history } = input;
     ensureSlopcontrolDir(project.rootPath);
-    const blueprint = readBlueprint(project.rootPath);
-    const roadmap = readRoadmap(project.rootPath);
     const historyBlock =
       history.length === 0
         ? "(no prior turns)"
@@ -2491,14 +2540,299 @@ ${blueprintContractPromptBlock()}`;
       includeAskBriefNudge: true,
     });
 
+    const config = readProjectConfig(project.rootPath);
+    const turnOverride = parseAskInvestigateTool(input.investigateTool);
+    let intent: "auto" | "mastra" | "pi" = "auto";
+    if (turnOverride !== "mastra" && turnOverride !== "pi") {
+      intent = await this.classifyAskInvestigateIntent(message);
+    }
+    const engine = resolveAskInvestigateEngine({
+      turnOverride,
+      intent,
+      projectPreference: config.askInvestigateTool ?? "auto",
+    });
+    input.onProgress?.({
+      type: "status",
+      summary: `ask investigating (${engine})`,
+    });
+
+    let findings = "";
+    let dirtyWarning: string | null = null;
+    if (engine === "pi") {
+      try {
+        const walked = await this.runPiAskInvestigate(input);
+        findings = walked.findings;
+        dirtyWarning = walked.dirtyWarning;
+      } catch (error) {
+        slog.warn("ask", "pi investigate failed; falling back to mastra tools", {
+          askId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        const mastra = await this.runMastraAskPresenceTurn(
+          input,
+          historyBlock,
+          depPack,
+        );
+        findings = mastra.reply;
+      }
+    } else {
+      const mastra = await this.runMastraAskPresenceTurn(
+        input,
+        historyBlock,
+        depPack,
+      );
+      findings = mastra.reply;
+    }
+
+    return this.runAskJudge(input, findings, dirtyWarning);
+  }
+
+  private async classifyAskInvestigateIntent(
+    message: string,
+  ): Promise<"auto" | "mastra" | "pi"> {
+    const classify = tryBindAskInvestigateEngineClassifier(this.ctx.registry);
+    if (!classify || !message.trim()) return "auto";
+    try {
+      return await classify(message);
+    } catch (error) {
+      // Fail-closed to auto (→ project default → fast path). Never regex.
+      slog.warn(
+        "ask",
+        "investigate-engine intent classification failed; using auto (no keyword fallback)",
+        { error: error instanceof Error ? error.message : String(error) },
+      );
+      return "auto";
+    }
+  }
+
+  private async runAskJudge(
+    input: AskTurnInput,
+    findings: string,
+    dirtyWarning: string | null,
+  ): Promise<{ reply: string }> {
+    const { project, askId, message } = input;
+    const productClip = clipBlueprintForAskAlign(
+      readBlueprint(project.rootPath),
+      4_000,
+    );
+    const judgePrompt = buildAskAlignJudgePrompt({
+      operatorMessage: message,
+      findings,
+      productClip,
+      dirtyWarning,
+    });
+    input.onProgress?.({
+      type: "status",
+      summary: "ask judging findings",
+    });
+    try {
+      const judged = await runAgentLiveTurn(
+        this.ctx.agents.judgeAgent,
+        `Project ask conversation (askId=${askId}).\n\n${judgePrompt}`,
+        project.id,
+        `ask-judge-${askId}`,
+        {
+          maxSteps: 4,
+          timeoutMs: 120_000,
+          onProgress: input.onProgress,
+          abortSignal: input.abortSignal,
+          synthesizeIfNarration: false,
+          statusLabel: "ask judging findings",
+        },
+      );
+      return { reply: judged.reply.trim() || findings || "(empty reply)" };
+    } catch (error) {
+      slog.warn("ask", "judge pass failed; returning investigation findings", {
+        askId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { reply: findings.trim() || "(empty reply)" };
+    }
+  }
+
+  private async runDevelopJudge(input: {
+    project: Project;
+    run: Run;
+    phase: Phase;
+    phaseDoc: string;
+    iteration: number;
+    codingOutput: string;
+    changedFiles: string[];
+    abortSignal?: AbortSignal;
+  }): Promise<DevelopJudgeVerdict | null> {
+    const {
+      project,
+      run,
+      phase,
+      phaseDoc,
+      iteration,
+      codingOutput,
+      changedFiles,
+      abortSignal,
+    } = input;
+    const prompt = buildDevelopJudgePrompt({
+      phaseTitle: phase.title?.trim() || phase.description.slice(0, 80),
+      brief: [phase.description, phaseDoc].filter(Boolean).join("\n\n"),
+      codingOutput,
+      changedFiles,
+    });
+    log(project, run, "--- Coding-turn judge ---");
+    try {
+      const judged = await runAgentLiveTurn(
+        this.ctx.agents.judgeAgent,
+        prompt,
+        project.id,
+        `dev-judge-${run.id}-${iteration}`,
+        {
+          maxSteps: 2,
+          timeoutMs: 90_000,
+          abortSignal,
+          synthesizeIfNarration: false,
+          statusLabel: "coding-turn judge",
+        },
+      );
+      const body = judged.reply.trim();
+      if (!body) return null;
+      appendAppendix(
+        project.rootPath,
+        phase.id,
+        `## Iteration ${iteration} — coding-turn judge\n\n${body.slice(0, 4_000)}\n`,
+      );
+      log(project, run, body.slice(0, 2_000));
+      return parseDevelopJudgeVerdict(body);
+    } catch (error) {
+      log(
+        project,
+        run,
+        `--- Coding-turn judge skipped: ${error instanceof Error ? error.message : String(error)} ---`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Pre-merge judge pass over the worktree change set when checks pass —
+   * runs BEFORE merge so off-track deliveries never land on main.
+   * The build loop's counterpart of the Ask judge's operator-facing reply.
+   * Returns null on judge failure (checks remain the hard gate).
+   */
+  private async runDevelopCompletionJudge(input: {
+    project: Project;
+    run: Run;
+    phase: Phase;
+    phaseDoc: string;
+    changedFiles: string[];
+    checksSummary: string;
+    abortSignal?: AbortSignal;
+  }): Promise<DevelopJudgeVerdict | null> {
+    const {
+      project,
+      run,
+      phase,
+      phaseDoc,
+      changedFiles,
+      checksSummary,
+      abortSignal,
+    } = input;
+    const prompt = buildDevelopCompletionJudgePrompt({
+      phaseTitle: phase.title?.trim() || phase.description.slice(0, 80),
+      brief: [phase.description, phaseDoc].filter(Boolean).join("\n\n"),
+      changedFiles,
+      checksSummary,
+    });
+    log(project, run, "--- Pre-merge judge ---");
+    try {
+      const judged = await runAgentLiveTurn(
+        this.ctx.agents.judgeAgent,
+        prompt,
+        project.id,
+        `dev-judge-final-${run.id}`,
+        {
+          maxSteps: 2,
+          timeoutMs: 90_000,
+          abortSignal,
+          synthesizeIfNarration: false,
+          statusLabel: "pre-merge judge",
+        },
+      );
+      const body = judged.reply.trim();
+      if (!body) return null;
+      const verdict = parseDevelopJudgeVerdict(body);
+      appendAppendix(
+        project.rootPath,
+        phase.id,
+        `## Pre-merge judge — ${verdict.verdict ?? "unparsed"}\n\n${body.slice(0, 4_000)}\n`,
+      );
+      log(project, run, body.slice(0, 2_000));
+      return verdict;
+    } catch (error) {
+      log(
+        project,
+        run,
+        `--- Pre-merge judge skipped: ${error instanceof Error ? error.message : String(error)} ---`,
+      );
+      return null;
+    }
+  }
+
+  private async runPiAskInvestigate(input: AskTurnInput): Promise<{
+    findings: string;
+    dirtyWarning: string | null;
+  }> {
+    const { project } = input;
+    const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole("ask");
+    const tool = getCodingTool("pi");
+    input.onProgress?.({ type: "status", summary: "pi investigating" });
+    const session = await tool.createSession({
+      projectDir: project.rootPath,
+      endpoint,
+      modelId,
+      mode: "investigate",
+      onEvent: (event) => {
+        if (event.type === "turn_start" || /tool/i.test(event.type)) {
+          input.onProgress?.({
+            type: "status",
+            summary: clipAskProgress(`pi ${event.type}`, 160),
+          });
+        }
+      },
+    });
+    try {
+      const screens = seedScreensForAsk(project.rootPath, input.message);
+      const prompt = buildPiInvestigatePrompt({
+        operatorMessage: input.message,
+        screenSeed: formatScreenSeed(screens),
+      });
+      const timeoutMs = resolveAskTurnTimeoutMs();
+      const result = tool.runPromptWithSystem
+        ? await tool.runPromptWithSystem(session, prompt, undefined, {
+            timeoutMs,
+          })
+        : await tool.runPrompt(session, prompt, { timeoutMs });
+      const changed = await tool.getChangedFiles(session);
+      const dirtyWarning = formatInvestigateDirtyTree(changed);
+      if (result.aborted && !result.output.trim()) {
+        throw new Error(result.abortReason ?? "pi investigate aborted");
+      }
+      return {
+        findings: result.output.trim() || "(empty pi findings)",
+        dirtyWarning,
+      };
+    } finally {
+      await tool.abort(session).catch(() => undefined);
+    }
+  }
+
+  private async runMastraAskPresenceTurn(
+    input: AskTurnInput,
+    historyBlock: string,
+    depPack: string,
+  ): Promise<{ reply: string }> {
+    const { project, askId, message } = input;
     const prompt = `Project ask conversation (askId=${askId}).
-Answer the operator using the codebase and planning docs. When shaping a change, include ## Task brief.
+Investigate the operator question using the codebase. Return findings the judge will refine — cite paths. When shaping a change, include ## Task brief.
 
-BLUEPRINT (excerpt):
-${clipPromptSection("BLUEPRINT.md", blueprint, 6_000)}
-
-ROADMAP (excerpt):
-${clipPromptSection("ROADMAP.md", roadmap, 3_000)}
+${planningDocsPointerForPresence()}
 ${depPack ? `\n${depPack}\n` : ""}
 Recent conversation:
 ${historyBlock}
@@ -4099,8 +4433,6 @@ End with PLAN_COMPLETE.`;
     }
 
     ensureSlopcontrolDir(project.rootPath);
-    const blueprint = readBlueprint(project.rootPath);
-    const roadmap = readRoadmap(project.rootPath);
     const historyBlock =
       history.length === 0
         ? "(no prior turns)"
@@ -4117,11 +4449,7 @@ Investigate ONLY this topic and return markdown findings (no file writes, no pha
 Topic:
 ${topic}
 
-BLUEPRINT (excerpt):
-${clipPromptSection("BLUEPRINT.md", blueprint, 4_000)}
-
-ROADMAP (excerpt):
-${clipPromptSection("ROADMAP.md", roadmap, 2_000)}
+${planningDocsPointerForPresence()}
 
 Ask conversation context:
 ${historyBlock}`;
@@ -6184,6 +6512,13 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     let lastErrorCount = Number.POSITIVE_INFINITY;
     let lastAbortWasProductiveTimeout = false;
     let lastFailWasPostMergeRootVerify = false;
+    let lastContinueWasJudgeExtension = false;
+    let lastJudgeSteering: DevelopJudgeVerdict | null = null;
+    let judgeExtensionCount = 0;
+    // Bounded judge authority: the pre-merge judge may force at most one
+    // extra iteration per develop run; further dissent is recorded, not looped.
+    const MAX_JUDGE_EXTENSIONS = 1;
+    const allChangedFiles = new Set<string>();
     const MAX_DIAGNOSIS_STREAK = 3;
     const MAX_STALL_STRIKES = 3;
     const memory = readRunMemory(project.rootPath, run.id);
@@ -6453,6 +6788,19 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           ]
             .filter(Boolean)
             .join("\n\n---\n\n");
+        } else if (lastContinueWasJudgeExtension) {
+          lastContinueWasJudgeExtension = false;
+          prompt = `Automated checks pass but the pre-merge judge ruled the delivery OFF-TRACK against the phase brief — the phase was NOT merged.
+Close ONLY the judge gaps in the steering note below — do not re-litigate prior diagnoses, do not rework delivered work, do not probe live APIs.
+Run Automated Checks again, update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE.`;
+          systemOverride = [
+            contextSystem || null,
+            designContext.trim() ? designContext.slice(0, 4_000) : null,
+            learningsBlock.trim() ? learningsBlock : null,
+            appendix.trim() ? `APPENDIX.md\n\n${appendix}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n\n---\n\n");
         } else {
           // Prefer latest diagnosis over APPENDIX scrape (stale host-utility cards misroute).
           prompt = buildDevelopCodingRetryPrompt({
@@ -6475,6 +6823,26 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               .filter(Boolean)
               .join("\n\n---\n\n");
           }
+        }
+
+        if (lastJudgeSteering) {
+          const steering = lastJudgeSteering;
+          lastJudgeSteering = null;
+          const parts = [
+            `CODING-TURN JUDGE STEERING (verdict: ${steering.verdict ?? "unparsed"}):`,
+          ];
+          if (steering.gaps.length > 0) {
+            parts.push(
+              `Gaps the brief still needs:\n${steering.gaps.map((g) => `- ${g}`).join("\n")}`,
+            );
+          }
+          if (steering.nextCodingTurn) {
+            parts.push(`Judge instruction: ${steering.nextCodingTurn}`);
+          }
+          parts.push(
+            "Address these gaps directly — they outrank stale APPENDIX cards.",
+          );
+          prompt = `${prompt}\n\n${parts.join("\n")}`;
         }
 
         let codingResult;
@@ -6638,6 +7006,30 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         ];
         if (changed.length > 0) {
           log(project, run, `Changed files: ${changed.join(", ")}`);
+          for (const f of changed) allChangedFiles.add(f);
+          if (!signal?.aborted) {
+            const judgeVerdict = await this.runDevelopJudge({
+              project,
+              run,
+              phase,
+              phaseDoc,
+              iteration,
+              codingOutput: codingResult.output,
+              changedFiles: changed,
+              abortSignal: signal,
+            });
+            if (
+              judgeVerdict?.verdict === "partial" ||
+              judgeVerdict?.verdict === "off-track"
+            ) {
+              lastJudgeSteering = judgeVerdict;
+              log(
+                project,
+                run,
+                `--- Judge verdict: ${judgeVerdict.verdict} — steering next coding turn (${judgeVerdict.gaps.length} gaps) ---`,
+              );
+            }
+          }
         }
 
         const planProgress = evaluatePlanProgress(phaseDoc, changed);
@@ -6706,6 +7098,50 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           run,
           `[timing] iteration ${iteration} elapsed ${formatDurationMs(Date.now() - iterationStarted)}`,
         );
+
+        // Pre-merge judgement: the judge reviews the worktree change set
+        // against the brief BEFORE merging. Off-track with concrete gaps
+        // forces one bounded extra iteration without merging.
+        // Judge failure fails open — checks are the hard gate.
+        if (checks.ok && !signal?.aborted) {
+          const preMergeVerdict = await this.runDevelopCompletionJudge({
+            project,
+            run,
+            phase,
+            phaseDoc,
+            changedFiles: [...allChangedFiles],
+            checksSummary: checks.summary || checks.output.slice(-1_500),
+            abortSignal: signal,
+          });
+          if (
+            preMergeVerdict?.verdict === "off-track" &&
+            preMergeVerdict.gaps.length > 0 &&
+            judgeExtensionCount < MAX_JUDGE_EXTENSIONS &&
+            iteration < MAX_ITERATIONS
+          ) {
+            judgeExtensionCount += 1;
+            lastContinueWasJudgeExtension = true;
+            lastJudgeSteering = preMergeVerdict;
+            log(
+              project,
+              run,
+              `--- Pre-merge judge: off-track — extending development without merge (extension ${judgeExtensionCount}/${MAX_JUDGE_EXTENSIONS}) ---`,
+            );
+            appendAppendix(
+              project.rootPath,
+              phase.id,
+              `## Iteration ${iteration} — pre-merge judge extended development\n\nThe judge ruled the delivery off-track before merge. Gaps:\n${preMergeVerdict.gaps.map((g) => `- ${g}`).join("\n")}\n`,
+            );
+            continue;
+          }
+          if (preMergeVerdict?.verdict === "off-track") {
+            log(
+              project,
+              run,
+              "--- Pre-merge judge dissent recorded (extension budget spent) — proceeding to merge on green checks ---",
+            );
+          }
+        }
 
         if (checks.ok && autoMerge) {
           log(
@@ -7123,6 +7559,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             checks,
           );
           log(project, run, checks.output);
+
           if (autoMerge && config.removeWorktreeOnComplete !== false) {
             try {
               const removed = removePhaseWorktree({

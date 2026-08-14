@@ -6,8 +6,12 @@ import {
   listCodingTools,
   OpenCodeAckTimeoutError,
   PiAdapter,
+  piAckPrompt,
   piApiTypeFor,
   piModelFor,
+  piSessionPreamble,
+  PI_INVESTIGATE_SYSTEM_PROMPT,
+  formatInvestigateDirtyTree,
 } from "./index.js";
 import type { LlmEndpoint } from "@slopcontrol/types";
 
@@ -137,5 +141,23 @@ describe("CodingSessionAckError", () => {
     assert.equal(err.abortReason, "turn_timeout");
     // Historical message shape preserved for log greps.
     assert.match(err.message, /^OpenCode session ack aborted: turn_timeout$/);
+  });
+});
+
+describe("pi investigate mode helpers", () => {
+  it("ack prompt is inspect-not-implement", () => {
+    assert.match(piAckPrompt("investigate"), /inspect the codebase/i);
+    assert.match(piAckPrompt("investigate"), /Do not change files/i);
+    assert.doesNotMatch(piAckPrompt("investigate"), /ready to implement/i);
+    assert.match(piAckPrompt("implement"), /ready to implement/i);
+    const preamble = piSessionPreamble("/tmp/proj", "investigate");
+    assert.match(preamble, /Ask/i);
+    assert.doesNotMatch(preamble, /PHASE.md/);
+    assert.match(PI_INVESTIGATE_SYSTEM_PROMPT, /Do NOT write/i);
+    assert.equal(formatInvestigateDirtyTree([]), null);
+    assert.match(
+      formatInvestigateDirtyTree(["src/app/page.tsx"]) ?? "",
+      /modified files/i,
+    );
   });
 });

@@ -59,6 +59,14 @@ export const AgentRoleSchema = z.enum([
   "classification",
   /** Chat-service operator agent — defaults to supervisor when omitted */
   "chat",
+  /** Ask (read-only codebase Q&A) — defaults to research when omitted */
+  "ask",
+  /** Agent chat (inspect/verify with shell) — defaults to research when omitted */
+  "agent",
+  /**
+   * Post-investigate / post-coding synthesis judge — defaults to ask, then research.
+   */
+  "judge",
 ]);
 
 export type AgentRole = z.infer<typeof AgentRoleSchema>;
@@ -88,6 +96,14 @@ export const RoleModelBindingsSchema = z.object({
   classification: RoleBindingSchema.optional(),
   /** Chat-service operator agent. Defaults to supervisor when omitted. */
   chat: RoleBindingSchema.optional(),
+  /** Ask agent (read-only investigation). Defaults to research when omitted. */
+  ask: RoleBindingSchema.optional(),
+  /** Agent-chat (inspect/verify with shell). Defaults to research when omitted. */
+  agent: RoleBindingSchema.optional(),
+  /**
+   * Refine investigation findings / coding-turn diffs. Defaults to ask, then research.
+   */
+  judge: RoleBindingSchema.optional(),
 });
 
 export type RoleModelBindings = z.infer<typeof RoleModelBindingsSchema>;
@@ -590,6 +606,11 @@ export type BuildProcessConfigResult = z.infer<
   typeof BuildProcessConfigResultSchema
 >;
 
+/** Ask investigation walker. `auto` uses the thorough vs presence heuristic. */
+export const AskInvestigateToolSchema = z.enum(["auto", "mastra", "pi"]);
+
+export type AskInvestigateTool = z.infer<typeof AskInvestigateToolSchema>;
+
 export const ProjectConfigSchema = z.object({
   buildCommand: z.string().default("npm run build"),
   testCommand: z.string().default("npm test"),
@@ -681,6 +702,12 @@ export const ProjectConfigSchema = z.object({
    */
   envPassthroughPrefixes: z.array(z.string().min(1)).optional(),
   codingToolId: z.string().default("opencode"),
+  /**
+   * Ask investigation walker: `auto` (LLM intent, then fast path), `mastra` (fast tools), or `pi` (thorough).
+   * Per-turn `investigateTool` and LLM engine intent (thorough vs quick) override this.
+   * No keyword heuristics: when nothing picks an engine, the fast mastra path runs.
+   */
+  askInvestigateTool: AskInvestigateToolSchema.default("auto"),
   /**
    * Max wall-clock ms for a single OpenCode coding turn.
    * Overrides SLOPCONTROL_CODING_TURN_MS when set. Default elsewhere is 600000.

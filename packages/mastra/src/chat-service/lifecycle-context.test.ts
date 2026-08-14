@@ -34,6 +34,8 @@ describe("chat lifecycle prompt", () => {
     assert.ok(prompt.includes("Do not tell the operator the work finished until wait_for_run"));
     assert.ok(prompt.includes("write the operator-facing answer from that result"));
     assert.ok(prompt.includes("get_ask / get_agent"));
+    assert.ok(prompt.includes("Chat-owned asks"));
+    assert.ok(prompt.includes("do not replace a page/route review"));
     assert.ok(prompt.includes("Never tell them to confirm in a separate SlopControl interface"));
     assert.ok(prompt.includes("submit_review"));
     assert.ok(prompt.includes("park advance_run"));
@@ -43,6 +45,9 @@ describe("chat lifecycle prompt", () => {
     assert.ok(!prompt.includes("please do"));
     assert.ok(prompt.includes("click navigates to route X"));
     assert.ok(prompt.includes("Intent engagement is only for fill/submit"));
+    assert.ok(prompt.includes("Ask walker"));
+    assert.ok(prompt.includes("classified by the classification model"));
+    assert.ok(prompt.includes("chat_function_bind"));
   });
 
   it("injects parked actions and forbids a separate UI confirm", () => {

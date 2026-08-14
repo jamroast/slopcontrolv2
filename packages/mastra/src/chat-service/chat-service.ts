@@ -3,9 +3,11 @@ import { EventEmitter } from "node:events";
 import { Agent } from "@mastra/core/agent";
 import type { Memory } from "@mastra/memory";
 import {
+  classifyAskResumeViaLlm,
   classifyChatConfirmViaLlm,
   LlmRegistry,
   toMastraModelConfig,
+  type AskResumeClassification,
   type ChatConfirmClassification,
   type ParkedChatAction,
 } from "@slopcontrol/llm";
@@ -56,18 +58,29 @@ import {
   isBusyRunStage,
   waitForRun,
 } from "./wait-run.js";
+import {
+  applyAskResumeDecision,
+  ASK_ID_DEPENDENT_TOOLS,
+  composeAskDispatchMessage,
+  decideAskResume,
+  isAskOpen,
+  parseAskIdFromDispatch,
+  parseAskStatusFromDispatch,
+  type AskResumeLatch,
+} from "./ask-routing.js";
 import type {
   ChatContextDeps,
   ChatEvent,
   ChatEventListener,
   ChatToolDispatch,
+  ChatToolResult,
   ChatTranscriptMessage,
   ConversationStore,
   PendingAction,
 } from "./types.js";
 
 const DEFAULT_CONFIRM_TIMEOUT_MS = 10 * 60 * 1_000;
-const DEFAULT_TURN_TIMEOUT_MS = 240_000;
+const DEFAULT_TURN_TIMEOUT_MS = 720_000;
 const MAX_STEPS = 16;
 
 export interface ChatServiceDeps {
@@ -89,6 +102,15 @@ export interface ChatServiceDeps {
     message: string;
     parked: ParkedChatAction[];
   }) => Promise<ChatConfirmClassification>;
+  /**
+   * continue vs new for a latched ask. Injected so tests stub the LLM.
+   * Throw / omit → fail-closed to new.
+   */
+  classifyAskResume?: (opts: {
+    message: string;
+    latchTitle?: string;
+    latchLastUser?: string;
+  }) => Promise<AskResumeClassification>;
   confirmTimeoutMs?: number;
   turnTimeoutMs?: number;
   /** How long confirm/auto-wait blocks for a busy run (default 90s). */
@@ -133,6 +155,10 @@ export class ChatService {
     string,
     { conversationId: string; runId: string; projectId?: string }
   >();
+  /** Last ask this conversation started or continued — not project latestOpenAsk. */
+  private readonly askLatches = new Map<string, AskResumeLatch>();
+  /** Operator utterance for the in-flight sendMessage (ask routing). */
+  private turnOperatorMessage = "";
 
   constructor(private readonly deps: ChatServiceDeps) {
     this.emitter.setMaxListeners(100);
@@ -212,6 +238,7 @@ export class ChatService {
   closeConversation(id: string): ChatConversation {
     const conversation = this.getConversation(id);
     this.clearProceedLatchesForConversation(id);
+    this.askLatches.delete(id);
     const closed = this.deps.store.closeConversation(id) ?? conversation;
     this.emit(closed, { type: "closed" });
     return closed;
@@ -221,6 +248,7 @@ export class ChatService {
     const conversation = this.deps.store.getConversation(id);
     if (!conversation) return false;
     this.clearProceedLatchesForConversation(id);
+    this.askLatches.delete(id);
     void this.deps
       .getMemory()
       .deleteThread(conversation.id)
@@ -254,6 +282,7 @@ export class ChatService {
       const idleMs = now.getTime() - Date.parse(c.lastActiveAt);
       if (idleMs < maxIdleMs) continue;
       this.clearProceedLatchesForConversation(c.id);
+      this.askLatches.delete(c.id);
       this.deps.store.closeConversation(c.id);
       this.emit(c, { type: "closed", summary: "idle timeout" });
       closed.push(c.id);
@@ -400,7 +429,7 @@ export class ChatService {
       return { ok: true, reply };
     }
 
-    const result = await this.deps.dispatch(action.tool, action.args);
+    const result = await this.dispatchRouted(conversation, action.tool, action.args);
     let text = formatChatDispatchResult(result, action.tool);
     if (!result.isError) {
       text = await this.maybeWaitForLifecycleRun(conversation, action.tool, text);
@@ -519,6 +548,237 @@ export class ChatService {
       modelId,
       message,
       parked,
+    });
+  }
+
+  private resolveAskLatch(conversationId: string): AskResumeLatch | undefined {
+    const latch = this.askLatches.get(conversationId);
+    if (!latch) return undefined;
+    const live = this.deps.context.getAsk?.(latch.askId);
+    if (!live) return latch;
+    return {
+      ...latch,
+      status: live.status,
+      title: live.title ?? latch.title,
+    };
+  }
+
+  private fillAskIdFromLatch(
+    conversationId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (!ASK_ID_DEPENDENT_TOOLS.has(tool)) return args;
+    const existing =
+      typeof args.askId === "string" ? args.askId.trim() : "";
+    if (existing) return args;
+    const latch = this.resolveAskLatch(conversationId);
+    if (!latch?.askId) return args;
+    return { ...args, askId: latch.askId };
+  }
+
+  /**
+   * LLM classification for ask continue-vs-new. Throws on LLM/parse failure
+   * so the caller can fall back to deterministic heuristics.
+   */
+  private async classifyAskResumeDecision(opts: {
+    message: string;
+    latch: AskResumeLatch;
+  }): Promise<"continue" | "new"> {
+    const classified = this.deps.classifyAskResume
+      ? await this.deps.classifyAskResume({
+          message: opts.message,
+          latchTitle: opts.latch.title,
+          latchLastUser: opts.latch.lastUserLine,
+        })
+      : await this.classifyAskResumeViaLlm(opts.message, opts.latch);
+    return classified.decision === "continue" ? "continue" : "new";
+  }
+
+  private async classifyAskResumeViaLlm(
+    message: string,
+    latch: AskResumeLatch,
+  ): Promise<AskResumeClassification> {
+    const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
+    const { endpoint, modelId } = registry.resolveEndpointForRole(
+      "classification",
+    );
+    return classifyAskResumeViaLlm({
+      endpoint,
+      modelId,
+      message,
+      latchTitle: latch.title,
+      latchLastUser: latch.lastUserLine,
+    });
+  }
+
+  /**
+   * Chat-originated ask never falls through to project latestOpenAsk.
+   * Always sends askId or newAsk=true. Ask-id dependents fill from this
+   * conversation's latch when omitted.
+   */
+  private async dispatchRouted(
+    conversation: ChatConversation,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<ChatToolResult> {
+    let nextArgs = args;
+    if (name === "ask") {
+      nextArgs = await this.routeAskArgs(conversation, args);
+    } else if (ASK_ID_DEPENDENT_TOOLS.has(name)) {
+      nextArgs = this.fillAskIdFromLatch(conversation.id, name, args);
+      const filled =
+        typeof nextArgs.askId === "string" ? nextArgs.askId.trim() : "";
+      if (!filled) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "No askId: this chat has no latched ask. Call ask first or pass askId.",
+            },
+          ],
+        };
+      }
+    }
+
+    const result = await this.deps.dispatch(name, nextArgs);
+    if (!result.isError) {
+      this.rememberAskFromDispatch(conversation, name, nextArgs, result);
+    }
+    return result;
+  }
+
+  private async routeAskArgs(
+    conversation: ChatConversation,
+    args: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    const operatorMessage =
+      this.turnOperatorMessage.trim() ||
+      (typeof args.message === "string" ? args.message : "");
+    const latch = this.resolveAskLatch(conversation.id);
+
+    // LLM-first: classify continue-vs-new via the classification role.
+    // Regex heuristics (decideAskResume) are fallback only on LLM failure.
+    let decision: { kind: "continue"; askId: string; reason: string } | { kind: "new"; title: string; reason: string };
+    if (latch?.askId && isAskOpen(latch.status)) {
+      try {
+        const classified = await this.classifyAskResumeDecision({
+          message: operatorMessage,
+          latch,
+        });
+        decision =
+          classified === "continue"
+            ? {
+                kind: "continue",
+                askId: latch.askId,
+                reason: "classifier continue",
+              }
+            : {
+                kind: "new",
+                title:
+                  (typeof args.title === "string" && args.title.trim()) ||
+                  operatorMessage.split("\n")[0]?.slice(0, 80) ||
+                  "New investigation",
+                reason: "classifier new",
+              };
+      } catch {
+        // LLM failed — fall back to deterministic heuristics
+        const fallback = decideAskResume({
+          operatorMessage,
+          args: {
+            askId: typeof args.askId === "string" ? args.askId : undefined,
+            newAsk: args.newAsk === true,
+            title: typeof args.title === "string" ? args.title : undefined,
+            message: typeof args.message === "string" ? args.message : undefined,
+          },
+          latch,
+        });
+        if (fallback.kind === "continue") {
+          decision = {
+            kind: "continue",
+            askId: fallback.askId,
+            reason: `fallback: ${fallback.reason}`,
+          };
+        } else if (fallback.kind === "new") {
+          decision = {
+            kind: "new",
+            title: fallback.title,
+            reason: `fallback: ${fallback.reason}`,
+          };
+        } else {
+          // ambiguous even in fallback — fail closed to new
+          decision = {
+            kind: "new",
+            title:
+              (typeof args.title === "string" && args.title.trim()) ||
+              operatorMessage.split("\n")[0]?.slice(0, 80) ||
+              "New investigation",
+            reason: "fallback ambiguous",
+          };
+        }
+      }
+    } else {
+      // No open latch — always start a new ask
+      decision = {
+        kind: "new",
+        title:
+          (typeof args.title === "string" && args.title.trim()) ||
+          operatorMessage.split("\n")[0]?.slice(0, 80) ||
+          "New investigation",
+        reason: latch?.askId ? `latch not open (${latch.status})` : "no latch",
+      };
+    }
+    this.emit(conversation, {
+      type: "status",
+      summary:
+        decision.kind === "continue"
+          ? `continuing ask ${decision.askId}`
+          : `starting new ask: ${decision.title}`,
+    });
+    const routed = applyAskResumeDecision(decision, args);
+    const composed = composeAskDispatchMessage({
+      operatorMessage,
+      chatMessage:
+        typeof args.message === "string" ? args.message : undefined,
+      priorOperatorQuestion: latch?.lastUserLine,
+    });
+    if (composed) {
+      return { ...routed, message: composed };
+    }
+    return routed;
+  }
+
+  private rememberAskFromDispatch(
+    conversation: ChatConversation,
+    name: string,
+    args: Record<string, unknown>,
+    result: ChatToolResult,
+  ): void {
+    const raw = result.content.map((c) => c.text).join("\n");
+    if (name === "promote_ask") {
+      const id =
+        parseAskIdFromDispatch(raw) ||
+        (typeof args.askId === "string" ? args.askId : "");
+      const latch = this.askLatches.get(conversation.id);
+      if (latch && (!id || latch.askId === id)) {
+        this.askLatches.delete(conversation.id);
+      }
+      return;
+    }
+    if (name !== "ask" && name !== "fork_ask") return;
+    const askId = parseAskIdFromDispatch(raw);
+    if (!askId) return;
+    const status = parseAskStatusFromDispatch(raw);
+    const title =
+      typeof args.title === "string" && args.title.trim()
+        ? args.title.trim()
+        : this.askLatches.get(conversation.id)?.title;
+    this.askLatches.set(conversation.id, {
+      askId,
+      title,
+      lastUserLine: this.turnOperatorMessage.trim() || undefined,
+      status: status || "open",
     });
   }
 
@@ -764,6 +1024,7 @@ export class ChatService {
       throw new ConversationClosedError(conversationId);
     }
     this.deps.store.touchConversation(conversationId, text);
+    this.turnOperatorMessage = text;
 
     const queue: ChatEvent[] = [];
     let wake: (() => void) | null = null;
@@ -805,6 +1066,7 @@ export class ChatService {
       }
       if (turnError) throw turnError;
     } finally {
+      this.turnOperatorMessage = "";
       unsubscribe();
     }
   }
@@ -852,11 +1114,15 @@ export class ChatService {
         });
 
     const tools = buildChatTools({
-      dispatch: this.deps.dispatch,
+      dispatch: (name, args) => this.dispatchRouted(conversation, name, args),
       conversationId: conversation.id,
       projectId: conversation.projectId,
       requestConfirmation: (tool, args) =>
-        this.requestConfirmation(conversation, tool, args),
+        this.requestConfirmation(
+          conversation,
+          tool,
+          this.fillAskIdFromLatch(conversation.id, tool, args),
+        ),
     });
 
     const agent = new Agent({

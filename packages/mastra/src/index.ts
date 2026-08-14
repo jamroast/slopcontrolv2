@@ -14,6 +14,7 @@ import {
   createPlanLoopAgent,
   createPlanLoopRepairAgent,
   createDevSupervisorAgent,
+  createJudgeAgent,
   createPhasePlannerAgent,
   createResearchAgent,
   createReviewAgent,
@@ -38,6 +39,7 @@ export interface SlopcontrolRuntime {
     blueprintAgent: ReturnType<typeof createBlueprintAgent>;
     askAgent: ReturnType<typeof createAskAgent>;
     askSubResearchAgent: ReturnType<typeof createAskSubResearchAgent>;
+    judgeAgent: ReturnType<typeof createJudgeAgent>;
     agentChatAgent: ReturnType<typeof createAgentChatAgent>;
   };
 }
@@ -110,6 +112,7 @@ export function createSlopcontrolMastra(
     projectDir,
     memory,
   );
+  const judgeAgent = createJudgeAgent(registry, memory);
   const agentChatAgent = createAgentChatAgent(registry, projectDir, memory);
 
   const agents = {
@@ -124,6 +127,7 @@ export function createSlopcontrolMastra(
     blueprintAgent,
     askAgent,
     askSubResearchAgent,
+    judgeAgent,
     agentChatAgent,
   };
 

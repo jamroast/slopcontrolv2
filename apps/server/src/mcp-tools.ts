@@ -1320,6 +1320,23 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "project_set_ask_investigate_tool",
+      description:
+        "Switch the Ask investigation walker for a project: auto (heuristic), mastra (faster Mastra tools), or pi (thorough read-only walk). Takes effect on the next ask. Bind the judge model separately with chat_function_bind function=judge.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          tool: {
+            type: "string",
+            enum: ["auto", "mastra", "pi"],
+            description: "auto | mastra | pi",
+          },
+        },
+        required: ["projectId", "tool"],
+      },
+    },
+    {
       name: "project_env_sync",
       description:
         "Run the project-native env sync (toolchain envSyncCmd) at the project root: merges gitignored runtime env files (.env.local/.env.docker) from the project's templates, preserving existing values. Fails with a hint when the project has no envSyncCmd.",
@@ -1738,7 +1755,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "ask",
       description:
-        "Project-scoped AI conversation (exploratory, read-only). Does not create a phase. Omitting askId continues the project's latest open ask (sticky resume). Pass askId to target a specific session. Pass newAsk=true to force a fresh conversation. Always reuse askId from the previous ask response. For several investigations use ask_sub_research. When the change is clear, call promote_ask. After promote, use fork_ask to keep chatting. For shell inspect/verify without develop, use agent. For look-and-feel mocks use design_loop_start. While a turn is running, call stop_session to interrupt.",
+        "Project-scoped AI conversation (exploratory, read-only). Does not create a phase. Omitting askId continues the project's latest open ask (sticky resume) for the Ask UI / MCP. Chat-service conversations never omit both askId and newAsk — they latch per chat and start a new ask on topic shift. Pass askId to target a specific session. Pass newAsk=true to force a fresh conversation. Always reuse askId from the previous ask response when continuing the same investigation. For several investigations use ask_sub_research. When the change is clear, call promote_ask. After promote, use fork_ask to keep chatting. For shell inspect/verify without develop, use agent. For look-and-feel mocks use design_loop_start. While a turn is running, call stop_session to interrupt.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1757,6 +1774,12 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           title: {
             type: "string",
             description: "Optional title for a new ask session",
+          },
+          investigateTool: {
+            type: "string",
+            enum: ["auto", "mastra", "pi"],
+            description:
+              "Investigate walker for this turn: mastra (fast), pi (thorough), auto (project default + classified thorough/quick intent). Overrides the project askInvestigateTool for this call only.",
           },
         },
         required: ["projectId", "message"],
@@ -2059,7 +2082,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "chat_models_list",
       description:
-        "List platform functions (research, planning, coding, classification, chat, …) with the model currently bound to each, plus the models providers advertise. Use this before chat_function_bind. Do not treat endpoint ids like ollama-cloud-kimi as the thing to switch.",
+        "List platform functions (research, planning, coding, classification, chat, ask, agent, judge, …) with the model currently bound to each, plus the models providers advertise. Use this before chat_function_bind. Do not treat endpoint ids like ollama-cloud-kimi as the thing to switch.",
       inputSchema: { type: "object", properties: {} },
     },
     {
@@ -2086,7 +2109,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           function: {
             type: "string",
             description:
-              "Function to bind: research, planning, supervisor, coding, design, designVision, designImage, classification, chat.",
+              "Function to bind: research, planning, supervisor, coding, design, designVision, designImage, classification, chat, ask, agent, judge.",
           },
           modelId: { type: "string" },
           endpointId: {
@@ -3439,6 +3462,22 @@ export async function dispatchSlopcontrolTool(
       });
     }
 
+    if (name === "project_set_ask_investigate_tool") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/ask-investigate-tool`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ tool: args.tool }),
+          },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
     if (name === "project_env_sync") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -4070,6 +4109,9 @@ export async function dispatchSlopcontrolTool(
               askId: args.askId,
               title: args.title,
               newAsk: args.newAsk === true || args.newAsk === "true",
+              ...(args.investigateTool
+                ? { investigateTool: args.investigateTool }
+                : {}),
             }),
           },
         );

@@ -6,6 +6,7 @@ import type {
   CodingResult,
   CodingSession,
   CodingTool,
+  CreateSessionOptions,
   RunPromptOptions,
 } from "./index.js";
 import { detectCodingProbeAbuseFromEvents } from "./probe-abuse.js";
@@ -451,12 +452,7 @@ export class OpenCodeAdapter implements CodingTool {
     return this.baseUrl;
   }
 
-  async createSession(opts: {
-    projectDir: string;
-    endpoint?: LlmEndpoint;
-    modelId?: string;
-    onEvent?: CodingEventListener;
-  }): Promise<CodingSession> {
+  async createSession(opts: CreateSessionOptions): Promise<CodingSession> {
     await ensureOpenCodeRunning(this.baseUrl);
 
     const client = createClient(this.baseUrl);

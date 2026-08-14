@@ -137,8 +137,10 @@ function makeService(opts?: {
   store?: ReturnType<typeof makeStore>;
   dispatch?: (name: string, args: Record<string, unknown>) => Promise<ChatToolResult>;
   classifyConfirm?: ChatServiceDeps["classifyConfirm"];
+  classifyAskResume?: ChatServiceDeps["classifyAskResume"];
   confirmTimeoutMs?: number;
   listRuns?: ChatServiceDeps["context"]["listRuns"];
+  getAsk?: ChatServiceDeps["context"]["getAsk"];
   waitTimeoutMs?: number;
   waitPollMs?: number;
   followUpWaitMs?: number;
@@ -155,6 +157,7 @@ function makeService(opts?: {
       opts?.dispatch ??
       (async () => ({ content: [{ type: "text", text: "{}" }] })),
     classifyConfirm: opts?.classifyConfirm,
+    classifyAskResume: opts?.classifyAskResume,
     context: {
       listProjects: () => [],
       listPhases: () => [],
@@ -170,6 +173,7 @@ function makeService(opts?: {
               updatedAt: "",
             }
           : undefined,
+      getAsk: opts?.getAsk,
     },
     endpointsPath: makeEndpointsPath(dir),
     confirmTimeoutMs: opts?.confirmTimeoutMs,
@@ -1109,8 +1113,8 @@ describe("chat tool input schemas", () => {
     );
   });
 
-  it("requires ids for get_ask, get_agent, loop get, and live-turn tools", () => {
-    assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.get_ask!.parse({}));
+  it("requires ids for get_agent, loop get, and live-turn tools; get_ask may omit askId", () => {
+    assert.ok(CHAT_TOOL_INPUT_SCHEMA.get_ask!.parse({}));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.get_ask!.parse({ askId: "a1" }));
     assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.get_agent!.parse({}));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.get_agent!.parse({ agentId: "ag1" }));
@@ -1118,6 +1122,23 @@ describe("chat tool input schemas", () => {
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({ loopId: "l1" }));
     assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.ask!.parse({}));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.ask!.parse({ message: "why is this broken?" }));
+    assert.ok(
+      CHAT_TOOL_INPUT_SCHEMA.ask!.parse({
+        message: "review /product",
+        investigateTool: "pi",
+      }),
+    );
+    assert.throws(() =>
+      CHAT_TOOL_INPUT_SCHEMA.ask!.parse({
+        message: "x",
+        investigateTool: "opencode",
+      }),
+    );
+    assert.ok(
+      CHAT_TOOL_INPUT_SCHEMA.project_set_ask_investigate_tool!.parse({
+        tool: "mastra",
+      }),
+    );
     assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.design_loop_continue!.parse({ loopId: "l1" }));
     assert.ok(
       CHAT_TOOL_INPUT_SCHEMA.design_loop_continue!.parse({
@@ -1153,6 +1174,18 @@ describe("chat dispatch result shaping", () => {
   it("extracts reply from an ask envelope", () => {
     const raw = "askId: abc\nstatus: open\n---\nThe button is a no-op.";
     assert.equal(extractDispatchedReply(raw), "The button is a no-op.");
+  });
+
+  it("keeps a long ask envelope instead of clipping it into a continue-loop", () => {
+    const findings = "claim-ok ".repeat(800);
+    const raw = `askId: abc\nstatus: open\n---\n${findings}`;
+    const shaped = formatChatDispatchResult(
+      { content: [{ type: "text", text: raw }] },
+      "ask",
+    );
+    assert.ok(shaped.length > 4_000);
+    assert.match(shaped, /claim-ok/);
+    assert.equal(shaped.includes("truncated"), false);
   });
 
   it("keeps the latest get_ask / get_agent messages, not the history dump", () => {
@@ -1225,3 +1258,244 @@ describe("chat dispatch result shaping", () => {
     assert.match(prefix, /Do not call agent again/);
   });
 });
+
+describe("chat ask session routing", () => {
+  type AskHost = {
+    askLatches: Map<
+      string,
+      { askId: string; title?: string; lastUserLine?: string; status?: string }
+    >;
+    turnOperatorMessage: string;
+    dispatchRouted: (
+      c: ChatConversation,
+      name: string,
+      args: Record<string, unknown>,
+    ) => Promise<ChatToolResult>;
+  };
+
+  function host(service: ChatService): AskHost {
+    return service as unknown as AskHost;
+  }
+
+  async function route(
+    service: ChatService,
+    conv: ChatConversation,
+    name: string,
+    args: Record<string, unknown>,
+    operatorMessage: string,
+  ) {
+    const h = host(service);
+    h.turnOperatorMessage = operatorMessage;
+    try {
+      return await h.dispatchRouted(conv, name, args);
+    } finally {
+      h.turnOperatorMessage = "";
+    }
+  }
+
+  const dockerLatch = {
+    askId: "ask-docker",
+    title: "npm run manage -- up is failing",
+    lastUserLine: "fix this docker build",
+    status: "open",
+  };
+
+  it("sends newAsk when this chat has no latch", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (name, args) => {
+        dispatched.push({ name, args });
+        return {
+          content: [{ type: "text", text: "askId: ask-new\nstatus: open\n---\nok" }],
+        };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      await route(service, conv, "ask", { message: "why is sign-in broken?" }, "why is sign-in broken?");
+      assert.equal(dispatched[0]!.name, "ask");
+      assert.equal(dispatched[0]!.args.newAsk, true);
+      assert.equal(dispatched[0]!.args.askId, undefined);
+      assert.equal(host(service).askLatches.get(conv.id)?.askId, "ask-new");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("starts a new ask on a topic shift instead of the latched docker thread", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (name, args) => {
+        dispatched.push({ name, args });
+        return {
+          content: [{ type: "text", text: "askId: ask-product\nstatus: open\n---\nok" }],
+        };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      host(service).askLatches.set(conv.id, dockerLatch);
+      await route(
+        service,
+        conv,
+        "ask",
+        { message: "rewritten brief about landing vs blueprint" },
+        "great thanks for fixing that. Could you review the /product route",
+      );
+      assert.equal(dispatched[0]!.args.newAsk, true);
+      assert.equal(dispatched[0]!.args.askId, undefined);
+      const sent = String(dispatched[0]!.args.message);
+      assert.match(sent, /Operator request:/);
+      assert.match(sent, /\/product route/);
+      assert.match(sent, /do not replace the operator request/i);
+      assert.match(sent, /rewritten brief about landing vs blueprint/);
+      assert.equal(host(service).askLatches.get(conv.id)?.askId, "ask-product");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("continues this chat's latch on a short follow-up", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (_name, args) => {
+        dispatched.push({ name: "ask", args });
+        return {
+          content: [{ type: "text", text: "askId: ask-docker\nstatus: open\n---\nok" }],
+        };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      host(service).askLatches.set(conv.id, dockerLatch);
+      await route(service, conv, "ask", { message: "brief" }, "what about the registry?");
+      assert.equal(dispatched[0]!.args.askId, "ask-docker");
+      assert.equal(dispatched[0]!.args.newAsk, undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("prepends the operator request and prior latch line when chat rewrites a redo", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (_name, args) => {
+        dispatched.push({ name: "ask", args });
+        return {
+          content: [{ type: "text", text: "askId: ask-product\nstatus: open\n---\nok" }],
+        };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      host(service).askLatches.set(conv.id, {
+        askId: "ask-product",
+        title: "review /product",
+        lastUserLine:
+          "investigate the contents of the /product route vs marketplace and chat",
+        status: "open",
+      });
+      await route(
+        service,
+        conv,
+        "ask",
+        { message: "Read every product page and audit claims", newAsk: true },
+        "Please can you redo that research",
+      );
+      const sent = String(dispatched[0]!.args.message);
+      assert.equal(dispatched[0]!.args.newAsk, true);
+      assert.match(sent, /Please can you redo that research/);
+      assert.match(sent, /Prior operator question this refers to/);
+      assert.match(sent, /\/product route vs marketplace/);
+      assert.match(sent, /do not replace the operator request/i);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("fills omitted askId on get_ask / promote_ask from the latch", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (name, args) => {
+        dispatched.push({ name, args });
+        return { content: [{ type: "text", text: "askId: ask-docker\n---\nok" }] };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      host(service).askLatches.set(conv.id, dockerLatch);
+      await route(service, conv, "get_ask", {}, "show me that ask");
+      await route(service, conv, "promote_ask", {}, "promote it");
+      assert.equal(dispatched[0]!.args.askId, "ask-docker");
+      assert.equal(dispatched[1]!.args.askId, "ask-docker");
+      assert.equal(host(service).askLatches.has(conv.id), false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("errors when get_ask omits askId and this chat has no latch", async () => {
+    let called = false;
+    const { service, cleanup } = makeService({
+      dispatch: async () => {
+        called = true;
+        return { content: [{ type: "text", text: "{}" }] };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const result = await route(service, conv, "get_ask", {}, "show ask");
+      assert.equal(result.isError, true);
+      assert.equal(called, false);
+      assert.match(result.content[0]!.text, /No askId/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("fails closed to a new ask when the classifier throws", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, cleanup } = makeService({
+      classifyAskResume: async () => {
+        throw new Error("classifier down");
+      },
+      dispatch: async (_name, args) => {
+        dispatched.push({ name: "ask", args });
+        return {
+          content: [{ type: "text", text: "askId: ask-fresh\nstatus: open\n---\nok" }],
+        };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      host(service).askLatches.set(conv.id, {
+        ...dockerLatch,
+        title: "misc",
+        lastUserLine: "hello",
+      });
+      await route(
+        service,
+        conv,
+        "ask",
+        { message: "hmm" },
+        "Can we also think about auth a bit more in general terms please",
+      );
+      assert.equal(dispatched[0]!.args.newAsk, true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("clears the ask latch when the conversation closes", async () => {
+    const { service, cleanup } = makeService();
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      host(service).askLatches.set(conv.id, dockerLatch);
+      service.closeConversation(conv.id);
+      assert.equal(host(service).askLatches.has(conv.id), false);
+    } finally {
+      cleanup();
+    }
+  });
+});
+

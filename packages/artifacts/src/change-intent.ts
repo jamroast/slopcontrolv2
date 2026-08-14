@@ -1301,6 +1301,40 @@ export function clipBlueprintForPrompt(
   return `${body.slice(0, maxChars)}\n\n…[truncated BLUEPRINT.md]`;
 }
 
+const ASK_ALIGN_SECTIONS = [
+  "Product summary",
+  "Skills / tools / workflows",
+  "Modules and key paths",
+] as const;
+
+/**
+ * Product-definition clip for Ask *after* investigation.
+ * Does not prefer Live decisions — those are for coding/research, not
+ * "does this page do the product justice?"
+ */
+export function clipBlueprintForAskAlign(
+  blueprint: string,
+  maxChars = 4_000,
+): string {
+  const parts: string[] = [];
+  for (const title of ASK_ALIGN_SECTIONS) {
+    const body = extractSection(blueprint, title)?.trim();
+    if (body) {
+      parts.push(`## ${title}\n\n${body}`);
+    }
+  }
+  if (!parts.length) {
+    const trimmed = (blueprint ?? "").trim();
+    if (!trimmed) return "";
+    return trimmed.length <= maxChars
+      ? trimmed
+      : `${trimmed.slice(0, maxChars)}\n\n…[truncated BLUEPRINT.md]`;
+  }
+  const out = parts.join("\n\n");
+  if (out.length <= maxChars) return out;
+  return `${out.slice(0, maxChars)}\n\n…[truncated]`;
+}
+
 /**
  * Deterministic reconcile: intent-aware GC, dedupe BD ids (keep newest),
  * rebuild Live decisions (verified vs claimed when probes provided).

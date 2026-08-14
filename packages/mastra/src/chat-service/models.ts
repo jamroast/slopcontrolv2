@@ -29,6 +29,11 @@ export const LLM_FUNCTION_DESCRIPTIONS: Record<AgentRole, string> = {
   classification:
     "Structured JSON classification (intent, confirm, etc.; falls back to planning when unbound)",
   chat: "Operator chat agent (falls back to supervisor when unbound)",
+  ask: "Ask agent — read-only codebase investigation (falls back to research when unbound)",
+  agent:
+    "Agent chat — inspect/verify with shell (falls back to research when unbound)",
+  judge:
+    "Post-investigate / post-coding synthesis judge (falls back to ask, then research)",
 };
 
 export interface FunctionCurrentBinding {

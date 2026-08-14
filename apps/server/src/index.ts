@@ -180,7 +180,7 @@ import {
   verifyProjectBuildProcess,
 } from "./build-process.js";
 import { ObsidianSync } from "@slopcontrol/obsidian";
-import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, AgentRoleSchema, type Run, type RunStage } from "@slopcontrol/types";
+import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, AgentRoleSchema, AskInvestigateToolSchema, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
 import { createStore, defaultDataDir } from "./store.js";
 import { DevelopLock } from "./develop-lock.js";
@@ -211,6 +211,12 @@ function getChatService(): ChatService {
         listPhases: (projectId) => store.listPhases(projectId),
         listRuns: (projectId) => store.listRuns(projectId),
         getProject: (id) => store.getProject(id),
+        getAsk: (id) => {
+          const ask = store.getAsk(id);
+          return ask
+            ? { id: ask.id, status: ask.status, title: ask.title }
+            : undefined;
+        },
       },
       endpointsPath: join(dataDir, "endpoints.json"),
       onEndpointsChanged: () => clearSlopcontrolRuntimeCache(),
@@ -1078,6 +1084,7 @@ app.get("/projects", (_req, res) => {
             configured: config.toolchain ?? null,
           }).source !== "none",
         codingToolId: config.codingToolId ?? "opencode",
+        askInvestigateTool: config.askInvestigateTool ?? "auto",
       };
     }),
   });
@@ -1401,6 +1408,37 @@ app.put("/projects/:id/coding-tool", (req, res) => {
   res.json({ projectId: project.id, codingToolId: toolId, knownTools: known });
 });
 
+/** Per-project Ask investigation walker (auto|mastra|pi). */
+app.put("/projects/:id/ask-investigate-tool", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const parsed = AskInvestigateToolSchema.safeParse(
+    typeof req.body?.tool === "string"
+      ? req.body.tool.trim()
+      : req.body?.askInvestigateTool,
+  );
+  if (!parsed.success) {
+    res.status(400).json({
+      error: "tool must be one of: auto, mastra, pi",
+    });
+    return;
+  }
+  const config = readProjectConfig(project.rootPath);
+  config.askInvestigateTool = parsed.data;
+  writeProjectConfig(project.rootPath, config);
+  log.info("project", "ask investigate tool switched", {
+    projectId: project.id,
+    askInvestigateTool: parsed.data,
+  });
+  res.json({
+    projectId: project.id,
+    askInvestigateTool: parsed.data,
+  });
+});
+
 /**
  * Consume side of the registry cycle: update THIS project to a published
  * library version via its own toolchain (pnpm add …) and commit the bump.
@@ -1673,6 +1711,12 @@ app.post("/projects/:id/asks", async (req, res) => {
     req.body?.newAsk === "true" ||
     req.body?.forceNew === "true";
   const stream = wantsLiveStream(req);
+  const investigateParsed = AskInvestigateToolSchema.safeParse(
+    req.body?.investigateTool,
+  );
+  const investigateTool = investigateParsed.success
+    ? investigateParsed.data
+    : undefined;
 
   const now = new Date().toISOString();
   const userMsg = { role: "user" as const, content: message, at: now };
@@ -1745,6 +1789,7 @@ app.post("/projects/:id/asks", async (req, res) => {
       listProjects: () => store.listProjects(),
       dataDir: defaultDataDir(),
       abortSignal: bound.signal,
+      ...(investigateTool ? { investigateTool } : {}),
       onProgress: (event) => {
         bound.onProgress(event);
         const line = askProgressLine(event);
@@ -7500,7 +7545,7 @@ app.post("/chats/function-mappings", async (req, res) => {
     if (!parsedFn.success) {
       res.status(400).json({
         error:
-          "function must be one of: research, planning, supervisor, coding, design, designVision, designImage, classification, chat",
+          `function must be one of: ${AgentRoleSchema.options.join(", ")}`,
       });
       return;
     }

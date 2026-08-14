@@ -225,6 +225,16 @@ describe("buildFunctionMappingList", () => {
     assert.equal(coding?.current?.modelId, "glm-5.2");
     const vision = listed.functions.find((f) => f.function === "designVision");
     assert.equal(vision?.current, null);
+    const ask = listed.functions.find((f) => f.function === "ask");
+    assert.ok(ask);
+    assert.equal(ask.current?.modelId, "glm-5.2");
+    assert.equal(ask.current?.explicit, false);
+    assert.equal(ask.current?.fallbackFrom, "research");
+    const agent = listed.functions.find((f) => f.function === "agent");
+    assert.ok(agent);
+    assert.equal(agent.current?.modelId, "glm-5.2");
+    assert.equal(agent.current?.explicit, false);
+    assert.equal(agent.current?.fallbackFrom, "research");
     assert.ok(listed.models.some((m) => m.modelId === "kimi-k2.7-code" && !m.mapped));
     assert.ok(listed.models.some((m) => m.modelId === "glm-5.2" && m.mapped));
     for (const model of listed.models) {
@@ -342,6 +352,40 @@ describe("bindFunctionToModel", () => {
       assert.equal(result.config.roles.classification?.endpointId, "e1");
       assert.equal(result.config.roles.classification?.modelId, "glm-5.2");
       assert.equal(result.config.endpoints.length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds ask and agent as their own function mappings", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-bind-"));
+    try {
+      const path = writeConfig(dir);
+      const ask = bindFunctionToModel({
+        endpointsPath: path,
+        function: "ask",
+        modelId: "glm-5.2",
+        providers: [],
+      });
+      assert.equal(ask.createdEndpoint, false);
+      assert.equal(ask.config.roles.ask?.endpointId, "e1");
+      assert.equal(ask.config.roles.ask?.modelId, "glm-5.2");
+      const agent = bindFunctionToModel({
+        endpointsPath: path,
+        function: "agent",
+        modelId: "glm-5.2",
+        providers: [],
+      });
+      assert.equal(agent.config.roles.agent?.endpointId, "e1");
+      assert.equal(agent.config.roles.agent?.modelId, "glm-5.2");
+      const judge = bindFunctionToModel({
+        endpointsPath: path,
+        function: "judge",
+        modelId: "glm-5.2",
+        providers: [],
+      });
+      assert.equal(judge.config.roles.judge?.endpointId, "e1");
+      assert.equal(judge.config.roles.judge?.modelId, "glm-5.2");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

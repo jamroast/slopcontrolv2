@@ -10,6 +10,7 @@ import { ASK_SUB_RESEARCH_MAX_TOPICS } from "@slopcontrol/types";
 import {
   createAgentChatAgent,
   createAskAgent,
+  createJudgeAgent,
   createPlanLoopAgent,
   createPlanLoopRepairAgent,
   createAskSubResearchAgent,
@@ -66,12 +67,14 @@ describe("ask / agent chat tool split", () => {
       const projectDir = join(dir, "proj");
 
       const ask = createAskAgent(registry, projectDir, memory);
+      const judge = createJudgeAgent(registry, memory);
       const sub = createAskSubResearchAgent(registry, projectDir, memory);
       const agent = createAgentChatAgent(registry, projectDir, memory);
       const designLoop = createDesignLoopAgent(registry, projectDir, memory);
       const planLoop = createPlanLoopAgent(registry, projectDir, memory);
 
       const askTools = await ask.listTools();
+      const judgeTools = await judge.listTools();
       const subTools = await sub.listTools();
       const agentTools = await agent.listTools();
       const loopTools = await designLoop.listTools();
@@ -79,6 +82,7 @@ describe("ask / agent chat tool split", () => {
 
       assert.equal("run_command" in askTools, false);
       assert.equal("write_file" in askTools, false);
+      assert.equal(Object.keys(judgeTools).length, 0);
       assert.equal("run_command" in subTools, false);
       assert.equal("write_file" in subTools, false);
       assert.equal("run_command" in agentTools, true);

@@ -91,7 +91,8 @@ export type RoleBindingInfo = {
 
 /**
  * Describe how a function (agent role) is bound in endpoints.json,
- * including fallbacks (classification/design → planning, chat → supervisor).
+ * including fallbacks (classification/design → planning, chat → supervisor,
+ * ask/agent → research, judge → ask then research).
  * Does not throw for unbound optional roles (designVision / designImage).
  */
 export function roleBindingInfo(
@@ -125,6 +126,24 @@ export function roleBindingInfo(
       explicit: false,
       fallbackFrom: "supervisor",
       binding: roles.supervisor,
+    };
+  }
+  if (role === "ask" || role === "agent") {
+    return {
+      role,
+      bound: true,
+      explicit: false,
+      fallbackFrom: "research",
+      binding: roles.research,
+    };
+  }
+  if (role === "judge") {
+    return {
+      role,
+      bound: true,
+      explicit: false,
+      fallbackFrom: roles.ask ? "ask" : "research",
+      binding: roles.ask ?? roles.research,
     };
   }
   if (role === "designVision" || role === "designImage") {
@@ -247,6 +266,16 @@ export class LlmRegistry {
     if (role === "chat") {
       return Boolean(this.roles.chat) || Boolean(this.roles.supervisor);
     }
+    if (role === "ask" || role === "agent") {
+      return Boolean(this.roles[role]) || Boolean(this.roles.research);
+    }
+    if (role === "judge") {
+      return (
+        Boolean(this.roles.judge) ||
+        Boolean(this.roles.ask) ||
+        Boolean(this.roles.research)
+      );
+    }
     const binding = this.roles[role as keyof RoleModelBindings];
     return Boolean(binding);
   }
@@ -310,6 +339,8 @@ export * from "./json-chat.js";
 export * from "./intent-extract.js";
 export * from "./continue-intent-llm.js";
 export * from "./chat-confirm-llm.js";
+export * from "./ask-resume-llm.js";
+export * from "./ask-investigate-engine-llm.js";
 export * from "./plan-continue-intent-llm.js";
 export * from "./dependency-intent-llm.js";
 export * from "./element-honor-llm.js";

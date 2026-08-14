@@ -1,4 +1,10 @@
-import type { ChatConversation, Phase, Project, Run } from "@slopcontrol/types";
+import type {
+  AskSession,
+  ChatConversation,
+  Phase,
+  Project,
+  Run,
+} from "@slopcontrol/types";
 
 /** Events emitted on a conversation stream (per-chat + aggregate SSE). */
 export interface ChatEvent {
@@ -79,6 +85,8 @@ export interface ChatContextDeps {
   listPhases(projectId: string): Phase[];
   listRuns(projectId?: string): Run[];
   getProject(id: string): Project | undefined;
+  /** Optional — used to see if a chat ask latch is still open. */
+  getAsk?(id: string): Pick<AskSession, "id" | "status" | "title"> | undefined;
 }
 
 export interface PendingAction {

@@ -34,7 +34,10 @@ Tool choice for investigation vs coding:
 - Inspecting source, tracing "why is this broken", reading env/config, or answering a how-does-this-work question: use free tools — ask (project read tools) or list_* / get_*.
 - Gated agent and start_development start a mutating coding-agent session. Use them only when the operator wants code written or a develop/verify run, not for a read-only source trace.
 - After ask, agent, or a parked action returns, write the operator-facing answer from that result. Do not stop at "Let me look" and do not tell them the investigation is still pending.
-- get_ask / get_agent / get_development_report / design_loop_get / plan_loop_get require the id from the matching list_* tool. Never call them empty.`;
+- Chat-owned asks: omit askId to let this chat continue or start a new ask. Never rely on the project's latest open ask. Pass askId only to target a specific session; pass newAsk=true to force a fresh one. Put the operator's question in message; do not replace a page/route review with a source-claim checklist.
+- Ask walker: mastra is faster, pi is more thorough. Default is the project's askInvestigateTool (auto|mastra|pi). For one turn pass investigateTool, or express thorough vs quick intent in the operator message (classified by the classification model — never keyword-matched; with no expressed intent the fast mastra path runs). Park project_set_ask_investigate_tool to change the project default. A judge pass always refines findings — bind function "judge" (Kimi) separately from "ask" (GLM) via chat_function_bind.
+- Develop loop: the same judge function reviews each coding turn against the phase brief; partial/off-track verdicts steer the next coding turn directly. When Automated Checks pass, a pre-merge judge reviews the whole change set BEFORE merging — off-track with concrete gaps forces one bounded extra iteration without merge, otherwise the verdict is recorded and the phase merges and completes.
+- get_ask / get_agent / get_development_report / design_loop_get / plan_loop_get require the id from the matching list_* tool (get_ask may omit askId to use this chat's latched ask). Never call get_agent / loop gets empty.`;
 
 function phaseLine(phase: Phase): string {
   const title = phase.title ?? phase.description.slice(0, 60);
@@ -136,7 +139,7 @@ export function buildGlobalChatPrompt(opts: {
 ${LIFECYCLE_CONTRACT}
 
 ## Your role (global scope)
-Cross-project oversight: check health, inspect any project's phases/runs (pass its projectId explicitly), draft asks, and recommend where work should happen. For deep single-project work (reading its BLUEPRINT in detail, design loops), suggest opening a project-scoped chat. You also manage model configuration: chat_models_list shows each function (research, coding, classification, …), its current model, and the models providers advertise. Use chat_function_bind to map a function to a model (creates the endpoint mapping if it is missing). chat_model_set only overrides this conversation.
+Cross-project oversight: check health, inspect any project's phases/runs (pass its projectId explicitly), draft asks, and recommend where work should happen. For deep single-project work (reading its BLUEPRINT in detail, design loops), suggest opening a project-scoped chat. You also manage model configuration: chat_models_list shows each function (research, coding, classification, ask, agent, judge, …), its current model, and the models providers advertise. Use chat_function_bind to map a function to a model (creates the endpoint mapping if it is missing). chat_model_set only overrides this conversation.
 
 ## Projects (${projects.length})
 ${lines.join("\n") || "- (none registered)"}${formatPendingConfirmPrompt(opts.pendingActions ?? [])}`;

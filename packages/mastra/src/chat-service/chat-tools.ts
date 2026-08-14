@@ -110,6 +110,7 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   "project_library_consume",
   "project_build_process_configure",
   "project_set_coding_tool",
+  "project_set_ask_investigate_tool",
   "project_env_sync",
   "project_runs_compact",
   // project admin (non-destructive)
@@ -159,7 +160,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
   }),
   get_ask: z.object({
-    askId: z.string().min(1),
+    askId: z.string().min(1).optional(),
     projectId: optionalProject,
   }),
   get_agent: z.object({
@@ -179,6 +180,11 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     askId: z.string().min(1).optional(),
     title: z.string().optional(),
     newAsk: z.boolean().optional(),
+    investigateTool: z.enum(["auto", "mastra", "pi"]).optional(),
+    projectId: optionalProject,
+  }),
+  project_set_ask_investigate_tool: z.object({
+    tool: z.enum(["auto", "mastra", "pi"]),
     projectId: optionalProject,
   }),
   agent: z.object({
@@ -188,18 +194,18 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
   }),
   ask_sub_research: z.object({
-    askId: z.string().min(1),
+    askId: z.string().min(1).optional(),
     topics: z.array(z.string().min(1)).min(1),
     projectId: optionalProject,
   }),
   promote_ask: z.object({
-    askId: z.string().min(1),
+    askId: z.string().min(1).optional(),
     description: z.string().optional(),
     dependsOn: z.array(z.string()).optional(),
     projectId: optionalProject,
   }),
   fork_ask: z.object({
-    askId: z.string().min(1),
+    askId: z.string().min(1).optional(),
     title: z.string().optional(),
     projectId: optionalProject,
   }),
@@ -277,14 +283,16 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   get_development_report:
     "Development report for a run. Prefer list_runs first, then pass runId.",
   get_ask:
-    "One ask session. Requires askId from list_asks. Returns latest messages, not the full history dump.",
+    "One ask session. Pass askId, or omit to use this chat's latched ask. Returns latest messages, not the full history dump.",
   get_agent:
     "One agent session. Requires agentId from list_agents. Returns latest messages, not the full history dump.",
   design_loop_get:
     "One design loop. Requires loopId from list_design_loops. Use notes; do not paste HTML into the operator reply.",
   plan_loop_get:
     "One plan loop. Requires loopId from list_plan_loops.",
-  ask: "Investigate the project (read source, explain why something is broken). Prefer this over gated agent for read-only traces. Requires message.",
+  ask: "Investigate the project (read source, explain why something is broken). Pass the operator's words through in message — do not replace a page/route/product-gap question with a source-claim checklist. Optional investigateTool: mastra (faster) | pi (thorough) | auto. Thorough vs quick intent in the operator message is classified by the LLM, never keyword-matched; with no expressed intent the fast mastra path runs. Prefer this over gated agent for read-only traces. Requires message. You may pass askId or newAsk; the chat service will choose continue vs a new ask so this never resumes some other open ask on the project.",
+  project_set_ask_investigate_tool:
+    "Set the project's default Ask walker: auto, mastra (fast), or pi (thorough). Requires tool. Bind the judge model with chat_function_bind function=judge.",
   agent:
     "Start a mutating coding-agent session. Do not use this to read source or explain a bug — use ask. Requires message.",
   start_development:
@@ -293,7 +301,8 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Preferred proceed tool. Requires runId. Confirming it walks the current gate until work is running: in_review → approve review → start_development (or start_design if required). Use this when the operator says go ahead / accept / start development / continue. Never auto-merges. Stay in this chat.",
   submit_review:
     "Approve or request changes on an in_review research/draft. Requires runId and decision (approve | request_changes). Confirming approve then keeps advancing until work is running (same continuer as advance_run). Prefer advance_run when they want to proceed. Stay in this chat — do not send the operator to a dashboard Approve button.",
-  promote_ask: "Promote an ask into a phase. Requires askId from list_asks.",
+  promote_ask:
+    "Promote an ask into a phase. Pass askId, or omit to promote this chat's latched ask.",
   stop_session:
     "Interrupt a live ask/agent/design_loop/plan_loop turn. Requires kind and id.",
 };
@@ -326,10 +335,15 @@ function previewArgs(args: Record<string, unknown>): string {
  * every later turn of the conversation.
  */
 export const CHAT_TOOL_RESULT_MAX_CHARS = 4_000;
+/** Ask judge replies are long; a 4k clip made chat loop "continue the unclipped results". */
+export const CHAT_ASK_TOOL_RESULT_MAX_CHARS = 16_000;
 
-function clipChatToolText(text: string): string {
-  if (text.length <= CHAT_TOOL_RESULT_MAX_CHARS) return text;
-  return `${text.slice(0, CHAT_TOOL_RESULT_MAX_CHARS)}\n…(truncated ${text.length - CHAT_TOOL_RESULT_MAX_CHARS} chars — narrow the query or ask for a specific item)`;
+function clipChatToolText(
+  text: string,
+  max: number = CHAT_TOOL_RESULT_MAX_CHARS,
+): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n…(truncated ${text.length - max} chars — narrow the query or ask for a specific item)`;
 }
 
 /**
@@ -464,6 +478,10 @@ function compactList(items: unknown, label: string): string | null {
 export function compactChatToolPayload(raw: string, _toolName?: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return raw;
+  const max =
+    _toolName === "ask"
+      ? CHAT_ASK_TOOL_RESULT_MAX_CHARS
+      : CHAT_TOOL_RESULT_MAX_CHARS;
 
   const envelope = splitMcpEnvelope(trimmed);
   if (envelope) {
@@ -474,8 +492,8 @@ export function compactChatToolPayload(raw: string, _toolName?: string): string 
     const notesLen = notesHit?.[1]?.length ?? 0;
     const bodyBudget =
       notesLen >= 200
-        ? Math.min(1_200, CHAT_TOOL_RESULT_MAX_CHARS)
-        : CHAT_TOOL_RESULT_MAX_CHARS - header.length - 16;
+        ? Math.min(1_200, max)
+        : max - header.length - 16;
     return `${header}\n---\n${clipText(body, Math.max(400, bodyBudget))}`;
   }
 
@@ -575,7 +593,11 @@ export function formatChatDispatchResult(
   const raw = result.content.map((c) => c.text).join("\n");
   const body = compactChatToolPayload(raw, toolName);
   const prefixed = result.isError ? `ERROR:\n${body}` : body;
-  return clipChatToolText(prefixed);
+  const max =
+    toolName === "ask"
+      ? CHAT_ASK_TOOL_RESULT_MAX_CHARS
+      : CHAT_TOOL_RESULT_MAX_CHARS;
+  return clipChatToolText(prefixed, max);
 }
 
 /**
