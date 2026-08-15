@@ -7449,6 +7449,36 @@ function sseHeaders(res: express.Response): void {
   res.flushHeaders();
 }
 
+const SSE_HEARTBEAT_MS = 20_000;
+
+/** Keep chat SSE connections alive and push filtered chat-service events. */
+function attachChatEventStream(
+  req: express.Request,
+  res: express.Response,
+  filter: (event: { conversationId?: string; projectId?: string | null }) => boolean,
+): void {
+  sseHeaders(res);
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(`: ping\n\n`);
+    }
+  }, SSE_HEARTBEAT_MS);
+
+  const unsubscribe = getChatService().subscribe((event) => {
+    if (!filter(event)) return;
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+  });
+
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  };
+  req.on("close", cleanup);
+  res.on("close", cleanup);
+}
+
 app.post("/projects/:id/chats", (req, res) => {
   try {
     const project = store.getProject(req.params.id);
@@ -7491,12 +7521,7 @@ app.get("/projects/:id/chats/events", (req, res) => {
     res.status(404).json({ error: "Project not found" });
     return;
   }
-  sseHeaders(res);
-  const unsubscribe = getChatService().subscribe((event) => {
-    if (event.projectId !== project.id) return;
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
-  });
-  req.on("close", unsubscribe);
+  attachChatEventStream(req, res, (event) => event.projectId === project.id);
 });
 
 app.post("/chats", (req, res) => {
@@ -7526,11 +7551,20 @@ app.get("/chats", async (req, res) => {
 });
 
 app.get("/chats/events", (req, res) => {
-  sseHeaders(res);
-  const unsubscribe = getChatService().subscribe((event) => {
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
-  });
-  req.on("close", unsubscribe);
+  attachChatEventStream(req, res, () => true);
+});
+
+app.get("/chats/:id/events", (req, res) => {
+  try {
+    getChatService().getConversation(req.params.id);
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
+  const conversationId = req.params.id;
+  attachChatEventStream(req, res, (event) => event.conversationId === conversationId);
 });
 
 app.get("/chats/models", async (_req, res) => {
