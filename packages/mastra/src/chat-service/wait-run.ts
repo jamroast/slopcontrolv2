@@ -1,3 +1,5 @@
+import type { RunSettledContext } from "./run-settled-notification.js";
+import { buildRunSettledGuidance } from "./run-settled-notification.js";
 import {
   BUSY_RUN_STAGES,
   isBusyRunStage,
@@ -25,6 +27,8 @@ export const LIFECYCLE_WAIT_TOOLS = new Set<string>([
 
 export const DEFAULT_WAIT_TIMEOUT_MS = 90_000;
 export const DEFAULT_WAIT_INTERVAL_MS = 2_000;
+/** Slow poll when run-stage pub/sub is active (watchdog only). */
+export const DEFAULT_WATCHDOG_INTERVAL_MS = 30_000;
 export const DEFAULT_FOLLOW_UP_WAIT_MS = 30 * 60 * 1_000;
 export const HTTP_WAIT_MAX_MS = 180_000;
 
@@ -118,24 +122,6 @@ export type WaitForRunResult = {
   projectId?: string;
 };
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(signal.reason ?? new Error("aborted"));
-      return;
-    }
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(signal.reason ?? new Error("aborted"));
-      },
-      { once: true },
-    );
-  });
-}
-
 /**
  * Pull runId + stage out of a start_change / start_development (etc.) payload.
  */
@@ -172,73 +158,120 @@ export async function waitForRun(opts: {
   getRun: () => RunSnapshot | undefined | Promise<RunSnapshot | undefined>;
   timeoutMs?: number;
   intervalMs?: number;
+  watchdogIntervalMs?: number;
   signal?: AbortSignal;
   onProgress?: (snap: RunSnapshot, elapsedMs: number) => void;
+  /** Wake early on server stage transitions (touchRunStage pub/sub). */
+  subscribeRun?: (runId: string, listener: () => void) => () => void;
 }): Promise<WaitForRunResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
-  const intervalMs = opts.intervalMs ?? DEFAULT_WAIT_INTERVAL_MS;
+  const pollMs = opts.intervalMs ?? DEFAULT_WAIT_INTERVAL_MS;
+  const watchdogMs = opts.subscribeRun
+    ? (opts.watchdogIntervalMs ?? DEFAULT_WATCHDOG_INTERVAL_MS)
+    : pollMs;
   const started = Date.now();
+  let lastStage: RunStage | undefined;
   let last: RunSnapshot | undefined;
 
-  while (true) {
-    if (opts.signal?.aborted) {
-      throw opts.signal.reason ?? new Error("aborted");
-    }
-    const snap = await opts.getRun();
-    const elapsedMs = Date.now() - started;
-    if (!snap) {
-      return {
-        runId: opts.runId,
-        stage: "missing",
-        settled: false,
-        timedOut: false,
-        elapsedMs,
-      };
-    }
-    last = snap;
-    opts.onProgress?.(snap, elapsedMs);
-    if (!isBusyRunStage(snap.stage)) {
-      return {
-        runId: snap.id,
-        stage: snap.stage,
-        settled: true,
-        timedOut: false,
-        elapsedMs,
-        phaseId: snap.phaseId,
-        projectId: snap.projectId,
-      };
-    }
-    if (elapsedMs >= timeoutMs) {
-      return {
-        runId: snap.id,
-        stage: snap.stage,
-        settled: false,
-        timedOut: true,
-        elapsedMs,
-        phaseId: snap.phaseId,
-        projectId: snap.projectId,
-      };
-    }
-    const remaining = timeoutMs - elapsedMs;
-    await sleep(Math.min(intervalMs, Math.max(10, remaining)), opts.signal);
-  }
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    let watchdog: ReturnType<typeof setInterval> | undefined;
+    let unsub: (() => void) | undefined;
+
+    const finish = (result: WaitForRunResult) => {
+      if (finished) return;
+      finished = true;
+      if (watchdog) clearInterval(watchdog);
+      unsub?.();
+      resolve(result);
+    };
+
+    const onAbort = () => {
+      if (finished) return;
+      finished = true;
+      if (watchdog) clearInterval(watchdog);
+      unsub?.();
+      reject(opts.signal?.reason ?? new Error("aborted"));
+    };
+
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+
+    const evaluate = async (): Promise<void> => {
+      if (finished || opts.signal?.aborted) return;
+      const snap = await opts.getRun();
+      const elapsedMs = Date.now() - started;
+      if (!snap) {
+        finish({
+          runId: opts.runId,
+          stage: "missing",
+          settled: false,
+          timedOut: false,
+          elapsedMs,
+        });
+        return;
+      }
+      last = snap;
+      if (snap.stage !== lastStage) {
+        lastStage = snap.stage;
+        opts.onProgress?.(snap, elapsedMs);
+      }
+      if (!isBusyRunStage(snap.stage)) {
+        finish({
+          runId: snap.id,
+          stage: snap.stage,
+          settled: true,
+          timedOut: false,
+          elapsedMs,
+          phaseId: snap.phaseId,
+          projectId: snap.projectId,
+        });
+        return;
+      }
+      if (elapsedMs >= timeoutMs) {
+        finish({
+          runId: snap.id,
+          stage: snap.stage,
+          settled: false,
+          timedOut: true,
+          elapsedMs,
+          phaseId: snap.phaseId,
+          projectId: snap.projectId,
+        });
+      }
+    };
+
+    unsub = opts.subscribeRun?.(opts.runId, () => {
+      void evaluate();
+    });
+
+    void evaluate();
+    watchdog = setInterval(() => {
+      void evaluate();
+    }, Math.max(10, watchdogMs));
+  });
 }
 
-export function formatWaitForRunResult(result: WaitForRunResult): string {
+export function formatWaitForRunResult(
+  result: WaitForRunResult,
+  ctx?: RunSettledContext,
+): string {
   if (result.stage === "missing") {
     return `Run ${result.runId} was not found while waiting.`;
   }
   if (result.settled) {
+    const guidance = buildRunSettledGuidance(
+      {
+        id: result.runId,
+        stage: result.stage,
+        phaseId: result.phaseId,
+        projectId: result.projectId,
+      },
+      ctx,
+    );
     return [
       `Run ${result.runId} finished ${result.stage} after ${Math.round(result.elapsedMs / 1000)}s.`,
       "Brief the operator on this outcome now.",
-      result.stage === "in_review"
-        ? "Research is ready for operator review — park advance_run (or start_development). Confirming either accepts the review if needed and keeps going until coding or design is running. Stay in this chat. Use submit_review request_changes only to send the plan back."
-        : result.stage === "complete"
-          ? "The run completed."
-          : result.stage === "blocked" || result.stage === "failed"
-            ? "The run did not succeed. Use get_run / get_development_report / get_operator_suggestions for why, then propose next steps."
-            : "Do not claim the work is still in progress.",
+      guidance,
     ].join(" ");
   }
   return [

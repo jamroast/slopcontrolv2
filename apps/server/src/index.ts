@@ -1,6 +1,6 @@
 import "./load-env.js";
 
-import { existsSync, readFileSync, readdirSync, rmSync, openSync, readSync, closeSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, openSync, readSync, closeSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import cors from "cors";
 import express from "express";
@@ -161,8 +161,12 @@ import {
 import {
   classifyDependencyIntentViaLlm,
   loadEndpointsConfig,
+  loadProvidersConfig,
+  defaultProvidersPath,
+  mergeProviderUpdate,
+  resolveEndpointSecrets,
 } from "@slopcontrol/llm";
-import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError, clearSlopcontrolRuntimeCache, waitForRun, formatWaitForRunResult, DEFAULT_WAIT_TIMEOUT_MS, DEFAULT_WAIT_INTERVAL_MS, HTTP_WAIT_MAX_MS } from "@slopcontrol/mastra";
+import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError, clearSlopcontrolRuntimeCache, waitForRun, formatWaitForRunResult, DEFAULT_WAIT_TIMEOUT_MS, DEFAULT_WAIT_INTERVAL_MS, HTTP_WAIT_MAX_MS, RunStageBroker } from "@slopcontrol/mastra";
 import {
   bindLiveTurn,
   wantsLiveStream,
@@ -183,7 +187,7 @@ import { ObsidianSync } from "@slopcontrol/obsidian";
 import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, AgentRoleSchema, AskInvestigateToolSchema, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
 import { createStore, defaultDataDir } from "./store.js";
-import { shouldNotifyRunSettled } from "./run-settled.js";
+import { shouldNotifyRunStageChange } from "./run-settled.js";
 import { DevelopLock } from "./develop-lock.js";
 import { NO_ENV_SYNC_HINT, runProjectEnvSync } from "./env-sync.js";
 import { compactProjectRuns, compactRuns, planCompaction } from "./run-compaction.js";
@@ -198,6 +202,9 @@ const activeRuns = new Set<string>();
 const abortControllers = new Map<string, AbortController>();
 /** One live develop (design→develop / retry) job per project. */
 const developLock = new DevelopLock((runId) => activeRuns.has(runId));
+const runStageBroker = new RunStageBroker({
+  logPath: join(defaultDataDir(), "events.jsonl"),
+});
 
 let chatServiceInstance: ChatService | null = null;
 function getChatService(): ChatService {
@@ -221,6 +228,8 @@ function getChatService(): ChatService {
       },
       endpointsPath: join(dataDir, "endpoints.json"),
       onEndpointsChanged: () => clearSlopcontrolRuntimeCache(),
+      subscribeRunUpdates: (runId, listener) =>
+        runStageBroker.subscribe(runId, listener),
     });
   }
   return chatServiceInstance;
@@ -289,14 +298,22 @@ function touchRunStage(runId: string, stage: RunStage, iterationCount?: number):
   }
   store.updateRun(run);
 
+  runStageBroker.emit({
+    id: run.id,
+    stage: run.stage,
+    phaseId: run.phaseId,
+    projectId: run.projectId,
+    previousStage: previous,
+  });
+
   // Choke point for run-settled push notifications: every research/design/
-  // develop stage transition flows through here, so terminal stages notify
-  // awaiting chat conversations regardless of which loop produced them.
-  if (shouldNotifyRunSettled(previous, stage)) {
+  // develop stage transition flows through here, so gate + terminal stages
+  // notify awaiting chat conversations regardless of which loop produced them.
+  if (shouldNotifyRunStageChange(previous, stage)) {
     try {
-      getChatService().handleRunSettled(run);
+      getChatService().handleRunStageChanged(run);
     } catch (err) {
-      log.warn("chat", "handleRunSettled failed", {
+      log.warn("chat", "handleRunStageChanged failed", {
         runId: run.id,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -6516,6 +6533,105 @@ app.get("/config/endpoints", (_req, res) => {
   res.json(config);
 });
 
+// ---- provider config (providers.json) ----
+
+function providersPath(): string {
+  return defaultProvidersPath(defaultDataDir());
+}
+
+function redactProviders(config: ReturnType<typeof loadProvidersConfig>) {
+  const redacted: Record<string, Record<string, unknown>> = {};
+  for (const [name, entry] of Object.entries(config.providers)) {
+    redacted[name] = {
+      ...entry,
+      apiKey: entry.apiKey ? "***" : null,
+    };
+  }
+  return { providers: redacted };
+}
+
+app.get("/config/providers", (_req, res) => {
+  const config = loadProvidersConfig(providersPath());
+  res.json(redactProviders(config));
+});
+
+app.put("/config/providers/:name", (req, res) => {
+  const { name } = req.params;
+  const body = req.body ?? {};
+  const config = loadProvidersConfig(providersPath());
+  config.providers[name] = mergeProviderUpdate(config.providers[name], body);
+  const path = providersPath();
+  writeFileSync(path, JSON.stringify(config, null, 2), "utf-8");
+  clearSlopcontrolRuntimeCache();
+  res.json({ ok: true, provider: name });
+});
+
+app.delete("/config/providers/:name", (req, res) => {
+  const { name } = req.params;
+  const config = loadProvidersConfig(providersPath());
+  if (!(name in config.providers)) {
+    res.status(404).json({ error: `Provider not found: ${name}` });
+    return;
+  }
+  delete config.providers[name];
+  const path = providersPath();
+  writeFileSync(path, JSON.stringify(config, null, 2), "utf-8");
+  clearSlopcontrolRuntimeCache();
+  res.json({ ok: true, removed: name });
+});
+
+// Test connectivity for a provider by listing its models
+app.get("/config/providers/:name/test", async (req, res) => {
+  const { name } = req.params;
+  const config = loadProvidersConfig(providersPath());
+  const provider = config.providers[name];
+  if (!provider) {
+    res.status(404).json({ error: `Provider not found: ${name}` });
+    return;
+  }
+  const synthetic = resolveEndpointSecrets(
+    {
+      id: name,
+      label: name,
+      baseUrl: provider.defaultBaseUrl ?? "",
+      provider: name,
+      apiType: "openai-chat",
+      modelId: "test",
+    },
+    config,
+  );
+  const baseUrl = synthetic.baseUrl?.trim() ?? "";
+  if (!baseUrl) {
+    res.status(400).json({ error: `Provider ${name} has no defaultBaseUrl configured` });
+    return;
+  }
+  const apiKey = synthetic.apiKey?.trim() ?? "";
+  try {
+    const url = `${baseUrl.replace(/\/$/, "")}/models`;
+    const res2 = await fetch(url, {
+      headers: {
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        ...synthetic.headers,
+        ...provider.headers,
+      },
+      signal: AbortSignal.timeout(synthetic.timeoutMs ?? provider.timeoutMs ?? 10_000),
+    });
+    if (!res2.ok) {
+      res.json({ ok: false, error: `HTTP ${res2.status} from ${url}`, provider: name });
+      return;
+    }
+    const data = (await res2.json()) as { data?: { id?: string }[] };
+    const models = (data.data ?? []).map((m) => m.id).filter(Boolean);
+    res.json({ ok: true, provider: name, models, count: models.length });
+  } catch (err) {
+    res.json({
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      provider: name,
+    });
+  }
+});
+
 app.post("/runs", async (req, res) => {
   const parsed = RunActionSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -7554,6 +7670,63 @@ app.get("/chats/events", (req, res) => {
   attachChatEventStream(req, res, () => true);
 });
 
+// Live run-stage events for the dashboard: replay retained log then follow
+// live. Replaces polling /runs/:id/status and /chats/:id/awaited-runs.
+app.get("/events/runs", (req, res) => {
+  const projectId =
+    typeof req.query.projectId === "string" && req.query.projectId.trim()
+      ? req.query.projectId.trim()
+      : null;
+  const afterSeq = Math.max(
+    0,
+    Number.parseInt(
+      typeof req.query.afterSeq === "string" ? req.query.afterSeq : "0",
+      10,
+    ) || 0,
+  );
+
+  sseHeaders(res);
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write(`: ping\n\n`);
+    }
+  }, SSE_HEARTBEAT_MS);
+
+  const writeEvent = (event: {
+    seq?: number;
+    ts?: string;
+    id: string;
+    stage: string;
+    phaseId?: string;
+    projectId?: string;
+    previousStage?: string;
+  }) => {
+    if (projectId && event.projectId !== projectId) return;
+    if (!res.writableEnded) {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+  };
+
+  // Replay retained events newer than afterSeq, then follow live
+  for (const event of runStageBroker.replaySince(afterSeq)) {
+    writeEvent(event);
+  }
+  const unsubscribe = runStageBroker.subscribe("*", (update) => {
+    writeEvent({
+      seq: runStageBroker.currentSeq(),
+      ts: new Date().toISOString(),
+      ...update,
+    });
+  });
+
+  const cleanup = () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  };
+  req.on("close", cleanup);
+  res.on("close", cleanup);
+});
+
 app.get("/chats/:id/events", (req, res) => {
   try {
     getChatService().getConversation(req.params.id);
@@ -7589,7 +7762,7 @@ app.get("/chats/function-mappings", async (_req, res) => {
 
 app.post("/chats/function-mappings", async (req, res) => {
   try {
-    const { modelId, endpointId } = req.body ?? {};
+    const { modelId, provider, endpointId } = req.body ?? {};
     const parsedFn = AgentRoleSchema.safeParse(req.body?.function);
     if (!parsedFn.success) {
       res.status(400).json({
@@ -7606,9 +7779,16 @@ app.post("/chats/function-mappings", async (req, res) => {
       res.status(400).json({ error: "endpointId must be a string" });
       return;
     }
+    if (provider !== undefined && typeof provider !== "string") {
+      res.status(400).json({ error: "provider must be a string" });
+      return;
+    }
     const result = await getChatService().bindFunctionMapping({
       function: parsedFn.data,
       modelId: modelId.trim(),
+      ...(typeof provider === "string" && provider.trim()
+        ? { provider: provider.trim() }
+        : {}),
       ...(endpointId?.trim() ? { endpointId: endpointId.trim() } : {}),
     });
     res.json({
@@ -7616,6 +7796,7 @@ app.post("/chats/function-mappings", async (req, res) => {
       function: result.function,
       modelId: result.modelId,
       endpointId: result.endpointId,
+      provider: result.provider,
       createdEndpoint: result.createdEndpoint,
       roles: result.config.roles,
     });
@@ -7853,6 +8034,18 @@ app.get("/chats/awaited-runs", (_req, res) => {
 });
 
 app.listen(PORT, () => {
+  // Bound the event log before anything replays from it
+  try {
+    if (runStageBroker.compact()) {
+      log.info("events", "event log compacted", {
+        path: join(defaultDataDir(), "events.jsonl"),
+      });
+    }
+  } catch (err) {
+    log.warn("events", "event log compaction failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   startLiveTurnWatcher();
   startRunCompactionWatcher({
     store,
@@ -7871,10 +8064,36 @@ app.listen(PORT, () => {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+  // Replay the event log for awaited runs that settled while the server was
+  // down — supplements the store-scan recovery above (fallback for rotation).
+  try {
+    const events = runStageBroker.replaySince(0);
+    for (const event of events) {
+      getChatService().handleRunStageChanged({
+        id: event.id,
+        stage: event.stage,
+        phaseId: event.phaseId,
+        projectId: event.projectId,
+      });
+    }
+    if (events.length > 0) {
+      log.info("events", "replayed event log on startup", {
+        count: events.length,
+      });
+    }
+  } catch (err) {
+    log.warn("events", "startup event replay failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const providers = loadProvidersConfig(defaultProvidersPath(defaultDataDir()));
+  const providerKeys = Object.entries(providers.providers)
+    .map(([name, p]) => `${name}=${p.apiKey ? "set" : "none"}`)
+    .join(", ");
   log.info("server", `listening on http://localhost:${PORT}`, {
     dataDir: defaultDataDir(),
     logLevel: process.env.SLOPCONTROL_LOG_LEVEL ?? "info",
-    ollamaApiKey: process.env.OLLAMA_API_KEY ? "set" : "NOT set",
+    providers: providerKeys || "(none configured)",
   });
   void import("./npm-registry.js")
     .then(({ autoStartNpmRegistry }) =>

@@ -1,15 +1,20 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   EndpointsConfigSchema,
   type AgentRole,
   type EndpointsConfig,
   type LlmEndpoint,
+  type ProvidersConfig,
   type RoleBinding,
   type RoleModelBindings,
 } from "@slopcontrol/types";
 import { endpointSupportsVision } from "./capabilities.js";
+import {
+  defaultProvidersPath,
+  loadProvidersConfig,
+} from "./providers.js";
 import { resolveEndpointSecrets } from "./secrets.js";
 
 export { substituteEnv, resolveEndpointSecrets } from "./secrets.js";
@@ -192,8 +197,9 @@ function bindingForRole(
 export function toMastraModelConfig(
   endpoint: LlmEndpoint,
   modelIdOverride?: string,
+  providers?: ProvidersConfig,
 ): MastraModelConfig {
-  const resolved = resolveEndpointSecrets(endpoint);
+  const resolved = resolveEndpointSecrets(endpoint, providers);
   const modelId = modelIdOverride ?? resolved.modelId;
   const prefix = providerPrefix(resolved.apiType);
   const apiKey = resolved.apiKey?.trim() ?? "";
@@ -223,14 +229,22 @@ export function toMastraModelConfig(
 export class LlmRegistry {
   private readonly endpoints: Map<string, LlmEndpoint>;
   private readonly roles: RoleModelBindings;
+  private readonly providers: ProvidersConfig;
 
-  constructor(config: EndpointsConfig) {
+  constructor(config: EndpointsConfig, providers?: ProvidersConfig) {
     this.endpoints = new Map(config.endpoints.map((e) => [e.id, e]));
     this.roles = config.roles;
+    this.providers = providers ?? { providers: {} };
   }
 
-  static fromFile(configPath?: string): LlmRegistry {
-    return new LlmRegistry(loadEndpointsConfig(configPath));
+  static fromFile(configPath?: string, providersPath?: string): LlmRegistry {
+    const endpointsPath =
+      configPath ?? defaultConfigPath(process.env.SLOPCONTROL_DATA_DIR);
+    const resolvedProvidersPath =
+      providersPath ?? join(dirname(endpointsPath), "providers.json");
+    const endpoints = loadEndpointsConfig(endpointsPath);
+    const providers = loadProvidersConfig(resolvedProvidersPath);
+    return new LlmRegistry(endpoints, providers);
   }
 
   getEndpoint(id: string): LlmEndpoint {
@@ -247,6 +261,10 @@ export class LlmRegistry {
 
   getRoleBindings(): RoleModelBindings {
     return this.roles;
+  }
+
+  getProviders(): ProvidersConfig {
+    return this.providers;
   }
 
   /** True when a role has an explicit binding (after overrides). */
@@ -283,7 +301,7 @@ export class LlmRegistry {
   resolve(role: AgentRole, roleOverrides?: Partial<RoleModelBindings>): MastraModelConfig {
     const binding = bindingForRole(this.roles, role, roleOverrides);
     const endpoint = this.getEndpoint(binding.endpointId);
-    return toMastraModelConfig(endpoint, binding.modelId);
+    return toMastraModelConfig(endpoint, binding.modelId, this.providers);
   }
 
   resolveEndpointForRole(
@@ -291,12 +309,15 @@ export class LlmRegistry {
     roleOverrides?: Partial<RoleModelBindings>,
   ): { endpoint: LlmEndpoint; modelId: string; mastraModel: MastraModelConfig } {
     const binding = bindingForRole(this.roles, role, roleOverrides);
-    const endpoint = resolveEndpointSecrets(this.getEndpoint(binding.endpointId));
+    const endpoint = resolveEndpointSecrets(
+      this.getEndpoint(binding.endpointId),
+      this.providers,
+    );
     const modelId = binding.modelId ?? endpoint.modelId;
     return {
       endpoint,
       modelId,
-      mastraModel: toMastraModelConfig(endpoint, modelId),
+      mastraModel: toMastraModelConfig(endpoint, modelId, this.providers),
     };
   }
 
@@ -310,7 +331,10 @@ export class LlmRegistry {
     const binding =
       roleOverrides?.designVision ?? this.roles.designVision ?? null;
     if (!binding) return null;
-    const endpoint = resolveEndpointSecrets(this.getEndpoint(binding.endpointId));
+    const endpoint = resolveEndpointSecrets(
+      this.getEndpoint(binding.endpointId),
+      this.providers,
+    );
     if (!endpointSupportsVision(endpoint)) return null;
     return {
       endpoint,
@@ -326,7 +350,10 @@ export class LlmRegistry {
   ): { endpoint: LlmEndpoint; modelId: string } | null {
     const binding = roleOverrides?.designImage ?? this.roles.designImage ?? null;
     if (!binding) return null;
-    const endpoint = resolveEndpointSecrets(this.getEndpoint(binding.endpointId));
+    const endpoint = resolveEndpointSecrets(
+      this.getEndpoint(binding.endpointId),
+      this.providers,
+    );
     return {
       endpoint,
       modelId: binding.modelId ?? endpoint.modelId,
@@ -334,6 +361,7 @@ export class LlmRegistry {
   }
 }
 
+export * from "./providers.js";
 export * from "./vision-chat.js";
 export * from "./json-chat.js";
 export * from "./intent-extract.js";

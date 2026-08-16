@@ -6,6 +6,7 @@ import {
   classifyAskResumeViaLlm,
   classifyChatConfirmViaLlm,
   LlmRegistry,
+  loadProvidersConfig,
   toMastraModelConfig,
   type AskResumeClassification,
   type ChatConfirmClassification,
@@ -22,6 +23,7 @@ import {
   askProgressFromStreamChunk,
   decideNarrationSynthesis,
 } from "../orchestrator/ask-stream.js";
+import { recallProjectKnowledge } from "../orchestrator/project-knowledge.js";
 import { isPromptTooLongError } from "../supervisor-enrich.js";
 import {
   buildChatTools,
@@ -35,7 +37,9 @@ import {
 import {
   bindFunctionToModel,
   buildFunctionMappingList,
+  buildProviderCatalogs,
   listUniqueProviderModels,
+  providersPathFromEndpoints,
   updateEndpointModel,
   type BindFunctionResult,
   type EndpointModelList,
@@ -48,6 +52,13 @@ import {
   shouldAdvanceAfterConfirm,
   stageFromDispatchText,
 } from "./advance-run.js";
+import {
+  buildRunSettledNotification,
+  formatRunNotificationBrief,
+  type RunSettledContext,
+} from "./run-settled-notification.js";
+import { createToolCallGuard } from "./tool-call-guard.js";
+import type { RunStageUpdate } from "../run-stage-broker.js";
 import {
   DEFAULT_FOLLOW_UP_WAIT_MS,
   DEFAULT_WAIT_INTERVAL_MS,
@@ -88,6 +99,7 @@ import type {
 const DEFAULT_CONFIRM_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_TURN_TIMEOUT_MS = 720_000;
 const MAX_STEPS = 16;
+const SYSTEM_TURN_MAX_STEPS = 1;
 
 export interface ChatServiceDeps {
   store: ConversationStore;
@@ -126,6 +138,11 @@ export interface ChatServiceDeps {
   followUpWaitMs?: number;
   /** Progress-event cadence for watchers (test-only override). */
   waitProgressIntervalMs?: number;
+  /** Subscribe to run stage transitions (server touchRunStage pub/sub). */
+  subscribeRunUpdates?: (
+    runId: string,
+    listener: (update: RunStageUpdate) => void,
+  ) => () => void;
 }
 
 export class ConversationClosedError extends Error {
@@ -183,6 +200,8 @@ export class ChatService {
    * instead of spin-waiting on busyConversations. Drained after each turn.
    */
   private readonly notificationQueue = new Map<string, string[]>();
+  /** Dedupe settlement delivery when event + poll paths race. */
+  private readonly deliveredRunNotifications = new Map<string, Set<string>>();
 
   constructor(private readonly deps: ChatServiceDeps) {
     this.emitter.setMaxListeners(100);
@@ -292,6 +311,7 @@ export class ChatService {
     this.askLatches.delete(id);
     this.awaitedRuns.delete(id);
     this.notificationQueue.delete(id);
+    this.deliveredRunNotifications.delete(id);
     void this.deps
       .getMemory()
       .deleteThread(conversation.id)
@@ -336,30 +356,24 @@ export class ChatService {
     return closed;
   }
 
+  private runSettledContext(): RunSettledContext {
+    return { getProject: (id) => this.deps.context.getProject(id) };
+  }
+
   /**
-   * Called by the orchestrator (via onRunSettled) when a run reaches a
-   * terminal stage. Delivers notifications to every conversation awaiting
-   * this run. Fire-and-forget — errors are logged via emit, not thrown.
+   * Called when a run leaves a busy stage (gate or terminal). Delivers
+   * notifications to every conversation awaiting this run.
    */
-  handleRunSettled(run: { id: string; stage: string; phaseId?: string; projectId?: string }): void {
-    // Find all conversations with a proceed latch for this run
-    const latched: Array<{ conversationId: string; runId: string }> = [];
-    for (const [, latch] of this.proceedLatches) {
-      if (latch.runId === run.id) {
-        latched.push({ conversationId: latch.conversationId, runId: latch.runId });
-      }
-    }
+  handleRunStageChanged(run: {
+    id: string;
+    stage: string;
+    phaseId?: string;
+    projectId?: string;
+  }): void {
+    if (isBusyRunStage(run.stage)) return;
 
-    // Find all conversations with an awaitedRun for this run
-    for (const [conversationId, awaited] of this.awaitedRuns) {
-      if (awaited.runId === run.id && !latched.some((l) => l.conversationId === conversationId)) {
-        latched.push({ conversationId, runId: run.id });
-      }
-    }
-
+    const latched = this.conversationsAwaitingRun(run.id);
     for (const { conversationId } of latched) {
-      // Abort any live follow-up watcher for this run — it polls the same
-      // settlement and would emit a duplicate run_settled + notification turn.
       const watchKey = `${conversationId}:${run.id}`;
       this.runWatchers.get(watchKey)?.abort();
       this.runWatchers.delete(watchKey);
@@ -372,32 +386,207 @@ export class ChatService {
         continue;
       }
 
-      this.clearProceedLatch(conversationId, run.id);
-      this.awaitedRuns.delete(conversationId);
-      this.deps.store.setAwaitedRun?.(conversationId, null);
-
-      // Emit the settled event immediately so SSE consumers see it
-      this.emit(conversation, {
-        type: "run_settled",
-        summary: `Run ${run.id} finished ${run.stage}`,
-        run: {
-          runId: run.id,
-          projectId: run.projectId,
-          stage: run.stage,
-        },
+      void this.completeAwaitedRunForConversation(conversation, run.id, {
+        stage: run.stage,
+        phaseId: run.phaseId,
+        projectId: run.projectId,
+        elapsedMs: this.elapsedMsForAwaited(conversationId, run.id),
       });
+    }
+  }
 
-      // Queue a notification turn for the next available moment
-      const note = `[Run ${run.id} reached ${run.stage}. ${run.stage === "complete" ? "The run completed successfully." : run.stage === "blocked" || run.stage === "failed" ? "The run did not succeed. Use get_run for details." : "The run has finished."}]`;
-      const existing = this.notificationQueue.get(conversationId) ?? [];
-      existing.push(note);
-      this.notificationQueue.set(conversationId, existing);
+  /** @deprecated alias — use handleRunStageChanged */
+  handleRunSettled(run: {
+    id: string;
+    stage: string;
+    phaseId?: string;
+    projectId?: string;
+  }): void {
+    this.handleRunStageChanged(run);
+  }
 
-      // If the conversation is not busy, deliver immediately
-      if (!this.busyConversations.has(conversationId)) {
-        this.drainNotificationQueue(conversationId);
+  private conversationsAwaitingRun(
+    runId: string,
+  ): Array<{ conversationId: string; runId: string }> {
+    const latched: Array<{ conversationId: string; runId: string }> = [];
+    for (const [, latch] of this.proceedLatches) {
+      if (latch.runId === runId) {
+        latched.push({ conversationId: latch.conversationId, runId: latch.runId });
       }
     }
+    for (const [conversationId, awaited] of this.awaitedRuns) {
+      if (
+        awaited.runId === runId &&
+        !latched.some((l) => l.conversationId === conversationId)
+      ) {
+        latched.push({ conversationId, runId });
+      }
+    }
+    return latched;
+  }
+
+  private elapsedMsForAwaited(conversationId: string, runId: string): number {
+    const awaited = this.awaitedRuns.get(conversationId);
+    if (awaited?.runId === runId) {
+      return Date.now() - Date.parse(awaited.startedAt);
+    }
+    return 0;
+  }
+
+  /**
+   * Shared settlement path for event-driven notifications and poll fallback.
+   * Returns true when the follow-up watcher should reschedule (proceed latch).
+   */
+  private async completeAwaitedRunForConversation(
+    conversation: ChatConversation,
+    runId: string,
+    outcome: {
+      stage: string;
+      phaseId?: string;
+      projectId?: string;
+      elapsedMs?: number;
+    },
+    kind: RunWaitKind = this.awaitedRuns.get(conversation.id)?.kind ??
+      runWaitKindForStage(outcome.stage),
+  ): Promise<boolean> {
+    const dedupeKey = `${runId}:${outcome.stage}`;
+    const seen =
+      this.deliveredRunNotifications.get(conversation.id) ?? new Set<string>();
+    if (seen.has(dedupeKey)) return false;
+    seen.add(dedupeKey);
+    this.deliveredRunNotifications.set(conversation.id, seen);
+
+    this.awaitedRuns.delete(conversation.id);
+    this.deps.store.setAwaitedRun?.(conversation.id, null);
+
+    this.emit(conversation, {
+      type: "run_settled",
+      summary: `run reached ${outcome.stage}`,
+      run: {
+        runId,
+        projectId: outcome.projectId,
+        stage: outcome.stage,
+        kind,
+        elapsedMs: outcome.elapsedMs,
+      },
+    });
+
+    if (isTerminalRunStage(outcome.stage)) {
+      this.clearProceedLatch(conversation.id, runId);
+    }
+
+    const config = this.waitConfigFor(kind);
+    const latch = this.proceedLatches.get(
+      this.proceedLatchKey(conversation.id, runId),
+    );
+    let extra = "";
+    let advanceError: string | undefined;
+    let reschedule = false;
+
+    if (latch && isGateRunStage(outcome.stage)) {
+      const advanced = await this.maybeAdvanceRun(
+        conversation,
+        "advance_run",
+        {
+          runId,
+          ...(latch.projectId ? { projectId: latch.projectId } : {}),
+        },
+        JSON.stringify({ runId, stage: outcome.stage }),
+        { skipFollowUpWait: true },
+      );
+      extra = `\n\n${advanced.text}`;
+      if (advanced.kind === "error") {
+        advanceError = advanced.text.slice(0, 500);
+      }
+      const live = this.lookupRun(runId);
+      if (isTerminalRunStage(live?.stage) || isTerminalRunStage(advanced.stage)) {
+        this.clearProceedLatch(conversation.id, runId);
+      } else if (
+        live &&
+        isBusyRunStage(live.stage) &&
+        config.followUpMs > 0
+      ) {
+        reschedule = true;
+      }
+    }
+
+    const note = [
+      buildRunSettledNotification(
+        {
+          id: runId,
+          stage: outcome.stage,
+          phaseId: outcome.phaseId,
+          projectId: outcome.projectId,
+        },
+        this.runSettledContext(),
+      ),
+      extra.trim(),
+      advanceError
+        ? `Advance error: ${advanceError}. Use get_run for details.`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const existing = this.notificationQueue.get(conversation.id) ?? [];
+    existing.push(note);
+    this.notificationQueue.set(conversation.id, existing);
+
+    if (!this.busyConversations.has(conversation.id)) {
+      this.drainNotificationQueue(conversation.id);
+    }
+
+    return reschedule;
+  }
+
+  /**
+   * Append a system notification to Memory and SSE without invoking the LLM.
+   */
+  private async deliverSystemNotification(
+    conversation: ChatConversation,
+    userNote: string,
+    assistantBrief: string,
+  ): Promise<void> {
+    const resourceId = conversation.projectId ?? "global";
+    const threadId = conversation.id;
+    const now = new Date();
+    const mkMessage = (
+      role: "user" | "assistant",
+      text: string,
+    ): {
+      id: string;
+      role: "user" | "assistant";
+      createdAt: Date;
+      threadId: string;
+      resourceId: string;
+      content: {
+        format: 2;
+        parts: Array<{ type: "text"; text: string }>;
+      };
+    } => ({
+      id: randomUUID(),
+      role,
+      createdAt: now,
+      threadId,
+      resourceId,
+      content: {
+        format: 2,
+        parts: [{ type: "text", text }],
+      },
+    });
+
+    await this.deps.getMemory().saveMessages({
+      messages: [
+        mkMessage("user", userNote),
+        mkMessage("assistant", assistantBrief),
+      ],
+    });
+
+    this.emit(conversation, {
+      type: "status",
+      summary: "run notification recorded",
+    });
+    this.emit(conversation, { type: "delta", text: assistantBrief });
+    this.emit(conversation, { type: "done", text: assistantBrief });
   }
 
   /**
@@ -454,7 +643,7 @@ export class ChatService {
       this.awaitedRuns.set(c.id, awaited);
       if (!isBusyRunStage(run.stage)) {
         // Run settled while the server was down — deliver the missed notification
-        this.handleRunSettled(run);
+        this.handleRunStageChanged(run);
         continue;
       }
       // Run still busy — re-establish the watcher
@@ -466,19 +655,30 @@ export class ChatService {
 
   async listModels(): Promise<EndpointModelList[]> {
     const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
-    return listUniqueProviderModels(registry.listEndpoints());
+    return listUniqueProviderModels(
+      registry.listEndpoints(),
+      fetch,
+      10_000,
+      registry.getProviders(),
+    );
   }
 
   async listFunctionMappings(): Promise<FunctionMappingList> {
     const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
     const endpoints = registry.listEndpoints();
-    const providers = await listUniqueProviderModels(endpoints);
+    const providersConfig = loadProvidersConfig(
+      providersPathFromEndpoints(this.deps.endpointsPath),
+    );
+    const { catalogs } = await buildProviderCatalogs({
+      endpoints,
+      providersConfig,
+    });
     return buildFunctionMappingList(
       {
         endpoints,
         roles: registry.getRoleBindings(),
       },
-      providers,
+      catalogs,
     );
   }
 
@@ -505,15 +705,26 @@ export class ChatService {
   async bindFunctionMapping(opts: {
     function: AgentRole;
     modelId: string;
+    provider?: string;
     endpointId?: string;
   }): Promise<BindFunctionResult> {
-    const providers = await this.listModels();
+    const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
+    const endpoints = registry.listEndpoints();
+    const providersConfig = loadProvidersConfig(
+      providersPathFromEndpoints(this.deps.endpointsPath),
+    );
+    const { catalogs } = await buildProviderCatalogs({
+      endpoints,
+      providersConfig,
+    });
     const result = bindFunctionToModel({
       endpointsPath: this.deps.endpointsPath,
       function: opts.function,
       modelId: opts.modelId,
+      provider: opts.provider,
       endpointId: opts.endpointId,
-      providers,
+      providersConfig,
+      catalogs,
     });
     this.deps.onEndpointsChanged?.();
     return result;
@@ -1103,12 +1314,10 @@ export class ChatService {
       getRun: () => this.lookupRun(extracted.runId),
       timeoutMs: config.inlineMs,
       intervalMs: this.waitPollMs,
-      onProgress: (snap) => {
-        this.emit(conversation, {
-          type: "status",
-          summary: `${snap.stage}…`,
-        });
-      },
+      subscribeRun: this.deps.subscribeRunUpdates
+        ? (id, listener) =>
+            this.deps.subscribeRunUpdates!(id, () => listener())
+        : undefined,
     });
 
     if (wait.settled) {
@@ -1129,7 +1338,7 @@ export class ChatService {
     } else if (wait.timedOut && config.followUpMs > 0 && !opts?.skipFollowUp) {
       this.watchRunForFollowUp(conversation, extracted.runId, kind);
     }
-    return `${resultText.trim()}\n\n${formatWaitForRunResult(wait)}`;
+    return `${resultText.trim()}\n\n${formatWaitForRunResult(wait, this.runSettledContext())}`;
   }
 
   /**
@@ -1203,6 +1412,10 @@ export class ChatService {
           timeoutMs: config.followUpMs,
           intervalMs: this.waitPollMs,
           signal: abort.signal,
+          subscribeRun: this.deps.subscribeRunUpdates
+            ? (id, listener) =>
+                this.deps.subscribeRunUpdates!(id, () => listener())
+            : undefined,
           onProgress: (snap, elapsedMs) => {
             // Emit periodic run_progress events for dashboard display
             if (elapsedMs - lastProgressEmit >= config.progressIntervalMs) {
@@ -1219,10 +1432,6 @@ export class ChatService {
                 },
               });
             }
-            this.emit(conversation, {
-              type: "status",
-              summary: `${snap.stage}…`,
-            });
           },
         });
 
@@ -1257,76 +1466,18 @@ export class ChatService {
           return;
         }
 
-        // Run settled — clear awaited state
-        this.awaitedRuns.delete(latest.id);
-        this.deps.store.setAwaitedRun?.(latest.id, null);
-
-        this.emit(latest, {
-          type: "run_settled",
-          summary: `run reached ${wait.stage}`,
-          run: {
-            runId,
-            projectId: wait.projectId,
+        // Run settled — poll fallback when event path did not fire first
+        reschedule = await this.completeAwaitedRunForConversation(
+          latest,
+          runId,
+          {
             stage: wait.stage,
-            kind,
+            phaseId: wait.phaseId,
+            projectId: wait.projectId,
             elapsedMs: wait.elapsedMs,
           },
-        });
-
-        if (isTerminalRunStage(wait.stage)) {
-          this.clearProceedLatch(latest.id, runId);
-        }
-
-        const latch = this.proceedLatches.get(
-          this.proceedLatchKey(latest.id, runId),
+          kind,
         );
-        let extra = "";
-        let advanceError: string | undefined;
-        if (latch && isGateRunStage(wait.stage)) {
-          const advanced = await this.maybeAdvanceRun(
-            latest,
-            "advance_run",
-            {
-              runId,
-              ...(latch.projectId ? { projectId: latch.projectId } : {}),
-            },
-            JSON.stringify({ runId, stage: wait.stage }),
-            { skipFollowUpWait: true },
-          );
-          extra = `\n\n${advanced.text}`;
-          if (advanced.kind === "error") {
-            advanceError = advanced.text.slice(0, 500);
-          }
-          const live = this.lookupRun(runId);
-          if (isTerminalRunStage(live?.stage) || isTerminalRunStage(advanced.stage)) {
-            this.clearProceedLatch(latest.id, runId);
-          } else if (
-            live &&
-            isBusyRunStage(live.stage) &&
-            config.followUpMs > 0
-          ) {
-            reschedule = true;
-          }
-        }
-
-        // Queue notification turn instead of spin-waiting on busyConversations
-        const note = [
-          `[Run ${runId} reached ${wait.stage}. ${formatWaitForRunResult(wait)}]`,
-          extra.trim(),
-          advanceError
-            ? `Advance error: ${advanceError}. Use get_run for details.`
-            : null,
-        ]
-          .filter(Boolean)
-          .join("\n");
-        const existing = this.notificationQueue.get(latest.id) ?? [];
-        existing.push(note);
-        this.notificationQueue.set(latest.id, existing);
-
-        // If the conversation is not busy, deliver immediately
-        if (!this.busyConversations.has(latest.id)) {
-          this.drainNotificationQueue(latest.id);
-        }
       } catch {
         /* aborted or follow-up turn failed — operator can ask */
       } finally {
@@ -1343,9 +1494,8 @@ export class ChatService {
   }
 
   /**
-   * Drain the notification queue for a conversation. Runs pending
-   * notifications as synthetic turns. Called after each operator turn
-   * completes and when a background watcher finds the conversation idle.
+   * Drain the notification queue for a conversation. Delivers pending
+   * notifications via memory append + SSE (no LLM).
    */
   private drainNotificationQueue(conversationId: string): void {
     const notes = this.notificationQueue.get(conversationId);
@@ -1355,11 +1505,14 @@ export class ChatService {
     const conversation = this.deps.store.getConversation(conversationId);
     if (!conversation || conversation.status === "closed") return;
 
-    // Fire-and-forget — don't block the caller
     void (async () => {
       for (const note of notes) {
         try {
-          await this.runTurn(conversation, note, { synthetic: false });
+          await this.deliverSystemNotification(
+            conversation,
+            note,
+            formatRunNotificationBrief(note),
+          );
         } catch {
           /* best-effort notification */
         }
@@ -1367,13 +1520,17 @@ export class ChatService {
     })();
   }
 
-  /** Keep the Memory thread truthful after a gated action resolves. */
+  /** Record a gated-action outcome in Memory without an LLM turn. */
   private async runSyntheticTurn(
     conversation: ChatConversation,
     note: string,
   ): Promise<void> {
     try {
-      await this.runTurn(conversation, note, { synthetic: true });
+      await this.deliverSystemNotification(
+        conversation,
+        note,
+        formatRunNotificationBrief(note),
+      );
     } catch {
       /* synthetic acknowledgement is best-effort */
     }
@@ -1464,9 +1621,14 @@ export class ChatService {
     opts: { synthetic: boolean },
   ): Promise<void> {
     const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
+    const toolGuard = createToolCallGuard();
     const override = conversation.modelOverride;
     const model = override
-      ? toMastraModelConfig(registry.getEndpoint(override.endpointId), override.modelId)
+      ? toMastraModelConfig(
+          registry.getEndpoint(override.endpointId),
+          override.modelId,
+          registry.getProviders(),
+        )
       : registry.resolve("chat");
 
     const pendingActions = this.listPendingForConversation(conversation.id).map(
@@ -1476,11 +1638,18 @@ export class ChatService {
         argsPreview: JSON.stringify(p.args).slice(0, 400),
       }),
     );
+    const projectKnowledge = conversation.projectId
+      ? await recallProjectKnowledge({
+          memory: this.deps.getMemory(),
+          projectId: conversation.projectId,
+        })
+      : "";
     const systemPrompt = conversation.projectId
       ? buildProjectChatPrompt({
           project: this.deps.context.getProject(conversation.projectId)!,
           deps: this.deps.context,
           pendingActions,
+          projectKnowledge,
         })
       : buildGlobalChatPrompt({
           deps: this.deps.context,
@@ -1488,7 +1657,16 @@ export class ChatService {
         });
 
     const tools = buildChatTools({
-      dispatch: (name, args) => this.dispatchRouted(conversation, name, args),
+      dispatch: (name, args) => {
+        const blocked = toolGuard.check(name, args);
+        if (blocked) {
+          return Promise.resolve({
+            content: [{ type: "text" as const, text: blocked }],
+            isError: true,
+          });
+        }
+        return this.dispatchRouted(conversation, name, args);
+      },
       conversationId: conversation.id,
       projectId: conversation.projectId,
       requestConfirmation: (tool, args) =>
@@ -1524,7 +1702,8 @@ export class ChatService {
 
     const runStreamOn = async (threadId: string): Promise<void> => {
       const streamResult = await agent.stream(text, {
-        maxSteps: MAX_STEPS,
+        maxSteps: opts.synthetic ? SYSTEM_TURN_MAX_STEPS : MAX_STEPS,
+        ...(opts.synthetic ? { activeTools: [] as string[] } : {}),
         abortSignal: abort.signal,
         memory: {
           thread: threadId,

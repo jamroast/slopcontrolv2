@@ -140,6 +140,7 @@ export function createSlopcontrolMastra(
     dataDir,
     registry,
     agents,
+    memory,
   });
 
   return {
@@ -175,5 +176,8 @@ export function clearSlopcontrolRuntimeCache(): void {
 
 export * from "./agents/index.js";
 export * from "./orchestrator/index.js";
+export * from "./orchestrator/diagnosis-memory.js";
+export * from "./orchestrator/project-knowledge.js";
 export * from "./tools/project-tools.js";
 export * from "./chat-service/index.js";
+export * from "./run-stage-broker.js";

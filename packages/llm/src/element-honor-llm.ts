@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { LlmEndpoint } from "@slopcontrol/types";
+import type { LlmEndpoint, ProvidersConfig } from "@slopcontrol/types";
 import { chatJson } from "./json-chat.js";
 import { resolveEndpointSecrets } from "./secrets.js";
 
@@ -152,12 +152,13 @@ export async function tryMenubarEmbedSimilarity(opts: {
   pinnedMenubarHtml: string;
   mockHeaderHtml: string;
   timeoutMs?: number;
+  providers?: ProvidersConfig;
 }): Promise<number | undefined> {
   const a = opts.pinnedMenubarHtml.trim();
   const b = opts.mockHeaderHtml.trim();
   if (!a || !b) return undefined;
 
-  const endpoint = resolveEndpointSecrets(opts.endpoint);
+  const endpoint = resolveEndpointSecrets(opts.endpoint, opts.providers);
   const modelId = opts.modelId ?? endpoint.modelId;
   const baseUrl = endpoint.baseUrl.replace(/\/+$/, "");
   const url = `${baseUrl}/embeddings`;

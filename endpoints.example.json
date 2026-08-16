@@ -5,6 +5,7 @@
       "label": "Ollama Cloud Kimi K3 (multimodal; Extra Usage — use sparingly)",
       "baseUrl": "https://ollama.com/v1",
       "apiKey": "${OLLAMA_API_KEY}",
+      "provider": "ollama-cloud",
       "apiType": "openai-chat",
       "modelId": "kimi-k3:cloud",
       "capabilities": { "chat": true, "vision": true, "imageGen": false }
@@ -14,6 +15,7 @@
       "label": "Ollama Cloud GLM 5.2 (text only — no vision)",
       "baseUrl": "https://ollama.com/v1",
       "apiKey": "${OLLAMA_API_KEY}",
+      "provider": "ollama-cloud",
       "apiType": "openai-chat",
       "modelId": "glm-5.2:cloud",
       "capabilities": { "chat": true, "vision": false, "imageGen": false }
@@ -23,6 +25,7 @@
       "label": "Ollama Cloud DeepSeek V4 Pro (text — design-loop / fast chat)",
       "baseUrl": "https://ollama.com/v1",
       "apiKey": "${OLLAMA_API_KEY}",
+      "provider": "ollama-cloud",
       "apiType": "openai-chat",
       "modelId": "deepseek-v4-pro:cloud",
       "capabilities": { "chat": true, "vision": false, "imageGen": false }
@@ -32,6 +35,7 @@
       "label": "Ollama kimi-k2.7-code (vision chat)",
       "baseUrl": "https://ollama.com/v1",
       "apiKey": "${OLLAMA_API_KEY}",
+      "provider": "ollama-cloud",
       "apiType": "openai-chat",
       "modelId": "kimi-k2.7-code:cloud",
       "capabilities": { "chat": true, "vision": true, "imageGen": false }
@@ -48,6 +52,7 @@
       "id": "local-ollama-cloud",
       "label": "Local Ollama daemon routing to cloud (ollama signin; no API key)",
       "baseUrl": "http://localhost:11434/v1",
+      "provider": "local-ollama",
       "apiType": "openai-chat",
       "modelId": "glm-5.2:cloud",
       "capabilities": { "chat": true, "vision": false, "imageGen": false }
@@ -56,9 +61,28 @@
       "id": "local-coder",
       "label": "Local Qwen Coder",
       "baseUrl": "http://localhost:11434/v1",
+      "provider": "local-ollama",
       "apiType": "openai-chat",
       "modelId": "qwen2.5-coder",
       "capabilities": { "chat": true, "vision": false, "imageGen": false }
+    },
+    {
+      "id": "openrouter-claude",
+      "label": "OpenRouter Claude 3.5 Sonnet",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "provider": "openrouter",
+      "apiType": "openai-chat",
+      "modelId": "anthropic/claude-3.5-sonnet",
+      "capabilities": { "chat": true, "vision": true, "imageGen": false }
+    },
+    {
+      "id": "openrouter-gemini",
+      "label": "OpenRouter Gemini 2.0 Flash",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "provider": "openrouter",
+      "apiType": "openai-chat",
+      "modelId": "google/gemini-2.0-flash-001",
+      "capabilities": { "chat": true, "vision": true, "imageGen": false }
     }
   ],
   "roles": {

@@ -6,4 +6,6 @@ export * from "./wait-run.js";
 export * from "./lifecycle-policy.js";
 export * from "./ask-routing.js";
 export * from "./advance-run.js";
+export * from "./run-settled-notification.js";
+export * from "./tool-call-guard.js";
 export * from "./chat-service.js";

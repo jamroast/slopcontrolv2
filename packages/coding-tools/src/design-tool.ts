@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import type { LlmEndpoint } from "@slopcontrol/types";
+import type { LlmEndpoint, ProvidersConfig } from "@slopcontrol/types";
 import {
   endpointSupportsImageGen,
   resolveEndpointSecrets,
@@ -13,6 +13,7 @@ export interface GenerateImageOptions {
   modelId?: string;
   width?: number;
   height?: number;
+  providers?: ProvidersConfig;
   /** Brand / palette hint for SVG fallback. */
   brandName?: string;
   palette?: string[];
@@ -134,7 +135,7 @@ export class OllamaImagesDesignTool implements DesignTool {
       return fallback();
     }
 
-    const endpoint = resolveEndpointSecrets(opts.endpoint);
+    const endpoint = resolveEndpointSecrets(opts.endpoint, opts.providers);
     if (!endpointSupportsImageGen(endpoint)) {
       return {
         ...fallback(),

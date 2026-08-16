@@ -90,6 +90,67 @@ type VerifyStep = {
   outputExcerpt?: string;
 };
 
+type FunctionCurrentBinding = {
+  modelId: string;
+  endpointId: string;
+  provider?: string;
+  explicit: boolean;
+  fallbackFrom?: string;
+};
+
+type FunctionMapping = {
+  function: string;
+  description: string;
+  current: FunctionCurrentBinding | null;
+};
+
+type AvailableModel = {
+  modelId: string;
+  label: string;
+  provider: string;
+  providerName: string;
+  endpointId: string;
+  baseUrl: string;
+  mapped: boolean;
+};
+
+type ProviderCatalog = {
+  providerName: string;
+  endpointId: string;
+  label: string;
+  provider: string;
+  baseUrl: string;
+  apiType: string;
+  models: string[];
+  source: "live" | "configured";
+  error?: string;
+  mappedModelIds: string[];
+};
+
+type FunctionMappingList = {
+  functions: FunctionMapping[];
+  models: AvailableModel[];
+  providers: ProviderCatalog[];
+};
+
+type ChatConversation = {
+  id: string;
+  projectId: string | null;
+  title?: string;
+  status: "active" | "closed";
+  modelOverride?: { endpointId: string; modelId: string };
+  awaitedRun?: {
+    runId: string;
+    projectId: string;
+    kind: string;
+    startedAt: string;
+  } | null;
+  createdAt: string;
+  lastActiveAt: string;
+  closedAt?: string;
+  messageCount?: number;
+};
+
 export function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -122,6 +183,20 @@ export function Dashboard() {
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
   const [worktrees, setWorktrees] = useState<WorktreeInfo[]>([]);
   const [checkoutBranch, setCheckoutBranch] = useState("");
+
+  // Models & providers (provider-aware MCP surface)
+  const [functionMappings, setFunctionMappings] = useState<FunctionMappingList | null>(null);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [bindFunction, setBindFunction] = useState("");
+  const [bindModelId, setBindModelId] = useState("");
+  const [bindProvider, setBindProvider] = useState("");
+  const [bindResult, setBindResult] = useState<string | null>(null);
+
+  // Chats
+  const [conversations, setConversations] = useState<ChatConversation[]>([]);
+  const [chatsError, setChatsError] = useState<string | null>(null);
+  const [chatTitle, setChatTitle] = useState("");
+  const [chatStatusFilter, setChatStatusFilter] = useState<"active" | "closed" | "">("");
 
   const stages = [
     "idle",
@@ -170,8 +245,111 @@ export function Dashboard() {
     }
   }
 
+  async function refreshFunctionMappings() {
+    try {
+      const data = await api<FunctionMappingList>("/chats/function-mappings");
+      setFunctionMappings(data);
+      setModelsError(null);
+    } catch (err) {
+      setModelsError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function refreshConversations() {
+    try {
+      const qs = chatStatusFilter ? `?status=${chatStatusFilter}` : "";
+      const data = await api<{ conversations: ChatConversation[] }>(
+        `/chats${qs}`,
+      );
+      setConversations(data.conversations);
+      setChatsError(null);
+    } catch (err) {
+      setChatsError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function doBindFunction() {
+    if (!bindFunction || !bindModelId) return;
+    setBusy(true);
+    setError(null);
+    setBindResult(null);
+    try {
+      const data = await api<{
+        ok: boolean;
+        function: string;
+        modelId: string;
+        endpointId: string;
+        provider?: string;
+        createdEndpoint: boolean;
+      }>("/chats/function-mappings", {
+        method: "POST",
+        body: JSON.stringify({
+          function: bindFunction,
+          modelId: bindModelId,
+          ...(bindProvider ? { provider: bindProvider } : {}),
+        }),
+      });
+      setBindResult(
+        `${data.function} → ${data.modelId} (${data.provider ?? data.endpointId}${
+          data.createdEndpoint ? ", new endpoint" : ""
+        })`,
+      );
+      await refreshFunctionMappings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doCreateChat() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api<{ conversation: ChatConversation }>("/chats", {
+        method: "POST",
+        body: JSON.stringify({ title: chatTitle || undefined }),
+      });
+      setChatTitle("");
+      await refreshConversations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doCloseChat(id: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/chats/${id}/close`, { method: "POST" });
+      await refreshConversations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doDeleteChat(id: string) {
+    if (!window.confirm("Delete this conversation?")) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/chats/${id}`, { method: "DELETE" });
+      await refreshConversations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     refreshProjects().catch((err: Error) => setError(err.message));
+    void refreshFunctionMappings();
+    void refreshConversations();
   }, []);
 
   useEffect(() => {
@@ -998,6 +1176,223 @@ export function Dashboard() {
           <div className="log">{log || "Waiting for logs..."}</div>
         </section>
       )}
+
+      <section className="card">
+        <h2>Models & Providers</h2>
+        <p>
+          Platform functions (agent roles) and the provider-aware model catalog.
+          Bind a function to a model by <code>provider</code> (providers.json key)
+          + <code>modelId</code>.
+        </p>
+        <div className="row">
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={() => void refreshFunctionMappings()}
+          >
+            Refresh models
+          </button>
+        </div>
+        {modelsError && <p className="error">{modelsError}</p>}
+        {functionMappings ? (
+          <>
+            <h3>Function mappings</h3>
+            <table className="models-table">
+              <thead>
+                <tr>
+                  <th>Function</th>
+                  <th>Model</th>
+                  <th>Provider</th>
+                  <th>Endpoint</th>
+                </tr>
+              </thead>
+              <tbody>
+                {functionMappings.functions.map((fn) => (
+                  <tr key={fn.function}>
+                    <td>
+                      <code>{fn.function}</code>
+                      {!fn.current?.explicit ? (
+                        <small className="muted"> (fallback)</small>
+                      ) : null}
+                    </td>
+                    <td>{fn.current?.modelId ?? "—"}</td>
+                    <td>{fn.current?.provider ?? "—"}</td>
+                    <td>
+                      <code>{fn.current?.endpointId ?? "—"}</code>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <h3>Bind function</h3>
+            <div className="row">
+              <select
+                value={bindFunction}
+                onChange={(e) => setBindFunction(e.target.value)}
+              >
+                <option value="">Select function…</option>
+                {functionMappings.functions.map((fn) => (
+                  <option key={fn.function} value={fn.function}>
+                    {fn.function}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={bindModelId}
+                onChange={(e) => setBindModelId(e.target.value)}
+              >
+                <option value="">Select model…</option>
+                {functionMappings.models.map((m) => (
+                  <option key={`${m.providerName}:${m.modelId}`} value={m.modelId}>
+                    {m.modelId} ({m.provider})
+                  </option>
+                ))}
+              </select>
+              <select
+                value={bindProvider}
+                onChange={(e) => setBindProvider(e.target.value)}
+              >
+                <option value="">Auto provider</option>
+                {functionMappings.providers.map((p) => (
+                  <option key={p.providerName} value={p.providerName}>
+                    {p.providerName}
+                  </option>
+                ))}
+              </select>
+              <button
+                disabled={busy || !bindFunction || !bindModelId}
+                onClick={() => void doBindFunction()}
+              >
+                Bind
+              </button>
+            </div>
+            {bindResult && <p>Bound: {bindResult}</p>}
+
+            <h3>Providers</h3>
+            {functionMappings.providers.map((p) => (
+              <div key={p.providerName} className="provider-block">
+                <p>
+                  <strong>{p.label}</strong>{" "}
+                  <code>{p.providerName}</code> · {p.apiType} ·{" "}
+                  <code>{p.baseUrl}</code>
+                  {p.source === "live" ? (
+                    <small className="muted"> (live)</small>
+                  ) : (
+                    <small className="muted"> (configured)</small>
+                  )}
+                  {p.error ? (
+                    <small className="error"> — {p.error}</small>
+                  ) : null}
+                </p>
+                <p className="model-chips">
+                  {p.models.map((m) => {
+                    const mapped = p.mappedModelIds.includes(m);
+                    return (
+                      <span
+                        key={m}
+                        className={`model-chip${mapped ? " mapped" : ""}`}
+                        title={mapped ? "mapped to an endpoint" : "available"}
+                      >
+                        {m}
+                      </span>
+                    );
+                  })}
+                </p>
+              </div>
+            ))}
+          </>
+        ) : (
+          <p>Loading models…</p>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Chats</h2>
+        <p>
+          Operator chat conversations (global scope). Model overrides and
+          awaited runs are shown per conversation.
+        </p>
+        <div className="row">
+          <input
+            placeholder="New chat title (optional)"
+            value={chatTitle}
+            onChange={(e) => setChatTitle(e.target.value)}
+          />
+          <button disabled={busy} onClick={() => void doCreateChat()}>
+            New chat
+          </button>
+          <select
+            value={chatStatusFilter}
+            onChange={(e) => {
+              setChatStatusFilter(
+                e.target.value as "active" | "closed" | "",
+              );
+            }}
+          >
+            <option value="">All</option>
+            <option value="active">Active</option>
+            <option value="closed">Closed</option>
+          </select>
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={() => void refreshConversations()}
+          >
+            Refresh
+          </button>
+        </div>
+        {chatsError && <p className="error">{chatsError}</p>}
+        {conversations.length === 0 ? (
+          <p>No conversations.</p>
+        ) : (
+          <ul>
+            {conversations.map((c) => (
+              <li key={c.id} style={{ marginBottom: "0.75rem" }}>
+                <strong>{c.title ?? c.id.slice(0, 8)}</strong>{" "}
+                <code>{c.id.slice(0, 8)}</code> · {c.status}
+                {c.messageCount != null ? ` · ${c.messageCount} msgs` : ""}
+                {c.modelOverride ? (
+                  <>
+                    {" "}
+                    · model{" "}
+                    <code>
+                      {c.modelOverride.modelId}@{c.modelOverride.endpointId}
+                    </code>
+                  </>
+                ) : null}
+                {c.awaitedRun ? (
+                  <>
+                    {" "}
+                    · awaiting{" "}
+                    <code>
+                      {c.awaitedRun.kind}:{c.awaitedRun.runId.slice(0, 8)}
+                    </code>
+                  </>
+                ) : null}
+                <div className="row" style={{ marginTop: "0.35rem" }}>
+                  {c.status === "active" ? (
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void doCloseChat(c.id)}
+                    >
+                      Close
+                    </button>
+                  ) : null}
+                  <button
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() => void doDeleteChat(c.id)}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       {error && <p className="error">{error}</p>}
     </>

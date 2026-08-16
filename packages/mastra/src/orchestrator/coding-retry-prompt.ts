@@ -22,6 +22,12 @@ export type DevelopCodingRetryInput = {
    * Must not override a present diagnosis.
    */
   appendixFallback?: string;
+  /**
+   * Prior failure history lines (most recent first) from the per-project
+   * diagnoses memory thread. Rendered above the current diagnosis so the
+   * coding agent cites prior resolutions instead of re-discovering them.
+   */
+  priorDiagnoses?: string[];
 };
 
 export function resolveDevelopCodingRetryKind(
@@ -94,8 +100,16 @@ export function buildDevelopCodingRetryPrompt(
   const next = input.nextActions?.trim()
     ? `\nDiagnosis nextActions: ${input.nextActions.trim()}`
     : "";
+  const history =
+    input.priorDiagnoses && input.priorDiagnoses.length > 0
+      ? `Prior failure history (most recent first) — cite prior resolutions instead of re-discovering them:\n${input.priorDiagnoses
+          .slice(0, 10)
+          .map((line) => `- ${line}`)
+          .join("\n")}\n\n`
+      : "";
 
-  switch (kind) {
+  const body = ((): string => {
+    switch (kind) {
     case "deps":
       return `Fix the APPENDIX Failure diagnosis: **missing deps / exit 127 / command not found** in the verify cwd.
 Run the project package manager install **in the worktree** (or the cwd SlopControl is verifying) — e.g. \`pnpm install --frozen-lockfile\` when \`pnpm-lock.yaml\` is present. Do NOT edit PHASE.md Automated Checks for this fingerprint. Do NOT claim DEV_COMPLETE from a green build on the project root while the worktree lacks node_modules.
@@ -122,4 +136,6 @@ Do NOT burn the session on live API probing or rate-limit waits — edit files a
 Do NOT chase infra bring-up (missing local services) inside the app repo — follow APPENDIX failure class.
 Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Knowledge / Follow-ups) to APPENDIX. Print DEV_COMPLETE when build, tests, and phase success criteria pass.`;
   }
+  })();
+  return `${history}${body}`;
 }

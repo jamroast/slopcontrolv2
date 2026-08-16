@@ -60,3 +60,44 @@ replace with background process + sleep/kill`,
     );
   });
 });
+
+describe("prior failure history in retry prompts", () => {
+  it("renders the history block when prior diagnoses exist", () => {
+    const prompt = buildDevelopCodingRetryPrompt({
+      phaseId: "06-demo",
+      title: "Broken Automated Check shell",
+      tags: ["process-shell"],
+      priorDiagnoses: [
+        "[fp-1] process: Docker 401 — rootCause: env_file override — resolution: fix compose",
+        "[fp-2] infra: ECONNREFUSED — rootCause: db down — resolution: compose up",
+      ],
+    });
+    assert.match(prompt, /Prior failure history \(most recent first\)/);
+    assert.match(prompt, /- \[fp-1\] process: Docker 401/);
+    assert.match(prompt, /- \[fp-2\] infra: ECONNREFUSED/);
+    // History appears before the diagnosis body
+    assert.ok(
+      prompt.indexOf("Prior failure history") <
+        prompt.indexOf("Fix the APPENDIX Failure diagnosis"),
+    );
+  });
+
+  it("omits the history block when no prior diagnoses", () => {
+    const prompt = buildDevelopCodingRetryPrompt({
+      phaseId: "06-demo",
+      title: "Broken Automated Check shell",
+      tags: ["process-shell"],
+      priorDiagnoses: [],
+    });
+    assert.doesNotMatch(prompt, /Prior failure history/);
+  });
+
+  it("omits the history block when priorDiagnoses is undefined", () => {
+    const prompt = buildDevelopCodingRetryPrompt({
+      phaseId: "06-demo",
+      title: "Broken Automated Check shell",
+      tags: ["process-shell"],
+    });
+    assert.doesNotMatch(prompt, /Prior failure history/);
+  });
+});

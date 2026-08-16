@@ -314,4 +314,76 @@ describe("@slopcontrol/llm", () => {
     assert.ok(img);
     assert.equal(img!.endpoint.apiType, "openai-images");
   });
+
+  it("resolve() uses providers.json when the endpoint has provider only", () => {
+    const registry = new LlmRegistry(
+      {
+        endpoints: [
+          {
+            id: "or",
+            baseUrl: "https://openrouter.ai/api/v1",
+            provider: "openrouter",
+            apiType: "openai-chat",
+            modelId: "anthropic/claude-3.5-sonnet",
+          },
+        ],
+        roles: {
+          research: { endpointId: "or" },
+          planning: { endpointId: "or" },
+          supervisor: { endpointId: "or" },
+          coding: { endpointId: "or" },
+        },
+      },
+      {
+        providers: {
+          openrouter: { apiKey: "sk-or-from-providers-json" },
+        },
+      },
+    );
+    const model = registry.resolve("research");
+    assert.equal(model.apiKey, "sk-or-from-providers-json");
+  });
+
+  it("fromFile loads providers.json from the endpoints directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slopcontrol-llm-providers-"));
+    const configPath = join(dir, "endpoints.json");
+    const providersPath = join(dir, "providers.json");
+    try {
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          endpoints: [
+            {
+              id: "or",
+              baseUrl: "https://openrouter.ai/api/v1",
+              provider: "openrouter",
+              apiType: "openai-chat",
+              modelId: "anthropic/claude-3.5-sonnet",
+            },
+          ],
+          roles: {
+            research: { endpointId: "or" },
+            planning: { endpointId: "or" },
+            supervisor: { endpointId: "or" },
+            coding: { endpointId: "or" },
+          },
+        }),
+        "utf-8",
+      );
+      writeFileSync(
+        providersPath,
+        JSON.stringify({
+          providers: {
+            openrouter: { apiKey: "sk-or-from-file" },
+          },
+        }),
+        "utf-8",
+      );
+      const registry = LlmRegistry.fromFile(configPath);
+      const model = registry.resolve("research");
+      assert.equal(model.apiKey, "sk-or-from-file");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

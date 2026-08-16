@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { exec, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import type { Agent } from "@mastra/core/agent";
+import type { Memory } from "@mastra/memory";
 import {
   appendAppendix,
   appendRunLog,
@@ -315,6 +316,14 @@ import {
   depsInstallCommand,
   needsDepsInstall,
 } from "./deps-install.js";
+import {
+  appendDiagnosisToMemory,
+  recallDiagnosisHistory,
+} from "./diagnosis-memory.js";
+import {
+  appendProjectKnowledge,
+  recallProjectKnowledge,
+} from "./project-knowledge.js";
 import { buildDevelopCodingRetryPrompt } from "./coding-retry-prompt.js";
 export {
   buildDevelopCodingRetryPrompt,
@@ -340,7 +349,7 @@ import {
 
 const execAsync = promisify(exec);
 
-const MAX_NO_PROGRESS = 8;
+const MAX_NO_PROGRESS = Number(process.env.SLOPCONTROL_MAX_NO_PROGRESS ?? 8);
 const MAX_ITERATIONS = 50;
 /** Default OpenCode coding turn wall-clock (overridable via config / env). */
 const DEFAULT_CODING_TURN_MS = 600_000;
@@ -382,6 +391,12 @@ export interface OrchestratorContext {
   dataDir: string;
   registry: LlmRegistry;
   agents: OrchestratorAgents;
+  /**
+   * Shared Mastra Memory — used for the per-project diagnoses thread
+   * (failure history recalled into retry prompts) and the project-knowledge
+   * thread (handoff knowledge accumulated across phases).
+   */
+  memory?: Memory;
   /**
    * Auto-publish hook fired after a phase completes on a project whose
    * config sets `componentLibrary: true`. Defaults to an HTTP POST to the
@@ -2064,6 +2079,38 @@ async function refineClaimProofGateIssues(
 
 export class ChangeOrchestrator {
   constructor(private readonly ctx: OrchestratorContext) {}
+
+  /**
+   * Persist a diagnosis to disk (authoritative) and append it to the
+   * per-project diagnoses memory thread (recall layer for retry prompts).
+   * Memory write is fire-and-forget.
+   */
+  private persistDiagnosis(
+    project: Project,
+    run: Run,
+    diagnosis: PersistedDiagnosis,
+    phaseId?: string,
+  ): string {
+    const path = writeDiagnosis(project.rootPath, run.id, diagnosis, phaseId);
+    void appendDiagnosisToMemory({
+      memory: this.ctx.memory,
+      projectId: project.id,
+      diagnosis: {
+        ...diagnosis,
+        runId: run.id,
+        phaseId: phaseId ?? diagnosis.phaseId,
+      },
+    });
+    return path;
+  }
+
+  /**
+   * Recall recent diagnosis history for retry prompts (most recent first).
+   * Empty on any failure — history is additive, never load-bearing.
+   */
+  private async diagnosisHistory(projectId: string): Promise<string[]> {
+    return recallDiagnosisHistory({ memory: this.ctx.memory, projectId });
+  }
 
   /**
    * Shared CROSS-PROJECT DEPS + DEPENDENCY INTENT prompt blocks for ask/agent/plan/research.
@@ -4572,9 +4619,9 @@ ${message.trim()}`;
             run,
             `ERROR: ${opened.message ?? "needs_intent — provide a non-empty description/intent"}`,
           );
-          writeDiagnosis(
-            project.rootPath,
-            run.id,
+          this.persistDiagnosis(
+            project,
+              run,
             buildPlanningFailureDiagnosis({
               stage: "research",
               title: "Research failed: needs intent",
@@ -4599,9 +4646,9 @@ ${message.trim()}`;
         const opened = await this.openProject({ project });
         if (opened.blueprintStatus === "needs_intent") {
           log(project, run, `ERROR: ${opened.message ?? "needs_intent"}`);
-          writeDiagnosis(
-            project.rootPath,
-            run.id,
+          this.persistDiagnosis(
+            project,
+              run,
             buildPlanningFailureDiagnosis({
               stage: "research",
               title: "Research failed: needs intent",
@@ -4636,6 +4683,13 @@ ${message.trim()}`;
     const learningsBlock = loadLearningsPromptBlock(project.rootPath, {
       phaseDescription: description,
     });
+    const projectKnowledge = await recallProjectKnowledge({
+      memory: this.ctx.memory,
+      projectId: project.id,
+    });
+    const knowledgeBlock = projectKnowledge.trim()
+      ? `## Project knowledge (accumulated across phases)\n${projectKnowledge}`
+      : "";
     const researchPath = `.slopcontrol/phases/${phase.id}/RESEARCH.md`;
     const researchDate = new Date().toISOString().slice(0, 10);
     const engagementHonesty = intent.interaction
@@ -4782,7 +4836,7 @@ ${clipBlueprintForPrompt(blueprint || "", 6_000)}
 
 Roadmap (excerpt — full file at .slopcontrol/ROADMAP.md):
 ${clipPromptSection("ROADMAP.md", roadmap || "", 2_000)}
-${learningsBlock ? `\n${learningsBlock}` : ""}
+${learningsBlock ? `\n${learningsBlock}` : ""}${knowledgeBlock ? `\n${knowledgeBlock}` : ""}
 Research the project at ${project.rootPath}.
 Use tools sparingly, then write RESEARCH.md via write_file to ${researchPath} AND return the same markdown in your final response (start with #).
 End with RESEARCH_COMPLETE.
@@ -4936,9 +4990,9 @@ Phase id: ${phase.id}`;
         phaseId: phase.id,
         runId: run.id,
       });
-      writeDiagnosis(
-        project.rootPath,
-        run.id,
+      this.persistDiagnosis(
+        project,
+          run,
         buildPlanningFailureDiagnosis({
           stage: "research",
           title: "Research failed: empty RESEARCH.md",
@@ -4994,6 +5048,13 @@ Phase id: ${phase.id}`;
       phaseDescription: phase.description,
       phaseDoc: research,
     });
+    const planningKnowledge = await recallProjectKnowledge({
+      memory: this.ctx.memory,
+      projectId: project.id,
+    });
+    const planningKnowledgeBlock = planningKnowledge.trim()
+      ? `## Project knowledge (accumulated across phases)\n${planningKnowledge}`
+      : "";
     const intent = await ensureChangeIntentAsync(
       project.rootPath,
       phase.id,
@@ -5175,7 +5236,7 @@ Automated Checks must be finite: no dev servers (\`next dev\`, \`pnpm dev\`), no
 When Change Intent interaction primaryAction is submit form, prove fill+submit at the locked mount; only chat mounts (composer/bubble) also need live AI SDK static tool-part proofs (type: "tool-<name>" / parseToolResult / extractActiveForm). When there is no interaction contract, do not invent fill+submit proofs (click-to-navigate / landing chrome: prove click / onClick / href / router.push). When primaryAction is click/navigate, prove those click proofs — not fill+submit.
 When finished, include PHASE_COMPLETE on its own line.
 Do NOT narrate that you wrote the file — output the document itself.
-${learningsBlock ? `\n${learningsBlock}\n` : ""}
+${learningsBlock ? `\n${learningsBlock}\n` : ""}${planningKnowledgeBlock ? `\n${planningKnowledgeBlock}\n` : ""}
 Blueprint (excerpt — full at .slopcontrol/BLUEPRINT.md; prefer Live decisions):
 ${clipPromptSection("BLUEPRINT.md", clipBlueprintForPrompt(blueprint, blueprintClip), blueprintClip)}
 
@@ -5194,9 +5255,9 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
           `${reason}\n--- Engagement Change Intent: refusing Intent-breaking scaffold; fail closed (retry draft) ---`,
         );
         writePhaseStatus(project.rootPath, phase.id, "draft");
-        writeDiagnosis(
-          project.rootPath,
-          run.id,
+        this.persistDiagnosis(
+          project,
+            run,
           buildPlanningFailureDiagnosis({
             stage: "draft",
             title: "Draft rejected: engagement Change Intent (no scaffold)",
@@ -5249,9 +5310,9 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         )
           ? "change-intent"
           : "draft-failed");
-      writeDiagnosis(
-        project.rootPath,
-        run.id,
+      this.persistDiagnosis(
+        project,
+          run,
         buildPlanningFailureDiagnosis({
           stage: "draft",
           title: opts?.title ?? "Draft rejected",
@@ -5518,9 +5579,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
-      writeDiagnosis(
-        project.rootPath,
-        run.id,
+      this.persistDiagnosis(
+        project,
+          run,
         buildPlanningFailureDiagnosis({
           stage: "draft",
           title: "Draft blocked: PHASE structure",
@@ -5546,9 +5607,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
-      writeDiagnosis(
-        project.rootPath,
-        run.id,
+      this.persistDiagnosis(
+        project,
+          run,
         buildPlanningFailureDiagnosis({
           stage: "draft",
           title: "Draft blocked: RESEARCH alignment",
@@ -5574,9 +5635,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
-      writeDiagnosis(
-        project.rootPath,
-        run.id,
+      this.persistDiagnosis(
+        project,
+          run,
         buildPlanningFailureDiagnosis({
           stage: "draft",
           title: "Draft blocked: theme audit",
@@ -5603,9 +5664,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
-      writeDiagnosis(
-        project.rootPath,
-        run.id,
+      this.persistDiagnosis(
+        project,
+          run,
         buildPlanningFailureDiagnosis({
           stage: "draft",
           title: "Draft blocked: Change Intent",
@@ -6520,6 +6581,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
 
     let iteration = 0;
     let noProgressCount = 0;
+    let lastIterationHadFileChanges = false;
     let stallStrikeCount = 0;
     let infraStrikeCount = 0;
     let diagnosisStreak = 0;
@@ -6619,6 +6681,20 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
             sourceRunId: run.id,
           });
         }
+        // Accumulate handoff knowledge into the project knowledge memory
+        // thread (OM summarizes; agents read the summary in prompts).
+        if (outcome === "complete") {
+          void appendProjectKnowledge({
+            memory: this.ctx.memory,
+            projectId: project.id,
+            items: [
+              ...(handoff.knowledge ?? []),
+              ...(handoff.operatorRequirements ?? []).map(
+                (r) => `Operator requirement: ${r}`,
+              ),
+            ],
+          });
+        }
         log(
           project,
           run,
@@ -6683,6 +6759,64 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         iteration += 1;
         const iterationStarted = Date.now();
         log(project, run, `\n=== ITERATION ${iteration} ===`);
+
+        if (
+          iteration > 1 &&
+          diagnosisStreak >= MAX_DIAGNOSIS_STREAK - 1 &&
+          lastDiagnosisFingerprint
+        ) {
+          log(
+            project,
+            run,
+            `--- Same diagnosis would repeat (${diagnosisStreak}×, fp=${lastDiagnosisFingerprint}); blocking before another coding turn ---`,
+          );
+          appendAppendix(
+            project.rootPath,
+            phase.id,
+            [
+              lastDiagnosisCard || `Repeated diagnosis fp=${lastDiagnosisFingerprint}`,
+              "",
+              `DEV_BLOCKED — same failure diagnosis repeated ${diagnosisStreak} times without progress.`,
+              "Operator/coding must change approach before retry_development.",
+            ].join("\n"),
+          );
+          log(project, run, COMPLETION_TOKENS.DEV_BLOCKED);
+          writePhaseStatus(project.rootPath, phase.id, "blocked");
+          return finishDevelop("blocked", {
+            worktreePath: worktree.path,
+            worktreeBranch: worktree.branch,
+          });
+        }
+
+        if (
+          iteration > 1 &&
+          !lastAbortWasProductiveTimeout &&
+          !lastFailWasPostMergeRootVerify &&
+          !lastContinueWasJudgeExtension &&
+          !lastIterationHadFileChanges &&
+          lastErrorHash
+        ) {
+          log(
+            project,
+            run,
+            "--- Skipping coding turn: prior iteration changed no files with same failure fingerprint ---",
+          );
+          noProgressCount += 1;
+          if (noProgressCount >= MAX_NO_PROGRESS) {
+            appendAppendix(
+              project.rootPath,
+              phase.id,
+              `${lastDiagnosisCard || "No progress"}\n\nDEV_BLOCKED — no-progress streak exhausted.`,
+            );
+            log(project, run, COMPLETION_TOKENS.DEV_BLOCKED);
+            writePhaseStatus(project.rootPath, phase.id, "blocked");
+            return finishDevelop("blocked", {
+              worktreePath: worktree.path,
+              worktreeBranch: worktree.branch,
+            });
+          }
+          continue;
+        }
 
         // Re-sync gitignored env into worktree each iteration (keys live on root).
         const resynced = syncLocalFilesToWorktree({
@@ -6824,6 +6958,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             class: lastHandoffDiagnosis?.class,
             tags: lastHandoffDiagnosis?.tags,
             appendixFallback: appendix,
+            priorDiagnoses: await this.diagnosisHistory(project.id),
           });
           if (appendix.trim()) {
             systemOverride = [
@@ -6874,6 +7009,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               worktreeBranch: worktree.branch,
             });
           }
+          lastIterationHadFileChanges = false;
           continue;
         }
 
@@ -6953,9 +7089,9 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               phase.id,
               `## Failure diagnosis\n\n- **class:** infra (high)\n- **audience:** operator\n- **title:** OpenCode coding LLM stalled / rate-limited repeatedly\n\n### Root cause\n\n${stallRootCause}\n\n### Operator actions\n\n${stallActions.map((a, i) => `${i + 1}. ${a}`).join("\n")}\n`,
             );
-            writeDiagnosis(
-              project.rootPath,
-              run.id,
+            this.persistDiagnosis(
+              project,
+                run,
               {
                 audience: "operator",
                 operatorActions: stallActions,
@@ -6994,6 +7130,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               worktreeBranch: worktree.branch,
             });
           }
+          lastIterationHadFileChanges = gitChanged.length > 0;
           continue;
         }
 
@@ -7004,6 +7141,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         const changed = [
           ...new Set([...sessionChanged, ...gitChanged].filter(Boolean)),
         ];
+        lastIterationHadFileChanges = changed.length > 0;
         if (changed.length > 0) {
           log(project, run, `Changed files: ${changed.join(", ")}`);
           for (const f of changed) allChangedFiles.add(f);
@@ -7296,9 +7434,9 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                       run,
                       `--- Project env sync failed (${envSyncRun.code}) — runtime env files may be missing template keys: ${detail} ---`,
                     );
-                    writeDiagnosis(
-                      project.rootPath,
-                      run.id,
+                    this.persistDiagnosis(
+                      project,
+                        run,
                       buildEnvSyncFailureDiagnosis({
                         summary: `env sync exited ${envSyncRun.code}: ${detail}`,
                         phaseId: phase.id,
@@ -7633,9 +7771,9 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               );
             }
             if (publishFailure) {
-              writeDiagnosis(
-                project.rootPath,
-                run.id,
+              this.persistDiagnosis(
+                project,
+                  run,
                 buildLibraryPublishFailureDiagnosis({
                   summary: publishFailure,
                   phaseId: phase.id,
@@ -7679,9 +7817,9 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           sourcePhaseId: phase.id,
           sourceRunId: run.id,
         });
-        writeDiagnosis(
-          project.rootPath,
-          run.id,
+        this.persistDiagnosis(
+          project,
+            run,
           {
             audience: diagnosis.audience,
             operatorActions: diagnosis.operatorActions,
@@ -7730,6 +7868,13 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             run,
             `--- Learning recorded: ${recorded.id} (hits=${recorded.hitCount}) ---`,
           );
+          void appendProjectKnowledge({
+            memory: this.ctx.memory,
+            projectId: project.id,
+            items: [
+              `Learning: ${diagnosis.learning.title} — ${diagnosis.learning.lesson}`,
+            ],
+          });
         }
 
         appendAppendix(
@@ -7788,6 +7933,22 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         } else {
           diagnosisStreak = 1;
           lastDiagnosisFingerprint = diagnosis.fingerprint;
+        }
+
+        // Informational: how often has this fingerprint appeared across runs?
+        // Does not change block behavior — the streak guard above owns that.
+        {
+          const history = await this.diagnosisHistory(project.id);
+          const seenBefore = history.filter((line) =>
+            line.includes(`[${diagnosis.fingerprint}]`),
+          ).length;
+          if (seenBefore > 0) {
+            log(
+              project,
+              run,
+              `--- Diagnosis fp=${diagnosis.fingerprint} seen ${seenBefore} time(s) before across runs ---`,
+            );
+          }
         }
 
         if (diagnosisStreak >= MAX_DIAGNOSIS_STREAK) {
@@ -8119,9 +8280,9 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
       sourcePhaseId: phase.id,
       sourceRunId: run.id,
     });
-    writeDiagnosis(
-      project.rootPath,
-      run.id,
+    this.persistDiagnosis(
+      project,
+        run,
       {
         audience: diagnosis.audience,
         operatorActions: diagnosis.operatorActions,

@@ -2121,7 +2121,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "chat_function_bind",
       description:
-        "Map a platform function (role) to a model. If that model has no endpoint entry yet, clone the provider credentials, create the mapping, and bind the function to it. Pass endpointId only when the same model exists on more than one provider or the model is not in the list yet.",
+        "Map a platform function (role) to a model on a provider. Pass provider (providers.json key from chat_models_list) and modelId. Creates or reuses an endpoint with that provider+model. endpointId is legacy — prefer provider.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2131,10 +2131,15 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
               "Function to bind: research, planning, supervisor, coding, design, designVision, designImage, classification, chat, ask, agent, judge.",
           },
           modelId: { type: "string" },
+          provider: {
+            type: "string",
+            description:
+              "providers.json key from chat_models_list (e.g. openrouter, ollama-cloud).",
+          },
           endpointId: {
             type: "string",
             description:
-              "Optional provider handle from chat_models_list when the model is new or ambiguous.",
+              "Legacy provider handle; use provider instead when available.",
           },
         },
         required: ["function", "modelId"],
@@ -2150,6 +2155,59 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           runId: { type: "string" },
         },
         required: ["runId"],
+      },
+    },
+    {
+      name: "provider_list",
+      description:
+        "List configured LLM providers from providers.json. Keys are redacted (shown as \"***\" or null). Use this before provider_set or chat_function_bind.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "provider_set",
+      description:
+        "Set or update a provider's configuration in providers.json. Pass apiKey (or null for local), plus optional defaultBaseUrl, headers, timeoutMs, defaultParams.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          apiKey: { type: "string", nullable: true },
+          defaultBaseUrl: { type: "string" },
+          headers: { type: "object", additionalProperties: { type: "string" } },
+          timeoutMs: { type: "number" },
+          defaultParams: {
+            type: "object",
+            properties: {
+              temperature: { type: "number" },
+              maxTokens: { type: "number" },
+              topP: { type: "number" },
+            },
+          },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "provider_remove",
+      description: "Remove a provider from providers.json.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+        },
+        required: ["name"],
+      },
+    },
+    {
+      name: "provider_test",
+      description:
+        "Test connectivity for a provider by listing its models. Returns the model catalog or an error. Uses the provider's configured baseUrl and apiKey.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+        },
+        required: ["name"],
       },
     },
   ];
@@ -4789,11 +4847,76 @@ export async function dispatchSlopcontrolTool(
           body: JSON.stringify({
             function: args.function,
             modelId: args.modelId,
+            ...(typeof args.provider === "string"
+              ? { provider: args.provider }
+              : {}),
             ...(typeof args.endpointId === "string"
               ? { endpointId: args.endpointId }
               : {}),
           }),
         });
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "provider_list") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/config/providers`);
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "provider_set") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/config/providers/${encodeURIComponent(args.name as string)}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              apiKey: args.apiKey,
+              defaultBaseUrl: args.defaultBaseUrl,
+              headers: args.headers,
+              timeoutMs: args.timeoutMs,
+              defaultParams: args.defaultParams,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "provider_remove") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/config/providers/${encodeURIComponent(args.name as string)}`,
+          { method: "DELETE" },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "provider_test") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/config/providers/${encodeURIComponent(args.name as string)}/test`,
+        );
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

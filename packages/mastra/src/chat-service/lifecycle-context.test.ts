@@ -40,7 +40,9 @@ describe("chat lifecycle prompt", () => {
     assert.ok(prompt.includes("submit_review"));
     assert.ok(prompt.includes("park advance_run"));
     assert.ok(prompt.includes("Never stop at accepted"));
-    assert.ok(prompt.includes("never auto-merge"));
+    assert.ok(prompt.includes("autoMergeOnComplete"));
+    assert.ok(prompt.includes("do NOT ask the operator to choose main vs development branch"));
+    assert.ok(!prompt.includes("never auto-merge"));
     assert.ok(!prompt.includes("approve in the SlopControl interface"));
     assert.ok(!prompt.includes("please do"));
     assert.ok(prompt.includes("click navigates to route X"));
@@ -66,5 +68,39 @@ describe("chat lifecycle prompt", () => {
     assert.ok(prompt.includes("agent"));
     assert.ok(prompt.includes("chat_function_bind"));
     assert.ok(!prompt.includes("chat_endpoint_model_update"));
+  });
+});
+
+describe("project knowledge in chat prompt", () => {
+  it("includes the knowledge block when provided", () => {
+    const prompt = buildProjectChatPrompt({
+      project,
+      deps: emptyDeps,
+      projectKnowledge: "- Menubar mounts ThemeToggle\n- Tests need Docker up",
+    });
+    assert.ok(prompt.includes("## Project knowledge (accumulated)"));
+    assert.ok(prompt.includes("- Menubar mounts ThemeToggle"));
+    // Knowledge lands before the BLUEPRINT excerpt
+    assert.ok(
+      prompt.indexOf("## Project knowledge") <
+        prompt.indexOf("## BLUEPRINT.md"),
+    );
+  });
+
+  it("omits the knowledge block when empty or whitespace", () => {
+    const empty = buildProjectChatPrompt({
+      project,
+      deps: emptyDeps,
+      projectKnowledge: "",
+    });
+    assert.ok(!empty.includes("## Project knowledge"));
+    const blank = buildProjectChatPrompt({
+      project,
+      deps: emptyDeps,
+      projectKnowledge: "   ",
+    });
+    assert.ok(!blank.includes("## Project knowledge"));
+    const missing = buildProjectChatPrompt({ project, deps: emptyDeps });
+    assert.ok(!missing.includes("## Project knowledge"));
   });
 });

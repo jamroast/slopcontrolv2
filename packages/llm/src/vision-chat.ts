@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
-import type { LlmEndpoint } from "@slopcontrol/types";
+import type { LlmEndpoint, ProvidersConfig } from "@slopcontrol/types";
 import { assertVisionCapable } from "./capabilities.js";
 import { resolveEndpointSecrets } from "./secrets.js";
 
@@ -10,6 +10,7 @@ export interface ChatWithImagesOptions {
   prompt: string;
   imagePaths: string[];
   timeoutMs?: number;
+  providers?: ProvidersConfig;
 }
 
 export interface ChatWithImagesResult {
@@ -46,7 +47,7 @@ export function filterRasterVisionPaths(paths: string[]): string[] {
 export async function chatWithImages(
   opts: ChatWithImagesOptions,
 ): Promise<ChatWithImagesResult> {
-  const endpoint = resolveEndpointSecrets(opts.endpoint);
+  const endpoint = resolveEndpointSecrets(opts.endpoint, opts.providers);
   assertVisionCapable(endpoint);
 
   const modelId = opts.modelId ?? endpoint.modelId;

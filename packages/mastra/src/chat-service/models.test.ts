@@ -7,11 +7,31 @@ import type { LlmEndpoint } from "@slopcontrol/llm";
 import {
   bindFunctionToModel,
   buildFunctionMappingList,
+  listConfiguredProviderCatalogs,
   listEndpointModels,
   listUniqueProviderModels,
   updateEndpointModel,
   type EndpointModelList,
+  type ProviderCatalog,
 } from "./models.js";
+
+function legacyCatalog(
+  endpoint: LlmEndpoint,
+  models: string[],
+  source: "live" | "configured" = "live",
+): ProviderCatalog {
+  return {
+    providerName: endpoint.provider ?? endpoint.id,
+    endpointId: endpoint.id,
+    label: endpoint.id,
+    provider: endpoint.provider ?? endpoint.id,
+    baseUrl: endpoint.baseUrl,
+    apiType: endpoint.apiType,
+    models,
+    source,
+    mappedModelIds: [endpoint.modelId],
+  };
+}
 
 const baseEndpoint: LlmEndpoint = {
   id: "e1",
@@ -206,15 +226,10 @@ describe("buildFunctionMappingList", () => {
       endpoints: [baseEndpoint],
       roles: requiredRoles,
     };
-    const providers: EndpointModelList[] = [
-      {
-        endpointId: "e1",
-        configuredModel: "glm-5.2",
-        models: ["glm-5.2", "kimi-k2.7-code"],
-        source: "live",
-      },
+    const catalogs: ProviderCatalog[] = [
+      legacyCatalog(baseEndpoint, ["glm-5.2", "kimi-k2.7-code"]),
     ];
-    const listed = buildFunctionMappingList(config, providers);
+    const listed = buildFunctionMappingList(config, catalogs);
     const classification = listed.functions.find((f) => f.function === "classification");
     assert.ok(classification);
     assert.equal(classification.current?.modelId, "glm-5.2");
@@ -239,7 +254,7 @@ describe("buildFunctionMappingList", () => {
     assert.ok(listed.models.some((m) => m.modelId === "glm-5.2" && m.mapped));
     for (const model of listed.models) {
       assert.equal(model.label, model.modelId);
-      assert.equal(model.provider, "Local Ollama");
+      assert.equal(model.providerName, "e1");
     }
   });
 
@@ -270,13 +285,20 @@ describe("buildFunctionMappingList", () => {
         coding: { endpointId: "ollama-cloud-glm" },
       },
     };
-    const providers: EndpointModelList[] = config.endpoints.map((ep) => ({
-      endpointId: ep.id,
-      configuredModel: ep.modelId,
-      models: catalog,
-      source: "live" as const,
-    }));
-    const listed = buildFunctionMappingList(config, providers);
+    const catalogs: ProviderCatalog[] = [
+      {
+        providerName: "ollama-cloud-kimi",
+        endpointId: "ollama-cloud-kimi",
+        label: "Ollama Cloud",
+        provider: "Ollama Cloud",
+        baseUrl: "https://ollama.com/v1",
+        apiType: "openai-chat",
+        models: catalog,
+        source: "live",
+        mappedModelIds: config.endpoints.map((e) => e.modelId),
+      },
+    ];
+    const listed = buildFunctionMappingList(config, catalogs);
     const modelIds = listed.models.map((m) => m.modelId);
     assert.deepEqual([...new Set(modelIds)].sort(), [...catalog].sort());
     assert.equal(listed.models.length, catalog.length);
@@ -311,18 +333,8 @@ describe("buildFunctionMappingList", () => {
       roles: requiredRoles,
     };
     const listed = buildFunctionMappingList(config, [
-      {
-        endpointId: "e1",
-        configuredModel: "glm-5.2",
-        models: ["glm-5.2"],
-        source: "live",
-      },
-      {
-        endpointId: "cloud",
-        configuredModel: "glm-5.2:cloud",
-        models: ["glm-5.2:cloud", "glm-5.2"],
-        source: "live",
-      },
+      legacyCatalog(baseEndpoint, ["glm-5.2"]),
+      legacyCatalog(config.endpoints[1]!, ["glm-5.2:cloud", "glm-5.2"]),
     ]);
     const glm = listed.models.filter((m) => m.modelId === "glm-5.2");
     assert.equal(glm.length, 2);
@@ -330,8 +342,8 @@ describe("buildFunctionMappingList", () => {
     assert.equal(glm[0]!.label, "glm-5.2");
     assert.equal(glm[1]!.label, "glm-5.2");
     assert.deepEqual(
-      new Set(glm.map((m) => m.provider)),
-      new Set(["Local Ollama", "Ollama Cloud"]),
+      new Set(glm.map((m) => m.providerName)),
+      new Set(["e1", "cloud"]),
     );
   });
 });
@@ -345,7 +357,7 @@ describe("bindFunctionToModel", () => {
         endpointsPath: path,
         function: "classification",
         modelId: "glm-5.2",
-        providers: [],
+        catalogs: [legacyCatalog(baseEndpoint, ["glm-5.2"])],
       });
       assert.equal(result.createdEndpoint, false);
       assert.equal(result.endpointId, "e1");
@@ -365,7 +377,7 @@ describe("bindFunctionToModel", () => {
         endpointsPath: path,
         function: "ask",
         modelId: "glm-5.2",
-        providers: [],
+        catalogs: [legacyCatalog(baseEndpoint, ["glm-5.2"])],
       });
       assert.equal(ask.createdEndpoint, false);
       assert.equal(ask.config.roles.ask?.endpointId, "e1");
@@ -374,7 +386,7 @@ describe("bindFunctionToModel", () => {
         endpointsPath: path,
         function: "agent",
         modelId: "glm-5.2",
-        providers: [],
+        catalogs: [legacyCatalog(baseEndpoint, ["glm-5.2"])],
       });
       assert.equal(agent.config.roles.agent?.endpointId, "e1");
       assert.equal(agent.config.roles.agent?.modelId, "glm-5.2");
@@ -382,7 +394,7 @@ describe("bindFunctionToModel", () => {
         endpointsPath: path,
         function: "judge",
         modelId: "glm-5.2",
-        providers: [],
+        catalogs: [legacyCatalog(baseEndpoint, ["glm-5.2"])],
       });
       assert.equal(judge.config.roles.judge?.endpointId, "e1");
       assert.equal(judge.config.roles.judge?.modelId, "glm-5.2");
@@ -416,13 +428,16 @@ describe("bindFunctionToModel", () => {
         endpointsPath: path,
         function: "classification",
         modelId: "glm-5.2:cloud",
-        providers: [
-          {
-            endpointId: "ollama-cloud-kimi",
-            configuredModel: "kimi-k2.7-code",
-            models: ["kimi-k2.7-code", "glm-5.2:cloud"],
-            source: "live",
-          },
+        catalogs: [
+          legacyCatalog(
+            {
+              ...baseEndpoint,
+              id: "ollama-cloud-kimi",
+              baseUrl: "https://ollama.com/v1",
+              modelId: "kimi-k2.7-code",
+            },
+            ["kimi-k2.7-code", "glm-5.2:cloud"],
+          ),
         ],
       });
       assert.equal(result.createdEndpoint, true);
@@ -450,7 +465,7 @@ describe("bindFunctionToModel", () => {
         function: "coding",
         modelId: "qwen3:32b",
         endpointId: "e1",
-        providers: [],
+        catalogs: [legacyCatalog(baseEndpoint, ["glm-5.2"])],
       });
       assert.equal(result.createdEndpoint, true);
       assert.equal(result.config.roles.coding.endpointId, result.endpointId);
@@ -461,7 +476,7 @@ describe("bindFunctionToModel", () => {
     }
   });
 
-  it("requires endpointId when the model is unknown", () => {
+  it("requires provider when the model is unknown", () => {
     const dir = mkdtempSync(join(tmpdir(), "slop-bind-"));
     try {
       const path = writeConfig(dir);
@@ -471,10 +486,54 @@ describe("bindFunctionToModel", () => {
             endpointsPath: path,
             function: "chat",
             modelId: "mystery-model",
-            providers: [],
+            catalogs: [],
           }),
-        /Pass endpointId/,
+        /Pass provider/,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds by providers.json key and sets endpoint.provider", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-bind-"));
+    try {
+      const path = writeConfig(dir);
+      const result = bindFunctionToModel({
+        endpointsPath: path,
+        function: "research",
+        modelId: "anthropic/claude-3.5-sonnet",
+        provider: "openrouter",
+        providersConfig: {
+          providers: {
+            openrouter: {
+              apiKey: "sk-or-test",
+              defaultBaseUrl: "https://openrouter.ai/api/v1",
+            },
+          },
+        },
+        catalogs: [
+          {
+            providerName: "openrouter",
+            endpointId: "openrouter",
+            label: "openrouter",
+            provider: "openrouter",
+            baseUrl: "https://openrouter.ai/api/v1",
+            apiType: "openai-chat",
+            models: ["anthropic/claude-3.5-sonnet"],
+            source: "live",
+            mappedModelIds: [],
+          },
+        ],
+      });
+      assert.equal(result.provider, "openrouter");
+      assert.equal(result.createdEndpoint, true);
+      const created = result.config.endpoints.find((e) => e.id === result.endpointId);
+      assert.ok(created);
+      assert.equal(created.provider, "openrouter");
+      assert.equal(created.modelId, "anthropic/claude-3.5-sonnet");
+      assert.equal(created.baseUrl, "https://openrouter.ai/api/v1");
+      assert.equal(created.apiKey, undefined);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -1,4 +1,4 @@
-import type { LlmEndpoint } from "@slopcontrol/types";
+import type { LlmEndpoint, ProvidersConfig } from "@slopcontrol/types";
 import { resolveEndpointSecrets } from "./secrets.js";
 
 /** Default wall-clock for classification-style JSON chat (cloud models need headroom). */
@@ -11,6 +11,7 @@ export interface ChatJsonOptions {
   user: string;
   timeoutMs?: number;
   temperature?: number;
+  providers?: ProvidersConfig;
   /**
    * Extra attempts after the first when content is empty, not valid JSON,
    * or the request timed out (default 2 → 3 tries total).
@@ -107,7 +108,7 @@ function timeoutError(timeoutMs: number, attempt: number, maxAttempts: number): 
  * Retries on empty content, invalid JSON, or client timeout abort.
  */
 export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
-  const endpoint = resolveEndpointSecrets(opts.endpoint);
+  const endpoint = resolveEndpointSecrets(opts.endpoint, opts.providers);
   const modelId = opts.modelId ?? endpoint.modelId;
   const baseUrl = endpoint.baseUrl.replace(/\/+$/, "");
   const url = `${baseUrl}/chat/completions`;

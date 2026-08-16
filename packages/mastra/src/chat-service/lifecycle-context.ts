@@ -1,4 +1,4 @@
-import { readBlueprint, readRoadmap } from "@slopcontrol/artifacts";
+import { readBlueprint, readProjectConfig, readRoadmap } from "@slopcontrol/artifacts";
 import type { Phase, Project, Run } from "@slopcontrol/types";
 import type { ChatContextDeps } from "./types.js";
 
@@ -16,7 +16,7 @@ Work flows through phases. Each phase: draft (PHASE.md) → research (RESEARCH.m
 - PLAN LOOP: multi-turn planning for bigger work (plan_loop_start/continue/accept), then plan_loop_promote creates phases.
 - RESEARCH: start_change / promote creates the phase and runs research. Research lands in_review and MUST wait for the operator — do not auto-approve. If they want to proceed (accept / start development / continue / go ahead), park advance_run with the runId. Confirming advance_run, start_development, or submit_review(approve) uses the same stage continuer: in_review → accepted → start_development (and start_design if the phase requires it) until work is actually running. Never stop at accepted. Never send the operator to a dashboard Approve button. To send the plan back, submit_review with decision=request_changes and feedback.
 - DESIGN GATE: phases with UI intent need a design pass FIRST (design_loop_start) — EXCEPT stockAdoption (adopting library components) and assetSwap (wiring an existing asset), which skip design by intent.
-- DEVELOPMENT: start_development (gated) runs the coding agent in a worktree, then automated checks + verify. Park merge_phase only when the operator asks to merge — never auto-merge.
+- DEVELOPMENT: start_development (gated) runs the coding agent in a worktree, then automated checks + verify. When autoMergeOnComplete is enabled (project default), SlopControl merges the phase branch into the project root on green checks — do NOT ask the operator to choose main vs development branch or park merge_phase. Park merge_phase only when auto-merge is disabled or the handoff shows autoMerged: false with the worktree still present.
 
 Waiting on long stages:
 - start_change / promote_ask / start_development / start_design return immediately while work continues (stage researching or developing).
@@ -37,7 +37,8 @@ Tool choice for investigation vs coding:
 - Chat-owned asks: omit askId to let this chat continue or start a new ask. Never rely on the project's latest open ask. Pass askId only to target a specific session; pass newAsk=true to force a fresh one. Put the operator's question in message; do not replace a page/route review with a source-claim checklist.
 - Ask walker: mastra is faster, pi is more thorough. Default is the project's askInvestigateTool (auto|mastra|pi). For one turn pass investigateTool, or express thorough vs quick intent in the operator message (classified by the classification model — never keyword-matched; with no expressed intent the fast mastra path runs). Park project_set_ask_investigate_tool to change the project default. A judge pass always refines findings — bind function "judge" (Kimi) separately from "ask" (GLM) via chat_function_bind.
 - Develop loop: the same judge function reviews each coding turn against the phase brief; partial/off-track verdicts steer the next coding turn directly. When Automated Checks pass, a pre-merge judge reviews the whole change set BEFORE merging — off-track with concrete gaps forces one bounded extra iteration without merge, otherwise the verdict is recorded and the phase merges and completes.
-- get_ask / get_agent / get_development_report / design_loop_get / plan_loop_get require the id from the matching list_* tool (get_ask may omit askId to use this chat's latched ask). Never call get_agent / loop gets empty.`;
+- get_ask / get_agent / get_development_report / design_loop_get / plan_loop_get require the id from the matching list_* tool (get_ask may omit askId to use this chat's latched ask). Never call get_agent / loop gets empty.
+- Do not repeat the same read-only get_* / list_* call with identical args in one turn — answer from findings already returned.`;
 
 function phaseLine(phase: Phase): string {
   const title = phase.title ?? phase.description.slice(0, 60);
@@ -74,6 +75,8 @@ export function buildProjectChatPrompt(opts: {
   project: Project;
   deps: ChatContextDeps;
   pendingActions?: PendingPromptAction[];
+  /** Accumulated project knowledge from the OM knowledge thread. */
+  projectKnowledge?: string;
 }): string {
   const { project, deps } = opts;
   const blueprint = clip(readBlueprint(project.rootPath), 5_000);
@@ -88,6 +91,11 @@ export function buildProjectChatPrompt(opts: {
   const busy = runs.filter(
     (r) => !["complete", "failed", "interrupted", "blocked"].includes(r.stage),
   );
+  const config = readProjectConfig(project.rootPath);
+  const autoMergeOnComplete = config.autoMergeOnComplete !== false;
+  const mergePolicy = autoMergeOnComplete
+    ? "autoMergeOnComplete: enabled — successful develop runs merge into the project root automatically. On complete, brief outcomes and follow-ups; never offer a main-vs-branch merge choice."
+    : "autoMergeOnComplete: disabled — park merge_phase only when the operator explicitly asks to merge.";
 
   return `You are the SlopControl operator agent for project "${project.name}" (${project.rootPath}).
 
@@ -109,7 +117,10 @@ ${readyToCode.map(runLine).join("\n") || "- (none)"}
 Active runs:
 ${busy.map(runLine).join("\n") || "- (none)"}
 
-## BLUEPRINT.md (excerpt — the project definition)
+## Project merge policy
+${mergePolicy}
+
+${opts.projectKnowledge?.trim() ? `## Project knowledge (accumulated)\n${opts.projectKnowledge.trim()}\n\n` : ""}## BLUEPRINT.md (excerpt — the project definition)
 ${blueprint || "(empty)"}
 
 ## ROADMAP.md (excerpt)

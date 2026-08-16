@@ -43,9 +43,46 @@ export const LlmEndpointSchema = z.object({
   timeoutMs: z.number().positive().optional(),
   reasoningVariant: z.enum(["low", "medium", "high"]).optional(),
   capabilities: LlmCapabilitiesSchema.optional(),
+  /**
+   * Provider name — references a key in providers.json. When set, the
+   * provider's apiKey/config are merged into this endpoint (endpoint wins
+   * on conflict). When omitted, the endpoint uses ${ENV_VAR} substitution.
+   */
+  provider: z.string().optional(),
 });
 
 export type LlmEndpoint = z.infer<typeof LlmEndpointSchema>;
+
+/**
+ * Provider configuration in providers.json. Keys are provider names
+ * (e.g. "ollama-cloud", "openrouter", "local-ollama").
+ */
+export const ProviderConfigSchema = z.object({
+  /** API key for the provider. null for local providers that need no key. */
+  apiKey: z.string().nullable().optional(),
+  /** Default base URL when the endpoint doesn't override it. */
+  defaultBaseUrl: z.string().url().optional(),
+  /** Extra headers merged into every request to this provider. */
+  headers: z.record(z.string(), z.string()).optional(),
+  /** Default timeout for requests to this provider. */
+  timeoutMs: z.number().positive().optional(),
+  /** Default sampling params. */
+  defaultParams: z
+    .object({
+      temperature: z.number().optional(),
+      maxTokens: z.number().optional(),
+      topP: z.number().optional(),
+    })
+    .optional(),
+});
+
+export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
+
+export const ProvidersConfigSchema = z.object({
+  providers: z.record(z.string(), ProviderConfigSchema),
+});
+
+export type ProvidersConfig = z.infer<typeof ProvidersConfigSchema>;
 
 export const AgentRoleSchema = z.enum([
   "research",

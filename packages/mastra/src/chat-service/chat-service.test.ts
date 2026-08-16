@@ -150,15 +150,18 @@ function makeService(opts?: {
   waitPollMs?: number;
   followUpWaitMs?: number;
   waitProgressIntervalMs?: number;
+  getMemory?: ChatServiceDeps["getMemory"];
 }) {
   const dir = mkdtempSync(join(tmpdir(), "slop-chat-svc-"));
   const store = opts?.store ?? makeStore();
   const events: ChatEvent[] = [];
   const service = new ChatService({
     store,
-    getMemory: () => {
-      throw new Error("no memory in tests");
-    },
+    getMemory:
+      opts?.getMemory ??
+      (() => {
+        throw new Error("no memory in tests");
+      }),
     dispatch:
       opts?.dispatch ??
       (async () => ({ content: [{ type: "text", text: "{}" }] })),
@@ -741,7 +744,14 @@ describe("ChatService confirmation gate", () => {
       assert.equal(result.ok, true);
       assert.match(String(result.reply), /in_review/);
       assert.match(String(result.reply), /ready for operator review/);
-      assert.ok(events.some((e) => e.type === "status" && e.summary?.includes("researching")));
+      assert.ok(
+        events.some(
+          (e) =>
+            e.type === "run_awaited" &&
+            e.run?.runId === run.id &&
+            e.run?.stage === "researching",
+        ),
+      );
     } finally {
       cleanup();
     }
@@ -1713,7 +1723,16 @@ describe("awaited runs + run-settled notifications", () => {
   });
 
   it("queues the notification while the conversation is busy and drains after", async () => {
-    const { service, cleanup } = makeService();
+    const saved: unknown[] = [];
+    const { service, cleanup } = makeService({
+      getMemory: () =>
+        ({
+          saveMessages: async (opts: { messages: unknown[] }) => {
+            saved.push(...opts.messages);
+            return { messages: opts.messages };
+          },
+        }) as never,
+    });
     try {
       const conv = service.createConversation({ projectId: "p1" });
       const svc = internals(service);
@@ -1726,13 +1745,41 @@ describe("awaited runs + run-settled notifications", () => {
       svc.busyConversations.add(conv.id);
 
       service.handleRunSettled({ id: "run-x", stage: "complete", projectId: "p1" });
-      // Busy — note queued, not yet drained; awaited state cleared regardless.
       assert.equal(svc.notificationQueue.get(conv.id)?.length, 1);
       assert.equal(svc.awaitedRuns.has(conv.id), false);
 
       svc.busyConversations.delete(conv.id);
       svc.drainNotificationQueue(conv.id);
+      await new Promise((r) => setTimeout(r, 20));
       assert.equal(svc.notificationQueue.has(conv.id), false);
+      assert.equal(saved.length, 2);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("delivers run-settled notifications via memory append without LLM turns", async () => {
+    const saved: unknown[] = [];
+    const { service, events, cleanup } = makeService({
+      getMemory: () =>
+        ({
+          saveMessages: async (opts: { messages: unknown[] }) => {
+            saved.push(...opts.messages);
+            return { messages: opts.messages };
+          },
+        }) as never,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const svc = internals(service);
+      svc.notificationQueue.set(conv.id, [
+        "[Run run-z reached complete. Development finished successfully.]",
+      ]);
+      svc.drainNotificationQueue(conv.id);
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(saved.length, 2);
+      assert.ok(events.some((e) => e.type === "done"));
+      assert.ok(!events.some((e) => e.type === "tool_call"));
     } finally {
       cleanup();
     }
@@ -1784,7 +1831,7 @@ describe("awaited runs + run-settled notifications", () => {
     }
   });
 
-  it("emits periodic run_progress events while the follow-up watcher polls", async () => {
+  it("emits run_progress on stage change, not on every poll tick", async () => {
     const run = makeRun("developing", "run-progress");
     const { service, events, cleanup } = makeService({
       dispatch: async () => ({
@@ -1816,7 +1863,6 @@ describe("awaited runs + run-settled notifications", () => {
         skipSynthetic: true,
       });
 
-      // Let the watcher poll a few intervals, then settle the run.
       await new Promise((r) => setTimeout(r, 120));
       run.stage = "complete";
       const deadline = Date.now() + 800;
@@ -1833,13 +1879,21 @@ describe("awaited runs + run-settled notifications", () => {
           e.run?.runId === run.id &&
           !e.run?.timedOut,
       );
-      assert.ok(
-        progress.length >= 2,
-        `expected periodic progress events, got ${progress.length}`,
+      assert.equal(
+        progress.length,
+        1,
+        "progress fires once when the stage leaves developing",
       );
       assert.ok(
         events.some((e) => e.type === "run_settled" && e.run?.runId === run.id),
         "expected run_settled once the run flips",
+      );
+      const idleStatusTicks = events.filter(
+        (e) => e.type === "status" && e.summary === "developing…",
+      );
+      assert.ok(
+        idleStatusTicks.length <= 1,
+        "should not spam status on every poll interval",
       );
     } finally {
       cleanup();

@@ -442,6 +442,22 @@ function compactHandoff(report: Record<string, unknown>): string {
     lines.push("", "Next steps:");
     for (const r of next.slice(0, 12)) lines.push(`- ${r}`);
   }
+  const merge =
+    report.merge && typeof report.merge === "object" && !Array.isArray(report.merge)
+      ? (report.merge as Record<string, unknown>)
+      : null;
+  if (merge) {
+    lines.push("", "Merge:");
+    if (typeof merge.autoMerged === "boolean") {
+      lines.push(`- autoMerged: ${merge.autoMerged}`);
+    }
+    if (typeof merge.worktreePresent === "boolean") {
+      lines.push(`- worktreePresent: ${merge.worktreePresent}`);
+    }
+    if (typeof merge.branch === "string" && merge.branch.trim()) {
+      lines.push(`- branch: ${merge.branch}`);
+    }
+  }
   if (typeof report.checksSummary === "string" && report.checksSummary.trim()) {
     lines.push("", clipText(report.checksSummary.trim(), 800));
   }
