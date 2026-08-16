@@ -12,6 +12,7 @@ const CHAT_TOOLS = [
   "chat_send",
   "chat_confirm",
   "chat_close",
+  "chat_reopen",
   "chat_delete",
   "chat_models_list",
   "chat_model_set",
@@ -76,6 +77,34 @@ describe("chat MCP tool registry", () => {
       (tool.inputSchema as { required?: string[] }).required,
       ["conversationId"],
     );
+  });
+
+  it("chat_reopen requires conversationId", () => {
+    const tool = SLOPCONTROL_MCP_TOOLS.find((t) => t.name === "chat_reopen");
+    assert.ok(tool);
+    assert.deepEqual(
+      (tool.inputSchema as { required?: string[] }).required,
+      ["conversationId"],
+    );
+  });
+
+  it("chat_reopen POSTs /chats/:id/reopen", async () => {
+    const fetchMock = mock.method(globalThis, "fetch", async () => ({
+      ok: true,
+      text: async () => '{"conversation":{"id":"c1","status":"active"}}',
+    }));
+    try {
+      const result = await dispatchSlopcontrolTool("chat_reopen", {
+        conversationId: "c1",
+      });
+      assert.equal(result.isError, false);
+      assert.match(result.content[0]?.text ?? "", /"status":"active"/);
+      const [url, init] = fetchMock.mock.calls[0]?.arguments ?? [];
+      assert.match(String(url), /\/chats\/c1\/reopen$/);
+      assert.equal((init as RequestInit)?.method, "POST");
+    } finally {
+      fetchMock.mock.restore();
+    }
   });
 
   it("dispatchSlopcontrolTool rejects unknown tools", async () => {

@@ -7881,6 +7881,16 @@ app.post("/chats/:id/close", (req, res) => {
   }
 });
 
+app.post("/chats/:id/reopen", (req, res) => {
+  try {
+    res.json({ conversation: getChatService().reopenConversation(routeParam(req, "id")) });
+  } catch (err) {
+    res
+      .status(chatErrorStatus(err))
+      .json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 function setChatModelHandler(req: express.Request, res: express.Response): void {
   try {
     const { endpointId, modelId } = req.body ?? {};

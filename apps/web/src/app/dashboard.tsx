@@ -151,6 +151,22 @@ type ChatConversation = {
   messageCount?: number;
 };
 
+type ProviderConfig = {
+  apiKey?: string | null;
+  defaultBaseUrl?: string;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+  defaultParams?: {
+    temperature?: number;
+    maxTokens?: number;
+    topP?: number;
+  };
+};
+
+type ProviderList = {
+  providers: Record<string, ProviderConfig>;
+};
+
 export function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("");
@@ -197,6 +213,18 @@ export function Dashboard() {
   const [chatsError, setChatsError] = useState<string | null>(null);
   const [chatTitle, setChatTitle] = useState("");
   const [chatStatusFilter, setChatStatusFilter] = useState<"active" | "closed" | "">("");
+
+  // Provider management (providers.json)
+  const [providerList, setProviderList] = useState<ProviderList | null>(null);
+  const [providersError, setProvidersError] = useState<string | null>(null);
+  const [providerFormName, setProviderFormName] = useState("");
+  const [providerFormApiKey, setProviderFormApiKey] = useState("");
+  const [providerFormBaseUrl, setProviderFormBaseUrl] = useState("");
+  const [providerFormTimeout, setProviderFormTimeout] = useState("");
+  const [providerResult, setProviderResult] = useState<string | null>(null);
+  const [providerTestResult, setProviderTestResult] = useState<
+    Record<string, string>
+  >({});
 
   const stages = [
     "idle",
@@ -332,6 +360,19 @@ export function Dashboard() {
     }
   }
 
+  async function doReopenChat(id: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/chats/${id}/reopen`, { method: "POST" });
+      await refreshConversations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function doDeleteChat(id: string) {
     if (!window.confirm("Delete this conversation?")) return;
     setBusy(true);
@@ -346,10 +387,97 @@ export function Dashboard() {
     }
   }
 
+  async function refreshProviders() {
+    try {
+      const data = await api<ProviderList>("/config/providers");
+      setProviderList(data);
+      setProvidersError(null);
+    } catch (err) {
+      setProvidersError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function doSaveProvider() {
+    if (!providerFormName.trim()) return;
+    setBusy(true);
+    setError(null);
+    setProviderResult(null);
+    try {
+      const body: Record<string, unknown> = {};
+      if (providerFormApiKey.trim()) body.apiKey = providerFormApiKey.trim();
+      if (providerFormBaseUrl.trim())
+        body.defaultBaseUrl = providerFormBaseUrl.trim();
+      if (providerFormTimeout.trim()) {
+        const ms = Number(providerFormTimeout.trim());
+        if (Number.isFinite(ms) && ms > 0) body.timeoutMs = ms;
+      }
+      await api(`/config/providers/${encodeURIComponent(providerFormName.trim())}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
+      setProviderResult(`Saved provider "${providerFormName.trim()}"`);
+      setProviderFormName("");
+      setProviderFormApiKey("");
+      setProviderFormBaseUrl("");
+      setProviderFormTimeout("");
+      await refreshProviders();
+      await refreshFunctionMappings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doRemoveProvider(name: string) {
+    if (!window.confirm(`Remove provider "${name}"?`)) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/config/providers/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      });
+      await refreshProviders();
+      await refreshFunctionMappings();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doTestProvider(name: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const data = await api<{
+        ok: boolean;
+        provider: string;
+        models?: string[];
+        count?: number;
+        error?: string;
+      }>(`/config/providers/${encodeURIComponent(name)}/test`);
+      setProviderTestResult((prev) => ({
+        ...prev,
+        [name]: data.ok
+          ? `ok — ${data.count ?? data.models?.length ?? 0} models`
+          : `error — ${data.error ?? "unknown"}`,
+      }));
+    } catch (err) {
+      setProviderTestResult((prev) => ({
+        ...prev,
+        [name]: `error — ${err instanceof Error ? err.message : String(err)}`,
+      }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     refreshProjects().catch((err: Error) => setError(err.message));
     void refreshFunctionMappings();
     void refreshConversations();
+    void refreshProviders();
   }, []);
 
   useEffect(() => {
@@ -1301,6 +1429,96 @@ export function Dashboard() {
                 </p>
               </div>
             ))}
+
+            <h3>Provider config (providers.json)</h3>
+            {providersError && <p className="error">{providersError}</p>}
+            {providerList ? (
+              <>
+                <table className="models-table">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Base URL</th>
+                      <th>API key</th>
+                      <th>Timeout</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {Object.entries(providerList.providers).map(
+                      ([name, cfg]) => (
+                        <tr key={name}>
+                          <td>
+                            <code>{name}</code>
+                          </td>
+                          <td>
+                            <code>{cfg.defaultBaseUrl ?? "—"}</code>
+                          </td>
+                          <td>{cfg.apiKey ? "***" : "—"}</td>
+                          <td>{cfg.timeoutMs ? `${cfg.timeoutMs}ms` : "—"}</td>
+                          <td>
+                            <div className="row">
+                              <button
+                                className="secondary"
+                                disabled={busy}
+                                onClick={() => void doTestProvider(name)}
+                              >
+                                Test
+                              </button>
+                              <button
+                                className="secondary"
+                                disabled={busy}
+                                onClick={() => void doRemoveProvider(name)}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                            {providerTestResult[name] ? (
+                              <small className="muted">
+                                {providerTestResult[name]}
+                              </small>
+                            ) : null}
+                          </td>
+                        </tr>
+                      ),
+                    )}
+                  </tbody>
+                </table>
+
+                <h4>Add / update provider</h4>
+                <div className="row">
+                  <input
+                    placeholder="Provider name (e.g. openrouter)"
+                    value={providerFormName}
+                    onChange={(e) => setProviderFormName(e.target.value)}
+                  />
+                  <input
+                    placeholder="API key (blank = none/local)"
+                    value={providerFormApiKey}
+                    onChange={(e) => setProviderFormApiKey(e.target.value)}
+                  />
+                  <input
+                    placeholder="Default base URL"
+                    value={providerFormBaseUrl}
+                    onChange={(e) => setProviderFormBaseUrl(e.target.value)}
+                  />
+                  <input
+                    placeholder="Timeout ms (optional)"
+                    value={providerFormTimeout}
+                    onChange={(e) => setProviderFormTimeout(e.target.value)}
+                  />
+                  <button
+                    disabled={busy || !providerFormName.trim()}
+                    onClick={() => void doSaveProvider()}
+                  >
+                    Save provider
+                  </button>
+                </div>
+                {providerResult && <p>{providerResult}</p>}
+              </>
+            ) : (
+              <p>Loading provider config…</p>
+            )}
           </>
         ) : (
           <p>Loading models…</p>
@@ -1379,7 +1597,15 @@ export function Dashboard() {
                     >
                       Close
                     </button>
-                  ) : null}
+                  ) : (
+                    <button
+                      className="secondary"
+                      disabled={busy}
+                      onClick={() => void doReopenChat(c.id)}
+                    >
+                      Reopen
+                    </button>
+                  )}
                   <button
                     className="secondary"
                     disabled={busy}

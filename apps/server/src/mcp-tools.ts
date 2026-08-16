@@ -2063,7 +2063,18 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     },
     {
       name: "chat_close",
-      description: "Close a chat conversation (keeps history; idle chats auto-close).",
+      description:
+        "Close a chat conversation (keeps history; reopen anytime with chat_reopen). Chats idle past 7 days (SLOPCONTROL_CHAT_IDLE_CLOSE_MS) auto-close — except while their awaited run is still live and busy. A closed chat consumes no resources and can be woken months later.",
+      inputSchema: {
+        type: "object",
+        properties: { conversationId: { type: "string" } },
+        required: ["conversationId"],
+      },
+    },
+    {
+      name: "chat_reopen",
+      description:
+        "Re-open a closed chat conversation so the operator can continue the thread. History is preserved; use after auto-idle-close or manual chat_close.",
       inputSchema: {
         type: "object",
         properties: { conversationId: { type: "string" } },
@@ -4755,13 +4766,15 @@ export async function dispatchSlopcontrolTool(
       });
     }
 
-    if (name === "chat_close" || name === "chat_delete") {
+    if (name === "chat_close" || name === "chat_reopen" || name === "chat_delete") {
       return wrap(async () => {
         const id = encodeURIComponent(args.conversationId as string);
         const res =
           name === "chat_close"
             ? await fetch(`${SERVER_URL}/chats/${id}/close`, { method: "POST" })
-            : await fetch(`${SERVER_URL}/chats/${id}`, { method: "DELETE" });
+            : name === "chat_reopen"
+              ? await fetch(`${SERVER_URL}/chats/${id}/reopen`, { method: "POST" })
+              : await fetch(`${SERVER_URL}/chats/${id}`, { method: "DELETE" });
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

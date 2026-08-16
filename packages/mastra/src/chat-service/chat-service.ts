@@ -304,6 +304,18 @@ export class ChatService {
     return closed;
   }
 
+  /** Re-open a closed conversation so the operator can continue the thread. */
+  reopenConversation(id: string): ChatConversation {
+    const conversation = this.getConversation(id);
+    if (conversation.status === "active") return conversation;
+    conversation.status = "active";
+    conversation.closedAt = undefined;
+    conversation.lastActiveAt = new Date().toISOString();
+    this.deps.store.updateConversation(conversation);
+    this.emit(conversation, { type: "status", summary: "reopened" });
+    return conversation;
+  }
+
   deleteConversation(id: string): boolean {
     const conversation = this.deps.store.getConversation(id);
     if (!conversation) return false;
@@ -338,12 +350,26 @@ export class ChatService {
       .filter((m): m is ChatTranscriptMessage => m !== null);
   }
 
-  /** Idle sweep: close active conversations past maxIdleMs. Returns closed. */
+  /**
+   * Idle sweep: close active conversations past maxIdleMs. Returns closed.
+   * A conversation awaiting a run is exempt only while that run still
+   * exists and is busy — a deleted or settled run must not pin the
+   * conversation (and its in-memory wait state) open forever.
+   */
   closeIdleConversations(maxIdleMs: number, now: Date = new Date()): string[] {
     const closed: string[] = [];
     for (const c of this.deps.store.listConversations({ status: "active" })) {
       const idleMs = now.getTime() - Date.parse(c.lastActiveAt);
       if (idleMs < maxIdleMs) continue;
+      const awaited = c.awaitedRun ?? this.awaitedRuns.get(c.id);
+      if (awaited) {
+        const run = this.lookupRun(awaited.runId);
+        if (run && isBusyRunStage(run.stage)) continue;
+        // Stale wait — run gone or settled without a notification reaching
+        // this conversation. Drop it and let the idle rule apply.
+        this.awaitedRuns.delete(c.id);
+        this.deps.store.setAwaitedRun?.(c.id, null);
+      }
       this.clearProceedLatchesForConversation(c.id);
       this.askLatches.delete(c.id);
       this.awaitedRuns.delete(c.id);
@@ -354,6 +380,11 @@ export class ChatService {
       closed.push(c.id);
     }
     return closed;
+  }
+
+  /** Bump idle-close clock without changing title (run activity counts as active). */
+  private bumpConversationActivity(conversationId: string): void {
+    this.deps.store.touchConversation(conversationId);
   }
 
   private runSettledContext(): RunSettledContext {
@@ -546,6 +577,7 @@ export class ChatService {
     userNote: string,
     assistantBrief: string,
   ): Promise<void> {
+    this.bumpConversationActivity(conversation.id);
     const resourceId = conversation.projectId ?? "global";
     const threadId = conversation.id;
     const now = new Date();
@@ -1298,6 +1330,7 @@ export class ChatService {
     };
     this.awaitedRuns.set(conversation.id, awaited);
     this.deps.store.setAwaitedRun?.(conversation.id, awaited);
+    this.bumpConversationActivity(conversation.id);
     this.emit(conversation, {
       type: "run_awaited",
       summary: `waiting for ${kind} run ${extracted.runId}…`,
@@ -1381,6 +1414,7 @@ export class ChatService {
     };
     this.awaitedRuns.set(conversation.id, awaited);
     this.deps.store.setAwaitedRun?.(conversation.id, awaited);
+    this.bumpConversationActivity(conversation.id);
     this.emit(conversation, {
       type: "run_awaited",
       summary: `waiting for ${kind} run ${runId}…`,

@@ -881,6 +881,129 @@ describe("ChatService lifecycle", () => {
     }
   });
 
+  it("closeIdleConversations skips conversations awaiting a live busy run", () => {
+    const now = new Date().toISOString();
+    const liveRun: Run = {
+      id: "run-wait",
+      phaseId: "ph-1",
+      projectId: "p1",
+      stage: "developing",
+      iterationCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      stageTimings: [],
+    };
+    const { service, store, cleanup } = makeService({
+      listRuns: () => [liveRun],
+    });
+    try {
+      const waiting = service.createConversation({ projectId: "p1" });
+      const staleRow = store.getConversation(waiting.id)!;
+      staleRow.lastActiveAt = new Date(Date.now() - 48 * 3600_000).toISOString();
+      staleRow.awaitedRun = {
+        runId: "run-wait",
+        projectId: "p1",
+        kind: "develop",
+        startedAt: new Date().toISOString(),
+      };
+      store.updateConversation(staleRow);
+
+      const closed = service.closeIdleConversations(24 * 3600_000);
+      assert.deepEqual(closed, []);
+      assert.equal(store.getConversation(waiting.id)?.status, "active");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("closeIdleConversations closes conversations whose awaited run is gone", () => {
+    const { service, store, cleanup } = makeService();
+    try {
+      const waiting = service.createConversation({ projectId: "p1" });
+      const staleRow = store.getConversation(waiting.id)!;
+      staleRow.lastActiveAt = new Date(Date.now() - 48 * 3600_000).toISOString();
+      staleRow.awaitedRun = {
+        runId: "run-deleted",
+        projectId: "p1",
+        kind: "develop",
+        startedAt: new Date().toISOString(),
+      };
+      store.updateConversation(staleRow);
+      // In-memory entry with no matching live run must not hold immunity either.
+      const orphan = service.createConversation({ projectId: "p1" });
+      (service as unknown as { awaitedRuns: Map<string, AwaitedRun> }).awaitedRuns.set(
+        orphan.id,
+        {
+          runId: "run-deleted-2",
+          projectId: "p1",
+          kind: "develop",
+          startedAt: new Date().toISOString(),
+        },
+      );
+      const orphanRow = store.getConversation(orphan.id)!;
+      orphanRow.lastActiveAt = new Date(Date.now() - 48 * 3600_000).toISOString();
+      store.updateConversation(orphanRow);
+
+      const closed = service.closeIdleConversations(24 * 3600_000);
+      assert.ok(closed.includes(waiting.id));
+      assert.ok(closed.includes(orphan.id));
+      const row = store.getConversation(waiting.id)!;
+      assert.equal(row.status, "closed");
+      assert.equal(row.awaitedRun, undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("run notifications bump activity so idle close respects recent work", async () => {
+    const { service, store, cleanup } = makeService({
+      getMemory: () =>
+        ({
+          saveMessages: async () => undefined,
+          recall: async () => ({ messages: [] }),
+        }) as never,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const row = store.getConversation(conv.id)!;
+      row.lastActiveAt = new Date(Date.now() - 48 * 3600_000).toISOString();
+      store.updateConversation(row);
+      const staleAt = row.lastActiveAt;
+
+      await (
+        service as unknown as {
+          deliverSystemNotification: (
+            c: ChatConversation,
+            note: string,
+            brief: string,
+          ) => Promise<void>;
+        }
+      ).deliverSystemNotification(conv, "Run finished develop.", "Develop run finished.");
+
+      assert.ok(
+        Date.parse(store.getConversation(conv.id)!.lastActiveAt) >
+          Date.parse(staleAt),
+      );
+      assert.deepEqual(service.closeIdleConversations(24 * 3600_000), []);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("reopenConversation restores a closed thread", () => {
+    const { service, store, cleanup } = makeService();
+    try {
+      const conv = service.createConversation({ projectId: null });
+      service.closeConversation(conv.id);
+      assert.equal(store.getConversation(conv.id)?.status, "closed");
+      const reopened = service.reopenConversation(conv.id);
+      assert.equal(reopened.status, "active");
+      assert.equal(store.getConversation(conv.id)?.closedAt, undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("sendMessage rejects closed conversations", async () => {
     const { service, cleanup } = makeService();
     try {

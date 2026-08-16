@@ -21,7 +21,7 @@ export function resolveChatConversationWatcherConfig(): ChatConversationWatcherC
     pollMs: envInt("SLOPCONTROL_CHAT_WATCHER_INTERVAL_MS", 10 * 60 * 1_000),
     maxIdleMs: envInt(
       "SLOPCONTROL_CHAT_IDLE_CLOSE_MS",
-      24 * 60 * 60 * 1_000,
+      7 * 24 * 60 * 60 * 1_000,
     ),
   };
 }
