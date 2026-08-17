@@ -179,5 +179,10 @@ export * from "./orchestrator/index.js";
 export * from "./orchestrator/diagnosis-memory.js";
 export * from "./orchestrator/project-knowledge.js";
 export * from "./tools/project-tools.js";
+export {
+  getWebSearchStatus,
+  webSearch,
+  type WebSearchStatus,
+} from "./tools/web-tools.js";
 export * from "./chat-service/index.js";
 export * from "./run-stage-broker.js";

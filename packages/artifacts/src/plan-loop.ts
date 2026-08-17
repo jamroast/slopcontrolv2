@@ -891,6 +891,62 @@ export function countAcceptedPlanFeatures(
   return features.filter((f) => f.accepted).length;
 }
 
+export function summarizePlanLoopProgress(opts: {
+  meta: PlanLoopMeta;
+  acceptance?: PlanLoopAcceptance | null;
+  hasPlan?: boolean;
+}): { nextStep: string; blockers: string[] } {
+  const blockers: string[] = [];
+  const { meta, acceptance, hasPlan } = opts;
+
+  if (meta.currentVersion < 1) {
+    blockers.push("No plan version yet — plan_loop_start or plan_loop_retry");
+    return {
+      nextStep: "plan_loop_start or plan_loop_retry",
+      blockers,
+    };
+  }
+
+  if (meta.status === "open") {
+    if (hasPlan === false) {
+      blockers.push("PLAN.md missing for the current version");
+    }
+    const ticked = countAcceptedPlanFeatures(acceptance?.features ?? []);
+    if (ticked < 1) {
+      blockers.push(
+        "No acceptance features ticked — use plan_loop_acceptance or confirm plan_loop_accept (auto-ticks all on confirm)",
+      );
+    }
+    if (blockers.length === 0) {
+      return {
+        nextStep: "plan_loop_accept then plan_loop_promote",
+        blockers: [],
+      };
+    }
+    return {
+      nextStep: "plan_loop_acceptance (optional ticks) then plan_loop_accept",
+      blockers,
+    };
+  }
+
+  if (meta.status === "accepted") {
+    return {
+      nextStep: "plan_loop_promote to create a phase and start research",
+      blockers: [],
+    };
+  }
+
+  if (meta.status === "promoted") {
+    return {
+      nextStep:
+        "Wait for research to reach in_review, then advance_run with the runId from promote",
+      blockers: [],
+    };
+  }
+
+  return { nextStep: "plan_loop_get or list_plan_loops", blockers };
+}
+
 export function formatPlanAcceptancePromptBlock(
   acceptance: PlanLoopAcceptance | null | undefined,
 ): string {
@@ -925,6 +981,8 @@ export function acceptPlanLoop(
   featureTicks?: {
     features?: PlanLoopAcceptanceFeature[];
     acceptedFeatureIds?: string[];
+    /** Chat confirm with no explicit ticks — accept the full checklist. */
+    acceptAllFeatures?: boolean;
   },
 ): PlanLoopMeta {
   const meta = readPlanLoopMeta(projectRoot, loopId);
@@ -957,15 +1015,23 @@ export function acceptPlanLoop(
     nextFeatures: featureTicks?.features,
     acceptedFeatureIds: featureTicks?.acceptedFeatureIds,
   });
-  if (countAcceptedPlanFeatures(features) < 1) {
-    throw new Error(
-      "Accept requires at least one ticked feature (goal, scope, success, …)",
-    );
+  let acceptedFeatures = features;
+  if (countAcceptedPlanFeatures(acceptedFeatures) < 1) {
+    if (featureTicks?.acceptAllFeatures) {
+      acceptedFeatures = acceptance.features.map((f) => ({
+        ...f,
+        accepted: true,
+      }));
+    } else {
+      throw new Error(
+        "Accept requires at least one ticked feature (goal, scope, success, …)",
+      );
+    }
   }
   const now = new Date().toISOString();
   acceptance = {
     version: v,
-    features,
+    features: acceptedFeatures,
     acceptedAt: now,
     updatedAt: now,
   };

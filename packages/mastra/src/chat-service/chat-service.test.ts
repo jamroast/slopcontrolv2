@@ -1267,6 +1267,8 @@ describe("chat tool input schemas", () => {
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.get_agent!.parse({ agentId: "ag1" }));
     assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.design_loop_get!.parse({}));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({ loopId: "l1" }));
+    assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({}));
+    assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_accept!.parse({}));
     assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.ask!.parse({}));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.ask!.parse({ message: "why is this broken?" }));
     assert.ok(

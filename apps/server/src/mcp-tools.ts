@@ -8,6 +8,7 @@ import { formatDurationMs, log } from "@slopcontrol/types";
 import {
   advanceRun,
   formatAdvanceRunResult,
+  getWebSearchStatus,
   stageFromDispatchText,
 } from "@slopcontrol/mastra";
 
@@ -155,6 +156,8 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
       error?: string;
       hint?: string;
       next?: string;
+      nextStep?: string;
+      blockers?: string[];
       phaseId?: string;
       usedScaffold?: boolean;
       conceptualModel?: {
@@ -192,6 +195,10 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
       parsed.usedScaffold ? "usedScaffold: true" : null,
       parsed.hint ? `hint: ${parsed.hint}` : null,
       parsed.next ? `next: ${parsed.next}` : null,
+      parsed.nextStep ? `nextStep: ${parsed.nextStep}` : null,
+      parsed.blockers?.length
+        ? `blockers: ${parsed.blockers.join("; ")}`
+        : null,
       parsed.notes ? `notes: ${parsed.notes}` : null,
       "---",
       plan ? `\`\`\`markdown\n${plan}\n\`\`\`` : body,
@@ -1161,6 +1168,15 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "web_search_status",
+      description:
+        "Diagnostic: which web search providers are configured (Ollama Cloud OLLAMA_API_KEY, Exa EXA_API_KEY) and the fallback order from ~/.slopcontrol/web-search.json.",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
+    {
       name: "npm_registry_status",
       description:
         "Status of SlopControl's private Verdaccio npm registry (url, up, scopes, packages). Auto-starts with the server unless SLOPCONTROL_NPM_REGISTRY=0.",
@@ -1600,7 +1616,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "plan_loop_accept",
       description:
-        "Freeze a plan-loop version + checklist as PLAN_PACK.json (requires ≥1 ticked feature and complete PLAN sections). Rejects usedScaffold / failure-scaffold PLAN.md — call plan_loop_retry until usedScaffold is false. Then call plan_loop_promote.",
+        "Freeze a plan-loop version + checklist as PLAN_PACK.json (requires complete PLAN sections). With no ticks, pass acceptAllFeatures:true to accept the full checklist. Rejects usedScaffold — call plan_loop_retry first. Then call plan_loop_promote (not start_development).",
       inputSchema: {
         type: "object",
         properties: {
@@ -1612,6 +1628,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             items: { type: "string" },
           },
           features: { type: "array", items: { type: "object" } },
+          acceptAllFeatures: { type: "boolean" },
         },
         required: ["projectId", "loopId"],
       },
@@ -3118,6 +3135,7 @@ export async function dispatchSlopcontrolTool(
               version: args.version,
               features: args.features,
               acceptedFeatureIds: args.acceptedFeatureIds,
+              acceptAllFeatures: args.acceptAllFeatures,
             }),
           },
         );
@@ -3394,6 +3412,16 @@ export async function dispatchSlopcontrolTool(
             { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
           ],
           isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "web_search_status") {
+      return wrap(async () => {
+        const status = getWebSearchStatus();
+        return {
+          content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+          isError: false,
         };
       });
     }

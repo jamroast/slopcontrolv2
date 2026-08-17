@@ -66,7 +66,7 @@ cp endpoints.example.json ~/.slopcontrol/endpoints.json
 
 Research, blueprint, and planner Mastra agents can use:
 
-- `web_search` — Exa search (requires `EXA_API_KEY` or `SLOPCONTROL_EXA_API_KEY` in the SlopControl server environment)
+- `web_search` — Ollama Cloud when `OLLAMA_API_KEY` is set (default), else Exa (`EXA_API_KEY` / `SLOPCONTROL_EXA_API_KEY`). Order in `~/.slopcontrol/web-search.json`; diagnose with MCP `web_search_status`.
 - `fetch_url` — HTTPS GET of a public doc URL (no API key; blocks localhost/private IPs)
 
 Develop (OpenCode) uses OpenCode’s `websearch` / `webfetch` when Exa is enabled:

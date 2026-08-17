@@ -137,6 +137,7 @@ import {
   resolvePlanLoopTip,
   readPlanLoopPack,
   summarizePlanConceptualModel,
+  summarizePlanLoopProgress,
   phaseDescriptionFromPlanPack,
   defaultPlanScope,
   phaseDescriptionFromDesignAccept,
@@ -2505,6 +2506,11 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
   const designPack = readPlanLoopPack(project.rootPath, meta.id);
   const acceptanceInScope =
     acceptance?.features.filter((f) => f.accepted).map((f) => f.id) ?? [];
+  const progress = summarizePlanLoopProgress({
+    meta,
+    acceptance,
+    hasPlan: Boolean(plan?.trim()),
+  });
   res.json({
     loop: meta,
     loopId: meta.id,
@@ -2522,6 +2528,8 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
       inScope: acceptanceInScope,
     }),
     versions: buildPlanLoopVersionTree(project.rootPath, meta.id),
+    nextStep: progress.nextStep,
+    blockers: progress.blockers,
   });
 });
 
@@ -2999,6 +3007,7 @@ app.post("/projects/:id/plan-loops/:loopId/accept", (req, res) => {
       acceptedFeatureIds: Array.isArray(req.body?.acceptedFeatureIds)
         ? req.body.acceptedFeatureIds.map(String)
         : undefined,
+      acceptAllFeatures: req.body?.acceptAllFeatures === true,
     });
     const acceptance = readPlanLoopAcceptance(project.rootPath, accepted.id);
     const plan = readPlanLoopPlanMd(

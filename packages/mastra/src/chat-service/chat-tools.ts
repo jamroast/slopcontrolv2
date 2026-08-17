@@ -173,7 +173,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
   }),
   plan_loop_get: z.object({
-    loopId: z.string().min(1),
+    loopId: z.string().min(1).optional(),
     projectId: optionalProject,
   }),
   ask: z.object({
@@ -228,6 +228,32 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     brief: z.string().min(1),
     askId: z.string().min(1).optional(),
     investigateTool: z.enum(["auto", "mastra", "pi"]).optional(),
+    projectId: optionalProject,
+  }),
+  plan_loop_acceptance: z.object({
+    loopId: z.string().min(1).optional(),
+    acceptedFeatureIds: z.array(z.string().min(1)).optional(),
+    features: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          label: z.string().optional(),
+          accepted: z.boolean(),
+        }),
+      )
+      .optional(),
+    projectId: optionalProject,
+  }),
+  plan_loop_accept: z.object({
+    loopId: z.string().min(1).optional(),
+    version: z.number().int().positive().optional(),
+    acceptedFeatureIds: z.array(z.string().min(1)).optional(),
+    projectId: optionalProject,
+  }),
+  plan_loop_promote: z.object({
+    loopId: z.string().min(1).optional(),
+    startResearch: z.boolean().optional(),
+    dependsOn: z.array(z.string()).optional(),
     projectId: optionalProject,
   }),
   design_loop_start: z.object({
@@ -302,11 +328,17 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   design_loop_get:
     "One design loop. Requires loopId from list_design_loops. Use notes; do not paste HTML into the operator reply.",
   plan_loop_get:
-    "One plan loop. Requires loopId from list_plan_loops. Do not poll while a plan_loop live turn is active on this chat — wait for live_settled notification.",
+    "One plan loop. Pass loopId, or omit to use this chat's latched plan loop (from plan_loop_start/continue). Returns nextStep and blockers. Do not poll while a plan_loop live turn is active — wait for live_settled.",
   plan_loop_start:
     "Start a multi-turn plan loop (structured PLAN.md). Requires brief — pass the operator's planning words in brief. Optional investigateTool: auto|mastra|pi. Thorough vs quick intent is LLM-classified. You'll be notified via live_settled when the turn completes — do not poll plan_loop_get.",
   plan_loop_continue:
-    "Revise a plan loop from operator feedback. Requires loopId and message. Notification-driven — do not poll plan_loop_get while running.",
+    "Revise a plan loop from operator feedback. Pass loopId (or omit latched) and message. Notification-driven — do not poll plan_loop_get while running.",
+  plan_loop_acceptance:
+    "Save acceptance checklist ticks (goal, scope, approach, areas, success, risks) before freezing the plan. Pass loopId (or omit latched) and acceptedFeatureIds or features[]. Does not accept the plan by itself.",
+  plan_loop_accept:
+    "Freeze the plan loop as accepted (requires a complete PLAN.md). Pass loopId (or omit latched). On operator confirm with no ticks, all checklist features are auto-ticked. Then call plan_loop_promote — not start_development directly.",
+  plan_loop_promote:
+    "Bind accepted plan to a new phase and start research (returns runId). Pass loopId (or omit latched). After research reaches in_review, use advance_run with that runId — plan_loop_promote does not start development.",
   design_loop_start:
     "Start a look-and-feel design loop (mock HTML). Requires brief — pass the operator's words in brief. Notification-driven when live turn active.",
   ask: "Investigate the project (read source, explain why something is broken). Pass the operator's words through in message — do not replace a page/route/product-gap question with a source-claim checklist. Optional investigateTool: mastra (faster) | pi (thorough) | auto. Thorough vs quick intent in the operator message is classified by the LLM, never keyword-matched; with no expressed intent the fast mastra path runs. Prefer this over gated agent for read-only traces. Requires message. You may pass askId or newAsk; the chat service will choose continue vs a new ask so this never resumes some other open ask on the project.",

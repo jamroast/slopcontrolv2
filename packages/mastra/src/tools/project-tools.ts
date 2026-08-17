@@ -10,7 +10,7 @@ import { join, dirname, relative } from "node:path";
 import { promisify } from "node:util";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
-import { fetchUrlContent, webSearchExa } from "./web-tools.js";
+import { fetchUrlContent, webSearch } from "./web-tools.js";
 
 const execAsync = promisify(exec);
 
@@ -211,16 +211,15 @@ export function createProjectTools(projectDir: string) {
     execute: async ({ url }) => fetchUrlContent(url),
   });
 
-  const webSearch = createTool({
+  const webSearchTool = createTool({
     id: "web_search",
     description:
-      "Search the public web via Exa (requires EXA_API_KEY). Use for current vendor docs, model catalogs, API differences. Prefer repo tools first; cite returned URLs in RESEARCH.md.",
+      "Search the public web (Ollama Cloud when OLLAMA_API_KEY is set, else Exa when EXA_API_KEY is set). Use for current vendor docs, model catalogs, API differences. Prefer repo tools first; cite returned URLs in RESEARCH.md.",
     inputSchema: z.object({
       query: z.string().min(1).describe("Search query"),
       numResults: z.number().int().min(1).max(10).default(5),
     }),
-    execute: async ({ query, numResults }) =>
-      webSearchExa(query, { numResults }),
+    execute: async ({ query, numResults }) => webSearch(query, { numResults }),
   });
 
   return {
@@ -230,6 +229,6 @@ export function createProjectTools(projectDir: string) {
     grepFiles,
     runCommand,
     fetchUrl,
-    webSearch,
+    webSearch: webSearchTool,
   };
 }

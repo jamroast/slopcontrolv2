@@ -4,7 +4,9 @@ import {
   isBlockedIp,
   validateFetchUrl,
   fetchUrlContent,
+  webSearch,
   webSearchExa,
+  webSearchOllama,
   FETCH_URL_MAX_BYTES,
 } from "./web-tools.js";
 
@@ -100,6 +102,138 @@ describe("web_search Exa", () => {
       assert.equal(result.results?.[0]?.url, "https://ollama.com/library/glm-5.2");
     } finally {
       if (prev !== undefined) process.env.EXA_API_KEY = prev;
+      else delete process.env.EXA_API_KEY;
+    }
+  });
+});
+
+describe("web_search Ollama", () => {
+  it("parses Ollama web_search results when key is set", async () => {
+    const prev = process.env.OLLAMA_API_KEY;
+    process.env.OLLAMA_API_KEY = "test-ollama-key";
+    try {
+      const result = await webSearchOllama("what is ollama", {
+        fetchImpl: async (url, init) => {
+          assert.equal(String(url), "https://ollama.com/api/web_search");
+          const headers = init?.headers as Record<string, string>;
+          assert.equal(headers.Authorization, "Bearer test-ollama-key");
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  title: "Ollama",
+                  url: "https://ollama.com",
+                  content: "Run models locally",
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.provider, "ollama");
+      assert.equal(result.results?.[0]?.url, "https://ollama.com");
+    } finally {
+      if (prev !== undefined) process.env.OLLAMA_API_KEY = prev;
+      else delete process.env.OLLAMA_API_KEY;
+    }
+  });
+});
+
+describe("web_search auto fallback", () => {
+  it("falls back from ollama to exa when ollama key is missing", async () => {
+    const prevOllama = process.env.OLLAMA_API_KEY;
+    const prevExa = process.env.EXA_API_KEY;
+    delete process.env.OLLAMA_API_KEY;
+    process.env.EXA_API_KEY = "exa-fallback";
+    try {
+      const result = await webSearch("test query", {
+        config: { provider: "auto", fallback: ["ollama", "exa"] },
+        fetchImpl: async (url) => {
+          if (String(url).includes("ollama.com")) {
+            throw new Error("should not call ollama without key");
+          }
+          return new Response(
+            JSON.stringify({
+              results: [{ title: "Hit", url: "https://example.com", text: "x" }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.provider, "exa");
+    } finally {
+      if (prevOllama !== undefined) process.env.OLLAMA_API_KEY = prevOllama;
+      else delete process.env.OLLAMA_API_KEY;
+      if (prevExa !== undefined) process.env.EXA_API_KEY = prevExa;
+      else delete process.env.EXA_API_KEY;
+    }
+  });
+});
+
+describe("web_search Ollama", () => {
+  it("parses Ollama web_search results when key is set", async () => {
+    const prev = process.env.OLLAMA_API_KEY;
+    process.env.OLLAMA_API_KEY = "test-ollama-key";
+    try {
+      const result = await webSearchOllama("what is ollama", {
+        fetchImpl: async (url, init) => {
+          assert.equal(String(url), "https://ollama.com/api/web_search");
+          const headers = init?.headers as Record<string, string>;
+          assert.equal(headers.Authorization, "Bearer test-ollama-key");
+          return new Response(
+            JSON.stringify({
+              results: [
+                {
+                  title: "Ollama",
+                  url: "https://ollama.com",
+                  content: "Run models locally",
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.provider, "ollama");
+      assert.equal(result.results?.[0]?.url, "https://ollama.com");
+    } finally {
+      if (prev !== undefined) process.env.OLLAMA_API_KEY = prev;
+      else delete process.env.OLLAMA_API_KEY;
+    }
+  });
+});
+
+describe("web_search auto fallback", () => {
+  it("falls back from ollama to exa when ollama key is missing", async () => {
+    const prevOllama = process.env.OLLAMA_API_KEY;
+    const prevExa = process.env.EXA_API_KEY;
+    delete process.env.OLLAMA_API_KEY;
+    process.env.EXA_API_KEY = "exa-fallback";
+    try {
+      const result = await webSearch("test query", {
+        config: { provider: "auto", fallback: ["ollama", "exa"] },
+        fetchImpl: async (url) => {
+          if (String(url).includes("ollama.com")) {
+            throw new Error("should not call ollama without key");
+          }
+          return new Response(
+            JSON.stringify({
+              results: [{ title: "Hit", url: "https://example.com", text: "x" }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        },
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.provider, "exa");
+    } finally {
+      if (prevOllama !== undefined) process.env.OLLAMA_API_KEY = prevOllama;
+      else delete process.env.OLLAMA_API_KEY;
+      if (prevExa !== undefined) process.env.EXA_API_KEY = prevExa;
       else delete process.env.EXA_API_KEY;
     }
   });

@@ -84,6 +84,13 @@ import {
   parseAskStatusFromDispatch,
   type AskResumeLatch,
 } from "./ask-routing.js";
+import {
+  hasPlanAcceptanceTicks,
+  parseLoopIdFromDispatch,
+  parsePlanLoopStatusFromDispatch,
+  PLAN_LOOP_ID_DEPENDENT_TOOLS,
+  type PlanResumeLatch,
+} from "./plan-routing.js";
 import type {
   AwaitedLiveTurn,
   AwaitedRun,
@@ -210,6 +217,8 @@ export class ChatService {
   >();
   /** Last ask this conversation started or continued — not project latestOpenAsk. */
   private readonly askLatches = new Map<string, AskResumeLatch>();
+  /** Last plan loop this conversation started or continued. */
+  private readonly planLatches = new Map<string, PlanResumeLatch>();
   /** Operator utterance for the in-flight sendMessage (ask routing). */
   private turnOperatorMessage = "";
   /**
@@ -327,6 +336,7 @@ export class ChatService {
     const conversation = this.getConversation(id);
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
+    this.planLatches.delete(id);
     this.awaitedRuns.delete(id);
     this.awaitedLiveTurns.delete(id);
     this.deliveredLiveNotifications.delete(id);
@@ -355,6 +365,7 @@ export class ChatService {
     if (!conversation) return false;
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
+    this.planLatches.delete(id);
     this.awaitedRuns.delete(id);
     this.awaitedLiveTurns.delete(id);
     this.deliveredRunNotifications.delete(id);
@@ -408,6 +419,7 @@ export class ChatService {
       }
       this.clearProceedLatchesForConversation(c.id);
       this.askLatches.delete(c.id);
+      this.planLatches.delete(c.id);
       this.awaitedRuns.delete(c.id);
       this.awaitedLiveTurns.delete(c.id);
       this.deliveredLiveNotifications.delete(c.id);
@@ -1371,6 +1383,44 @@ export class ChatService {
     return { ...args, askId: latch.askId };
   }
 
+  private resolvePlanLatch(conversationId: string): PlanResumeLatch | undefined {
+    return this.planLatches.get(conversationId);
+  }
+
+  private fillLoopIdFromLatch(
+    conversationId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (!PLAN_LOOP_ID_DEPENDENT_TOOLS.has(tool)) return args;
+    const existing =
+      typeof args.loopId === "string" ? args.loopId.trim() : "";
+    if (existing) return args;
+    const latch = this.resolvePlanLatch(conversationId);
+    if (!latch?.loopId) return args;
+    return { ...args, loopId: latch.loopId };
+  }
+
+  private backfillPlanAcceptArgs(
+    tool: string,
+    args: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (tool !== "plan_loop_accept") return args;
+    if (hasPlanAcceptanceTicks(args)) return args;
+    return { ...args, acceptAllFeatures: true };
+  }
+
+  private fillLatchedToolArgs(
+    conversationId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ): Record<string, unknown> {
+    let next = this.fillAskIdFromLatch(conversationId, tool, args);
+    next = this.fillLoopIdFromLatch(conversationId, tool, next);
+    next = this.backfillPlanAcceptArgs(tool, next);
+    return next;
+  }
+
   /**
    * LLM classification for ask continue-vs-new. Throws on LLM/parse failure
    * so the caller can fall back to deterministic heuristics.
@@ -1452,11 +1502,28 @@ export class ChatService {
           ],
         };
       }
+    } else if (PLAN_LOOP_ID_DEPENDENT_TOOLS.has(name)) {
+      nextArgs = this.fillLoopIdFromLatch(conversation.id, name, args);
+      nextArgs = this.backfillPlanAcceptArgs(name, nextArgs);
+      const filled =
+        typeof nextArgs.loopId === "string" ? nextArgs.loopId.trim() : "";
+      if (!filled) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "No loopId: this chat has no latched plan loop. Call plan_loop_start first or pass loopId.",
+            },
+          ],
+        };
+      }
     }
 
     const result = await this.deps.dispatch(name, nextArgs);
     if (!result.isError) {
       this.rememberAskFromDispatch(conversation, name, nextArgs, result);
+      this.rememberPlanFromDispatch(conversation, name, nextArgs, result);
     }
     return result;
   }
@@ -1591,6 +1658,46 @@ export class ChatService {
       title,
       lastUserLine: this.turnOperatorMessage.trim() || undefined,
       status: status || "open",
+    });
+  }
+
+  private rememberPlanFromDispatch(
+    conversation: ChatConversation,
+    name: string,
+    args: Record<string, unknown>,
+    result: ChatToolResult,
+  ): void {
+    const raw = result.content.map((c) => c.text).join("\n");
+    if (name === "plan_loop_promote") {
+      const id =
+        parseLoopIdFromDispatch(raw) ||
+        (typeof args.loopId === "string" ? args.loopId : "");
+      const latch = this.planLatches.get(conversation.id);
+      if (latch && (!id || latch.loopId === id)) {
+        this.planLatches.delete(conversation.id);
+      }
+      return;
+    }
+    if (
+      name !== "plan_loop_start" &&
+      name !== "plan_loop_continue" &&
+      name !== "plan_loop_accept"
+    ) {
+      return;
+    }
+    const loopId =
+      parseLoopIdFromDispatch(raw) ||
+      (typeof args.loopId === "string" ? args.loopId.trim() : "");
+    if (!loopId) return;
+    const status = parsePlanLoopStatusFromDispatch(raw);
+    const title =
+      typeof args.brief === "string" && args.brief.trim()
+        ? args.brief.trim().split("\n")[0]?.slice(0, 80)
+        : this.planLatches.get(conversation.id)?.title;
+    this.planLatches.set(conversation.id, {
+      loopId,
+      title,
+      status: status || (name === "plan_loop_accept" ? "accepted" : "open"),
     });
   }
 
@@ -2083,7 +2190,7 @@ export class ChatService {
         this.requestConfirmation(
           conversation,
           tool,
-          this.fillAskIdFromLatch(conversation.id, tool, args),
+          this.fillLatchedToolArgs(conversation.id, tool, args),
         ),
       onFreeToolResult: (name, _args, rawText, isError) => {
         if (isError || name !== "wait_for_run") return;

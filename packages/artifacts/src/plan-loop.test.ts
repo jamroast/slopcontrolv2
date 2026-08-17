@@ -19,6 +19,7 @@ import {
   PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR,
   scaffoldPlanDocument,
   seedPlanLoopAcceptance,
+  summarizePlanLoopProgress,
   validatePlanDocument,
   writePlanLoopMeta,
   writePlanLoopVersion,
@@ -194,6 +195,47 @@ describe("plan-loop", () => {
     });
     assert.match(bound, /PLAN CONTRACT/);
     assert.match(bound, /form-bubble/);
+  });
+
+  it("acceptAllFeatures ticks the full checklist when none were passed", () => {
+    const root = mkdtempSync(join(tmpdir(), "plan-loop-accept-all-"));
+    roots.push(root);
+    const meta = createPlanLoopMeta({
+      projectId: "p1",
+      brief: "Fix composer submit",
+    });
+    writePlanLoopMeta(root, meta);
+    writePlanLoopVersion({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      plan: GOOD_PLAN,
+      notes: "ok",
+      request: meta.brief,
+    });
+    seedPlanLoopAcceptance({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+    });
+    const accepted = acceptPlanLoop(root, meta.id, 1, {
+      acceptAllFeatures: true,
+    });
+    assert.equal(accepted.status, "accepted");
+  });
+
+  it("summarizePlanLoopProgress guides open loops without ticks", () => {
+    const meta = createPlanLoopMeta({ projectId: "p1", brief: "x" });
+    const progress = summarizePlanLoopProgress({
+      meta: { ...meta, currentVersion: 1 },
+      acceptance: {
+        version: 1,
+        features: [{ id: "goal", label: "Goal", accepted: false }],
+      },
+      hasPlan: true,
+    });
+    assert.ok(progress.blockers.length > 0);
+    assert.match(progress.nextStep, /plan_loop_accept/);
   });
 
   it("scaffoldPlanDocument includes required sections", () => {
