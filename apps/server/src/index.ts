@@ -230,6 +230,23 @@ function getChatService(): ChatService {
       onEndpointsChanged: () => clearSlopcontrolRuntimeCache(),
       subscribeRunUpdates: (runId, listener) =>
         runStageBroker.subscribe(runId, listener),
+      subscribeLiveTurnUpdates: (listener) =>
+        liveTurns.subscribe((event, turn) =>
+          listener(
+            {
+              type: event.type,
+              summary: "summary" in event ? event.summary : undefined,
+              tool: "tool" in event ? event.tool : undefined,
+            },
+            {
+              turnId: turn.turnId,
+              kind: turn.kind,
+              sessionId: turn.sessionId,
+              projectId: turn.projectId,
+              status: turn.status,
+            },
+          ),
+        ),
     });
   }
   return chatServiceInstance;
@@ -2516,13 +2533,22 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
   }
   const brief = String(req.body?.brief ?? req.body?.message ?? "").trim();
   if (!brief) {
-    res.status(400).json({ error: "brief is required" });
+    res.status(400).json({
+      error: "brief is required",
+      hint: "Pass the operator's planning message as brief (chat agents often omit this).",
+    });
     return;
   }
   const phaseId =
     typeof req.body?.phaseId === "string" ? req.body.phaseId.trim() : undefined;
   const askId =
     typeof req.body?.askId === "string" ? req.body.askId.trim() : undefined;
+  const investigateTool =
+    req.body?.investigateTool === "auto" ||
+    req.body?.investigateTool === "mastra" ||
+    req.body?.investigateTool === "pi"
+      ? req.body.investigateTool
+      : undefined;
   const scope =
     req.body?.scope && typeof req.body.scope === "object"
       ? {
@@ -2578,6 +2604,7 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
         loopId: meta.id,
         brief,
         version,
+        investigateTool,
         listProjects: () => store.listProjects(),
         dataDir: defaultDataDir(),
         abortSignal: bound.signal,
@@ -2706,6 +2733,12 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
     res.status(400).json({ error: "message is required" });
     return;
   }
+  const investigateTool =
+    req.body?.investigateTool === "auto" ||
+    req.body?.investigateTool === "mastra" ||
+    req.body?.investigateTool === "pi"
+      ? req.body.investigateTool
+      : undefined;
   const tip = resolvePlanLoopTip(project.rootPath, working.id);
   const baseRaw = req.body?.baseVersion;
   const baseVersion =
@@ -2769,6 +2802,7 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
         message,
         previousPlan: previousPlan ?? undefined,
         version,
+        investigateTool,
         listProjects: () => store.listProjects(),
         dataDir: defaultDataDir(),
         abortSignal: bound.signal,
@@ -8069,6 +8103,7 @@ app.listen(PORT, () => {
   // Recover any in-flight awaited runs that survived a server restart
   try {
     getChatService().recoverAwaitedRuns();
+    getChatService().recoverAwaitedLiveTurns();
   } catch (err) {
     log.warn("chat", "recoverAwaitedRuns failed", {
       error: err instanceof Error ? err.message : String(err),

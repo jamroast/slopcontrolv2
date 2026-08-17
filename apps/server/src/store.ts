@@ -496,6 +496,16 @@ export class SlopStore {
     this.updateConversation(conversation);
   }
 
+  setAwaitedLiveTurn(
+    conversationId: string,
+    awaited: import("@slopcontrol/types").AwaitedLiveTurn | null,
+  ): void {
+    const conversation = this.getConversation(conversationId);
+    if (!conversation) return;
+    conversation.awaitedLiveTurn = awaited ?? undefined;
+    this.updateConversation(conversation);
+  }
+
   listAgents(projectId: string): AgentSession[] {
     return this.data.agents
       .filter((agent) => agent.projectId === projectId)

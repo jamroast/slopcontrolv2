@@ -85,6 +85,7 @@ import {
   type AskResumeLatch,
 } from "./ask-routing.js";
 import type {
+  AwaitedLiveTurn,
   AwaitedRun,
   ChatContextDeps,
   ChatEvent,
@@ -95,6 +96,14 @@ import type {
   ConversationStore,
   PendingAction,
 } from "./types.js";
+import {
+  backfillLoopStartBrief,
+  LIVE_TURN_ASYNC_TOOLS,
+  liveTurnKindForTool,
+  liveTurnStartedMessage,
+  sessionIdFromLiveTurnArgs,
+  type LiveTurnProgressEvent,
+} from "./live-turn-chat.js";
 
 const DEFAULT_CONFIRM_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_TURN_TIMEOUT_MS = 720_000;
@@ -142,6 +151,19 @@ export interface ChatServiceDeps {
   subscribeRunUpdates?: (
     runId: string,
     listener: (update: RunStageUpdate) => void,
+  ) => () => void;
+  /** Subscribe to interactive live-turn progress (plan/design/ask/agent). */
+  subscribeLiveTurnUpdates?: (
+    listener: (
+      event: LiveTurnProgressEvent,
+      turn: {
+        turnId: string;
+        kind: AwaitedLiveTurn["kind"];
+        sessionId: string;
+        projectId: string;
+        status: string;
+      },
+    ) => void,
   ) => () => void;
 }
 
@@ -202,6 +224,10 @@ export class ChatService {
   private readonly notificationQueue = new Map<string, string[]>();
   /** Dedupe settlement delivery when event + poll paths race. */
   private readonly deliveredRunNotifications = new Map<string, Set<string>>();
+  /** Live turns (plan/design loops) this chat awaits — event-driven, no polling. */
+  private readonly awaitedLiveTurns = new Map<string, AwaitedLiveTurn>();
+  private readonly deliveredLiveNotifications = new Map<string, Set<string>>();
+  private readonly unsubscribeLiveTurns?: () => void;
 
   constructor(private readonly deps: ChatServiceDeps) {
     this.emitter.setMaxListeners(100);
@@ -215,6 +241,11 @@ export class ChatService {
       followUpMs: deps.followUpWaitMs,
       progressIntervalMs: deps.waitProgressIntervalMs,
     };
+    if (deps.subscribeLiveTurnUpdates) {
+      this.unsubscribeLiveTurns = deps.subscribeLiveTurnUpdates((event, turn) => {
+        this.handleLiveTurnProgress(event, turn);
+      });
+    }
   }
 
   /** Effective wait windows for a run kind: instance overrides beat WAIT_CONFIG. */
@@ -297,8 +328,11 @@ export class ChatService {
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
     this.awaitedRuns.delete(id);
+    this.awaitedLiveTurns.delete(id);
+    this.deliveredLiveNotifications.delete(id);
     this.notificationQueue.delete(id);
     this.deps.store.setAwaitedRun?.(id, null);
+    this.deps.store.setAwaitedLiveTurn?.(id, null);
     const closed = this.deps.store.closeConversation(id) ?? conversation;
     this.emit(closed, { type: "closed" });
     return closed;
@@ -322,8 +356,10 @@ export class ChatService {
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
     this.awaitedRuns.delete(id);
-    this.notificationQueue.delete(id);
+    this.awaitedLiveTurns.delete(id);
     this.deliveredRunNotifications.delete(id);
+    this.deliveredLiveNotifications.delete(id);
+    this.notificationQueue.delete(id);
     void this.deps
       .getMemory()
       .deleteThread(conversation.id)
@@ -373,8 +409,11 @@ export class ChatService {
       this.clearProceedLatchesForConversation(c.id);
       this.askLatches.delete(c.id);
       this.awaitedRuns.delete(c.id);
+      this.awaitedLiveTurns.delete(c.id);
+      this.deliveredLiveNotifications.delete(c.id);
       this.notificationQueue.delete(c.id);
       this.deps.store.setAwaitedRun?.(c.id, null);
+      this.deps.store.setAwaitedLiveTurn?.(c.id, null);
       this.deps.store.closeConversation(c.id);
       this.emit(c, { type: "closed", summary: "idle timeout" });
       closed.push(c.id);
@@ -503,6 +542,242 @@ export class ChatService {
         kind,
       },
     });
+  }
+
+  private registerAwaitedLiveTurn(
+    conversation: ChatConversation,
+    tool: string,
+    args: Record<string, unknown>,
+  ): void {
+    const kind = liveTurnKindForTool(tool);
+    if (!kind) return;
+    const projectId =
+      conversation.projectId ??
+      (typeof args.projectId === "string" ? args.projectId.trim() : "");
+    if (!projectId) return;
+    const sessionId = sessionIdFromLiveTurnArgs(tool, args);
+    const awaited: AwaitedLiveTurn = {
+      kind,
+      projectId,
+      sessionId,
+      turnId: undefined,
+      startedAt: new Date().toISOString(),
+    };
+    this.awaitedLiveTurns.set(conversation.id, awaited);
+    this.deps.store.setAwaitedLiveTurn?.(conversation.id, awaited);
+    this.bumpConversationActivity(conversation.id);
+    this.emit(conversation, {
+      type: "live_awaited",
+      summary: `waiting for ${kind} turn…`,
+      live: {
+        kind,
+        projectId,
+        sessionId,
+        status: "running",
+      },
+    });
+  }
+
+  hasActiveLiveTurn(conversationId: string, loopId?: string): boolean {
+    const awaited = this.awaitedLiveTurns.get(conversationId);
+    if (!awaited) return false;
+    if (loopId && awaited.sessionId && awaited.sessionId !== loopId) {
+      return false;
+    }
+    return true;
+  }
+
+  private conversationsAwaitingLiveTurn(turn: {
+    turnId: string;
+    kind: AwaitedLiveTurn["kind"];
+    sessionId: string;
+    projectId: string;
+  }): string[] {
+    const matched = new Set<string>();
+    // Sessions already claimed by any conversation — an unbound await must
+    // not steal progress for a turn another chat is bound to.
+    const boundSessions = new Set(
+      [...this.awaitedLiveTurns.values()]
+        .map((a) => a.sessionId)
+        .filter((s): s is string => Boolean(s)),
+    );
+    const fits = (awaited: AwaitedLiveTurn, conversationId: string) => {
+      if (awaited.kind !== turn.kind) return;
+      if (awaited.projectId !== turn.projectId) return;
+      if (awaited.turnId && awaited.turnId !== turn.turnId) return;
+      if (
+        awaited.sessionId &&
+        turn.sessionId &&
+        awaited.sessionId !== turn.sessionId
+      ) {
+        return;
+      }
+      if (
+        !awaited.sessionId &&
+        turn.sessionId &&
+        boundSessions.has(turn.sessionId)
+      ) {
+        return;
+      }
+      matched.add(conversationId);
+    };
+    for (const [conversationId, awaited] of this.awaitedLiveTurns) {
+      fits(awaited, conversationId);
+    }
+    for (const c of this.deps.store.listConversations({ status: "active" })) {
+      const persisted = c.awaitedLiveTurn;
+      if (!persisted) continue;
+      this.awaitedLiveTurns.set(c.id, persisted);
+      fits(persisted, c.id);
+    }
+    return [...matched];
+  }
+
+  private handleLiveTurnProgress(
+    event: LiveTurnProgressEvent,
+    turn: {
+      turnId: string;
+      kind: AwaitedLiveTurn["kind"];
+      sessionId: string;
+      projectId: string;
+      status: string;
+    },
+  ): void {
+    if (turn.status !== "running") return;
+    const summary =
+      event.type === "status"
+        ? String(event.summary ?? "").trim()
+        : event.type === "tool_call" || event.type === "tool_result"
+          ? `${event.type}: ${event.tool ?? ""} ${event.summary ?? ""}`.trim()
+          : "";
+    if (!summary || summary === "step") return;
+
+    for (const conversationId of this.conversationsAwaitingLiveTurn(turn)) {
+      const conversation = this.getConversation(conversationId);
+      const awaited = this.awaitedLiveTurns.get(conversationId);
+      if (!awaited) continue;
+      const next: AwaitedLiveTurn = {
+        ...awaited,
+        turnId: turn.turnId,
+        sessionId: awaited.sessionId || turn.sessionId || undefined,
+      };
+      this.awaitedLiveTurns.set(conversationId, next);
+      this.deps.store.setAwaitedLiveTurn?.(conversationId, next);
+      this.emit(conversation, {
+        type: "live_progress",
+        summary: summary.slice(0, 240),
+        live: {
+          turnId: turn.turnId,
+          kind: turn.kind,
+          sessionId: turn.sessionId,
+          projectId: turn.projectId,
+          status: turn.status,
+        },
+      });
+    }
+  }
+
+  private async completeAwaitedLiveTurnForConversation(
+    conversation: ChatConversation,
+    tool: string,
+    resultText: string,
+    isError: boolean,
+  ): Promise<void> {
+    const awaited = this.awaitedLiveTurns.get(conversation.id);
+    if (!awaited) return;
+    // Per-turn key: turnId once bound; startedAt nonce before that so two
+    // consecutive same-shape starts don't collide on "start".
+    const dedupeKey = awaited.turnId
+      ? `${awaited.turnId}:${isError ? "err" : "ok"}`
+      : `${awaited.kind}:${awaited.sessionId ?? "start"}:${awaited.startedAt}:${isError ? "err" : "ok"}`;
+    const seen =
+      this.deliveredLiveNotifications.get(conversation.id) ??
+      new Set<string>();
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    this.deliveredLiveNotifications.set(conversation.id, seen);
+
+    this.awaitedLiveTurns.delete(conversation.id);
+    this.deps.store.setAwaitedLiveTurn?.(conversation.id, null);
+
+    const elapsedMs = Date.now() - Date.parse(awaited.startedAt);
+    this.emit(conversation, {
+      type: "live_settled",
+      summary: isError ? `${tool} failed` : `${tool} complete`,
+      text: resultText.slice(0, 500),
+      live: {
+        turnId: awaited.turnId,
+        kind: awaited.kind,
+        sessionId: awaited.sessionId,
+        projectId: awaited.projectId,
+        status: isError ? "failed" : "done",
+        elapsedMs,
+        isError,
+      },
+    });
+
+    const notify = isError
+      ? `[live turn ${tool} FAILED]\n${resultText.slice(0, 3_000)}`
+      : `[live turn ${tool} settled]\n${resultText.slice(0, 3_000)}`;
+    const existing = this.notificationQueue.get(conversation.id) ?? [];
+    existing.push(notify);
+    this.notificationQueue.set(conversation.id, existing);
+    if (!this.busyConversations.has(conversation.id)) {
+      this.drainNotificationQueue(conversation.id);
+    }
+  }
+
+  private runAsyncLiveTurnDispatch(
+    conversation: ChatConversation,
+    tool: string,
+    args: Record<string, unknown>,
+  ): void {
+    void (async () => {
+      try {
+        const result = await this.dispatchRouted(conversation, tool, args);
+        const text = formatChatDispatchResult(result, tool);
+        // Single settlement write: the notification drained in
+        // completeAwaitedLiveTurnForConversation is the Memory record — no
+        // follow-up synthetic turn, or the thread gets the result twice.
+        await this.completeAwaitedLiveTurnForConversation(
+          conversation,
+          tool,
+          text,
+          Boolean(result.isError),
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        await this.completeAwaitedLiveTurnForConversation(
+          conversation,
+          tool,
+          msg,
+          true,
+        );
+      }
+    })();
+  }
+
+  /**
+   * Startup recovery: a persisted awaitedLiveTurn is always orphaned — the
+   * async dispatch and the server-side liveTurns registry are in-process, so
+   * the turn died with the old process. Clear it and tell the operator to
+   * re-issue the command (otherwise the chat waits forever and the
+   * tool-call guard keeps plan_loop_get / design_loop_get disabled).
+   */
+  recoverAwaitedLiveTurns(): void {
+    for (const c of this.deps.store.listConversations({ status: "active" })) {
+      const awaited = c.awaitedLiveTurn;
+      if (!awaited) continue;
+      this.deps.store.setAwaitedLiveTurn?.(c.id, null);
+      const existing = this.notificationQueue.get(c.id) ?? [];
+      existing.push(
+        `[live turn interrupted] The ${awaited.kind} turn was cut off by a server restart — re-issue the plan/design command.`,
+      );
+      this.notificationQueue.set(c.id, existing);
+      if (!this.busyConversations.has(c.id)) {
+        this.drainNotificationQueue(c.id);
+      }
+    }
   }
 
   private trackLifecycleRunBeforeDispatch(
@@ -922,6 +1197,31 @@ export class ChatService {
     }
 
     this.trackLifecycleRunBeforeDispatch(conversation, action.tool, action.args);
+
+    if (LIVE_TURN_ASYNC_TOOLS.has(action.tool)) {
+      this.registerAwaitedLiveTurn(conversation, action.tool, action.args);
+      this.runAsyncLiveTurnDispatch(conversation, action.tool, action.args);
+      const text = liveTurnStartedMessage(action.tool);
+      this.emit(conversation, {
+        type: "confirm_resolved",
+        tool: action.tool,
+        token: opts.token,
+        approved: true,
+      });
+      this.emit(conversation, {
+        type: "tool_result",
+        tool: action.tool,
+        summary: text.slice(0, 200),
+      });
+      if (!opts.skipSynthetic) {
+        await this.runSyntheticTurn(
+          conversation,
+          `[operator CONFIRMED ${action.tool}] ${text}`,
+        );
+      }
+      return { ok: true, reply: text };
+    }
+
     const result = await this.dispatchRouted(conversation, action.tool, action.args);
     let text = formatChatDispatchResult(result, action.tool);
     if (!result.isError) {
@@ -1119,6 +1419,24 @@ export class ChatService {
     let nextArgs = args;
     if (name === "ask") {
       nextArgs = await this.routeAskArgs(conversation, args);
+    } else if (name === "plan_loop_start" || name === "design_loop_start") {
+      nextArgs = backfillLoopStartBrief(
+        args,
+        this.turnOperatorMessage.trim(),
+      );
+      const brief =
+        typeof nextArgs.brief === "string" ? nextArgs.brief.trim() : "";
+      if (!brief) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `${name} requires brief — pass the operator's planning words in brief.`,
+            },
+          ],
+        };
+      }
     } else if (ASK_ID_DEPENDENT_TOOLS.has(name)) {
       nextArgs = this.fillAskIdFromLatch(conversation.id, name, args);
       const filled =
@@ -1714,7 +2032,10 @@ export class ChatService {
     opts: { synthetic: boolean },
   ): Promise<void> {
     const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
-    const toolGuard = createToolCallGuard();
+    const toolGuard = createToolCallGuard({
+      hasActiveLiveTurn: (loopId) =>
+        this.hasActiveLiveTurn(conversation.id, loopId),
+    });
     const override = conversation.modelOverride;
     const model = override
       ? resolveConversationModelOverride(registry, override)

@@ -2919,6 +2919,21 @@ export async function dispatchSlopcontrolTool(
     if (name === "plan_loop_start") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
+        const brief = String(args.brief ?? args.message ?? "").trim();
+        if (!brief) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error: "brief is required",
+                  hint: "Pass the operator's planning message as brief.",
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops?stream=1`,
           {
@@ -2928,9 +2943,10 @@ export async function dispatchSlopcontrolTool(
               Accept: "text/event-stream",
             },
             body: JSON.stringify({
-              brief: args.brief,
+              brief,
               askId: args.askId,
               scope: args.scope,
+              investigateTool: args.investigateTool,
             }),
           },
         );

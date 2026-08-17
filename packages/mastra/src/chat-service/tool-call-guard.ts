@@ -26,13 +26,28 @@ export type ToolCallGuard = {
   disabledTools: () => ReadonlySet<string>;
 };
 
+export type ToolCallGuardOptions = {
+  /** When a plan/design live turn is active, block plan_loop_get polling. */
+  hasActiveLiveTurn?: (loopId?: string) => boolean;
+};
+
 /** Detect repeated identical read-only tool calls in one agent turn. */
-export function createToolCallGuard(): ToolCallGuard {
+export function createToolCallGuard(
+  opts: ToolCallGuardOptions = {},
+): ToolCallGuard {
   const counts = new Map<string, number>();
   const disabled = new Set<string>();
 
   return {
     check(tool, args) {
+      if (
+        (tool === "plan_loop_get" || tool === "design_loop_get") &&
+        opts.hasActiveLiveTurn?.(
+          typeof args.loopId === "string" ? args.loopId : undefined,
+        )
+      ) {
+        return `${tool} is disabled while a live turn is active on this chat — wait for live_settled instead of polling.`;
+      }
       if (disabled.has(tool)) {
         return `Tool ${tool} is disabled for this turn after a repeated identical call. Answer from findings already in this turn.`;
       }

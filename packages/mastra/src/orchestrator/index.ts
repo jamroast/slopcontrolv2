@@ -256,6 +256,9 @@ import {
   chatWithImages,
   classifyContinueIntentViaLlm,
   classifyPlanContinueIntentViaLlm,
+  classifyPlanStartIntentViaLlm,
+  PLAN_START_INTENT_DEFAULT,
+  type PlanStartIntent,
   classifyDependencyIntentViaLlm,
   classifyElementHonorViaLlm,
   classifyVerifyFailureViaLlm,
@@ -283,6 +286,7 @@ import {
 } from "./ask-stream.js";
 import {
   buildAskAlignJudgePrompt,
+  buildPlanInvestigateJudgePrompt,
   buildDevelopCompletionJudgePrompt,
   buildDevelopJudgePrompt,
   buildJudgeExtensionPrompt,
@@ -601,6 +605,7 @@ export interface PlanLoopGenerateInput {
   message?: string;
   previousPlan?: string;
   version: number;
+  investigateTool?: "auto" | "mastra" | "pi";
   listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
   dataDir?: string;
   onProgress?: LiveProgressCallback;
@@ -2713,6 +2718,126 @@ ${blueprintContractPromptBlock()}`;
     }
   }
 
+  private async runPlanInvestigateAndJudge(input: {
+    project: Project;
+    loopId: string;
+    message: string;
+    investigateTool?: "auto" | "mastra" | "pi";
+    engineIntent?: "auto" | "mastra" | "pi";
+    listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+    dataDir?: string;
+    onProgress?: LiveProgressCallback;
+    abortSignal?: AbortSignal;
+  }): Promise<string> {
+    const config = readProjectConfig(input.project.rootPath);
+    const turnOverride = parseAskInvestigateTool(input.investigateTool);
+    let intent: "auto" | "mastra" | "pi" = input.engineIntent ?? "auto";
+    if (
+      turnOverride !== "mastra" &&
+      turnOverride !== "pi" &&
+      intent === "auto"
+    ) {
+      intent = await this.classifyAskInvestigateIntent(input.message);
+    }
+    const engine = resolveAskInvestigateEngine({
+      turnOverride,
+      intent,
+      projectPreference: config.askInvestigateTool ?? "auto",
+    });
+    input.onProgress?.({
+      type: "status",
+      summary: `plan investigating (${engine})`,
+    });
+
+    const askLike: AskTurnInput = {
+      project: input.project,
+      askId: input.loopId,
+      message: input.message,
+      history: [],
+      onProgress: input.onProgress,
+      abortSignal: input.abortSignal,
+      listProjects: input.listProjects,
+      dataDir: input.dataDir,
+      investigateTool: input.investigateTool,
+    };
+
+    let findings = "";
+    let dirtyWarning: string | null = null;
+    const depPack = await this.buildCrossProjectDependencyPrompt({
+      projectRoot: input.project.rootPath,
+      message: input.message,
+      listProjects: input.listProjects,
+      dataDir: input.dataDir,
+    });
+
+    if (engine === "pi") {
+      try {
+        const walked = await this.runPiAskInvestigate(askLike);
+        findings = walked.findings;
+        dirtyWarning = walked.dirtyWarning;
+      } catch (error) {
+        slog.warn("plan-loop", "pi investigate failed; falling back to mastra", {
+          loopId: input.loopId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        const mastra = await this.runMastraAskPresenceTurn(
+          askLike,
+          "(plan loop — no prior turns)",
+          depPack,
+        );
+        findings = mastra.reply;
+      }
+    } else {
+      const mastra = await this.runMastraAskPresenceTurn(
+        askLike,
+        "(plan loop — no prior turns)",
+        depPack,
+      );
+      findings = mastra.reply;
+    }
+
+    input.onProgress?.({
+      type: "status",
+      summary: "plan judging findings",
+    });
+    const productClip = clipBlueprintForAskAlign(
+      readBlueprint(input.project.rootPath),
+      4_000,
+    );
+    const judgePrompt = buildPlanInvestigateJudgePrompt({
+      operatorMessage: input.message,
+      findings,
+      productClip,
+      dirtyWarning,
+    });
+    try {
+      const judged = await runAgentLiveTurn(
+        this.ctx.agents.judgeAgent,
+        `Plan loop investigate (loopId=${input.loopId}).\n\n${judgePrompt}`,
+        input.project.id,
+        `plan-judge-${input.loopId}-v`,
+        {
+          maxSteps: 4,
+          timeoutMs: 120_000,
+          onProgress: input.onProgress,
+          abortSignal: input.abortSignal,
+          synthesizeIfNarration: false,
+          statusLabel: "plan judging findings",
+        },
+      );
+      const judgedText = judged.reply.trim();
+      return judgedText && judgedText !== EMPTY_LIVE_REPLY
+        ? judgedText
+        : findings.trim();
+    } catch (error) {
+      slog.warn("plan-loop", "judge pass failed; using raw findings", {
+        loopId: input.loopId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return findings.trim();
+    }
+  }
+
   private async runDevelopJudge(input: {
     project: Project;
     run: Run;
@@ -4175,6 +4300,7 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
     });
 
     let continueIntent: PlanContinueIntent = PLAN_CONTINUE_INTENT_DEFAULT;
+    let startIntent: PlanStartIntent = PLAN_START_INTENT_DEFAULT;
     if (isContinue) {
       const fallback = normalizePlanContinueIntentStructured(
         fallbackPlanContinueIntentFromText(message?.trim() || desc),
@@ -4202,6 +4328,46 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         ...PLAN_CONTINUE_INTENT_DEFAULT,
         scope: "full_revise",
       };
+      try {
+        const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
+          "classification",
+        );
+        startIntent = await classifyPlanStartIntentViaLlm({
+          endpoint,
+          modelId,
+          brief,
+          timeoutMs: 90_000,
+        });
+      } catch (err) {
+        slog.warn("plan-loop", "start intent LLM failed; defaults", {
+          loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        startIntent = {
+          ...PLAN_START_INTENT_DEFAULT,
+          siblingInvestigation: briefWantsSiblingInvestigation(brief),
+        };
+      }
+    }
+
+    const needsInvestigation = isContinue
+      ? continueIntent.scope === "expand_scope" ||
+        continueIntent.scope === "full_revise"
+      : startIntent.needsInvestigation;
+
+    let investigationFindings = "";
+    if (needsInvestigation) {
+      investigationFindings = await this.runPlanInvestigateAndJudge({
+        project,
+        loopId,
+        message: message?.trim() || brief,
+        investigateTool: input.investigateTool,
+        engineIntent: isContinue ? undefined : startIntent.investigateEngine,
+        listProjects: input.listProjects,
+        dataDir: input.dataDir,
+        onProgress: input.onProgress,
+        abortSignal: input.abortSignal,
+      });
     }
 
     const reopenLocks =
@@ -4288,7 +4454,9 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
       listProjects: input.listProjects,
     });
     const investigate =
-      Boolean(siblingPack.trim()) || briefWantsSiblingInvestigation(desc);
+      Boolean(siblingPack.trim()) ||
+      startIntent.siblingInvestigation ||
+      briefWantsSiblingInvestigation(desc);
 
     const acceptanceLockNote = reopenLocks
       ? "(Acceptance locks CLEARED for expand/full_revise — Goal/In scope may change; retick before accept.)"
@@ -4310,16 +4478,18 @@ Brief:
 ${clipPromptSection("brief", brief, 3_000)}
 
 ${message?.trim() ? `Operator feedback:\n${clipPromptSection("feedback", message, 3_000)}\n` : ""}
+${investigationFindings.trim() ? `INVESTIGATION FINDINGS (authoritative — synthesize PLAN from these; do not re-walk the repo):\n${clipPromptSection("findings", investigationFindings, 6_000)}\n` : ""}
 ${reviseBlock}
 
 Required H2 sections: Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes.
 CRITICAL: Goal must be 1–3 sentences — never paste the operator brief.
 ${expandH2Note}
-${investigate ? "CRITICAL: Investigate sibling absolute paths (read_file) before writing; cite them under Likely areas." : ""}
+${investigate && !investigationFindings.trim() ? "CRITICAL: Investigate sibling absolute paths (read_file) before writing; cite them under Likely areas." : ""}
 When CROSS-PROJECT DEPS / DEPENDENCY INTENT apply, record package/element refs under Likely areas and Handoff notes (e.g. deps: @acme/theme-toggle@1.0.0 from SiblingBrand). Never recommend npm link.
 Return a short rationale then the full plan in a markdown fence. End with PLAN_COMPLETE.`;
 
-    const maxSteps = investigate ? 16 : 10;
+    const maxSteps =
+      investigationFindings.trim() ? 6 : investigate ? 16 : 10;
     let raw = "";
     try {
       const live = await runAgentLiveTurn(

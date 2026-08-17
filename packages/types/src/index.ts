@@ -398,6 +398,16 @@ export const AwaitedRunSchema = z.object({
 
 export type AwaitedRun = z.infer<typeof AwaitedRunSchema>;
 
+export const AwaitedLiveTurnSchema = z.object({
+  turnId: z.string().optional(),
+  kind: z.enum(["ask", "agent", "design_loop", "plan_loop"]),
+  sessionId: z.string().optional(),
+  projectId: z.string().min(1),
+  startedAt: z.string().datetime(),
+});
+
+export type AwaitedLiveTurn = z.infer<typeof AwaitedLiveTurnSchema>;
+
 export const ChatConversationSchema = z.object({
   id: z.string().min(1),
   projectId: z.string().min(1).nullable(),
@@ -405,6 +415,7 @@ export const ChatConversationSchema = z.object({
   status: ChatConversationStatusSchema,
   modelOverride: ChatModelOverrideSchema.optional(),
   awaitedRun: AwaitedRunSchema.nullable().optional(),
+  awaitedLiveTurn: AwaitedLiveTurnSchema.nullable().optional(),
   createdAt: z.string().datetime(),
   lastActiveAt: z.string().datetime(),
   closedAt: z.string().datetime().optional(),

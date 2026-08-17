@@ -224,6 +224,18 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
       projectId: optionalProject,
     })
     .passthrough(),
+  plan_loop_start: z.object({
+    brief: z.string().min(1),
+    askId: z.string().min(1).optional(),
+    investigateTool: z.enum(["auto", "mastra", "pi"]).optional(),
+    projectId: optionalProject,
+  }),
+  design_loop_start: z.object({
+    brief: z.string().min(1),
+    askId: z.string().min(1).optional(),
+    phaseId: z.string().min(1).optional(),
+    projectId: optionalProject,
+  }),
   start_development: z
     .object({
       runId: z.string().min(1),
@@ -290,7 +302,13 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   design_loop_get:
     "One design loop. Requires loopId from list_design_loops. Use notes; do not paste HTML into the operator reply.",
   plan_loop_get:
-    "One plan loop. Requires loopId from list_plan_loops.",
+    "One plan loop. Requires loopId from list_plan_loops. Do not poll while a plan_loop live turn is active on this chat — wait for live_settled notification.",
+  plan_loop_start:
+    "Start a multi-turn plan loop (structured PLAN.md). Requires brief — pass the operator's planning words in brief. Optional investigateTool: auto|mastra|pi. Thorough vs quick intent is LLM-classified. You'll be notified via live_settled when the turn completes — do not poll plan_loop_get.",
+  plan_loop_continue:
+    "Revise a plan loop from operator feedback. Requires loopId and message. Notification-driven — do not poll plan_loop_get while running.",
+  design_loop_start:
+    "Start a look-and-feel design loop (mock HTML). Requires brief — pass the operator's words in brief. Notification-driven when live turn active.",
   ask: "Investigate the project (read source, explain why something is broken). Pass the operator's words through in message — do not replace a page/route/product-gap question with a source-claim checklist. Optional investigateTool: mastra (faster) | pi (thorough) | auto. Thorough vs quick intent in the operator message is classified by the LLM, never keyword-matched; with no expressed intent the fast mastra path runs. Prefer this over gated agent for read-only traces. Requires message. You may pass askId or newAsk; the chat service will choose continue vs a new ask so this never resumes some other open ask on the project.",
   project_set_ask_investigate_tool:
     "Set the project's default Ask walker: auto, mastra (fast), or pi (thorough). Requires tool. Bind the judge model with chat_function_bind function=judge.",

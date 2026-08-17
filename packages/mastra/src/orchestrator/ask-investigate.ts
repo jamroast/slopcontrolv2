@@ -143,6 +143,47 @@ BLUEPRINT product definition (for alignment, after the walk):
 ${clip}`;
 }
 
+export const PLAN_INVESTIGATE_JUDGE_PREFIX = `You already have investigation findings from a read-only codebase walker (Pi or Mastra tools).
+Refine them into structured PLAN-READY findings for a plan-loop agent. Do NOT call tools.
+Output markdown only with these sections:
+## Summary
+(2–4 sentences: what the operator wants and what the codebase shows)
+## Likely areas
+(bullets with concrete paths/modules — hypotheses for PLAN.md Likely areas)
+## Risks & unknowns
+(bullets for PLAN.md Risks section)
+## Sibling / dependency notes
+(bullets citing sibling paths or @scope packages if relevant, or "none")
+## Handoff hints
+(1–3 bullets for research/develop handoff)
+
+Cite paths from the findings. Never invent files. Never paste the operator brief verbatim as the plan.
+`;
+
+export function buildPlanInvestigateJudgePrompt(opts: {
+  operatorMessage: string;
+  findings: string;
+  productClip: string;
+  dirtyWarning?: string | null;
+}): string {
+  const dirty = opts.dirtyWarning?.trim()
+    ? `\nWALKER WARNING:\n${opts.dirtyWarning.trim()}\n`
+    : "";
+  const clip = opts.productClip.trim()
+    ? opts.productClip.trim()
+    : "(no Product summary / skills / modules sections in BLUEPRINT.md)";
+  return `${PLAN_INVESTIGATE_JUDGE_PREFIX}
+${dirty}
+Operator planning brief:
+${opts.operatorMessage.trim()}
+
+Raw investigation findings:
+${opts.findings.trim() || "(empty findings)"}
+
+BLUEPRINT product definition (alignment only):
+${clip}`;
+}
+
 export function planningDocsPointerForPresence(): string {
   return `Planning docs: \`.slopcontrol/BLUEPRINT.md\` and \`.slopcontrol/ROADMAP.md\` — read_file them only if you need product definition. Do not treat BLUEPRINT Live decisions as a substitute for reading source.`;
 }

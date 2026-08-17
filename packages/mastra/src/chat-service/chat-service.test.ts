@@ -16,6 +16,7 @@ import {
   CHAT_FREE_TOOLS,
   CHAT_GATED_TOOLS,
   CHAT_TOOL_INPUT_SCHEMA,
+  createToolCallGuard,
   type ChatEvent,
   type ChatServiceDeps,
   type ConversationStore,
@@ -77,6 +78,10 @@ function makeStore(): ConversationStore & { rows: ChatConversation[] } {
     setAwaitedRun(conversationId, awaited) {
       const c = rows.find((r) => r.id === conversationId);
       if (c) c.awaitedRun = awaited ?? undefined;
+    },
+    setAwaitedLiveTurn(conversationId, awaited) {
+      const c = rows.find((r) => r.id === conversationId);
+      if (c) c.awaitedLiveTurn = awaited ?? undefined;
     },
   };
 }
@@ -151,6 +156,7 @@ function makeService(opts?: {
   followUpWaitMs?: number;
   waitProgressIntervalMs?: number;
   getMemory?: ChatServiceDeps["getMemory"];
+  subscribeLiveTurnUpdates?: ChatServiceDeps["subscribeLiveTurnUpdates"];
 }) {
   const dir = mkdtempSync(join(tmpdir(), "slop-chat-svc-"));
   const store = opts?.store ?? makeStore();
@@ -191,6 +197,7 @@ function makeService(opts?: {
     waitPollMs: opts?.waitPollMs,
     followUpWaitMs: opts?.followUpWaitMs ?? 0,
     waitProgressIntervalMs: opts?.waitProgressIntervalMs,
+    subscribeLiveTurnUpdates: opts?.subscribeLiveTurnUpdates,
   });
   const unsubscribe = service.subscribe((e) => events.push(e));
   return {
@@ -2230,3 +2237,256 @@ describe("awaited runs + run-settled notifications", () => {
   });
 });
 
+
+describe("live-turn awaits (plan/design loops)", () => {
+  type LiveListener = Parameters<
+    NonNullable<ChatServiceDeps["subscribeLiveTurnUpdates"]>
+  >[0];
+
+  function liveInternals(service: ChatService) {
+    return service as unknown as {
+      awaitedLiveTurns: Map<string, import("@slopcontrol/types").AwaitedLiveTurn>;
+      deliveredLiveNotifications: Map<string, Set<string>>;
+      deliveredRunNotifications: Map<string, Set<string>>;
+      notificationQueue: Map<string, string[]>;
+    };
+  }
+
+  function liveMemorySink() {
+    const saved: unknown[] = [];
+    return {
+      saved,
+      getMemory: () =>
+        ({
+          saveMessages: async (opts: { messages: unknown[] }) => {
+            saved.push(...opts.messages);
+            return { messages: opts.messages };
+          },
+          recall: async () => ({ messages: [] }),
+          deleteThread: async () => undefined,
+        }) as never,
+    };
+  }
+
+  it("delete clears live-turn and run-notification dedupe state", async () => {
+    const { saved, getMemory } = liveMemorySink();
+    const { service, cleanup } = makeService({ getMemory });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const svc = liveInternals(service);
+      svc.awaitedLiveTurns.set(conv.id, {
+        kind: "plan_loop",
+        projectId: "p1",
+        startedAt: new Date().toISOString(),
+      });
+      svc.deliveredLiveNotifications.set(conv.id, new Set(["k"]));
+      svc.deliveredRunNotifications.set(conv.id, new Set(["k"]));
+      assert.equal(service.deleteConversation(conv.id), true);
+      assert.equal(svc.awaitedLiveTurns.has(conv.id), false);
+      assert.equal(svc.deliveredLiveNotifications.has(conv.id), false);
+      assert.equal(svc.deliveredRunNotifications.has(conv.id), false);
+      assert.equal(saved.length, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("recovery clears orphaned live-turn awaits and notifies", async () => {
+    const { saved, getMemory } = liveMemorySink();
+    const { service, store, cleanup } = makeService({ getMemory });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      store.setAwaitedLiveTurn?.(conv.id, {
+        kind: "plan_loop",
+        projectId: "p1",
+        sessionId: "loop-1",
+        startedAt: new Date().toISOString(),
+      });
+      service.recoverAwaitedLiveTurns();
+      assert.equal(store.getConversation(conv.id)?.awaitedLiveTurn, undefined);
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(saved.length, 2);
+      assert.match(String((saved[0] as { content?: { parts?: { text?: string }[] } })?.content?.parts?.[0]?.text), /interrupted/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("close clears live-turn await state", () => {
+    const { service, store, cleanup } = makeService();
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const svc = liveInternals(service);
+      svc.awaitedLiveTurns.set(conv.id, {
+        kind: "plan_loop",
+        projectId: "p1",
+        sessionId: "loop-1",
+        startedAt: new Date().toISOString(),
+      });
+      svc.deliveredLiveNotifications.set(conv.id, new Set(["k"]));
+      store.setAwaitedLiveTurn?.(conv.id, svc.awaitedLiveTurns.get(conv.id)!);
+      service.closeConversation(conv.id);
+      assert.equal(svc.awaitedLiveTurns.has(conv.id), false);
+      assert.equal(svc.deliveredLiveNotifications.has(conv.id), false);
+      assert.equal(store.getConversation(conv.id)?.awaitedLiveTurn, undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("confirm(plan_loop_start) returns immediately; settle writes one memory pair", async () => {
+    const { saved, getMemory } = liveMemorySink();
+    const { service, store, events, cleanup } = makeService({
+      getMemory,
+      dispatch: async (name) =>
+        name === "plan_loop_start"
+          ? { content: [{ type: "text", text: '{"loopId":"loop-9","version":1}' }] }
+          : { content: [{ type: "text", text: "{}" }] },
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const token = park(service, conv, "plan_loop_start", {
+        projectId: "p1",
+        brief: "plan the thing",
+      });
+      const result = await service.confirm({
+        conversationId: conv.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+      assert.equal(result.ok, true);
+      assert.match(String(result.reply), /Plan loop turn started/);
+      // Dispatch is async — settle it.
+      const deadline = Date.now() + 2_000;
+      while (
+        !events.some((e) => e.type === "live_settled") &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      const settled = events.filter((e) => e.type === "live_settled");
+      assert.equal(settled.length, 1);
+      assert.equal(store.getConversation(conv.id)?.awaitedLiveTurn, undefined);
+      // Single settlement write: exactly one user+assistant pair, no synthetic follow-up.
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(saved.length, 2);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("two consecutive same-kind settles are both delivered (per-turn dedupe)", async () => {
+    const { saved, getMemory } = liveMemorySink();
+    const { service, events, cleanup } = makeService({
+      getMemory,
+      dispatch: async () => ({
+        content: [{ type: "text", text: '{"loopId":"loop-9","version":1}' }],
+      }),
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const svc = liveInternals(service);
+      for (const startedAt of [
+        new Date(Date.now() - 1_000).toISOString(),
+        new Date().toISOString(),
+      ]) {
+        svc.awaitedLiveTurns.set(conv.id, {
+          kind: "plan_loop",
+          projectId: "p1",
+          startedAt,
+        });
+        await (
+          service as unknown as {
+            completeAwaitedLiveTurnForConversation: (
+              c: ChatConversation,
+              tool: string,
+              text: string,
+              isError: boolean,
+            ) => Promise<void>;
+          }
+        ).completeAwaitedLiveTurnForConversation(
+          conv,
+          "plan_loop_start",
+          "{}",
+          false,
+        );
+      }
+      const settled = events.filter((e) => e.type === "live_settled");
+      assert.equal(settled.length, 2);
+      await new Promise((r) => setTimeout(r, 20));
+      assert.equal(saved.length, 4);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("live progress binds to the conversation with the matching session", () => {
+    let listener: LiveListener | undefined;
+    const { service, events, cleanup } = makeService({
+      subscribeLiveTurnUpdates: (l) => {
+        listener = l;
+        return () => undefined;
+      },
+    });
+    try {
+      const a = service.createConversation({ projectId: "p1" });
+      const b = service.createConversation({ projectId: "p1" });
+      const svc = liveInternals(service);
+      svc.awaitedLiveTurns.set(a.id, {
+        kind: "plan_loop",
+        projectId: "p1",
+        sessionId: "loop-a",
+        startedAt: new Date().toISOString(),
+      });
+      svc.awaitedLiveTurns.set(b.id, {
+        kind: "plan_loop",
+        projectId: "p1",
+        startedAt: new Date().toISOString(),
+      });
+      listener!(
+        { type: "status", summary: "writing PLAN.md" },
+        {
+          turnId: "turn-1",
+          kind: "plan_loop",
+          sessionId: "loop-a",
+          projectId: "p1",
+          status: "running",
+        },
+      );
+      const progress = events.filter((e) => e.type === "live_progress");
+      assert.equal(progress.length, 1);
+      assert.equal(progress[0]?.conversationId, a.id);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("tool-call guard blocks plan_loop_get while a live turn is active", () => {
+    const { service, cleanup } = makeService();
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const svc = liveInternals(service);
+      const guard = createToolCallGuard({
+        hasActiveLiveTurn: (loopId) =>
+          service.hasActiveLiveTurn(conv.id, loopId),
+      });
+      // No active live turn — polling allowed.
+      assert.equal(guard.check("plan_loop_get", { loopId: "loop-1" }), null);
+      svc.awaitedLiveTurns.set(conv.id, {
+        kind: "plan_loop",
+        projectId: "p1",
+        sessionId: "loop-1",
+        startedAt: new Date().toISOString(),
+      });
+      assert.match(
+        String(guard.check("plan_loop_get", { loopId: "loop-1" })),
+        /disabled while a live turn is active/,
+      );
+      svc.awaitedLiveTurns.delete(conv.id);
+      assert.equal(guard.check("plan_loop_get", { loopId: "loop-1" }), null);
+    } finally {
+      cleanup();
+    }
+  });
+});

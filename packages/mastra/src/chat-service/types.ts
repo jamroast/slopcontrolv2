@@ -1,5 +1,6 @@
 import type {
   AskSession,
+  AwaitedLiveTurn,
   AwaitedRun,
   ChatConversation,
   Phase,
@@ -10,7 +11,7 @@ import type {
 /** Kind of run the chat is waiting on — drives differentiated wait timeouts. */
 export type RunWaitKind = AwaitedRun["kind"];
 
-export type { AwaitedRun };
+export type { AwaitedRun, AwaitedLiveTurn };
 
 /** Events emitted on a conversation stream (per-chat + aggregate SSE). */
 export interface ChatEvent {
@@ -29,7 +30,10 @@ export interface ChatEvent {
     | "closed"
     | "run_awaited"
     | "run_progress"
-    | "run_settled";
+    | "run_settled"
+    | "live_awaited"
+    | "live_progress"
+    | "live_settled";
   at: string;
   /** delta text / done reply. */
   text?: string;
@@ -54,6 +58,16 @@ export interface ChatEvent {
     elapsedMs?: number;
     timedOut?: boolean;
     error?: string;
+  };
+  /** live_awaited / live_progress / live_settled payload. */
+  live?: {
+    turnId?: string;
+    kind?: AwaitedLiveTurn["kind"];
+    sessionId?: string;
+    projectId?: string;
+    status?: string;
+    elapsedMs?: number;
+    isError?: boolean;
   };
 }
 
@@ -89,6 +103,10 @@ export interface ConversationStore {
   setAwaitedRun?(
     conversationId: string,
     awaited: AwaitedRun | null,
+  ): void;
+  setAwaitedLiveTurn?(
+    conversationId: string,
+    awaited: AwaitedLiveTurn | null,
   ): void;
 }
 

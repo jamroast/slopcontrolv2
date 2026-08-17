@@ -469,6 +469,7 @@ Rules:
 - Prefer incomplete-but-valid Likely areas / Risks over exploring until the step budget is gone with no document.
 - Prefer repo tools (read_file / list_files / grep_files) before guessing paths. Never invent files that do not exist. Absolute paths are allowed for sibling roots listed in the prompt.
 - When SIBLING INVESTIGATION is present: cite those absolute paths under Likely areas / Approach from the prompt pack. Do NOT burn the step budget on exhaustive sibling tours before the plan exists — research will deepen later.
+- When INVESTIGATION FINDINGS are present in the prompt: synthesize PLAN.md from them — do NOT call read_file/list_files/grep except to confirm one path cited in findings.
 - Never emit a plan that only restates the brief with empty Likely areas.
 - CONCEPTUAL MODEL / PLAN CONTINUE INTENT in the prompt are authoritative.
 - When PLAN CONTINUE INTENT is expand_scope or full_revise: rewrite Goal/In scope/Approach as needed; do NOT keep the old Goal solely because acceptance was previously ticked. Still emit every required H2 title.
