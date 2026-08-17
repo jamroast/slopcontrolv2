@@ -7,7 +7,6 @@ import {
   classifyChatConfirmViaLlm,
   LlmRegistry,
   loadProvidersConfig,
-  toMastraModelConfig,
   type AskResumeClassification,
   type ChatConfirmClassification,
   type ParkedChatAction,
@@ -40,6 +39,7 @@ import {
   buildProviderCatalogs,
   listUniqueProviderModels,
   providersPathFromEndpoints,
+  resolveConversationModelOverride,
   updateEndpointModel,
   type BindFunctionResult,
   type EndpointModelList,
@@ -395,12 +395,12 @@ export class ChatService {
    * Called when a run leaves a busy stage (gate or terminal). Delivers
    * notifications to every conversation awaiting this run.
    */
-  handleRunStageChanged(run: {
+  async handleRunStageChanged(run: {
     id: string;
     stage: string;
     phaseId?: string;
     projectId?: string;
-  }): void {
+  }): Promise<void> {
     if (isBusyRunStage(run.stage)) return;
 
     const latched = this.conversationsAwaitingRun(run.id);
@@ -417,12 +417,17 @@ export class ChatService {
         continue;
       }
 
-      void this.completeAwaitedRunForConversation(conversation, run.id, {
-        stage: run.stage,
-        phaseId: run.phaseId,
-        projectId: run.projectId,
-        elapsedMs: this.elapsedMsForAwaited(conversationId, run.id),
-      });
+      try {
+        await this.completeAwaitedRunForConversation(conversation, run.id, {
+          stage: run.stage,
+          phaseId: run.phaseId,
+          projectId: run.projectId,
+          elapsedMs: this.elapsedMsForAwaited(conversationId, run.id),
+        });
+      } catch (err) {
+        /* best-effort — watcher poll fallback may still deliver */
+        void err;
+      }
     }
   }
 
@@ -433,7 +438,7 @@ export class ChatService {
     phaseId?: string;
     projectId?: string;
   }): void {
-    this.handleRunStageChanged(run);
+    void this.handleRunStageChanged(run);
   }
 
   private conversationsAwaitingRun(
@@ -453,7 +458,79 @@ export class ChatService {
         latched.push({ conversationId, runId });
       }
     }
+    for (const c of this.deps.store.listConversations({ status: "active" })) {
+      const awaited = c.awaitedRun;
+      if (!awaited || awaited.runId !== runId) continue;
+      if (latched.some((l) => l.conversationId === c.id)) continue;
+      this.awaitedRuns.set(c.id, awaited);
+      latched.push({ conversationId: c.id, runId });
+    }
     return latched;
+  }
+
+  /** Track that this conversation should receive run-stage push notifications. */
+  private registerAwaitedRun(
+    conversation: ChatConversation,
+    runId: string,
+    kind: RunWaitKind,
+  ): void {
+    const existing = this.awaitedRuns.get(conversation.id);
+    const projectId =
+      conversation.projectId ??
+      this.lookupRun(runId)?.projectId ??
+      existing?.projectId ??
+      runId;
+    const awaited: AwaitedRun = {
+      runId,
+      projectId,
+      kind,
+      startedAt:
+        existing?.runId === runId
+          ? existing.startedAt
+          : new Date().toISOString(),
+    };
+    this.awaitedRuns.set(conversation.id, awaited);
+    this.deps.store.setAwaitedRun?.(conversation.id, awaited);
+    this.bumpConversationActivity(conversation.id);
+    const liveStage = this.lookupRun(runId)?.stage;
+    this.emit(conversation, {
+      type: "run_awaited",
+      summary: `waiting for ${kind} run ${runId}…`,
+      run: {
+        runId,
+        projectId,
+        stage: liveStage,
+        kind,
+      },
+    });
+  }
+
+  private trackLifecycleRunBeforeDispatch(
+    conversation: ChatConversation,
+    tool: string,
+    args: Record<string, unknown>,
+  ): void {
+    if (!LIFECYCLE_WAIT_TOOLS.has(tool)) return;
+    const runId = runIdFromLifecycle(args, "");
+    if (!runId) return;
+    const kind =
+      runWaitKindForTool(tool) ??
+      runWaitKindForStage(this.lookupRun(runId)?.stage);
+    this.registerAwaitedRun(conversation, runId, kind);
+  }
+
+  private trackLifecycleRunFromResult(
+    conversation: ChatConversation,
+    tool: string,
+    resultText: string,
+  ): void {
+    if (!LIFECYCLE_WAIT_TOOLS.has(tool)) return;
+    if (this.awaitedRuns.has(conversation.id)) return;
+    const extracted = extractBusyRunFromLifecycleResult(resultText);
+    if (!extracted?.runId || !isBusyRunStage(extracted.stage)) return;
+    const kind =
+      runWaitKindForTool(tool) ?? runWaitKindForStage(extracted.stage);
+    this.registerAwaitedRun(conversation, extracted.runId, kind);
   }
 
   private elapsedMsForAwaited(conversationId: string, runId: string): number {
@@ -675,7 +752,7 @@ export class ChatService {
       this.awaitedRuns.set(c.id, awaited);
       if (!isBusyRunStage(run.stage)) {
         // Run settled while the server was down — deliver the missed notification
-        this.handleRunStageChanged(run);
+        void this.handleRunStageChanged(run);
         continue;
       }
       // Run still busy — re-establish the watcher
@@ -844,9 +921,11 @@ export class ChatService {
       return { ok: true, reply };
     }
 
+    this.trackLifecycleRunBeforeDispatch(conversation, action.tool, action.args);
     const result = await this.dispatchRouted(conversation, action.tool, action.args);
     let text = formatChatDispatchResult(result, action.tool);
     if (!result.isError) {
+      this.trackLifecycleRunFromResult(conversation, action.tool, text);
       text = await this.maybeWaitForLifecycleRun(conversation, action.tool, text);
     }
     let failed = Boolean(result.isError);
@@ -1317,30 +1396,13 @@ export class ChatService {
     const kind = runWaitKindForTool(tool) ?? "develop";
     const config = this.waitConfigFor(kind);
 
-    // Persist + emit that this conversation is now awaiting a run
-    const projectId =
-      conversation.projectId ??
-      this.lookupRun(extracted.runId)?.projectId ??
-      extracted.runId;
-    const awaited: AwaitedRun = {
-      runId: extracted.runId,
-      projectId,
-      kind,
-      startedAt: new Date().toISOString(),
-    };
-    this.awaitedRuns.set(conversation.id, awaited);
-    this.deps.store.setAwaitedRun?.(conversation.id, awaited);
-    this.bumpConversationActivity(conversation.id);
-    this.emit(conversation, {
-      type: "run_awaited",
-      summary: `waiting for ${kind} run ${extracted.runId}…`,
-      run: {
-        runId: extracted.runId,
-        projectId,
-        stage: extracted.stage,
-        kind,
-      },
-    });
+    if (!this.awaitedRuns.has(conversation.id)) {
+      const projectId =
+        conversation.projectId ??
+        this.lookupRun(extracted.runId)?.projectId ??
+        extracted.runId;
+      this.registerAwaitedRun(conversation, extracted.runId, kind);
+    }
 
     const wait = await waitForRun({
       runId: extracted.runId,
@@ -1354,20 +1416,17 @@ export class ChatService {
     });
 
     if (wait.settled) {
-      // Run finished within inline window — clear awaited state
-      this.awaitedRuns.delete(conversation.id);
-      this.deps.store.setAwaitedRun?.(conversation.id, null);
-      this.emit(conversation, {
-        type: "run_settled",
-        summary: `Run ${extracted.runId} finished ${wait.stage}`,
-        run: {
-          runId: extracted.runId,
-          projectId: wait.projectId,
+      await this.completeAwaitedRunForConversation(
+        conversation,
+        extracted.runId,
+        {
           stage: wait.stage,
-          kind,
+          phaseId: wait.phaseId,
+          projectId: wait.projectId,
           elapsedMs: wait.elapsedMs,
         },
-      });
+        kind,
+      );
     } else if (wait.timedOut && config.followUpMs > 0 && !opts?.skipFollowUp) {
       this.watchRunForFollowUp(conversation, extracted.runId, kind);
     }
@@ -1658,11 +1717,7 @@ export class ChatService {
     const toolGuard = createToolCallGuard();
     const override = conversation.modelOverride;
     const model = override
-      ? toMastraModelConfig(
-          registry.getEndpoint(override.endpointId),
-          override.modelId,
-          registry.getProviders(),
-        )
+      ? resolveConversationModelOverride(registry, override)
       : registry.resolve("chat");
 
     const pendingActions = this.listPendingForConversation(conversation.id).map(

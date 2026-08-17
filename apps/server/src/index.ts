@@ -310,14 +310,14 @@ function touchRunStage(runId: string, stage: RunStage, iterationCount?: number):
   // develop stage transition flows through here, so gate + terminal stages
   // notify awaiting chat conversations regardless of which loop produced them.
   if (shouldNotifyRunStageChange(previous, stage)) {
-    try {
-      getChatService().handleRunStageChanged(run);
-    } catch (err) {
-      log.warn("chat", "handleRunStageChanged failed", {
-        runId: run.id,
-        error: err instanceof Error ? err.message : String(err),
+    void getChatService()
+      .handleRunStageChanged(run)
+      .catch((err) => {
+        log.warn("chat", "handleRunStageChanged failed", {
+          runId: run.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
       });
-    }
   }
 
   if (previous !== stage) {
@@ -8076,26 +8076,28 @@ app.listen(PORT, () => {
   }
   // Replay the event log for awaited runs that settled while the server was
   // down — supplements the store-scan recovery above (fallback for rotation).
-  try {
-    const events = runStageBroker.replaySince(0);
-    for (const event of events) {
-      getChatService().handleRunStageChanged({
-        id: event.id,
-        stage: event.stage,
-        phaseId: event.phaseId,
-        projectId: event.projectId,
+  void (async () => {
+    try {
+      const events = runStageBroker.replaySince(0);
+      for (const event of events) {
+        await getChatService().handleRunStageChanged({
+          id: event.id,
+          stage: event.stage,
+          phaseId: event.phaseId,
+          projectId: event.projectId,
+        });
+      }
+      if (events.length > 0) {
+        log.info("events", "replayed event log on startup", {
+          count: events.length,
+        });
+      }
+    } catch (err) {
+      log.warn("events", "startup event replay failed", {
+        error: err instanceof Error ? err.message : String(err),
       });
     }
-    if (events.length > 0) {
-      log.info("events", "replayed event log on startup", {
-        count: events.length,
-      });
-    }
-  } catch (err) {
-    log.warn("events", "startup event replay failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
+  })();
   const providers = loadProvidersConfig(defaultProvidersPath(defaultDataDir()));
   const providerKeys = Object.entries(providers.providers)
     .map(([name, p]) => `${name}=${p.apiKey ? "set" : "none"}`)

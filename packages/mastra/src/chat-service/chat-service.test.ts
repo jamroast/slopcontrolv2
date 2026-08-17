@@ -1713,6 +1713,31 @@ describe("awaited runs + run-settled notifications", () => {
     assert.equal(runWaitKindForTool("get_run"), undefined);
   });
 
+  it("handleRunStageChanged notifies from persisted store awaitedRun", async () => {
+    const run = makeRun("complete");
+    const { service, store, events, cleanup } = makeService({
+      listRuns: () => [run],
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      store.setAwaitedRun?.(conv.id, {
+        runId: run.id,
+        projectId: "p1",
+        kind: "develop",
+        startedAt: new Date().toISOString(),
+      });
+      await service.handleRunStageChanged(run);
+      await new Promise((r) => setTimeout(r, 30));
+      const settled = events.filter(
+        (e) => e.type === "run_settled" && e.run?.runId === run.id,
+      );
+      assert.equal(settled.length, 1);
+      assert.equal(store.getConversation(conv.id)?.awaitedRun, undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("recovery delivers the missed settlement notification and clears persisted state", async () => {
     const run = makeRun("complete");
     const { service, store, events, cleanup } = makeService({

@@ -4,12 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import type { LlmEndpoint } from "@slopcontrol/llm";
+import { LlmRegistry } from "@slopcontrol/llm";
 import {
   bindFunctionToModel,
   buildFunctionMappingList,
   listConfiguredProviderCatalogs,
   listEndpointModels,
   listUniqueProviderModels,
+  resolveConversationModelOverride,
   updateEndpointModel,
   type EndpointModelList,
   type ProviderCatalog,
@@ -219,6 +221,61 @@ function writeConfig(
   );
   return path;
 }
+
+describe("resolveConversationModelOverride", () => {
+  it("resolves a providers.json key from chat_models_list", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-override-"));
+    try {
+      const endpointsPath = writeConfig(dir, {
+        endpoints: [
+          {
+            ...baseEndpoint,
+            id: "ollama-cloud-deepseek",
+            baseUrl: "https://ollama.com/v1",
+            modelId: "deepseek-v4-pro:cloud",
+            provider: "ollama-cloud",
+          },
+        ],
+      });
+      writeFileSync(
+        join(dir, "providers.json"),
+        JSON.stringify({
+          providers: {
+            "ollama-cloud": {
+              apiKey: "test-key",
+              defaultBaseUrl: "https://ollama.com/v1",
+            },
+          },
+        }),
+      );
+      const registry = LlmRegistry.fromFile(endpointsPath, join(dir, "providers.json"));
+      const model = resolveConversationModelOverride(registry, {
+        endpointId: "ollama-cloud",
+        modelId: "deepseek-v4-pro:0813",
+      });
+      assert.equal(model.url, "https://ollama.com/v1");
+      assert.equal(model.apiKey, "test-key");
+      assert.match(model.id, /deepseek-v4-pro:0813/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("still resolves concrete endpoints.json ids", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-override-"));
+    try {
+      const endpointsPath = writeConfig(dir);
+      const registry = LlmRegistry.fromFile(endpointsPath);
+      const model = resolveConversationModelOverride(registry, {
+        endpointId: "e1",
+        modelId: "glm-5.2",
+      });
+      assert.match(model.id, /glm-5\.2/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("buildFunctionMappingList", () => {
   it("lists functions with current model and fallbacks", () => {

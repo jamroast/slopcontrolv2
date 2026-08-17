@@ -2118,7 +2118,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "chat_model_set",
       description:
-        "Override the model for one chat conversation only (endpointId + modelId from chat_models_list). Does not change platform function mappings — use chat_function_bind for that.",
+        "Override the model for one chat conversation only. Pass endpointId + modelId from chat_models_list — endpointId may be a providers.json key (e.g. ollama-cloud) or a concrete endpoints.json id. Does not change platform function mappings — use chat_function_bind for that.",
       inputSchema: {
         type: "object",
         properties: {

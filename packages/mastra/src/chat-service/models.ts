@@ -1,15 +1,19 @@
 import { dirname, join } from "node:path";
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
 import {
+  LlmRegistry,
   resolveEndpointSecrets,
   roleBindingInfo,
+  toMastraModelConfig,
   type LlmEndpoint,
+  type MastraModelConfig,
 } from "@slopcontrol/llm";
 import {
   AgentRoleSchema,
   EndpointsConfigSchema,
   LlmEndpointSchema,
   type AgentRole,
+  type ChatModelOverride,
   type EndpointsConfig,
   type ProvidersConfig,
 } from "@slopcontrol/types";
@@ -155,6 +159,39 @@ function providerDisplayName(endpoint: LlmEndpoint): string {
 
 export function providersPathFromEndpoints(endpointsPath: string): string {
   return join(dirname(endpointsPath), "providers.json");
+}
+
+/**
+ * Resolve a per-conversation model override. `endpointId` may be either a
+ * concrete endpoints.json id (ollama-cloud-deepseek) or a providers.json key
+ * (ollama-cloud) as returned by chat_models_list / function mappings.
+ */
+export function resolveConversationModelOverride(
+  registry: LlmRegistry,
+  override: ChatModelOverride,
+): MastraModelConfig {
+  const providers = registry.getProviders();
+  let endpoint: LlmEndpoint | undefined;
+  try {
+    endpoint = registry.getEndpoint(override.endpointId);
+  } catch {
+    endpoint = undefined;
+  }
+  if (!endpoint && providers.providers[override.endpointId]) {
+    endpoint = syntheticEndpointForProvider(override.endpointId, providers);
+  }
+  if (!endpoint) {
+    endpoint = registry
+      .listEndpoints()
+      .find(
+        (e) =>
+          e.provider === override.endpointId && e.modelId === override.modelId,
+      );
+  }
+  if (!endpoint) {
+    throw new Error(`Unknown LLM endpoint: ${override.endpointId}`);
+  }
+  return toMastraModelConfig(endpoint, override.modelId, providers);
 }
 
 /** Synthetic endpoint used to probe a providers.json entry. */
