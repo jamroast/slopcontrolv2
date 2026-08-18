@@ -7,6 +7,7 @@ import express from "express";
 import {
   readPhaseDoc,
   readResearch,
+  researchLooksSolid,
   readRunLog,
   appendRunLog,
   readDiagnosis,
@@ -828,6 +829,251 @@ async function executeRetryVerify(
     abortControllers.delete(run.id);
     developLock.release(project.id, run.id);
   }
+}
+
+/** Re-run post-merge root verify only (no coding / merge). Awaits completion. */
+async function executeRetryRootVerify(
+  runId: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const run = store.getRun(runId);
+  if (!run) {
+    return { status: 404, body: { error: "Run not found" } };
+  }
+  const project = store.getProject(run.projectId);
+  const phase = store.getPhase(run.phaseId);
+  if (!project || !phase) {
+    return { status: 404, body: { error: "Project or phase not found" } };
+  }
+  if (!RETRY_VERIFY_STAGES.has(run.stage)) {
+    return {
+      status: 409,
+      body: {
+        error: "retry_root_verify_not_allowed",
+        message:
+          "retry_root_verify is only allowed when the run stage is blocked, failed, or interrupted.",
+        stage: run.stage,
+      },
+    };
+  }
+  const handoff = readRunHandoff(project.rootPath, run.id);
+  if (!handoff?.merge?.autoMerged && !handoff?.merge?.commit) {
+    return {
+      status: 409,
+      body: {
+        error: "retry_root_verify_not_allowed",
+        message:
+          "retry_root_verify requires a merged phase (handoff.merge.autoMerged or merge.commit). Use retry_development instead.",
+      },
+    };
+  }
+  const unmet = unmetPhaseDependencies(phase, store.listPhases(project.id));
+  if (unmet.length > 0) {
+    return {
+      status: 409,
+      body: {
+        error: "Phase dependencies are not complete",
+        unmet,
+        dependsOn: phase.dependsOn ?? [],
+      },
+    };
+  }
+  const blockingRunId = developLock.getLiveClaim(project.id);
+  if (blockingRunId) {
+    const blocking = store.getRun(blockingRunId);
+    return {
+      status: 409,
+      body: {
+        error: "development_in_progress",
+        message:
+          "Another develop job is already running for this project. Wait for it to finish or stop_run, then retry.",
+        blockingRunId,
+        blockingPhaseId: blocking?.phaseId,
+        blockingStage: blocking?.stage,
+      },
+    };
+  }
+  const claim = developLock.tryClaim(project.id, run.id);
+  if (!claim.ok) {
+    const blocking = store.getRun(claim.blockingRunId);
+    return {
+      status: 409,
+      body: {
+        error: "development_in_progress",
+        message:
+          "Another develop job is already running for this project. Wait for it to finish or stop_run, then retry.",
+        blockingRunId: claim.blockingRunId,
+        blockingPhaseId: blocking?.phaseId,
+        blockingStage: blocking?.stage,
+      },
+    };
+  }
+
+  touchRunStage(run.id, "developing");
+  updatePhaseStatus(phase.id, "developing");
+  activeRuns.add(run.id);
+  const ac = new AbortController();
+  abortControllers.set(run.id, ac);
+
+  try {
+    const { orchestrator } = getRuntime(project.rootPath);
+    const result = await orchestrator.retryRootVerify({
+      project,
+      phase: store.getPhase(phase.id) ?? phase,
+      run: store.getRun(run.id) ?? run,
+      signal: ac.signal,
+    });
+    const latestPhase = store.getPhase(phase.id);
+    if (latestPhase) {
+      latestPhase.worktreePath = result.worktreePath;
+      latestPhase.worktreeBranch = result.worktreeBranch;
+      latestPhase.updatedAt = new Date().toISOString();
+      store.updatePhase(latestPhase);
+    }
+    touchRunStage(run.id, result.stage);
+    updatePhaseStatus(
+      phase.id,
+      result.stage === "complete"
+        ? "complete"
+        : result.stage === "blocked"
+          ? "blocked"
+          : result.stage === "interrupted"
+            ? "interrupted"
+            : "developing",
+    );
+    const steps = readVerifyStepsReport(project.rootPath, run.id);
+    return {
+      status: 200,
+      body: {
+        runId: run.id,
+        ok: result.ok,
+        stage: result.stage,
+        firstFailure: result.firstFailure ?? null,
+        stepsSummary: result.stepsSummary,
+        steps: steps?.steps ?? null,
+        accepted: true,
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    touchRunStage(run.id, "failed");
+    updatePhaseStatus(phase.id, "failed");
+    return {
+      status: 500,
+      body: { error: "retry_root_verify_failed", message, runId: run.id },
+    };
+  } finally {
+    activeRuns.delete(run.id);
+    abortControllers.delete(run.id);
+    developLock.release(project.id, run.id);
+  }
+}
+
+const RETRY_DRAFT_STAGES = new Set(["failed", "interrupted"]);
+
+/** Re-run draft only when RESEARCH.md is solid (no research agent). Background job. */
+async function executeRetryDraft(
+  runId: string,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const run = store.getRun(runId);
+  if (!run) {
+    return { status: 404, body: { error: "Run not found" } };
+  }
+  const project = store.getProject(run.projectId);
+  const phase = store.getPhase(run.phaseId);
+  if (!project || !phase) {
+    return { status: 404, body: { error: "Project or phase not found" } };
+  }
+  if (!RETRY_DRAFT_STAGES.has(run.stage)) {
+    return {
+      status: 409,
+      body: {
+        error: "retry_draft_not_allowed",
+        message:
+          "retry_draft is only allowed when the run stage is failed or interrupted.",
+        stage: run.stage,
+      },
+    };
+  }
+  if (!researchLooksSolid(readResearch(project.rootPath, phase.id))) {
+    return {
+      status: 409,
+      body: {
+        error: "retry_draft_not_allowed",
+        message:
+          "retry_draft requires solid RESEARCH.md (RESEARCH_COMPLETE or substantial heading). Use rerun_research instead.",
+      },
+    };
+  }
+  const busyPlanning = store
+    .listRuns(project.id)
+    .filter(
+      (r) =>
+        r.phaseId === phase.id &&
+        r.id !== run.id &&
+        (r.stage === "researching" || r.stage === "drafting"),
+    );
+  if (busyPlanning.length > 0) {
+    return {
+      status: 409,
+      body: {
+        error: "planning_in_progress",
+        message:
+          "Another planning run is already researching/drafting for this phase.",
+        blockingRunId: busyPlanning[0]!.id,
+      },
+    };
+  }
+  if (activeRuns.has(run.id)) {
+    return {
+      status: 409,
+      body: {
+        error: "run_already_active",
+        message: "This run is already active.",
+      },
+    };
+  }
+
+  touchRunStage(run.id, "drafting");
+  updatePhaseStatus(phase.id, "draft");
+  activeRuns.add(run.id);
+
+  runInBackground(run.id, async () => {
+    try {
+      const { orchestrator } = getRuntime(project.rootPath);
+      const stage = await orchestrator.retryDraft({
+        project,
+        phase: store.getPhase(phase.id) ?? phase,
+        run: store.getRun(run.id) ?? run,
+        listProjects: () => store.listProjects(),
+        onStage: (s) => touchRunStage(run.id, s),
+      });
+      touchRunStage(run.id, stage);
+      updatePhaseStatus(
+        phase.id,
+        stage === "in_review" ? "in_review" : "draft",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      touchRunStage(run.id, "failed");
+      updatePhaseStatus(phase.id, "draft");
+      appendRunLog(
+        project.rootPath,
+        run.id,
+        `retry_draft failed: ${message}`,
+      );
+    } finally {
+      activeRuns.delete(run.id);
+    }
+  });
+
+  return {
+    status: 202,
+    body: {
+      run: store.getRun(run.id),
+      stage: "drafting",
+      accepted: true,
+    },
+  };
 }
 
 app.get("/health", async (_req, res) => {
@@ -6333,6 +6579,16 @@ app.post("/runs/:id/retry-verify", async (req, res) => {
   res.status(result.status).json(result.body);
 });
 
+app.post("/runs/:id/retry-root-verify", async (req, res) => {
+  const result = await executeRetryRootVerify(req.params.id);
+  res.status(result.status).json(result.body);
+});
+
+app.post("/runs/:id/retry-draft", async (req, res) => {
+  const result = await executeRetryDraft(req.params.id);
+  res.status(result.status).json(result.body);
+});
+
 app.get("/projects/:projectId/phases/:phaseId/status", (req, res) => {
   const project = store.getProject(req.params.projectId);
   if (!project) {
@@ -7179,6 +7435,18 @@ app.post("/runs", async (req, res) => {
 
     if (action.action === "retry_verify") {
       const result = await executeRetryVerify(action.runId);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
+    if (action.action === "retry_root_verify") {
+      const result = await executeRetryRootVerify(action.runId);
+      res.status(result.status).json(result.body);
+      return;
+    }
+
+    if (action.action === "retry_draft") {
+      const result = await executeRetryDraft(action.runId);
       res.status(result.status).json(result.body);
       return;
     }

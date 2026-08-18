@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -16,6 +16,8 @@ import {
   hasLongLivedServerInCheck,
   hasBackgroundWaitHangAntipattern,
   hasBrittleSameLineGrepChain,
+  hasVitestGrepQuietAntipattern,
+  unwrapGrepQuietPipe,
 } from "./index.js";
 
 function phaseWithCheck(body: string): string {
@@ -394,5 +396,55 @@ wait $VITE_PID 2>/dev/null`;
       hasBrittleSameLineGrepChain("grep -qE 'className=\".*\"' f.ts"),
       false,
     );
+  });
+
+  it("rejects vitest piped to grep -q", () => {
+    const brittle = `npx vitest run tests/a.test.ts 2>&1 | grep -qE "Tests +[0-9]+ passed" || exit 1`;
+    assert.equal(hasVitestGrepQuietAntipattern(brittle), true);
+    const gate = validatePhaseDocForDev(phaseWithCheck(brittle));
+    assert.equal(gate.ok, false);
+    assert.ok(
+      gate.issues.some((i) => /grep -q|vitest/i.test(i)),
+      gate.issues.join("; "),
+    );
+  });
+
+  it("unwrapGrepQuietPipe strips grep -q tail", () => {
+    const cmd = `npx vitest run foo.test.ts 2>&1 | grep -qE "Tests +[0-9]+ passed" || exit 1`;
+    assert.equal(
+      unwrapGrepQuietPipe(cmd),
+      "npx vitest run foo.test.ts 2>&1 || exit 1",
+    );
+    assert.equal(unwrapGrepQuietPipe("pnpm build || exit 1"), null);
+  });
+
+  it("diagnostic rerun on grep -q pipe failure", async () => {
+    const calls: string[] = [];
+    const runner = async (cmd: string) => {
+      calls.push(cmd);
+      const file =
+        cmd.startsWith("bash '") && cmd.endsWith("'")
+          ? cmd.slice(6, -1).replace(/'\\''/g, "'")
+          : "";
+      const body = file ? readFileSync(file, "utf8") : "";
+      if (/\bgrep\b/.test(body)) {
+        return { exitCode: 1, output: "" };
+      }
+      return { exitCode: 0, output: "Tests 3 passed" };
+    };
+    const registry = createDefaultCheckRegistry(runner);
+    const result = await registry.run(
+      {
+        language: "bash",
+        body: 'npx vitest run foo.test.ts 2>&1 | grep -qE "Tests +[0-9]+ passed" || exit 1',
+        source: "fence",
+      },
+      { cwd: "/tmp", env: process.env },
+    );
+    assert.equal(result.exitCode, 0);
+    assert.match(result.output, /Diagnostic rerun/);
+    assert.match(result.output, /Tests 3 passed/);
+    assert.match(result.output, /treating check as pass/i);
+    assert.ok(calls.length >= 2);
   });
 });

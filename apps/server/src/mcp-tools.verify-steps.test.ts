@@ -3,10 +3,13 @@ import { describe, it } from "node:test";
 import { SLOPCONTROL_MCP_TOOLS } from "./mcp-tools.js";
 
 describe("MCP verify-steps tools", () => {
-  it("registers get_run_steps and retry_verify schemas", () => {
+  it("registers get_run_steps, retry_verify, retry_root_verify, retry_draft, and rerun_research schemas", () => {
     const names = new Set(SLOPCONTROL_MCP_TOOLS.map((t) => t.name));
     assert.ok(names.has("get_run_steps"));
     assert.ok(names.has("retry_verify"));
+    assert.ok(names.has("retry_root_verify"));
+    assert.ok(names.has("retry_draft"));
+    assert.ok(names.has("rerun_research"));
     assert.ok(names.has("get_run"));
     assert.ok(names.has("wait_for_run"));
     assert.ok(names.has("retry_development"));

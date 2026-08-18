@@ -348,6 +348,11 @@ export function buildDevelopmentHandoff(
         if (!operatorRequirements.includes(a)) operatorRequirements.push(a);
       }
     }
+    if (input.merge?.autoMerged && input.merge?.commit) {
+      nextSteps.unshift(
+        "Phase merged but root verify failed — call MCP retry_root_verify to re-run post-merge checks on project root (no coding).",
+      );
+    }
     nextSteps.unshift(
       "Call MCP get_operator_suggestions for remediation, then retry_development.",
     );

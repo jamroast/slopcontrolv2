@@ -1,4 +1,4 @@
-import { readProjectConfig, readRunHandoff } from "@slopcontrol/artifacts";
+import { readProjectConfig, readRunHandoff, readDiagnosis, readLatestDiagnosisForPhase } from "@slopcontrol/artifacts";
 
 export type RunSettledInput = {
   id: string;
@@ -81,6 +81,23 @@ export function buildRunSettledGuidance(
   }
 
   if (run.stage === "blocked" || run.stage === "failed") {
+    const rootPath = projectRootForRun(run, ctx);
+    const diagnosis = rootPath
+      ? (readDiagnosis(rootPath, run.id) ??
+        (run.phaseId
+          ? readLatestDiagnosisForPhase(rootPath, run.phaseId)
+          : null))
+      : null;
+    const isPlanningDraft =
+      diagnosis?.tags?.includes("planning") &&
+      diagnosis?.tags?.includes("draft");
+    if (isPlanningDraft) {
+      return [
+        "Planning draft failed but RESEARCH may be intact.",
+        "Call retry_draft on this runId (not rerun_research unless RESEARCH.md is missing).",
+        "Use get_run / get_operator_suggestions for the exact gate issues.",
+      ].join(" ");
+    }
     return "The run did not succeed. Use get_run / get_development_report / get_operator_suggestions for why, then propose next steps.";
   }
 

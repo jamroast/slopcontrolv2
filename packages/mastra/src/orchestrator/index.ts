@@ -19,6 +19,7 @@ import {
   type FailureDiagnosis,
   buildDevelopmentHandoff,
   writeDevelopmentHandoff,
+  readRunHandoff,
   formatDiagnosisCard,
   countErrors,
   type HandoffMergeInfo,
@@ -58,6 +59,8 @@ import {
   resolveProjectToolchain,
   runToolchainCommand,
   readResearch,
+  researchLooksSolid,
+  isPlannerRefusalOutput,
   readRoadmap,
   readRunMemory,
   readTokensCss,
@@ -818,14 +821,6 @@ function isProviderBadRequest(error: unknown): boolean {
   if (any.statusCode === 400 || any.status === 400) return true;
   if (any.cause != null) return isProviderBadRequest(any.cause);
   return false;
-}
-
-function researchLooksSolid(research: string): boolean {
-  const body = (research ?? "").trim();
-  return (
-    body.length >= 400 &&
-    (/RESEARCH_COMPLETE/i.test(body) || /^#\s+/m.test(body))
-  );
 }
 
 async function runAgent(
@@ -4836,6 +4831,23 @@ ${message.trim()}`;
 
     log(project, run, `--- Starting research for phase ${phase.id} ---`);
 
+    const existingResearch = readResearch(project.rootPath, phase.id);
+    if (researchLooksSolid(existingResearch)) {
+      log(
+        project,
+        run,
+        "--- Solid RESEARCH.md present; skipping research agent ---",
+      );
+      onStage?.("drafting");
+      return this.draftPhase({
+        project,
+        phase,
+        run,
+        onStage,
+        listProjects: input.listProjects,
+      });
+    }
+
     const intent = await ensureChangeIntentAsync(
       project.rootPath,
       phase.id,
@@ -5385,6 +5397,7 @@ ${draftPlanNote}${draftThemeNote}${draftElementsNote}${draftCrossDepPack ? `\n${
       const blueprintClip = slim ? 2_500 : 6_000;
       const researchClip = slim ? 4_000 : 8_000;
       return `Draft PHASE.md for phase ${phase.id} only (single phase).
+Phase id: ${phase.id}. Full context is in this message (description, Change Intent, RESEARCH.md, blueprint excerpt). Do NOT ask the operator for missing inputs — output the complete PHASE.md starting with \`# Phase …\`.
 Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 
@@ -5402,6 +5415,7 @@ Include ## Blueprint Deltas for durable design changes.
 MUST include ## Automated Checks with at least one runnable command in a \`\`\`bash fence
 (e.g. npm test -- path/to/regression.test.ts). Manual-only success criteria are not enough.
 Match tokens independently: one \`grep -q\` per token joined by \`&&\` — never require multiple tokens on a single line via \`.*\` chains (code formatting varies across lines).
+Never pipe vitest/jest to \`grep -q\` to match "Tests N passed" — use \`npx vitest run … || exit 1\` and trust the runner exit code.
 Automated Checks must be finite: no dev servers (\`next dev\`, \`pnpm dev\`), no bare \`docker compose up\`. A runtime probe against a dockerized app is legal ONLY as: \`docker compose up -d <svc>\` plus \`trap 'docker compose down' EXIT\`, then probe (wget/curl/node one-shot).
 When Change Intent interaction primaryAction is submit form, prove fill+submit at the locked mount; only chat mounts (composer/bubble) also need live AI SDK static tool-part proofs (type: "tool-<name>" / parseToolResult / extractActiveForm). When there is no interaction contract, do not invent fill+submit proofs (click-to-navigate / landing chrome: prove click / onClick / href / router.push). When primaryAction is click/navigate, prove those click proofs — not fill+submit.
 When finished, include PHASE_COMPLETE on its own line.
@@ -5438,10 +5452,12 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
             operatorActions:
               interactionProofKind(intent) === "click-navigate"
                 ? [
+                    "Call MCP retry_draft (research intact) to re-run draft only.",
                     "Retry draft so Success Criteria / Automated Checks prove click / onClick / href / router.push at the locked control.",
                     "Runtime proofs on dockerized apps must be finite: docker compose up -d <svc> + trap 'docker compose down' EXIT, then probe — never a bare compose up or dev server.",
                   ]
                 : [
+                    "Call MCP retry_draft (research intact) to re-run draft only.",
                     "Retry draft so Success Criteria / Automated Checks prove fill+submit at the locked mount (chat mounts also need live AI SDK static tool-part name resolution: type: tool-<name> / parseToolResult / extractActiveForm).",
                     "Runtime proofs on dockerized apps must be finite: docker compose up -d <svc> + trap 'docker compose down' EXIT, then probe — never a bare compose up or dev server.",
                     "Do not rely on summary-chip-only or tool-invocation+toolName fixtures.",
@@ -5502,6 +5518,24 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
       return align.ok ? [] : align.issues;
     };
 
+    const engagementIntent =
+      intent.interaction != null && intent.interaction.mount !== "n/a";
+
+    const refuseIfPlannerChat = (
+      agentOutput: string,
+      context: string,
+    ): RunStage | null => {
+      if (!isPlannerRefusalOutput(agentOutput)) return null;
+      if (!engagementIntent) return null;
+      return recoverableDraftFail(
+        `Planner refused (${context}): ${agentOutput.slice(0, 500)}`,
+        {
+          title: "Draft rejected: planner refused",
+          kind: "planner-refusal",
+        },
+      );
+    };
+
     let output: string | null = null;
     let phaseDocWritten = false;
     try {
@@ -5509,7 +5543,7 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         this.ctx.agents.phasePlannerAgent,
         buildDraftPrompt(false),
         project.id,
-        `${phase.id}-planning`,
+        `${run.id}-draft`,
         { maxSteps: 20 },
       );
     } catch (error) {
@@ -5527,7 +5561,7 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
             this.ctx.agents.phasePlannerAgent,
             buildDraftPrompt(true),
             project.id,
-            `${phase.id}-planning-slim`,
+            `${run.id}-draft-slim`,
             { maxSteps: 16 },
           );
         } catch (retryError) {
@@ -5557,6 +5591,9 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
     if (output != null && !phaseDocWritten) {
       log(project, run, output);
 
+      const refusal = refuseIfPlannerChat(output, "initial draft");
+      if (refusal) return refusal;
+
       let resolved = resolvePhaseDocFromAgentTurn({
         projectRoot: project.rootPath,
         phaseId: phase.id,
@@ -5576,6 +5613,18 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         resolved.source === "none" ||
         (resolved.alignIssues?.length ?? 0) > 0 ||
         intentIssues.length > 0;
+
+      if (
+        resolved.gate.ok &&
+        resolved.source !== "none" &&
+        intentIssues.length > 0 &&
+        !(resolved.alignIssues?.length ?? 0)
+      ) {
+        return recoverableDraftFail(intentIssues.join("; "), {
+          title: "Draft rejected: Change Intent",
+          kind: "change-intent",
+        });
+      }
 
       if (needsRepair) {
         const alignBlock =
@@ -5619,10 +5668,12 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
             this.ctx.agents.phasePlannerAgent,
             repairPrompt,
             project.id,
-            `${phase.id}-planning-repair`,
+            `${run.id}-draft-repair`,
             { maxSteps: 16 },
           );
           log(project, run, repaired);
+          const repairRefusal = refuseIfPlannerChat(repaired, "draft repair");
+          if (repairRefusal) return repairRefusal;
           resolved = resolvePhaseDocFromAgentTurn({
             projectRoot: project.rootPath,
             phaseId: phase.id,
@@ -8328,6 +8379,34 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
   }
 
   /**
+   * Re-run draft only when RESEARCH.md is solid (no research agent).
+   */
+  async retryDraft(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    onStage?: (stage: RunStage) => void;
+    listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+  }): Promise<RunStage> {
+    const { project, phase, run, onStage } = input;
+    const research = readResearch(project.rootPath, phase.id);
+    if (!researchLooksSolid(research)) {
+      throw new Error(
+        "retry_draft requires solid RESEARCH.md (RESEARCH_COMPLETE or substantial # heading)",
+      );
+    }
+    log(project, run, "--- retry_draft: re-running PHASE.md draft (research intact) ---");
+    clearRunDiagnosis(project.rootPath, run.id);
+    return this.draftPhase({
+      project,
+      phase,
+      run,
+      onStage,
+      listProjects: input.listProjects,
+    });
+  }
+
+  /**
    * Re-run the full success-check suite in the phase worktree (no coding, no merge).
    * Persists verify-steps.json + diagnosis on failure; clears diagnosis on success.
    */
@@ -8496,6 +8575,335 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             }
           : undefined,
       stepsSummary: checks.summary || "Verify failed",
+      worktreePath: worktree.path,
+      worktreeBranch: worktree.branch,
+    };
+  }
+
+  /**
+   * Re-run post-merge success checks on the project root (no coding, no merge).
+   * For runs that merged but failed root verify after auto-merge.
+   */
+  async retryRootVerify(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    signal?: AbortSignal;
+  }): Promise<{
+    stage: RunStage;
+    ok: boolean;
+    firstFailure?: {
+      id?: string;
+      name: string;
+      command?: string;
+      exitCode: number;
+    };
+    stepsSummary: string;
+    worktreePath?: string;
+    worktreeBranch?: string;
+  }> {
+    const { project, phase, run, signal } = input;
+    const config = readProjectConfig(project.rootPath);
+    const handoff = readRunHandoff(project.rootPath, run.id);
+    if (!handoff?.merge?.autoMerged && !handoff?.merge?.commit) {
+      return {
+        stage: run.stage,
+        ok: false,
+        stepsSummary:
+          "retry_root_verify requires a merged phase (handoff.merge.autoMerged or merge.commit). Use retry_development instead.",
+      };
+    }
+
+    log(
+      project,
+      run,
+      "--- retry_root_verify: re-running post-merge root success checks (no coding) ---",
+    );
+    writePhaseStatus(project.rootPath, phase.id, "developing");
+
+    const worktree = ensurePhaseWorktree({
+      projectRoot: project.rootPath,
+      projectId: project.id,
+      phaseId: phase.id,
+      dataDir: this.ctx.dataDir,
+      syncPaths: config.worktreeSyncPaths,
+    });
+    log(
+      project,
+      run,
+      `--- Worktree for sync: ${worktree.path} (branch ${worktree.branch}) ---`,
+    );
+
+    if (signal?.aborted) {
+      writePhaseStatus(project.rootPath, phase.id, "interrupted");
+      return {
+        stage: "interrupted",
+        ok: false,
+        stepsSummary: "retry_root_verify aborted",
+        worktreePath: worktree.path,
+        worktreeBranch: worktree.branch,
+      };
+    }
+
+    const ignoredSync = syncIgnoredArtifactsFromWorktree({
+      projectRoot: project.rootPath,
+      worktreePath: worktree.path,
+    });
+    if (ignoredSync.copied.length > 0 || ignoredSync.deleted.length > 0) {
+      const bits = [
+        ignoredSync.copied.length
+          ? `copied ${ignoredSync.copied.join(", ")}`
+          : null,
+        ignoredSync.deleted.length
+          ? `deleted stale ${ignoredSync.deleted.join(", ")}`
+          : null,
+      ].filter(Boolean);
+      log(
+        project,
+        run,
+        `--- Synced gitignored worktree artifacts to root: ${bits.join("; ")} ---`,
+      );
+    }
+
+    const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+    let checks = await runSuccessChecks(project, phaseDoc, project.rootPath, {
+      mode: "verify",
+      forceDepsInstall: true,
+      skipPhaseDocValidation: true,
+      phaseId: phase.id,
+      registry: this.ctx.registry,
+    });
+    if (!checks.ok && isExit127CommandNotFoundFailure(checks)) {
+      log(
+        project,
+        run,
+        "--- Auto deps-install after exit 127 (retry_root_verify) ---",
+      );
+      checks = await runSuccessChecks(project, phaseDoc, project.rootPath, {
+        mode: "verify",
+        forceDepsInstall: true,
+        skipPhaseDocValidation: true,
+        phaseId: phase.id,
+        registry: this.ctx.registry,
+      });
+    }
+
+    if (checks.ok) {
+      const appendixForGate = readAppendix(project.rootPath, phase.id);
+      const researchForGate = readResearch(project.rootPath, phase.id);
+      const apiGate = evaluateApiRoutingCompleteGate({
+        appendix: appendixForGate,
+        phaseDoc,
+        researchDoc: researchForGate,
+        changedFiles: [],
+        envTouchedPaths: [],
+      });
+      if (!apiGate.allowComplete) {
+        const gateStep: SuccessCheckStep = {
+          name: "api-routing-complete-gate",
+          exitCode: 1,
+          output: apiGate.reason ?? "API-routing complete gate failed",
+        };
+        checks = {
+          ok: false,
+          output: [checks.output, gateStep.output].join("\n\n"),
+          steps: [...(checks.steps ?? []), gateStep],
+          firstFailure: gateStep,
+          summary: buildCheckSummary(
+            false,
+            [...(checks.steps ?? []), gateStep],
+            gateStep,
+          ),
+        };
+      }
+    }
+
+    persistCheckOutput(
+      project,
+      run,
+      "retry-root-verify",
+      checks.output,
+      checks.ok,
+      checks,
+    );
+    log(project, run, `--- retry_root_verify summary ---\n${checks.summary}`);
+
+    const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
+    const mergeInfo: HandoffMergeInfo = {
+      autoMerged: handoff.merge.autoMerged,
+      worktreePresent: true,
+      branch: handoff.merge.branch ?? worktree.branch,
+      commit: handoff.merge.commit,
+      stashRestored: handoff.merge.stashRestored,
+      stashRef: handoff.merge.stashRef,
+    };
+
+    if (checks.ok) {
+      clearRunDiagnosis(project.rootPath, run.id, phase.id);
+      log(project, run, COMPLETION_TOKENS.DEV_COMPLETE);
+      writePhaseStatus(project.rootPath, phase.id, "complete");
+      upsertRoadmapEntry(
+        project.rootPath,
+        phase.id,
+        phase.title ?? phase.description.slice(0, 80),
+        "complete",
+        phase.dependsOn ?? [],
+      );
+
+      if (config.removeWorktreeOnComplete !== false) {
+        try {
+          const removed = removePhaseWorktree({
+            projectRoot: project.rootPath,
+            projectId: project.id,
+            phaseId: phase.id,
+            dataDir: this.ctx.dataDir,
+            deleteBranch: true,
+          });
+          log(project, run, `--- ${removed.message} ---`);
+          mergeInfo.worktreePresent = false;
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          log(
+            project,
+            run,
+            `--- Worktree cleanup skipped: ${message} ---`,
+          );
+        }
+      }
+
+      if (config.componentLibrary) {
+        const publish =
+          this.ctx.publishComponentLibrary ?? defaultPublishComponentLibrary;
+        try {
+          const outcome = await publish({
+            projectId: project.id,
+            projectRoot: project.rootPath,
+          });
+          log(
+            project,
+            run,
+            outcome.ok
+              ? `--- Component library auto-publish: ${outcome.summary} ---`
+              : `--- Component library auto-publish failed (phase still complete): ${outcome.summary} ---`,
+          );
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          log(
+            project,
+            run,
+            `--- Component library auto-publish failed (phase still complete): ${message} ---`,
+          );
+        }
+      }
+
+      const completeHandoff = buildDevelopmentHandoff({
+        outcome: "complete",
+        phaseId: phase.id,
+        runId: run.id,
+        phaseDoc,
+        appendix: readAppendix(project.rootPath, phase.id),
+        checksOk: true,
+        checksSummary: checks.summary || checks.output.slice(-2000),
+        merge: mergeInfo,
+        worktreeBranch: worktree.branch,
+      });
+      writeDevelopmentHandoff(project.rootPath, {
+        phaseId: phase.id,
+        runId: run.id,
+        handoff: completeHandoff,
+      });
+
+      return {
+        stage: "complete",
+        ok: true,
+        stepsSummary: checks.summary || "Root verify OK — phase complete",
+        worktreePath:
+          mergeInfo.worktreePresent === false ? undefined : worktree.path,
+        worktreeBranch: worktree.branch,
+      };
+    }
+
+    const diagnosis = await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
+      output: checks.summary || checks.output,
+      firstFailure: checks.firstFailure,
+      failingStepId: verifySteps?.firstFailure?.id,
+      sourcePhaseId: phase.id,
+      sourceRunId: run.id,
+    });
+    this.persistDiagnosis(
+      project,
+      run,
+      {
+        audience: diagnosis.audience,
+        operatorActions: diagnosis.operatorActions,
+        class: diagnosis.class,
+        confidence: diagnosis.confidence,
+        title: diagnosis.title,
+        rootCause: diagnosis.rootCause,
+        evidence: diagnosis.evidence,
+        nextActions: diagnosis.nextActions,
+        fingerprint: diagnosis.fingerprint,
+        codingAgentShouldFix: diagnosis.codingAgentShouldFix,
+        tags: diagnosis.tags,
+        failingStep: diagnosis.failingStep,
+        phaseId: phase.id,
+        runId: run.id,
+        updatedAt: new Date().toISOString(),
+      },
+      phase.id,
+    );
+    log(
+      project,
+      run,
+      `--- Failure diagnosis: ${diagnosis.class} (${diagnosis.confidence}) — ${diagnosis.title} ---`,
+    );
+
+    const blockedHandoff = buildDevelopmentHandoff({
+      outcome: "blocked",
+      phaseId: phase.id,
+      runId: run.id,
+      phaseDoc,
+      appendix: readAppendix(project.rootPath, phase.id),
+      checksOk: false,
+      checksSummary: checks.summary || checks.output.slice(-2000),
+      merge: mergeInfo,
+      diagnosis: {
+        fingerprint: diagnosis.fingerprint,
+        title: diagnosis.title,
+        class: diagnosis.class,
+        operatorActions: diagnosis.operatorActions,
+        nextActions: diagnosis.nextActions,
+        tags: diagnosis.tags,
+      },
+      worktreeBranch: worktree.branch,
+    });
+    writeDevelopmentHandoff(project.rootPath, {
+      phaseId: phase.id,
+      runId: run.id,
+      handoff: blockedHandoff,
+    });
+
+    writePhaseStatus(project.rootPath, phase.id, "blocked");
+    return {
+      stage: "blocked",
+      ok: false,
+      firstFailure: verifySteps?.firstFailure
+        ? {
+            id: verifySteps.firstFailure.id,
+            name: verifySteps.firstFailure.name,
+            command: verifySteps.firstFailure.command,
+            exitCode: verifySteps.firstFailure.exitCode,
+          }
+        : checks.firstFailure
+          ? {
+              name: checks.firstFailure.name,
+              command: checks.firstFailure.command,
+              exitCode: checks.firstFailure.exitCode,
+            }
+          : undefined,
+      stepsSummary: checks.summary || "Root verify failed",
       worktreePath: worktree.path,
       worktreeBranch: worktree.branch,
     };

@@ -71,6 +71,9 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   "start_development",
   "retry_development",
   "retry_verify",
+  "retry_root_verify",
+  "retry_draft",
+  "rerun_research",
   "stop_session",
   "agent",
   "merge_phase",
@@ -295,6 +298,24 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
       projectId: optionalProject,
     })
     .passthrough(),
+  retry_root_verify: z
+    .object({
+      runId: z.string().min(1),
+      projectId: optionalProject,
+    })
+    .passthrough(),
+  retry_draft: z
+    .object({
+      runId: z.string().min(1),
+      projectId: optionalProject,
+    })
+    .passthrough(),
+  rerun_research: z
+    .object({
+      runId: z.string().min(1),
+      projectId: optionalProject,
+    })
+    .passthrough(),
   stop_session: z.object({
     kind: z.enum(["ask", "agent", "design_loop", "plan_loop"]),
     id: z.string().min(1),
@@ -352,6 +373,10 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Preferred proceed tool. Requires runId. Confirming it walks the current gate until work is running: in_review → approve review → start_development (or start_design if required). Use this when the operator says go ahead / accept / start development / continue. Never auto-merges. Stay in this chat.",
   submit_review:
     "Approve or request changes on an in_review research/draft. Requires runId and decision (approve | request_changes). Confirming approve then keeps advancing until work is running (same continuer as advance_run). Prefer advance_run when they want to proceed. Stay in this chat — do not send the operator to a dashboard Approve button.",
+  retry_draft:
+    "Re-run PHASE.md draft only when RESEARCH.md is solid. Requires runId. Use when research succeeded but draft failed — not rerun_research.",
+  rerun_research:
+    "Re-run research for a failed planning run. Skips research agent when RESEARCH.md is already solid. Requires runId.",
   promote_ask:
     "Promote an ask into a phase. Pass askId, or omit to promote this chat's latched ask.",
   stop_session:

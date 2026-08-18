@@ -974,12 +974,12 @@ export function phaseDocAlignsWithChangeIntent(
 ): { ok: boolean; issues: string[] } {
   const issues: string[] = [];
   const deltas =
-    extractSection(phaseDoc, /Blueprint\s+Deltas?/i)?.toLowerCase() ?? "";
-  const scope = extractSection(phaseDoc, /Scope/i)?.toLowerCase() ?? "";
+    extractSection(phaseDoc, "Blueprint Deltas")?.toLowerCase() ?? "";
+  const scope = extractSection(phaseDoc, "Scope")?.toLowerCase() ?? "";
   const checks =
-    extractSection(phaseDoc, /Automated\s+Checks?/i)?.toLowerCase() ?? "";
+    extractSection(phaseDoc, "Automated Checks")?.toLowerCase() ?? "";
   const success =
-    extractSection(phaseDoc, /Success\s+Criteria/i)?.toLowerCase() ?? "";
+    extractSection(phaseDoc, "Success Criteria")?.toLowerCase() ?? "";
   const body = `${deltas}\n${scope}`;
 
   if (intent.uiMount === "composer") {

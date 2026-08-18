@@ -740,6 +740,32 @@ export function readResearch(projectRoot: string, phaseId: string): string {
   return readFileSync(path, "utf-8");
 }
 
+/** True when RESEARCH.md is substantial enough to draft from without re-research. */
+export function researchLooksSolid(research: string): boolean {
+  const body = (research ?? "").trim();
+  return (
+    body.length >= 400 &&
+    (/RESEARCH_COMPLETE/i.test(body) || /^#\s+/m.test(body))
+  );
+}
+
+/**
+ * True when the planner returned chat refusal instead of a PHASE.md document.
+ * Only applies when output lacks a valid phase doc structure.
+ */
+export function isPlannerRefusalOutput(text: string): boolean {
+  const trimmed = (text ?? "").trim();
+  if (!trimmed) return false;
+  const hasPhaseStructure =
+    /^#\s+Phase\b/im.test(trimmed) && /^##\s+Scope\b/im.test(trimmed);
+  if (hasPhaseStructure) return false;
+  return (
+    /I don'?t have (a )?phase/i.test(trimmed) ||
+    /request came through empty/i.test(trimmed) ||
+    (/Please provide/i.test(trimmed) && !/^#\s+/m.test(trimmed))
+  );
+}
+
 export function appendAppendix(
   projectRoot: string,
   phaseId: string,
@@ -1477,6 +1503,7 @@ export function buildPlanningFailureDiagnosis(opts: {
   const defaultActions =
     opts.stage === "draft"
       ? [
+          "Call retry_draft (research intact) — do not rerun_research unless RESEARCH.md is missing or stale.",
           "Retry draft after fixing PHASE.md Success Criteria / Automated Checks to match Change Intent (form contracts need fill+submit proof; click-to-navigate needs click / onClick / href / router.push; chat mounts (composer/bubble) with a form contract also need live AI SDK static tool parts: type: tool-<name> / parseToolResult / extractActiveForm — not only tool-invocation fixtures). Runtime proofs on dockerized apps must be finite: docker compose up -d <svc> + trap 'docker compose down' EXIT, then probe.",
           "Inspect get_run.dev_output / diagnosis.evidence for the exact gate issues.",
         ]

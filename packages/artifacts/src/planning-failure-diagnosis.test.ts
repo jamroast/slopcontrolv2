@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "node:test";
 import {
   buildPlanningFailureDiagnosis,
+  isPlannerRefusalOutput,
   phaseDocAlignsWithChangeIntent,
   readDiagnosis,
   readLatestDiagnosisForPhase,
+  researchLooksSolid,
   writeDiagnosis,
 } from "./index.js";
 import { extractChangeIntent } from "./change-intent.js";
@@ -41,6 +43,29 @@ describe("planning failure diagnosis", () => {
     assert.match(d.nextActions, /Retry draft/i);
     assert.ok(d.operatorActions.length > 0);
     assert.match(d.operatorActions.join(" "), /parseToolResult|tool-</i);
+    assert.match(d.operatorActions.join(" "), /retry_draft/i);
+  });
+
+  it("researchLooksSolid accepts RESEARCH_COMPLETE documents", () => {
+    const body = `# Research\n\n${"x".repeat(400)}\n\nRESEARCH_COMPLETE`;
+    assert.equal(researchLooksSolid(body), true);
+    assert.equal(researchLooksSolid("short"), false);
+  });
+
+  it("isPlannerRefusalOutput detects chat refusals without phase structure", () => {
+    assert.equal(
+      isPlannerRefusalOutput(
+        "I don't have a phase specification — the request came through empty.",
+      ),
+      true,
+    );
+    assert.equal(
+      isPlannerRefusalOutput("Please provide the phase description."),
+      true,
+    );
+    const valid = `# Phase 96: unify connection\n\n## Scope\n\nWork.\n\n## Automated Checks\n\n\`\`\`bash\nnpm test\n\`\`\``;
+    assert.equal(isPlannerRefusalOutput(valid), false);
+    assert.equal(isPlannerRefusalOutput(""), false);
   });
 
   it("writeDiagnosis persists run + phase diagnosis for planning failures", () => {
@@ -173,6 +198,48 @@ grep -q 'router.push("/sign-in")' src/components/layout/user-pill.tsx || exit 1
 - **BD-88-USERPILL-SIGNIN:** landing UserPill navigates to /sign-in
 `;
     const align = phaseDocAlignsWithChangeIntent(doc, intent);
+    assert.equal(align.ok, true, align.issues.join("; "));
+  });
+
+  it("does not treat Build Order prose mentioning Automated Checks as the checks section", () => {
+    const intent = extractChangeIntent(
+      "Chat composer form with fill and submit for connection wizard",
+    );
+    const withInteraction = {
+      ...intent,
+      uiMount: "composer" as const,
+      interaction: intent.interaction ?? {
+        mount: "composer" as const,
+        primaryAction: "submit form" as const,
+        proof: ["interactive control at locked mount", "primary action reachable"],
+        forbiddenSubstitutes: ["summary-chip-only"],
+      },
+    };
+    const doc = `# Phase 96 — test
+
+## Scope
+Composer mount proof.
+
+## File Changes
+- src/lib/active-form.ts
+
+## Build Order
+1. Implement
+2. Tests (see Automated Checks)
+
+## Success Criteria
+- Fill+submit at composer-form
+
+## Automated Checks
+\`\`\`bash
+grep -q 'parseToolResult' src/lib/active-form.ts || exit 1
+grep -q 'extractActiveForm' src/lib/active-form.ts || exit 1
+\`\`\`
+
+## Blueprint Deltas
+- none
+`;
+    const align = phaseDocAlignsWithChangeIntent(doc, withInteraction);
     assert.equal(align.ok, true, align.issues.join("; "));
   });
 });

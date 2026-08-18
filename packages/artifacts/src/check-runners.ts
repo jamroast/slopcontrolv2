@@ -223,6 +223,29 @@ export function hasBackgroundWaitHangAntipattern(body: string): boolean {
  * tokens requires all tokens on ONE line — code formatting varies, so the
  * check false-negatives on multi-line constructs.
  */
+/** Detect `vitest` (or `npx vitest`) piped to `grep -q` — suppresses failure output. */
+export function hasVitestGrepQuietAntipattern(body: string): boolean {
+  const normalized = normalizeShellCheckBody(body);
+  return /\b(?:npx\s+)?vitest\b/i.test(normalized) && /\|\s*grep\s+-q[Ee]?\b/.test(normalized);
+}
+
+/**
+ * When a check pipes to `grep -q`, return the upstream command with `|| exit 1`
+ * so failures surface runner output. Returns null when no grep -q pipe is found.
+ */
+export function unwrapGrepQuietPipe(body: string): string | null {
+  const normalized = normalizeShellCheckBody(body).trim();
+  const m = normalized.match(
+    /^([\s\S]+?)\|\s*grep\s+-q[Ee]?\s+(?:'[^']*'|"[^"]*"|[^\s|&;]+)\s*(?:\|\|\s*exit\s+1)?\s*$/,
+  );
+  if (!m?.[1]) return null;
+  let upstream = m[1].trim().replace(/\s+$/, "");
+  if (/\|\|\s*exit\s+1\b/.test(normalized) && !/\|\|\s*exit\s+1\b/.test(upstream)) {
+    upstream = `${upstream} || exit 1`;
+  }
+  return upstream;
+}
+
 export function hasBrittleSameLineGrepChain(body: string): boolean {
   const grepPattern = /\bgrep\b[^\n|&;]*?(['"])((?:(?!\1).)*)\1/g;
   let match: RegExpExecArray | null;
@@ -288,6 +311,11 @@ function shellValidate(cell: CheckCell): string[] {
       `Brittle Automated Check requires multiple tokens on ONE line via \`.*\` chains — code formatting varies. Match tokens independently: one \`grep -q\` per token joined by \`&&\` (or \`grep -Pzo\` for multi-line), e.g. \`grep -q 'fetch("/api/conversations"' f && grep -q 'method: "POST"' f\`: ${normalized.slice(0, 120)}`,
     );
   }
+  if (hasVitestGrepQuietAntipattern(normalized)) {
+    issues.push(
+      `Broken Automated Check pipes vitest to \`grep -q\`, which hides test failures. Prefer \`npx vitest run … || exit 1\` (trust the runner exit code): ${normalized.slice(0, 120)}`,
+    );
+  }
   return issues;
 }
 
@@ -303,13 +331,40 @@ export function createShellFamilyRunner(runner: CheckCommandRunner): CheckRunner
         normalizeShellCheckBody(cell.body),
         ctx.cwd,
       );
-      return runViaTempFile(
+      let result = await runViaTempFile(
         runner,
         body,
         ".sh",
         (file) => `${bin} ${shellQuote(file)}`,
         ctx,
       );
+      if (result.exitCode !== 0) {
+        const unwrapped = unwrapGrepQuietPipe(body);
+        if (unwrapped && unwrapped !== body) {
+          const diag = await runViaTempFile(
+            runner,
+            unwrapped,
+            ".sh",
+            (file) => `${bin} ${shellQuote(file)}`,
+            ctx,
+          );
+          result = {
+            exitCode: diag.exitCode === 0 ? 0 : result.exitCode,
+            output: [
+              result.output,
+              "",
+              "--- Diagnostic rerun (grep -q suppressed upstream output; re-ran without pipe) ---",
+              diag.output,
+              diag.exitCode === 0
+                ? "Upstream command succeeded without grep — treating check as pass."
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          };
+        }
+      }
+      return result;
     },
   };
 }

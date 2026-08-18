@@ -57,7 +57,7 @@ export type AdvanceDecision =
 function blockedReason(stage: RunStage): string {
   if (stage === "complete") return "Run already completed.";
   if (isTerminalRunStage(stage)) {
-    return `Run is ${stage}. Use get_run / get_operator_suggestions, then retry_development or retry_verify — do not invent a next step.`;
+    return `Run is ${stage}. Use get_run / get_operator_suggestions, then retry_draft or rerun_research (planning failures), retry_development, retry_verify (worktree), or retry_root_verify (post-merge root) — do not invent a next step.`;
   }
   return `Stage ${stage} does not auto-advance.`;
 }

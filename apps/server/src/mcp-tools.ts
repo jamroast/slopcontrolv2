@@ -823,6 +823,42 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "retry_root_verify",
+      description:
+        "Re-run post-merge success checks on the project root only (no coding, no merge). Use when handoff.merge.autoMerged is true but root verify failed after merge. Allowed when stage is blocked/failed/interrupted. Returns ok, stage, firstFailure, stepsSummary, and steps.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+        },
+        required: ["runId"],
+      },
+    },
+    {
+      name: "retry_draft",
+      description:
+        "Re-run PHASE.md draft only when RESEARCH.md is solid (no research agent). Allowed when run stage is failed or interrupted. Prefer this over rerun_research when research succeeded but draft failed.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+        },
+        required: ["runId"],
+      },
+    },
+    {
+      name: "rerun_research",
+      description:
+        "Re-run research (and draft) for an existing failed/interrupted planning run. Skips the research agent when RESEARCH.md is already solid. Returns 202 with stage researching/drafting.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+        },
+        required: ["runId"],
+      },
+    },
+    {
       name: "design_loop_start",
       description:
         "Start a chat-driven look-and-feel loop: generates self-contained mock HTML (no product edits). Returns loopId + html + transcript + conceptualModel (scope/theme). Optional scope narrows the conceptual model (e.g. component+chat.composer). Briefs that ask to pull current/existing theming or design concepts seed PRIOR_DESIGN from the latest accepted/implemented loop (or phase design) and ground v1 on that mock — prefer design_loop_continue when iterating the same dirty loop. If usedScaffold/timeout, call design_loop_retry. Iterate with design_loop_continue, freeze with design_loop_accept, then implement_design.",
@@ -2613,6 +2649,52 @@ export async function dispatchSlopcontrolTool(
           `${SERVER_URL}/runs/${encodeURIComponent(runId)}/retry-verify`,
           { method: "POST", headers: { "Content-Type": "application/json" } },
         );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "retry_root_verify") {
+      return wrap(async () => {
+        const runId = String(args.runId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/runs/${encodeURIComponent(runId)}/retry-root-verify`,
+          { method: "POST", headers: { "Content-Type": "application/json" } },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "retry_draft") {
+      return wrap(async () => {
+        const runId = String(args.runId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/runs/${encodeURIComponent(runId)}/retry-draft`,
+          { method: "POST", headers: { "Content-Type": "application/json" } },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "rerun_research") {
+      return wrap(async () => {
+        const runId = String(args.runId ?? "");
+        const res = await fetch(`${SERVER_URL}/runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "rerun_research", runId }),
+        });
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

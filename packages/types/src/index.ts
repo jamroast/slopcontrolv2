@@ -874,6 +874,14 @@ export const RunActionSchema = z.discriminatedUnion("action", [
     runId: z.string(),
   }),
   z.object({
+    action: z.literal("retry_root_verify"),
+    runId: z.string(),
+  }),
+  z.object({
+    action: z.literal("retry_draft"),
+    runId: z.string(),
+  }),
+  z.object({
     action: z.literal("delete_run"),
     runId: z.string(),
   }),
