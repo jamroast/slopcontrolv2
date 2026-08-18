@@ -265,6 +265,11 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     phaseId: z.string().min(1).optional(),
     projectId: optionalProject,
   }),
+  start_change: z.object({
+    description: z.string().min(1),
+    dependsOn: z.array(z.string()).optional(),
+    projectId: optionalProject,
+  }),
   start_development: z
     .object({
       runId: z.string().min(1),
@@ -362,6 +367,8 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Bind accepted plan to a new phase and start research (returns runId). Pass loopId (or omit latched). After research reaches in_review, use advance_run with that runId — plan_loop_promote does not start development.",
   design_loop_start:
     "Start a look-and-feel design loop (mock HTML). Requires brief — pass the operator's words in brief. Notification-driven when live turn active.",
+  start_change:
+    "Start research for a new phase. Requires description — pass the operator's full task definition (title, goal, affected areas, success criteria). Do not call with only projectId. Optional dependsOn for phase ordering.",
   ask: "Investigate the project (read source, explain why something is broken). Pass the operator's words through in message — do not replace a page/route/product-gap question with a source-claim checklist. Optional investigateTool: mastra (faster) | pi (thorough) | auto. Thorough vs quick intent in the operator message is classified by the LLM, never keyword-matched; with no expressed intent the fast mastra path runs. Prefer this over gated agent for read-only traces. Requires message. You may pass askId or newAsk; the chat service will choose continue vs a new ask so this never resumes some other open ask on the project.",
   project_set_ask_investigate_tool:
     "Set the project's default Ask walker: auto, mastra (fast), or pi (thorough). Requires tool. Bind the judge model with chat_function_bind function=judge.",
@@ -711,6 +718,27 @@ function shapeJsonForChat(parsed: unknown): string | null {
   return null;
 }
 
+function startChangeDescriptionMissing(raw: string): boolean {
+  return (
+    /fieldErrors.*description/i.test(raw) ||
+    /description is required/i.test(raw) ||
+    /expected string, received undefined/i.test(raw)
+  );
+}
+
+/** Plain operator text for common MCP/HTTP validation failures. */
+export function humanizeChatToolError(raw: string, toolName?: string): string {
+  const trimmed = raw.trim();
+  if (toolName === "start_change" && startChangeDescriptionMissing(trimmed)) {
+    const detail = trimmed.length <= 200 ? trimmed : `${trimmed.slice(0, 200)}…`;
+    return (
+      "start_change failed: no task description was sent. The chat should include your full brief, or the agent must pass it in description." +
+      (detail ? `\n(${detail})` : "")
+    );
+  }
+  return trimmed;
+}
+
 /** Tool result text the chat operator model actually sees. */
 export function formatChatDispatchResult(
   result: ChatToolResult,
@@ -718,7 +746,8 @@ export function formatChatDispatchResult(
 ): string {
   const raw = result.content.map((c) => c.text).join("\n");
   const body = compactChatToolPayload(raw, toolName);
-  const prefixed = result.isError ? `ERROR:\n${body}` : body;
+  const errorBody = result.isError ? humanizeChatToolError(body, toolName) : body;
+  const prefixed = result.isError ? `ERROR:\n${errorBody}` : errorBody;
   const max =
     toolName === "ask"
       ? CHAT_ASK_TOOL_RESULT_MAX_CHARS

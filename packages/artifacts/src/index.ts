@@ -60,6 +60,7 @@ export * from "./design-delivery.js";
 export * from "./phase-complete-gate.js";
 export * from "./development-handoff.js";
 export * from "./ask-session.js";
+export * from "./chat-task-description.js";
 export * from "./agent-session.js";
 export * from "./design-loop.js";
 export * from "./design-pack.js";

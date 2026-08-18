@@ -12,6 +12,7 @@ import {
   buildConfirmedTurnPrefix,
   extractDispatchedReply,
   formatChatDispatchResult,
+  humanizeChatToolError,
   compactChatToolPayload,
   CHAT_FREE_TOOLS,
   CHAT_GATED_TOOLS,
@@ -1295,6 +1296,15 @@ describe("chat tool input schemas", () => {
         message: "darker chrome",
       }),
     );
+    assert.throws(() =>
+      CHAT_TOOL_INPUT_SCHEMA.start_change!.parse({ projectId: "p1" }),
+    );
+    assert.ok(
+      CHAT_TOOL_INPUT_SCHEMA.start_change!.parse({
+        projectId: "p1",
+        description: "Implement service-token issuer",
+      }),
+    );
     assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.stop_session!.parse({ kind: "ask" }));
     assert.ok(
       CHAT_TOOL_INPUT_SCHEMA.stop_session!.parse({
@@ -1306,6 +1316,26 @@ describe("chat tool input schemas", () => {
 });
 
 describe("chat dispatch result shaping", () => {
+  it("humanizes start_change missing-description API errors", () => {
+    const raw = JSON.stringify({
+      error: {
+        fieldErrors: {
+          description: ["Invalid input: expected string, received undefined"],
+        },
+      },
+    });
+    const human = humanizeChatToolError(raw, "start_change");
+    assert.match(human, /no task description was sent/);
+    assert.match(human, /^start_change failed:/);
+    assert.match(
+      formatChatDispatchResult(
+        { isError: true, content: [{ type: "text", text: raw }] },
+        "start_change",
+      ),
+      /no task description was sent/,
+    );
+  });
+
   it("extracts reply from agent JSON so a session dump cannot hide the answer", () => {
     const raw = JSON.stringify({
       agent: { id: "ag-1", messages: [{ content: "noise".repeat(2_000) }] },
@@ -1962,7 +1992,9 @@ describe("awaited runs + run-settled notifications", () => {
     });
     try {
       const conv = service.createConversation({ projectId: "p1" });
-      const token = park(service, conv, "start_change", { phaseId: "ph-1" });
+      const token = park(service, conv, "start_change", {
+        description: "Implement service-token issuer",
+      });
       await service.confirm({
         conversationId: conv.id,
         token,
@@ -1983,6 +2015,120 @@ describe("awaited runs + run-settled notifications", () => {
       assert.equal(settled[0]?.run?.stage, "in_review");
       assert.equal(service.getAwaitedRun(conv.id), null);
       assert.equal(store.getConversation(conv.id)?.awaitedRun, undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("backfills start_change description from chat transcript on confirm", async () => {
+    const brief =
+      "## Task brief for jamroast: Service-token issuer\n\nGoal: Make jamroast the central identity authority.";
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (name, args) => {
+        dispatched.push({ name, args });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                run: { id: "run-backfill", stage: "researching" },
+                stage: "researching",
+              }),
+            },
+          ],
+        };
+      },
+      getMemory: () =>
+        ({
+          recall: async () => ({
+            messages: [
+              {
+                role: "user",
+                createdAt: "2026-08-18T15:08:29.967Z",
+                content: {
+                  format: 2,
+                  parts: [{ type: "text", text: brief }],
+                },
+              },
+              {
+                role: "user",
+                createdAt: "2026-08-18T15:10:12.901Z",
+                content: {
+                  format: 2,
+                  parts: [{ type: "text", text: "please hand it over" }],
+                },
+              },
+            ],
+            total: 2,
+            page: 0,
+            perPage: false,
+            hasMore: false,
+          }),
+          deleteThread: async () => {},
+        }) as never,
+      listRuns: () => [],
+      waitPollMs: 10,
+      followUpWaitMs: 0,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const token = park(service, conv, "start_change", { projectId: "p1" });
+      const result = await service.confirm({
+        conversationId: conv.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+      assert.equal(result.ok, true);
+      assert.equal(dispatched.length, 1);
+      assert.equal(dispatched[0]?.name, "start_change");
+      assert.equal(dispatched[0]?.args.description, brief);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("returns a friendly error when start_change has no description source", async () => {
+    const dispatched: string[] = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (name) => {
+        dispatched.push(name);
+        return { content: [{ type: "text", text: "{}" }] };
+      },
+      getMemory: () =>
+        ({
+          recall: async () => ({
+            messages: [
+              {
+                role: "user",
+                createdAt: "2026-08-18T15:10:12.901Z",
+                content: {
+                  format: 2,
+                  parts: [{ type: "text", text: "please hand it over" }],
+                },
+              },
+            ],
+            total: 1,
+            page: 0,
+            perPage: false,
+            hasMore: false,
+          }),
+          deleteThread: async () => {},
+        }) as never,
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const token = park(service, conv, "start_change", { projectId: "p1" });
+      const result = await service.confirm({
+        conversationId: conv.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+      assert.equal(result.ok, false);
+      assert.match(String(result.error), /requires description/);
+      assert.equal(dispatched.length, 0);
     } finally {
       cleanup();
     }

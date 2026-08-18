@@ -11,6 +11,7 @@ import {
   type ChatConfirmClassification,
   type ParkedChatAction,
 } from "@slopcontrol/llm";
+import { buildChatTaskDescription } from "@slopcontrol/artifacts";
 import {
   isGateRunStage,
   isTerminalRunStage,
@@ -1514,6 +1515,29 @@ export class ChatService {
             {
               type: "text",
               text: "No loopId: this chat has no latched plan loop. Call plan_loop_start first or pass loopId.",
+            },
+          ],
+        };
+      }
+    } else if (name === "start_change") {
+      let description =
+        typeof nextArgs.description === "string" ? nextArgs.description.trim() : "";
+      if (!description) {
+        const messages = await this.getMessages(conversation.id);
+        description =
+          buildChatTaskDescription(messages, {
+            operatorMessage: this.turnOperatorMessage.trim(),
+          }) ?? "";
+        nextArgs = { ...nextArgs, description };
+      }
+      if (!description) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                "start_change requires description — pass the operator's full task brief, or ensure the chat contains a substantive task message before handing over.",
             },
           ],
         };
