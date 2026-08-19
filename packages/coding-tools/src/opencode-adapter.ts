@@ -10,6 +10,7 @@ import type {
   RunPromptOptions,
 } from "./index.js";
 import { detectCodingProbeAbuseFromEvents } from "./probe-abuse.js";
+import { dirtyDelta } from "./dirty-delta.js";
 import {
   detectProviderRateLimit,
   TURN_BUDGET_YIELD,
@@ -34,6 +35,9 @@ interface OpenCodeSessionState {
   lastActivityAt: number;
   /** Set while a promptAsync turn is in flight; resolved by session events */
   turnWaiter?: { resolve: (signal: TurnSignal) => void } | null;
+  /** Repo status captured at session creation; getChangedFiles reports only
+   *  the delta attributable to this session (null when capture failed). */
+  dirtyBaseline: Set<string> | null;
 }
 
 const sessions = new Map<string, OpenCodeSessionState>();
@@ -190,6 +194,22 @@ function describeSessionError(error: unknown): string {
     record.name ??
     "OpenCode session error"
   );
+}
+
+/** Repo-wide OpenCode file-status paths ([] on error). */
+async function opencodeStatusPaths(
+  state: OpenCodeSessionState,
+): Promise<string[]> {
+  try {
+    const status = await state.client.file.status({
+      query: { directory: state.projectDir },
+    });
+    return (status.data ?? [])
+      .map((file) => file.path)
+      .filter((path): path is string => Boolean(path));
+  } catch {
+    return [];
+  }
 }
 
 function abortSession(state: OpenCodeSessionState): void {
@@ -509,9 +529,13 @@ export class OpenCodeAdapter implements CodingTool {
       onEvent: opts.onEvent,
       recentEventText: "",
       lastActivityAt: Date.now(),
+      dirtyBaseline: null,
     };
 
     sessions.set(session.id, state);
+    // Baseline before any turn runs so getChangedFiles can attribute only
+    // this session's mutations (post-merge verify trees are already dirty).
+    state.dirtyBaseline = new Set(await opencodeStatusPaths(state));
     // Await the SSE subscription before the ack turn so the turn's
     // session.idle completion event cannot be missed.
     await this.startEventStream(state);
@@ -615,13 +639,7 @@ export class OpenCodeAdapter implements CodingTool {
     const state = sessions.get(session.id);
     if (!state) return [];
 
-    const status = await state.client.file.status({
-      query: { directory: state.projectDir },
-    });
-    const files = status.data ?? [];
-    return files
-      .map((file) => file.path)
-      .filter((path): path is string => Boolean(path));
+    return dirtyDelta(state.dirtyBaseline, await opencodeStatusPaths(state));
   }
 
   async abort(session: CodingSession): Promise<void> {

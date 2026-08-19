@@ -28,6 +28,7 @@ import {
   type CodingEventListener,
 } from "./opencode-adapter.js";
 import { detectCodingProbeAbuseFromEvents } from "./probe-abuse.js";
+import { dirtyDelta, gitStatusPaths } from "./dirty-delta.js";
 import {
   detectProviderRateLimit,
   TURN_BUDGET_YIELD,
@@ -53,6 +54,9 @@ interface PiSessionState {
   seenTurnStart: boolean;
   /** Context queued via injectContext; folded into the next real prompt */
   pendingContext: string[];
+  /** Repo status captured at session creation; getChangedFiles reports only
+   *  the delta attributable to this session (null when capture failed). */
+  dirtyBaseline: Set<string> | null;
 }
 
 export const PI_INVESTIGATE_SYSTEM_PROMPT = `You are a read-only codebase investigator for SlopControl Ask.
@@ -515,6 +519,10 @@ export class PiAdapter implements CodingTool {
       toolId: this.id,
     };
 
+    // Baseline before any turn runs so getChangedFiles can attribute only
+    // this session's mutations (post-merge verify trees are already dirty).
+    const dirtyBaseline = new Set(await gitStatusPaths(opts.projectDir));
+
     const state: PiSessionState = {
       agent,
       modelRuntime,
@@ -526,6 +534,7 @@ export class PiAdapter implements CodingTool {
       lastActivityAt: Date.now(),
       seenTurnStart: false,
       pendingContext: [],
+      dirtyBaseline,
     };
 
     sessions.set(codingSession.id, state);
@@ -603,30 +612,7 @@ export class PiAdapter implements CodingTool {
   async getChangedFiles(session: CodingSession): Promise<string[]> {
     const state = sessions.get(session.id);
     if (!state) return [];
-    return new Promise((resolve) => {
-      execFile(
-        "git",
-        ["status", "--porcelain=v1", "-uall"],
-        { cwd: state.projectDir },
-        (error, stdout) => {
-          if (error) {
-            resolve([]);
-            return;
-          }
-          resolve(
-            stdout
-              .split("\n")
-              .map((line) => line.slice(3).trim())
-              .filter((line) => line.length > 0)
-              .map((line) => {
-                // Renames show as "old -> new"; keep the new path.
-                const arrow = line.indexOf(" -> ");
-                return arrow >= 0 ? line.slice(arrow + 4) : line;
-              }),
-          );
-        },
-      );
-    });
+    return dirtyDelta(state.dirtyBaseline, await gitStatusPaths(state.projectDir));
   }
 
   async abort(session: CodingSession): Promise<void> {

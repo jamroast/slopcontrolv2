@@ -25,59 +25,109 @@ export type VerifyRecoveryAttemptResult =
 const RECOVER_PROMPT = `Investigate this verify harness failure. Use bash probes only (no rm/install/ci during investigation).
 When you understand the cause, respond with ONLY the JSON object described in your system prompt.`;
 
+type RecoveryInvestigationResult = {
+  payload: RecoveryExecutePayload | null;
+  output: string;
+  dirtyWarning: string | null;
+};
+
+/**
+ * Drive a recovery investigation attempt with bounded resilience.
+ * A payload or a dirty tree is terminal — retrying cannot help. A throw
+ * (e.g. a transient Pi session_error) or an empty payload gets ONE retry
+ * on a fresh session with a retry note; after both attempts fail, throws
+ * with the accumulated last failure reason.
+ */
+export async function recoverInvestigateWithRetry(
+  attempt: (retryNote?: string) => Promise<RecoveryInvestigationResult>,
+  maxAttempts = 2,
+): Promise<RecoveryInvestigationResult> {
+  let lastReason = "unknown";
+  for (let n = 1; n <= maxAttempts; n++) {
+    const retryNote =
+      n > 1
+        ? `Prior attempt died on a session error (${lastReason}) — probes only, then emit the JSON.`
+        : undefined;
+    try {
+      const result = await attempt(retryNote);
+      if (result.payload || result.dirtyWarning) {
+        return result;
+      }
+      lastReason = "investigator emitted no RECOVERY_EXECUTE JSON";
+    } catch (err) {
+      lastReason = err instanceof Error ? err.message : String(err);
+    }
+  }
+  throw new Error(
+    `verify recovery investigation failed after ${maxAttempts} attempts: ${lastReason}`,
+  );
+}
+
 export async function runVerifyRecoveryInvestigation(opts: {
   verifyCwd: string;
   projectRoot: string;
   step: VerifyRecoveryStepInput;
   endpoint: LlmEndpoint;
   modelId?: string;
-}): Promise<{ payload: RecoveryExecutePayload | null; output: string; dirtyWarning: string | null }> {
+}): Promise<RecoveryInvestigationResult> {
   const evidence = buildVerifyRecoveryEvidence({
     verifyCwd: opts.verifyCwd,
     projectRoot: opts.projectRoot,
     step: opts.step,
   });
   const tool = getCodingTool("pi");
-  const session = await tool.createSession({
-    projectDir: opts.verifyCwd,
-    endpoint: opts.endpoint,
-    modelId: opts.modelId,
-    mode: "recover",
-  });
-  try {
-    if (tool.injectContext) {
-      await tool.injectContext(session, "verify-failure", evidence.promptBlock);
+
+  // Each attempt gets a fresh session so a poisoned/errored session cannot
+  // carry state into the retry.
+  const attempt = async (
+    retryNote?: string,
+  ): Promise<RecoveryInvestigationResult> => {
+    const session = await tool.createSession({
+      projectDir: opts.verifyCwd,
+      endpoint: opts.endpoint,
+      modelId: opts.modelId,
+      mode: "recover",
+    });
+    try {
+      if (tool.injectContext) {
+        await tool.injectContext(session, "verify-failure", evidence.promptBlock);
+      }
+      const timeoutMs = Number(process.env.SLOPCONTROL_VERIFY_RECOVERY_MS ?? 120_000);
+      const prompt = retryNote
+        ? `${retryNote}\n\n${RECOVER_PROMPT}`
+        : RECOVER_PROMPT;
+      const result = tool.runPromptWithSystem
+        ? await tool.runPromptWithSystem(session, prompt, undefined, {
+            timeoutMs,
+          })
+        : await tool.runPrompt(session, prompt, { timeoutMs });
+      const changed = await tool.getChangedFiles(session);
+      const dirtyWarning = formatInvestigateDirtyTree(changed);
+      let payload = parseRecoveryExecutePayload(result.output);
+      if (!payload && !result.aborted) {
+        const retry = tool.runPromptWithSystem
+          ? await tool.runPromptWithSystem(
+              session,
+              "Output ONLY the JSON execute object now. No prose.",
+              undefined,
+              { timeoutMs: 60_000 },
+            )
+          : await tool.runPrompt(session, "Output ONLY the JSON execute object now.", {
+              timeoutMs: 60_000,
+            });
+        payload = parseRecoveryExecutePayload(retry.output);
+      }
+      return {
+        payload,
+        output: result.output,
+        dirtyWarning,
+      };
+    } finally {
+      await tool.abort(session).catch(() => undefined);
     }
-    const timeoutMs = Number(process.env.SLOPCONTROL_VERIFY_RECOVERY_MS ?? 120_000);
-    const result = tool.runPromptWithSystem
-      ? await tool.runPromptWithSystem(session, RECOVER_PROMPT, undefined, {
-          timeoutMs,
-        })
-      : await tool.runPrompt(session, RECOVER_PROMPT, { timeoutMs });
-    const changed = await tool.getChangedFiles(session);
-    const dirtyWarning = formatInvestigateDirtyTree(changed);
-    let payload = parseRecoveryExecutePayload(result.output);
-    if (!payload && !result.aborted) {
-      const retry = tool.runPromptWithSystem
-        ? await tool.runPromptWithSystem(
-            session,
-            "Output ONLY the JSON execute object now. No prose.",
-            undefined,
-            { timeoutMs: 60_000 },
-          )
-        : await tool.runPrompt(session, "Output ONLY the JSON execute object now.", {
-            timeoutMs: 60_000,
-          });
-      payload = parseRecoveryExecutePayload(retry.output);
-    }
-    return {
-      payload,
-      output: result.output,
-      dirtyWarning,
-    };
-  } finally {
-    await tool.abort(session).catch(() => undefined);
-  }
+  };
+
+  return recoverInvestigateWithRetry(attempt);
 }
 
 export async function attemptVerifyRecovery(opts: {

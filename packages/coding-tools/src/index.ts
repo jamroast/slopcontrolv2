@@ -70,6 +70,7 @@ export type CodingToolFactory = (opts?: CodingToolFactoryOptions) => CodingTool;
 export * from "./opencode-adapter.js";
 export * from "./pi-adapter.js";
 export * from "./probe-abuse.js";
+export * from "./dirty-delta.js";
 export * from "./provider-stall.js";
 export * from "./ensure-opencode.js";
 export * from "./git-worktree.js";
