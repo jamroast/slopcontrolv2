@@ -159,19 +159,6 @@ function isGenericPlanFocus(token: string): boolean {
   return GENERIC_PLAN_FOCUS.test(token.trim());
 }
 
-/** Long or file-rich briefs need a repo walk even when the operator already listed requirements. */
-export function briefImpliesPlanInvestigation(brief: string): boolean {
-  const t = brief ?? "";
-  if (t.length >= 600) return true;
-  if ((t.match(/\b[\w./-]+\.(?:ts|tsx|js|jsx)\b/gi) ?? []).length >= 2) {
-    return true;
-  }
-  if (/\bsrc\/[\w./-]+/i.test(t)) return true;
-  if (/\b(investigate|research|look at|walk|explore)\b/i.test(t)) return true;
-  if (/\b\d+\s+(connector|type|endpoint)s?\b/i.test(t)) return true;
-  return false;
-}
-
 export function defaultPlanScope(
   brief: string,
   source: PlanScope["source"] = "start",

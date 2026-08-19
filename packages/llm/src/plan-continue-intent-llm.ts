@@ -15,12 +15,14 @@ Return ONLY a JSON object with these fields:
 - sections: string[] — PLAN.md section titles to change (subset of Goal, Constraints, In scope, Out of scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes)
 - focus: optional string — new focus when narrowing/expanding (a concrete component/feature name, never bare words like "management")
 - preserve: optional string[] — areas to freeze (omit on expand/full_revise)
+- needsInvestigation: boolean — true when the revision requires walking the repo first (investigate/research/walk/explore the codebase, "flesh out Likely areas", real/concrete paths or files, update Likely areas from actual source). false for wording tweaks, scope edits, or section rewrites the agent can do from the brief alone.
 - notes: string — 1 sentence summary
 
 Rules:
 - "rewrite / from scratch / start over / full revise" → full_revise
 - "add / extend / also / first component / new capability / new feature / new system / research and present a plan / present me with a plan / broaden the plan / extend the plan" → expand_scope. List many sections (Goal, In scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes).
-- "investigate / walk the repo / flesh out Likely areas / research the codebase" → expand_scope (include Likely areas, Approach) — not clarify_only
+- "investigate / walk the repo / flesh out Likely areas / research the codebase / real paths" → needsInvestigation true (usually expand_scope, include Likely areas, Approach) — not clarify_only
+- expand_scope or full_revise also imply needsInvestigation true when the new scope requires knowing the codebase
 - Do NOT treat "not only …" as narrow_scope.
 - "narrow / focus only on X" (genuine narrowing) → narrow_scope (set focus when named)
 - pure questions with no change ask → clarify_only

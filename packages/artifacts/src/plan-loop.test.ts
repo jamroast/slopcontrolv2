@@ -12,7 +12,6 @@ import { describe, it, after } from "node:test";
 import {
   acceptPlanLoop,
   bindAcceptedPlanLoopToPhase,
-  briefImpliesPlanInvestigation,
   createPlanLoopMeta,
   defaultPlanScope,
   extractPlanDocument,
@@ -33,7 +32,6 @@ import {
   readPhasePlanPack,
   phaseDescriptionFromPlanPack,
 } from "./plan-pack.js";
-import { fallbackPlanContinueIntentFromText } from "./plan-continue-intent.js";
 
 const GOOD_PLAN = `# Plan — composer submit
 
@@ -339,17 +337,6 @@ describe("plan-loop", () => {
     );
   });
 
-  it("fallbackPlanContinueIntentFromText classifies narrow and full", () => {
-    const narrow = fallbackPlanContinueIntentFromText(
-      "Please narrow to only the composer",
-    );
-    assert.equal(narrow.scope, "narrow_scope");
-    const full = fallbackPlanContinueIntentFromText(
-      "Rewrite the whole plan from scratch",
-    );
-    assert.equal(full.scope, "full_revise");
-  });
-
   it("defaultPlanScope ignores fix-the-catalogue in large feature briefs", () => {
     const brief =
       "Build provider config for JamPress. Fix the catalogue/registry auth mismatch for mcp-http connectors.";
@@ -359,10 +346,4 @@ describe("plan-loop", () => {
     assert.equal(scope.focus, "provider-config");
   });
 
-  it("briefImpliesPlanInvestigation for file-rich briefs", () => {
-    const brief =
-      "Rewire oauth2-providers.ts and secret-store.ts; 33 connector types across 5 auth categories.";
-    assert.equal(briefImpliesPlanInvestigation(brief), true);
-    assert.equal(briefImpliesPlanInvestigation("Tweak button copy"), false);
-  });
 });

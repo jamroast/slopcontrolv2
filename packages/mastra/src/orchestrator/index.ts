@@ -204,7 +204,6 @@ import {
   readPlanLoopMeta,
   writePlanLoopMeta,
   defaultPlanScope,
-  briefImpliesPlanInvestigation,
   formatPlanLoopReviseBlock,
   formatPlanAcceptancePromptBlock,
   readPlanLoopAcceptance,
@@ -217,9 +216,8 @@ import {
   scaffoldPlanDocument,
   failurePlanDocument,
   PLAN_CONTINUE_INTENT_DEFAULT,
-  fallbackPlanContinueIntentFromText,
+  PLAN_CONTINUE_INTENT_FALLBACK,
   normalizePlanContinueIntentStructured,
-  textSignalsPlanInvestigate,
   formatPlanContinueIntentPromptBlock,
   buildSiblingInvestigationPack,
   briefWantsSiblingInvestigation,
@@ -1485,6 +1483,8 @@ export type SuccessCheckResult = {
   firstFailure?: SuccessCheckStep;
   /** Short card for agents: failing step + exit + last lines of that step only. */
   summary: string;
+  /** Structural flag: harness recovery already ran this verify pass. */
+  recoveryAttempted?: boolean;
 };
 
 function lastNLines(text: string, n: number): string {
@@ -1673,11 +1673,26 @@ export async function runSuccessChecks(
           });
         }
         if (recovery.kind === "executed" || recovery.kind === "rejected") {
-          return failResult(parts.slice(0, -1), steps, {
-            ...failureStep,
-            output: `${failureStep.output}\n\n${recovery.log}`,
-          });
+          return {
+            ...failResult(parts.slice(0, -1), steps, {
+              ...failureStep,
+              output: `${failureStep.output}\n\n${recovery.log}`,
+            }),
+            recoveryAttempted: true,
+          };
         }
+        // skipped / not_applicable / investigate_failed — surface the reason so
+        // operator-facing suggestions can explain why recovery did not run.
+        const reason =
+          recovery.kind === "not_applicable"
+            ? "not a harness-recoverable step"
+            : recovery.reason;
+        // NB: must not contain VERIFY_RECOVERY_MARKER — that string drives the
+        // exhausted-recovery block path in the develop loop.
+        return failResult(parts.slice(0, -1), steps, {
+          ...failureStep,
+          output: `${failureStep.output}\n\nVerify harness recovery skipped — ${reason}`,
+        });
       }
       return failResult(parts.slice(0, -1), steps, failureStep);
     }
@@ -4329,9 +4344,6 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
     let continueIntent: PlanContinueIntent = PLAN_CONTINUE_INTENT_DEFAULT;
     let startIntent: PlanStartIntent = PLAN_START_INTENT_DEFAULT;
     if (isContinue) {
-      const fallback = normalizePlanContinueIntentStructured(
-        fallbackPlanContinueIntentFromText(message?.trim() || desc),
-      );
       try {
         const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
           "classification",
@@ -4344,11 +4356,30 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
           timeoutMs: 90_000,
         });
       } catch (err) {
-        slog.warn("plan-loop", "continue intent LLM failed; regex fallback", {
+        slog.warn("plan-loop", "continue intent LLM failed; retrying once", {
           loopId,
           error: err instanceof Error ? err.message : String(err),
         });
-        continueIntent = fallback;
+        try {
+          const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
+            "classification",
+          );
+          continueIntent = await classifyPlanContinueIntentViaLlm({
+            endpoint,
+            modelId,
+            message: message?.trim() || desc,
+            brief,
+            timeoutMs: 90_000,
+          });
+        } catch (retryErr) {
+          // Neutral fallback: preserve PLAN.md — the operator steers the next
+          // turn. Never guess an expensive investigate/regenerate from regex.
+          slog.warn("plan-loop", "continue intent LLM retry failed; clarify_only", {
+            loopId,
+            error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+          });
+          continueIntent = PLAN_CONTINUE_INTENT_FALLBACK;
+        }
       }
     } else {
       continueIntent = {
@@ -4366,24 +4397,42 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
           timeoutMs: 90_000,
         });
       } catch (err) {
-        slog.warn("plan-loop", "start intent LLM failed; defaults", {
+        slog.warn("plan-loop", "start intent LLM failed; retrying once", {
           loopId,
           error: err instanceof Error ? err.message : String(err),
         });
-        startIntent = {
-          ...PLAN_START_INTENT_DEFAULT,
-          siblingInvestigation: briefWantsSiblingInvestigation(brief),
-        };
+        try {
+          const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
+            "classification",
+          );
+          startIntent = await classifyPlanStartIntentViaLlm({
+            endpoint,
+            modelId,
+            brief,
+            timeoutMs: 90_000,
+          });
+        } catch (retryErr) {
+          // Neutral fallback: no investigation pass — the operator can ask
+          // explicitly if the plan needs a repo walk.
+          slog.warn("plan-loop", "start intent LLM retry failed; defaults", {
+            loopId,
+            error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+          });
+          startIntent = {
+            ...PLAN_START_INTENT_DEFAULT,
+            needsInvestigation: false,
+            siblingInvestigation: briefWantsSiblingInvestigation(brief),
+          };
+        }
       }
     }
 
+    // Investigation is classifier-driven only — no regex overrides.
     const needsInvestigation = isContinue
       ? continueIntent.scope === "expand_scope" ||
         continueIntent.scope === "full_revise" ||
-        (continueIntent.scope === "sections" &&
-          continueIntent.sections.some((s) => /likely areas/i.test(s))) ||
-        textSignalsPlanInvestigate(message?.trim() || "")
-      : startIntent.needsInvestigation || briefImpliesPlanInvestigation(brief);
+        continueIntent.needsInvestigation
+      : startIntent.needsInvestigation;
 
     let investigationFindings = "";
     if (needsInvestigation) {
@@ -8174,10 +8223,13 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             `${diagnosis.title}\n${diagnosis.evidence}\n${checks.firstFailure.output}`,
           );
 
+        // Structural flag from runSuccessChecks is authoritative; the output
+        // marker is kept as a fallback for pre-flag result shapes.
         const harnessRecoveryExhausted =
-          verifyRecoveryExhausted(
-            `${checks.output}\n${checks.firstFailure?.output ?? ""}`,
-          ) &&
+          (checks.recoveryAttempted === true ||
+            verifyRecoveryExhausted(
+              `${checks.output}\n${checks.firstFailure?.output ?? ""}`,
+            )) &&
           checks.firstFailure != null &&
           isHarnessRecoverableStep(checks.firstFailure);
 

@@ -32,12 +32,23 @@ describe("plan-routing", () => {
     assert.equal(hasPlanAcceptanceTicks({}), false);
   });
 
-  it("decidePlanTurn continues on try again with open latch", () => {
+  it("decidePlanTurn stays ambiguous without the classifier", () => {
     const d = decidePlanTurn({
       operatorMessage: "Please try again — the plan did not update",
       latch: { loopId: "loop-1", status: "open", currentVersion: 1 },
     });
-    assert.equal(d.action, "continue");
+    assert.equal(d.action, "ambiguous");
+    assert.equal(
+      decidePlanTurn({ operatorMessage: "try again", latch: null }).action,
+      "unrelated",
+    );
+    assert.equal(
+      decidePlanTurn({
+        operatorMessage: "",
+        latch: { loopId: "loop-1" },
+      }).action,
+      "ambiguous",
+    );
   });
 
   it("composePlanContinueMessage merges chat and loop context", () => {

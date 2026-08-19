@@ -34,21 +34,6 @@ export type PlanTurnDecision =
   | { action: "unrelated"; reason: string }
   | { action: "ambiguous"; reason: string };
 
-const CONTINUE_CUES =
-  /\b(try again|run (?:another|the) (?:plan|planning)|update the plan|revise|rewrite|flesh out|investigate|research|nothing (?:happened|changed)|didn't change|doesn't look|not right|wrong|missing|too (?:generic|thin|vague)|again please|loop again|continue planning|improve the plan|real paths|walk the (?:repo|codebase))\b/i;
-
-const ACCEPT_CUES =
-  /\b(accept the plan|plan looks good|sign off|freeze the plan|good enough|ready to promote|looks good)\b/i;
-
-const PROMOTE_CUES =
-  /\b(promote the plan|start research|bind to phase|create the phase)\b/i;
-
-const STATUS_CUES =
-  /^(?:what(?:'s| is) the (?:plan )?status|where are we|show (?:me )?the plan\??)$/i;
-
-const NEW_LOOP_CUES =
-  /\b(new plan loop|different plan|start over with a new|unrelated plan)\b/i;
-
 export function isPlanLoopOpen(status: string | undefined): boolean {
   return !status || status === "open";
 }
@@ -72,8 +57,11 @@ export function hasPlanAcceptanceTicks(args: Record<string, unknown>): boolean {
 }
 
 /**
- * Deterministic plan-turn routing when the classification LLM is unavailable.
- * Defaults to continue for substantive operator messages on an open loop.
+ * Structural plan-turn routing when the classification LLM is unavailable.
+ * Intentionally minimal: routing intent from operator text is the
+ * classifier's job — here we only detect cases where classification is
+ * moot (no open loop, empty message). Anything else stays ambiguous so the
+ * caller falls back to a neutral read-only action.
  */
 export function decidePlanTurn(input: {
   operatorMessage: string;
@@ -87,28 +75,6 @@ export function decidePlanTurn(input: {
   if (!message) {
     return { action: "ambiguous", reason: "empty operator message" };
   }
-
-  if (PROMOTE_CUES.test(message)) {
-    return { action: "promote", reason: "promote cue" };
-  }
-  if (ACCEPT_CUES.test(message)) {
-    return { action: "accept", reason: "accept cue" };
-  }
-  if (NEW_LOOP_CUES.test(message)) {
-    return { action: "new_loop", reason: "new loop cue" };
-  }
-  if (STATUS_CUES.test(message) && message.length <= 80) {
-    return { action: "status", reason: "status-only cue" };
-  }
-  if (CONTINUE_CUES.test(message)) {
-    return { action: "continue", reason: "continue cue" };
-  }
-
-  // Substantive message on open loop → continue (revise), not passive get.
-  if (message.length >= 12 && !STATUS_CUES.test(message)) {
-    return { action: "continue", reason: "substantive message on open loop" };
-  }
-
   return { action: "ambiguous", reason: "need classifier" };
 }
 

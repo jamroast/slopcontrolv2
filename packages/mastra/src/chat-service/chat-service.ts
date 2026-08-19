@@ -1448,12 +1448,14 @@ export class ChatService {
         reason: classified.notes?.trim() || "classifier",
       };
     } catch {
+      // Neutral fallback: read-only status, never a plan mutation on a
+      // classifier failure — the operator steers the next turn.
       const fallback = decidePlanTurn({
         operatorMessage: opts.message,
         latch: opts.latch,
       });
       if (fallback.action === "ambiguous") {
-        return { action: "continue", reason: "fallback default continue" };
+        return { action: "status", reason: "fallback default status" };
       }
       return fallback;
     }

@@ -10,4 +10,10 @@ describe("plan-continue-intent-llm", () => {
     assert.match(PLAN_CONTINUE_INTENT_SYSTEM_PROMPT, /not only/i);
     assert.match(PLAN_CONTINUE_INTENT_SYSTEM_PROMPT, /JSON/);
   });
+
+  it("system prompt documents needsInvestigation for repo walks", () => {
+    assert.match(PLAN_CONTINUE_INTENT_SYSTEM_PROMPT, /needsInvestigation/);
+    assert.match(PLAN_CONTINUE_INTENT_SYSTEM_PROMPT, /flesh out Likely areas/i);
+    assert.match(PLAN_CONTINUE_INTENT_SYSTEM_PROMPT, /walk the repo/i);
+  });
 });
