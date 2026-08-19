@@ -11,6 +11,7 @@ import {
   piModelFor,
   piSessionPreamble,
   PI_INVESTIGATE_SYSTEM_PROMPT,
+  VERIFY_RECOVER_SYSTEM_PROMPT,
   formatInvestigateDirtyTree,
 } from "./index.js";
 import type { LlmEndpoint } from "@slopcontrol/types";
@@ -159,5 +160,12 @@ describe("pi investigate mode helpers", () => {
       formatInvestigateDirtyTree(["src/app/page.tsx"]) ?? "",
       /modified files/i,
     );
+  });
+
+  it("recover mode uses verify recovery prompt", () => {
+    assert.match(piAckPrompt("recover"), /verify harness/i);
+    assert.match(piSessionPreamble("/tmp/proj", "recover"), /verify recovery/i);
+    assert.match(VERIFY_RECOVER_SYSTEM_PROMPT, /JSON object/i);
+    assert.match(VERIFY_RECOVER_SYSTEM_PROMPT, /Do NOT mutate/i);
   });
 });

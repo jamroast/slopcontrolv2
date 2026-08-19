@@ -5,13 +5,23 @@ import type { Memory } from "@mastra/memory";
 import {
   classifyAskResumeViaLlm,
   classifyChatConfirmViaLlm,
+  classifyPlanTurnIntentViaLlm,
   LlmRegistry,
   loadProvidersConfig,
   type AskResumeClassification,
   type ChatConfirmClassification,
   type ParkedChatAction,
+  type PlanTurnIntent,
 } from "@slopcontrol/llm";
-import { buildChatTaskDescription } from "@slopcontrol/artifacts";
+import {
+  appendLoopChatMessage,
+  buildChatTaskDescription,
+  listPlanLoops,
+  loopChatUserFeedbackSinceVersion,
+  readLoopChatMessages,
+  readPlanLoopMeta,
+  readPlanLoopPlanMd,
+} from "@slopcontrol/artifacts";
 import {
   isGateRunStage,
   isTerminalRunStage,
@@ -86,11 +96,17 @@ import {
   type AskResumeLatch,
 } from "./ask-routing.js";
 import {
+  composePlanContinueMessage,
+  decidePlanTurn,
+  formatPlanLoopLatchPrompt,
+  formatPlanTurnRoutingPrefix,
   hasPlanAcceptanceTicks,
+  isPlanLoopOpen,
   parseLoopIdFromDispatch,
   parsePlanLoopStatusFromDispatch,
   PLAN_LOOP_ID_DEPENDENT_TOOLS,
   type PlanResumeLatch,
+  type PlanTurnDecision,
 } from "./plan-routing.js";
 import type {
   AwaitedLiveTurn,
@@ -106,6 +122,7 @@ import type {
 } from "./types.js";
 import {
   backfillLoopStartBrief,
+  backfillLoopContinueMessage,
   LIVE_TURN_ASYNC_TOOLS,
   liveTurnKindForTool,
   liveTurnStartedMessage,
@@ -146,6 +163,11 @@ export interface ChatServiceDeps {
     latchTitle?: string;
     latchLastUser?: string;
   }) => Promise<AskResumeClassification>;
+  classifyPlanTurn?: (opts: {
+    message: string;
+    latch: PlanResumeLatch;
+    planExcerpt?: string;
+  }) => Promise<PlanTurnIntent>;
   confirmTimeoutMs?: number;
   turnTimeoutMs?: number;
   /** How long confirm/auto-wait blocks for a busy run (default 90s). */
@@ -1384,20 +1406,229 @@ export class ChatService {
     return { ...args, askId: latch.askId };
   }
 
-  private resolvePlanLatch(conversationId: string): PlanResumeLatch | undefined {
-    return this.planLatches.get(conversationId);
+  private resolvePlanLatch(
+    conversationId: string,
+    projectId?: string | null,
+  ): PlanResumeLatch | undefined {
+    const mem = this.planLatches.get(conversationId);
+    if (mem?.loopId) return mem;
+    if (!projectId) return undefined;
+    const project = this.deps.context.getProject(projectId);
+    if (!project) return undefined;
+    const open = listPlanLoops(project.rootPath).filter((l) =>
+      isPlanLoopOpen(l.status),
+    );
+    if (open.length !== 1) return undefined;
+    const loop = open[0]!;
+    const latch: PlanResumeLatch = {
+      loopId: loop.id,
+      title: loop.brief.split("\n")[0]?.slice(0, 120),
+      status: loop.status,
+      currentVersion: loop.currentVersion,
+    };
+    this.planLatches.set(conversationId, latch);
+    return latch;
+  }
+
+  private async classifyPlanTurnDecision(opts: {
+    message: string;
+    latch: PlanResumeLatch;
+    planExcerpt?: string;
+  }): Promise<Exclude<PlanTurnDecision, { action: "ambiguous" }>> {
+    try {
+      const classified = this.deps.classifyPlanTurn
+        ? await this.deps.classifyPlanTurn({
+            message: opts.message,
+            latch: opts.latch,
+            planExcerpt: opts.planExcerpt,
+          })
+        : await this.classifyPlanTurnViaLlm(opts.message, opts.latch, opts.planExcerpt);
+      return {
+        action: classified.action,
+        reason: classified.notes?.trim() || "classifier",
+      };
+    } catch {
+      const fallback = decidePlanTurn({
+        operatorMessage: opts.message,
+        latch: opts.latch,
+      });
+      if (fallback.action === "ambiguous") {
+        return { action: "continue", reason: "fallback default continue" };
+      }
+      return fallback;
+    }
+  }
+
+  private async classifyPlanTurnViaLlm(
+    message: string,
+    latch: PlanResumeLatch,
+    planExcerpt?: string,
+  ): Promise<PlanTurnIntent> {
+    const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
+    const { endpoint, modelId } = registry.resolveEndpointForRole(
+      "classification",
+    );
+    return classifyPlanTurnIntentViaLlm({
+      endpoint,
+      modelId,
+      message,
+      latchTitle: latch.title,
+      latchLastUser: latch.lastUserLine,
+      currentVersion: latch.currentVersion,
+      planExcerpt,
+    });
+  }
+
+  private planExcerptForLatch(
+    projectId: string,
+    latch: PlanResumeLatch,
+  ): string | undefined {
+    const project = this.deps.context.getProject(projectId);
+    if (!project || !latch.currentVersion) return undefined;
+    return (
+      readPlanLoopPlanMd(
+        project.rootPath,
+        latch.loopId,
+        latch.currentVersion,
+      )?.slice(0, 2_000) ?? undefined
+    );
+  }
+
+  private appendOperatorMessageToPlanLoopChat(
+    conversation: ChatConversation,
+    text: string,
+  ): void {
+    const trimmed = text.trim();
+    if (!trimmed || !conversation.projectId) return;
+    const latch = this.resolvePlanLatch(conversation.id, conversation.projectId);
+    if (!latch?.loopId || !isPlanLoopOpen(latch.status)) return;
+    const project = this.deps.context.getProject(conversation.projectId);
+    if (!project) return;
+    appendLoopChatMessage(project.rootPath, "plan", latch.loopId, {
+      role: "user",
+      content: trimmed,
+    });
+    this.planLatches.set(conversation.id, {
+      ...latch,
+      lastUserLine: trimmed,
+    });
+  }
+
+  private async composePlanContinueDispatchMessage(
+    conversation: ChatConversation,
+    operatorMessage: string,
+  ): Promise<string> {
+    const latch = this.resolvePlanLatch(conversation.id, conversation.projectId);
+    const chatMessages = await this.getMessages(conversation.id);
+    let loopUserMessages: string[] | undefined;
+    if (conversation.projectId && latch?.loopId) {
+      const project = this.deps.context.getProject(conversation.projectId);
+      if (project) {
+        const meta = readPlanLoopMeta(project.rootPath, latch.loopId);
+        if (meta) {
+          loopUserMessages = loopChatUserFeedbackSinceVersion(
+            readLoopChatMessages(project.rootPath, "plan", latch.loopId),
+            meta.currentVersion,
+          );
+        }
+      }
+    }
+    return composePlanContinueMessage({
+      operatorMessage,
+      chatMessages,
+      loopUserMessages,
+      priorOperatorLine: latch?.lastUserLine,
+    });
+  }
+
+  private async maybePrependPlanTurnRouting(
+    conversation: ChatConversation,
+    text: string,
+  ): Promise<string> {
+    const latch = this.resolvePlanLatch(conversation.id, conversation.projectId);
+    if (!latch?.loopId || !isPlanLoopOpen(latch.status)) return text;
+    const operatorMessage = this.turnOperatorMessage.trim() || text.trim();
+    if (!operatorMessage) return text;
+
+    const planExcerpt = conversation.projectId
+      ? this.planExcerptForLatch(conversation.projectId, latch)
+      : undefined;
+    const decision = await this.classifyPlanTurnDecision({
+      message: operatorMessage,
+      latch,
+      planExcerpt,
+    });
+    if (decision.action === "unrelated") return text;
+    const prefix = formatPlanTurnRoutingPrefix({ latch, decision });
+    return prefix ? `${prefix}\n\n${text}` : text;
+  }
+
+  private async maybeReroutePlanLoopTool(
+    conversation: ChatConversation,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ name: string; args: Record<string, unknown> } | null> {
+    if (name !== "plan_loop_get") return null;
+    const latch = this.resolvePlanLatch(conversation.id, conversation.projectId);
+    if (!latch?.loopId || !isPlanLoopOpen(latch.status)) return null;
+
+    const operatorMessage = this.turnOperatorMessage.trim();
+    if (!operatorMessage) return null;
+
+    const planExcerpt = conversation.projectId
+      ? this.planExcerptForLatch(conversation.projectId, latch)
+      : undefined;
+    const decision = await this.classifyPlanTurnDecision({
+      message: operatorMessage,
+      latch,
+      planExcerpt,
+    });
+
+    if (decision.action === "status" || decision.action === "unrelated") {
+      return null;
+    }
+
+    const loopId = latch.loopId;
+    if (decision.action === "continue") {
+      const message = await this.composePlanContinueDispatchMessage(
+        conversation,
+        operatorMessage,
+      );
+      this.emit(conversation, {
+        type: "status",
+        summary: `rerouting plan_loop_get → plan_loop_continue (${decision.reason})`,
+      });
+      return {
+        name: "plan_loop_continue",
+        args: { ...args, loopId, message },
+      };
+    }
+    if (decision.action === "accept") {
+      return {
+        name: "plan_loop_accept",
+        args: { ...args, loopId, acceptAllFeatures: true },
+      };
+    }
+    if (decision.action === "promote") {
+      return {
+        name: "plan_loop_promote",
+        args: { ...args, loopId },
+      };
+    }
+    return null;
   }
 
   private fillLoopIdFromLatch(
     conversationId: string,
     tool: string,
     args: Record<string, unknown>,
+    projectId?: string | null,
   ): Record<string, unknown> {
     if (!PLAN_LOOP_ID_DEPENDENT_TOOLS.has(tool)) return args;
     const existing =
       typeof args.loopId === "string" ? args.loopId.trim() : "";
     if (existing) return args;
-    const latch = this.resolvePlanLatch(conversationId);
+    const latch = this.resolvePlanLatch(conversationId, projectId);
     if (!latch?.loopId) return args;
     return { ...args, loopId: latch.loopId };
   }
@@ -1415,9 +1646,10 @@ export class ChatService {
     conversationId: string,
     tool: string,
     args: Record<string, unknown>,
+    projectId?: string | null,
   ): Record<string, unknown> {
     let next = this.fillAskIdFromLatch(conversationId, tool, args);
-    next = this.fillLoopIdFromLatch(conversationId, tool, next);
+    next = this.fillLoopIdFromLatch(conversationId, tool, next, projectId);
     next = this.backfillPlanAcceptArgs(tool, next);
     return next;
   }
@@ -1467,12 +1699,24 @@ export class ChatService {
     name: string,
     args: Record<string, unknown>,
   ): Promise<ChatToolResult> {
+    let nextName = name;
     let nextArgs = args;
-    if (name === "ask") {
-      nextArgs = await this.routeAskArgs(conversation, args);
-    } else if (name === "plan_loop_start" || name === "design_loop_start") {
+
+    const rerouted = await this.maybeReroutePlanLoopTool(
+      conversation,
+      nextName,
+      nextArgs,
+    );
+    if (rerouted) {
+      nextName = rerouted.name;
+      nextArgs = rerouted.args;
+    }
+
+    if (nextName === "ask") {
+      nextArgs = await this.routeAskArgs(conversation, nextArgs);
+    } else if (nextName === "plan_loop_start" || nextName === "design_loop_start") {
       nextArgs = backfillLoopStartBrief(
-        args,
+        nextArgs,
         this.turnOperatorMessage.trim(),
       );
       const brief =
@@ -1483,13 +1727,13 @@ export class ChatService {
           content: [
             {
               type: "text",
-              text: `${name} requires brief — pass the operator's planning words in brief.`,
+              text: `${nextName} requires brief — pass the operator's planning words in brief.`,
             },
           ],
         };
       }
-    } else if (ASK_ID_DEPENDENT_TOOLS.has(name)) {
-      nextArgs = this.fillAskIdFromLatch(conversation.id, name, args);
+    } else if (ASK_ID_DEPENDENT_TOOLS.has(nextName)) {
+      nextArgs = this.fillAskIdFromLatch(conversation.id, nextName, nextArgs);
       const filled =
         typeof nextArgs.askId === "string" ? nextArgs.askId.trim() : "";
       if (!filled) {
@@ -1503,9 +1747,63 @@ export class ChatService {
           ],
         };
       }
-    } else if (PLAN_LOOP_ID_DEPENDENT_TOOLS.has(name)) {
-      nextArgs = this.fillLoopIdFromLatch(conversation.id, name, args);
-      nextArgs = this.backfillPlanAcceptArgs(name, nextArgs);
+    } else if (nextName === "plan_loop_continue") {
+      nextArgs = this.fillLoopIdFromLatch(
+        conversation.id,
+        nextName,
+        nextArgs,
+        conversation.projectId,
+      );
+      nextArgs = backfillLoopContinueMessage(
+        nextArgs,
+        this.turnOperatorMessage.trim(),
+      );
+      let message =
+        typeof nextArgs.message === "string" ? nextArgs.message.trim() : "";
+      if (message) {
+        message = await this.composePlanContinueDispatchMessage(
+          conversation,
+          message,
+        );
+        nextArgs = { ...nextArgs, message };
+      }
+      if (!message) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "plan_loop_continue requires message — pass the operator's revision feedback in message.",
+            },
+          ],
+        };
+      }
+    } else if (nextName === "design_loop_continue") {
+      nextArgs = backfillLoopContinueMessage(
+        nextArgs,
+        this.turnOperatorMessage.trim(),
+      );
+      const message =
+        typeof nextArgs.message === "string" ? nextArgs.message.trim() : "";
+      if (!message) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "design_loop_continue requires message — pass the operator's revision feedback in message.",
+            },
+          ],
+        };
+      }
+    } else if (PLAN_LOOP_ID_DEPENDENT_TOOLS.has(nextName)) {
+      nextArgs = this.fillLoopIdFromLatch(
+        conversation.id,
+        nextName,
+        nextArgs,
+        conversation.projectId,
+      );
+      nextArgs = this.backfillPlanAcceptArgs(nextName, nextArgs);
       const filled =
         typeof nextArgs.loopId === "string" ? nextArgs.loopId.trim() : "";
       if (!filled) {
@@ -1519,7 +1817,7 @@ export class ChatService {
           ],
         };
       }
-    } else if (name === "start_change") {
+    } else if (nextName === "start_change") {
       let description =
         typeof nextArgs.description === "string" ? nextArgs.description.trim() : "";
       if (!description) {
@@ -1544,10 +1842,10 @@ export class ChatService {
       }
     }
 
-    const result = await this.deps.dispatch(name, nextArgs);
+    const result = await this.deps.dispatch(nextName, nextArgs);
     if (!result.isError) {
-      this.rememberAskFromDispatch(conversation, name, nextArgs, result);
-      this.rememberPlanFromDispatch(conversation, name, nextArgs, result);
+      this.rememberAskFromDispatch(conversation, nextName, nextArgs, result);
+      this.rememberPlanFromDispatch(conversation, nextName, nextArgs, result);
     }
     return result;
   }
@@ -1714,6 +2012,20 @@ export class ChatService {
       (typeof args.loopId === "string" ? args.loopId.trim() : "");
     if (!loopId) return;
     const status = parsePlanLoopStatusFromDispatch(raw);
+    let currentVersion = this.planLatches.get(conversation.id)?.currentVersion;
+    try {
+      const parsed = JSON.parse(raw) as {
+        version?: number;
+        loop?: { currentVersion?: number };
+      };
+      if (typeof parsed.version === "number") {
+        currentVersion = parsed.version;
+      } else if (typeof parsed.loop?.currentVersion === "number") {
+        currentVersion = parsed.loop.currentVersion;
+      }
+    } catch {
+      /* envelope or non-JSON */
+    }
     const title =
       typeof args.brief === "string" && args.brief.trim()
         ? args.brief.trim().split("\n")[0]?.slice(0, 80)
@@ -1722,6 +2034,8 @@ export class ChatService {
       loopId,
       title,
       status: status || (name === "plan_loop_accept" ? "accepted" : "open"),
+      lastUserLine: this.turnOperatorMessage.trim() || undefined,
+      currentVersion,
     });
   }
 
@@ -2094,6 +2408,7 @@ export class ChatService {
     }
     this.deps.store.touchConversation(conversationId, text);
     this.turnOperatorMessage = text;
+    this.appendOperatorMessageToPlanLoopChat(conversation, text);
 
     const queue: ChatEvent[] = [];
     let wake: (() => void) | null = null;
@@ -2111,7 +2426,11 @@ export class ChatService {
       const turnText = confirmPrefix
         ? `${confirmPrefix}\n\n---\nOperator message:\n${text}`
         : text;
-      const turn = this.runTurn(conversation, turnText, { synthetic: false });
+      const routedText = await this.maybePrependPlanTurnRouting(
+        conversation,
+        turnText,
+      );
+      const turn = this.runTurn(conversation, routedText, { synthetic: false });
       let done = false;
       let turnError: unknown = null;
       void turn
@@ -2185,17 +2504,27 @@ export class ChatService {
           projectId: conversation.projectId,
         })
       : "";
-    const systemPrompt = conversation.projectId
-      ? buildProjectChatPrompt({
-          project: this.deps.context.getProject(conversation.projectId)!,
-          deps: this.deps.context,
-          pendingActions,
-          projectKnowledge,
-        })
-      : buildGlobalChatPrompt({
-          deps: this.deps.context,
-          pendingActions,
-        });
+    const planLatch = this.resolvePlanLatch(
+      conversation.id,
+      conversation.projectId,
+    );
+    const planLatchBlock =
+      planLatch && isPlanLoopOpen(planLatch.status)
+        ? `\n\n${formatPlanLoopLatchPrompt(planLatch)}`
+        : "";
+    const systemPrompt = (
+      conversation.projectId
+        ? buildProjectChatPrompt({
+            project: this.deps.context.getProject(conversation.projectId)!,
+            deps: this.deps.context,
+            pendingActions,
+            projectKnowledge,
+          })
+        : buildGlobalChatPrompt({
+            deps: this.deps.context,
+            pendingActions,
+          })
+    ).concat(planLatchBlock);
 
     const tools = buildChatTools({
       dispatch: (name, args) => {
@@ -2214,7 +2543,12 @@ export class ChatService {
         this.requestConfirmation(
           conversation,
           tool,
-          this.fillLatchedToolArgs(conversation.id, tool, args),
+          this.fillLatchedToolArgs(
+            conversation.id,
+            tool,
+            args,
+            conversation.projectId,
+          ),
         ),
       onFreeToolResult: (name, _args, rawText, isError) => {
         if (isError || name !== "wait_for_run") return;

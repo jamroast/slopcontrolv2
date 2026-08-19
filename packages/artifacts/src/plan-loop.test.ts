@@ -12,7 +12,9 @@ import { describe, it, after } from "node:test";
 import {
   acceptPlanLoop,
   bindAcceptedPlanLoopToPhase,
+  briefImpliesPlanInvestigation,
   createPlanLoopMeta,
+  defaultPlanScope,
   extractPlanDocument,
   failurePlanDocument,
   isPlanLoopFailureOrScaffoldDocument,
@@ -235,6 +237,7 @@ describe("plan-loop", () => {
       hasPlan: true,
     });
     assert.ok(progress.blockers.length > 0);
+    assert.match(progress.nextStep, /plan_loop_continue/);
     assert.match(progress.nextStep, /plan_loop_accept/);
   });
 
@@ -345,5 +348,21 @@ describe("plan-loop", () => {
       "Rewrite the whole plan from scratch",
     );
     assert.equal(full.scope, "full_revise");
+  });
+
+  it("defaultPlanScope ignores fix-the-catalogue in large feature briefs", () => {
+    const brief =
+      "Build provider config for JamPress. Fix the catalogue/registry auth mismatch for mcp-http connectors.";
+    const scope = defaultPlanScope(brief, "start");
+    assert.notEqual(scope.kind, "bugfix");
+    assert.notEqual(scope.focus, "http");
+    assert.equal(scope.focus, "provider-config");
+  });
+
+  it("briefImpliesPlanInvestigation for file-rich briefs", () => {
+    const brief =
+      "Rewire oauth2-providers.ts and secret-store.ts; 33 connector types across 5 auth categories.";
+    assert.equal(briefImpliesPlanInvestigation(brief), true);
+    assert.equal(briefImpliesPlanInvestigation("Tweak button copy"), false);
   });
 });

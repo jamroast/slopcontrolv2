@@ -52,6 +52,8 @@ import {
   phaseNeedsDesign,
   promoteLearning,
   isMissingNodeBinFailure,
+  verifyRecoveryExhausted,
+  isHarnessRecoverableStep,
   readAppendix,
   readBlueprint,
   readPhaseDoc,
@@ -202,6 +204,7 @@ import {
   readPlanLoopMeta,
   writePlanLoopMeta,
   defaultPlanScope,
+  briefImpliesPlanInvestigation,
   formatPlanLoopReviseBlock,
   formatPlanAcceptancePromptBlock,
   readPlanLoopAcceptance,
@@ -216,6 +219,7 @@ import {
   PLAN_CONTINUE_INTENT_DEFAULT,
   fallbackPlanContinueIntentFromText,
   normalizePlanContinueIntentStructured,
+  textSignalsPlanInvestigate,
   formatPlanContinueIntentPromptBlock,
   buildSiblingInvestigationPack,
   briefWantsSiblingInvestigation,
@@ -323,6 +327,7 @@ import {
   depsInstallCommand,
   needsDepsInstall,
 } from "./deps-install.js";
+import { attemptVerifyRecovery } from "./verify-recovery.js";
 import {
   appendDiagnosisToMemory,
   recallDiagnosisHistory,
@@ -1567,6 +1572,8 @@ export async function runSuccessChecks(
     phaseId?: string;
     /** When set, claim-vs-proof gate issues are refined by the LLM judge. */
     registry?: LlmRegistry;
+    /** True after one verify-recovery re-run to prevent loops. */
+    recoveryAttempted?: boolean;
   },
 ): Promise<SuccessCheckResult> {
   const mode = opts?.mode ?? "full";
@@ -1644,10 +1651,35 @@ export async function runSuccessChecks(
     };
     parts.push(`deps-install (${installCmd}):\n${install.output.slice(-2000)}`);
     if (install.exitCode !== 0) {
-      return failResult(parts.slice(0, -1), steps, {
+      const failureStep: SuccessCheckStep = {
         ...installStep,
         output: `Dependency install failed.\n${install.output}`,
-      });
+      };
+      if (
+        !opts?.recoveryAttempted &&
+        opts?.registry &&
+        isHarnessRecoverableStep(failureStep)
+      ) {
+        const recovery = await attemptVerifyRecovery({
+          projectRoot: project.rootPath,
+          verifyCwd: cwd,
+          step: failureStep,
+          registry: opts.registry,
+        });
+        if (recovery.kind === "executed" && recovery.exitCode === 0) {
+          return runSuccessChecks(project, phaseDoc, cwd, {
+            ...opts,
+            recoveryAttempted: true,
+          });
+        }
+        if (recovery.kind === "executed" || recovery.kind === "rejected") {
+          return failResult(parts.slice(0, -1), steps, {
+            ...failureStep,
+            output: `${failureStep.output}\n\n${recovery.log}`,
+          });
+        }
+      }
+      return failResult(parts.slice(0, -1), steps, failureStep);
     }
     steps.push(installStep);
     depsInstalledThisPass = true;
@@ -4347,8 +4379,11 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
 
     const needsInvestigation = isContinue
       ? continueIntent.scope === "expand_scope" ||
-        continueIntent.scope === "full_revise"
-      : startIntent.needsInvestigation;
+        continueIntent.scope === "full_revise" ||
+        (continueIntent.scope === "sections" &&
+          continueIntent.sections.some((s) => /likely areas/i.test(s))) ||
+        textSignalsPlanInvestigate(message?.trim() || "")
+      : startIntent.needsInvestigation || briefImpliesPlanInvestigation(brief);
 
     let investigationFindings = "";
     if (needsInvestigation) {
@@ -4380,6 +4415,21 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
     const metaNow = readPlanLoopMeta(project.rootPath, loopId);
     if (metaNow) {
       let scope = metaNow.scope ?? defaultPlanScope(brief, "start");
+      if (!isContinue) {
+        if (startIntent.scopeKind) {
+          scope = { ...scope, kind: startIntent.scopeKind, source: "start" };
+        }
+        if (startIntent.focus?.trim() && !/^(management|http|api)$/i.test(startIntent.focus)) {
+          scope = { ...scope, focus: startIntent.focus.trim(), source: "start" };
+        }
+        if (startIntent.preserve?.length) {
+          scope = {
+            ...scope,
+            preserve: startIntent.preserve,
+            source: "start",
+          };
+        }
+      }
       if (isContinue) {
         if (
           continueIntent.scope === "expand_scope" ||
@@ -8124,8 +8174,38 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             `${diagnosis.title}\n${diagnosis.evidence}\n${checks.firstFailure.output}`,
           );
 
+        const harnessRecoveryExhausted =
+          verifyRecoveryExhausted(
+            `${checks.output}\n${checks.firstFailure?.output ?? ""}`,
+          ) &&
+          checks.firstFailure != null &&
+          isHarnessRecoverableStep(checks.firstFailure);
+
+        if (
+          harnessRecoveryExhausted &&
+          (diagnosis.class === "infra" || diagnosis.audience === "operator")
+        ) {
+          log(
+            project,
+            run,
+            "--- Verify recovery exhausted for harness failure; blocking (retry_root_verify) ---",
+          );
+          appendAppendix(
+            project.rootPath,
+            phase.id,
+            `${lastDiagnosisCard}\n\nDEV_BLOCKED — verify recovery exhausted. Use retry_root_verify after confirming the harness fix.`,
+          );
+          log(project, run, COMPLETION_TOKENS.DEV_BLOCKED);
+          writePhaseStatus(project.rootPath, phase.id, "blocked");
+          return finishDevelop("blocked", {
+            worktreePath: worktree.path,
+            worktreeBranch: worktree.branch,
+          });
+        }
+
         if (
           !overwriteMergeFailure &&
+          !harnessRecoveryExhausted &&
           (diagnosis.class === "infra" || diagnosis.audience === "operator")
         ) {
           infraStrikeCount += 1;

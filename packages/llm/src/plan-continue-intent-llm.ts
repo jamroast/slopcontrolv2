@@ -20,6 +20,7 @@ Return ONLY a JSON object with these fields:
 Rules:
 - "rewrite / from scratch / start over / full revise" → full_revise
 - "add / extend / also / first component / new capability / new feature / new system / research and present a plan / present me with a plan / broaden the plan / extend the plan" → expand_scope. List many sections (Goal, In scope, Approach, Likely areas, Success criteria, Risks & open questions, Handoff notes).
+- "investigate / walk the repo / flesh out Likely areas / research the codebase" → expand_scope (include Likely areas, Approach) — not clarify_only
 - Do NOT treat "not only …" as narrow_scope.
 - "narrow / focus only on X" (genuine narrowing) → narrow_scope (set focus when named)
 - pure questions with no change ask → clarify_only

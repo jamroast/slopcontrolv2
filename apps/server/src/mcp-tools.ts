@@ -1604,22 +1604,26 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "plan_loop_continue",
       description:
-        "Revise a plan-loop PLAN.md from operator feedback (new version). Reopens accepted/promoted loops. Optional baseVersion to fork from an active ancestor.",
+        "Revise a plan-loop PLAN.md from operator feedback (new version). Reopens accepted/promoted loops. message optional when plan loop CHAT.json has user feedback since the current version — server auto-composes. Use this (not plan_loop_get) when the operator wants the plan updated.",
       inputSchema: {
         type: "object",
         properties: {
           projectId: { type: "string" },
           loopId: { type: "string" },
-          message: { type: "string" },
+          message: {
+            type: "string",
+            description:
+              "Operator revision feedback. Omit to synthesize from plan loop CHAT.json.",
+          },
           baseVersion: { type: "number" },
         },
-        required: ["projectId", "loopId", "message"],
+        required: ["projectId", "loopId"],
       },
     },
     {
       name: "plan_loop_get",
       description:
-        "Fetch plan loop meta, transcript, PLAN.md, acceptance, planPack, conceptualModel. Pass includePlan=false for chat-only.",
+        "Read plan-loop status and PLAN.md (does NOT revise). When revisionRequired is true, call plan_loop_continue next. Pass includePlan=false for meta-only.",
       inputSchema: {
         type: "object",
         properties: {

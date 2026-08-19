@@ -54,6 +54,22 @@ export function textSignalsPlanFullRevise(text: string): boolean {
   );
 }
 
+/** Continue feedback that should trigger a repo investigation pass before revising PLAN.md. */
+export function textSignalsPlanInvestigate(text: string): boolean {
+  const t = text ?? "";
+  return (
+    /\b(investigate|research|walk|explore|deep\s+dive)\b.{0,80}\b(codebase|repo|source|project|jampress|jamroast)\b/i.test(
+      t,
+    ) ||
+    /\bflesh\s+out\b/i.test(t) ||
+    /\b(real|actual|concrete)\s+(paths?|files?|modules?)\b/i.test(t) ||
+    (/\blikely\s+areas\b/i.test(t) &&
+      /\b(update|revise|improve|fix|expand|research|investigate|walk)\b/i.test(
+        t,
+      ))
+  );
+}
+
 /**
  * Narrow cues — ignore "not only …" and do not treat bare "management" as focus.
  */

@@ -371,6 +371,7 @@ export * from "./ask-resume-llm.js";
 export * from "./ask-investigate-engine-llm.js";
 export * from "./plan-continue-intent-llm.js";
 export * from "./plan-start-intent-llm.js";
+export * from "./plan-turn-intent-llm.js";
 export * from "./dependency-intent-llm.js";
 export * from "./element-honor-llm.js";
 export * from "./build-process-config-llm.js";

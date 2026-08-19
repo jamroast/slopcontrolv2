@@ -176,6 +176,72 @@ export function replaceLastAssistantLoopChatMessage(
   return messages;
 }
 
+/** User lines after the last assistant message tied to currentVersion (or all users after first assistant). */
+export function loopChatUserFeedbackSinceVersion(
+  messages: LoopChatMessage[],
+  currentVersion: number,
+): string[] {
+  let lastVersionAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (
+      m.role === "assistant" &&
+      (m.meta?.version === currentVersion ||
+        (currentVersion === 1 && m.meta?.kind === "final"))
+    ) {
+      lastVersionAssistantIdx = i;
+      break;
+    }
+  }
+  const start = lastVersionAssistantIdx >= 0 ? lastVersionAssistantIdx + 1 : 0;
+  return messages
+    .slice(start)
+    .filter((m) => m.role === "user")
+    .map((m) => m.content.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Build plan_loop_continue feedback from loop CHAT.json when message omitted.
+ */
+export function synthesizePlanContinueFeedback(opts: {
+  projectRoot: string;
+  loopId: string;
+  currentVersion: number;
+  operatorMessage?: string;
+}): string {
+  const messages = readLoopChatMessages(opts.projectRoot, "plan", opts.loopId);
+  const loopUsers = loopChatUserFeedbackSinceVersion(
+    messages,
+    opts.currentVersion,
+  );
+  const operator = opts.operatorMessage?.trim() ?? "";
+  const parts: string[] = [];
+  if (operator) {
+    parts.push(`Latest operator feedback:\n${operator}`);
+  }
+  const prior = loopUsers.filter((m) => m !== operator);
+  if (prior.length > 0) {
+    parts.push(
+      `Plan conversation since v${opts.currentVersion} (incorporate all):\n${prior.join("\n\n---\n\n")}`,
+    );
+  }
+  const composed = parts.join("\n\n").trim();
+  if (composed) return composed.slice(0, 8_000);
+  const allUsers = messages
+    .filter((m) => m.role === "user")
+    .map((m) => m.content.trim())
+    .filter(Boolean);
+  const tail = allUsers.slice(-3);
+  if (tail.length > 0) {
+    return `Revise the plan from operator requirements:\n${tail.join("\n\n---\n\n")}`.slice(
+      0,
+      8_000,
+    );
+  }
+  return operator;
+}
+
 export function formatLoopWorkingStub(
   lines: string[],
   opts?: { startedAt?: string },

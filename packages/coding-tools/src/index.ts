@@ -22,7 +22,7 @@ export interface CodingResult {
   abortReason?: string;
 }
 
-export type CodingSessionMode = "implement" | "investigate";
+export type CodingSessionMode = "implement" | "investigate" | "recover";
 
 export interface CreateSessionOptions {
   projectDir: string;
@@ -32,6 +32,7 @@ export interface CreateSessionOptions {
   /**
    * implement (default): development worktree sessions.
    * investigate: read-only Ask walker — do not change files.
+   * recover: verify harness recovery — investigate with probe bash, emit execute JSON.
    */
   mode?: CodingSessionMode;
 }

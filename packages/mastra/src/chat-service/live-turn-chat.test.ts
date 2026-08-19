@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   backfillLoopStartBrief,
+  backfillLoopContinueMessage,
   liveTurnKindForTool,
 } from "./live-turn-chat.js";
 import { CHAT_TOOL_INPUT_SCHEMA } from "./chat-tools.js";
@@ -10,6 +11,14 @@ describe("live-turn-chat", () => {
   it("backfillLoopStartBrief uses operator message", () => {
     const out = backfillLoopStartBrief({ projectId: "p1" }, "Plan the chat UI");
     assert.equal(out.brief, "Plan the chat UI");
+  });
+
+  it("backfillLoopContinueMessage uses operator message", () => {
+    const out = backfillLoopContinueMessage(
+      { loopId: "loop-1" },
+      "Investigate the repo and update Likely areas",
+    );
+    assert.equal(out.message, "Investigate the repo and update Likely areas");
   });
 
   it("liveTurnKindForTool maps plan_loop_start", () => {

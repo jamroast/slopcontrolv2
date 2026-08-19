@@ -144,6 +144,7 @@ import {
   phaseDescriptionFromDesignAccept,
   resolveDesignImplementInScope,
   readLoopChatMessages,
+  synthesizePlanContinueFeedback,
 } from "@slopcontrol/artifacts";
 import {
   checkoutProjectBranch,
@@ -2757,6 +2758,10 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
     acceptance,
     hasPlan: Boolean(plan?.trim()),
   });
+  const revisionRequired =
+    meta.status === "open" &&
+    meta.currentVersion >= 1 &&
+    progress.nextStep.includes("plan_loop_continue");
   res.json({
     loop: meta,
     loopId: meta.id,
@@ -2776,6 +2781,10 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
     versions: buildPlanLoopVersionTree(project.rootPath, meta.id),
     nextStep: progress.nextStep,
     blockers: progress.blockers,
+    revisionRequired,
+    revisionHint: revisionRequired
+      ? "Operator feedback requires plan_loop_continue (with message or auto-composed from loop chat) — plan_loop_get does not revise PLAN.md."
+      : undefined,
   });
 });
 
@@ -2982,9 +2991,19 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
     reopenedFrom = working.status;
     working = reopenPlanLoopForIterate(project.rootPath, working.id);
   }
-  const message = String(req.body?.message ?? "").trim();
+  const messageRaw = String(req.body?.message ?? "").trim();
+  const message =
+    messageRaw ||
+    synthesizePlanContinueFeedback({
+      projectRoot: project.rootPath,
+      loopId: working.id,
+      currentVersion: working.currentVersion,
+    });
   if (!message) {
-    res.status(400).json({ error: "message is required" });
+    res.status(400).json({
+      error: "message is required",
+      hint: "Pass operator revision feedback, or append user messages to the plan loop CHAT.json first.",
+    });
     return;
   }
   const investigateTool =

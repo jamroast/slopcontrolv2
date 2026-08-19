@@ -354,7 +354,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   design_loop_get:
     "One design loop. Requires loopId from list_design_loops. Use notes; do not paste HTML into the operator reply.",
   plan_loop_get:
-    "One plan loop. Pass loopId, or omit to use this chat's latched plan loop (from plan_loop_start/continue). Returns nextStep and blockers. Do not poll while a plan_loop live turn is active — wait for live_settled.",
+    "One plan loop. Pass loopId, or omit to use this chat's latched plan loop (from plan_loop_start/continue). Returns nextStep and blockers. Read-only status check — when the operator wants to revise the plan, call plan_loop_continue (not plan_loop_get). Do not poll while a plan_loop live turn is active — wait for live_settled.",
   plan_loop_start:
     "Start a multi-turn plan loop (structured PLAN.md). Requires brief — pass the operator's planning words in brief. Optional investigateTool: auto|mastra|pi. Thorough vs quick intent is LLM-classified. You'll be notified via live_settled when the turn completes — do not poll plan_loop_get.",
   plan_loop_continue:

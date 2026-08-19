@@ -68,6 +68,17 @@ export function backfillLoopStartBrief(
   return { ...args, brief };
 }
 
+export function backfillLoopContinueMessage(
+  args: Record<string, unknown>,
+  operatorMessage: string,
+): Record<string, unknown> {
+  const message =
+    (typeof args.message === "string" && args.message.trim()) ||
+    operatorMessage.trim();
+  if (!message) return args;
+  return { ...args, message };
+}
+
 export function liveTurnStartedMessage(tool: string): string {
   if (tool.startsWith("plan_loop")) {
     return (

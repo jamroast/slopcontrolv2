@@ -152,6 +152,26 @@ export function summarizeBriefForGoal(brief: string, maxChars = 240): string {
   return `${base.slice(0, maxChars - 1).trim()}…`;
 }
 
+const GENERIC_PLAN_FOCUS =
+  /^(http|https|api|mcp|sse|rest|none|basic|management|workflows?|projects?|change)$/i;
+
+function isGenericPlanFocus(token: string): boolean {
+  return GENERIC_PLAN_FOCUS.test(token.trim());
+}
+
+/** Long or file-rich briefs need a repo walk even when the operator already listed requirements. */
+export function briefImpliesPlanInvestigation(brief: string): boolean {
+  const t = brief ?? "";
+  if (t.length >= 600) return true;
+  if ((t.match(/\b[\w./-]+\.(?:ts|tsx|js|jsx)\b/gi) ?? []).length >= 2) {
+    return true;
+  }
+  if (/\bsrc\/[\w./-]+/i.test(t)) return true;
+  if (/\b(investigate|research|look at|walk|explore)\b/i.test(t)) return true;
+  if (/\b\d+\s+(connector|type|endpoint)s?\b/i.test(t)) return true;
+  return false;
+}
+
 export function defaultPlanScope(
   brief: string,
   source: PlanScope["source"] = "start",
@@ -159,8 +179,13 @@ export function defaultPlanScope(
   // Ignore "not only …" so vision lists do not trigger narrow preserve.
   const t = (brief ?? "").replace(/\bnot\s+only\b/gi, " ");
   let kind: PlanScopeKind = "feature";
-  if (/\b(bug|fix|regress|broken)\b/i.test(t)) kind = "bugfix";
-  else if (/\b(refactor|cleanup|debt)\b/i.test(t)) kind = "refactor";
+  if (
+    /\b(bug|regress|broken|fix(?:es|ed|ing)?\s+(?:the\s+)?(?:bug|regression|issue))\b/i.test(
+      t,
+    )
+  ) {
+    kind = "bugfix";
+  } else if (/\b(refactor|cleanup|debt)\b/i.test(t)) kind = "refactor";
   else if (/\b(spike|explore|prototype|poc|investigate|research\s+this)\b/i.test(t))
     kind = "spike";
   else if (/\b(integrat|wire|connect|api)\b/i.test(t)) kind = "integration";
@@ -171,21 +196,32 @@ export function defaultPlanScope(
     focus = "chat";
   } else if (/\btheme(-toggle)?\b/i.test(t)) {
     focus = "theme";
+  } else if (/\bprovider[-\s]?config|connector|oauth|secret[-\s]?store\b/i.test(t)) {
+    focus = "provider-config";
   } else {
-    const focusOn = t.match(/\bfocus\s+on\b.{0,40}\b([a-z0-9._/-]{3,40})\b/i);
-    if (focusOn?.[1]) {
-      focus = focusOn[1].toLowerCase();
+    const pathFocus = t.match(/\b(src\/[\w./-]+|[\w.-]+\.(?:ts|tsx))\b/i);
+    if (pathFocus?.[1] && !isGenericPlanFocus(pathFocus[1])) {
+      focus = pathFocus[1].toLowerCase();
     } else {
-      const only = t.match(
-        /\b(?:only|just)\b.{0,40}\b([a-z0-9._/-]{3,40})\b/i,
-      );
-      if (only?.[1] && !/^(workflows?|management|projects?)$/i.test(only[1])) {
-        focus = only[1].toLowerCase();
+      const focusOn = t.match(/\bfocus\s+on\b.{0,40}\b([a-z0-9._/-]{3,40})\b/i);
+      if (focusOn?.[1] && !isGenericPlanFocus(focusOn[1])) {
+        focus = focusOn[1].toLowerCase();
       } else {
-        const region = t.match(
-          /\b(chat\.?composer|composer|theme|menubar|dashboard|auth)\b/i,
+        const only = t.match(
+          /\b(?:only|just)\b.{0,40}\b([a-z0-9._/-]{3,40})\b/i,
         );
-        if (region?.[1]) focus = region[1].toLowerCase().replace(/\s+/g, ".");
+        if (
+          only?.[1] &&
+          !/^(workflows?|management|projects?)$/i.test(only[1]) &&
+          !isGenericPlanFocus(only[1])
+        ) {
+          focus = only[1].toLowerCase();
+        } else {
+          const region = t.match(
+            /\b(chat\.?composer|composer|theme|menubar|dashboard|auth)\b/i,
+          );
+          if (region?.[1]) focus = region[1].toLowerCase().replace(/\s+/g, ".");
+        }
       }
     }
   }
@@ -924,7 +960,8 @@ export function summarizePlanLoopProgress(opts: {
       };
     }
     return {
-      nextStep: "plan_loop_acceptance (optional ticks) then plan_loop_accept",
+      nextStep:
+        "plan_loop_continue to revise from operator feedback, or plan_loop_acceptance (optional ticks) then plan_loop_accept when satisfied",
       blockers,
     };
   }

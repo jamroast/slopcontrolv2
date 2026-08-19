@@ -63,10 +63,27 @@ Rules:
 - Do NOT treat BLUEPRINT.md Live decisions as evidence of what a page shows.
 - Cite concrete paths you read. Return markdown findings the Ask judge can use.`;
 
+export const VERIFY_RECOVER_SYSTEM_PROMPT = `You are SlopControl's verify harness recovery investigator.
+
+You recover verify failures (deps install, cache corruption, compose/port collisions) — NOT product source bugs.
+
+Rules:
+- Working directory is the verify cwd SlopControl provides.
+- Investigate first with bash probes only: ls, stat, test, du, df, npm/pnpm/yarn read-only subcommands (config get, doctor, why), docker ps, lsof.
+- Do NOT mutate the tree during investigation (no rm, install, ci, clean, compose up/down).
+- Do NOT edit application source under src/, app/, etc.
+- Do NOT re-run the exact failing verify command blindly — diagnose, then propose one fix command.
+- When ready, end with ONLY a JSON object:
+{"execute":"<bash command or short && chain>","rationale":"<what you found>","confidence":"high|medium|low"}`;
+
 export function piAckPrompt(mode: CodingSessionMode = "implement"): string {
-  return mode === "investigate"
-    ? "Acknowledge you are ready to inspect the codebase. Do not change files."
-    : "Acknowledge you are ready to implement. Do not change files yet.";
+  if (mode === "investigate") {
+    return "Acknowledge you are ready to inspect the codebase. Do not change files.";
+  }
+  if (mode === "recover") {
+    return "Acknowledge you are ready to investigate the verify harness failure. Probe only — do not mutate files yet.";
+  }
+  return "Acknowledge you are ready to implement. Do not change files yet.";
 }
 
 export function piSessionPreamble(
@@ -78,7 +95,9 @@ export function piSessionPreamble(
   const driven =
     mode === "investigate"
       ? "You are being driven by SlopControl Ask. Investigate the codebase only. Do not change files, commit, or print secrets."
-      : "You are being driven by SlopControl. Follow PHASE.md / APPENDIX.md. Do not curl APIs with secrets.";
+      : mode === "recover"
+        ? "You are being driven by SlopControl verify recovery. Probe the harness failure; emit RECOVERY_EXECUTE JSON when ready. Do not mutate files during investigation."
+        : "You are being driven by SlopControl. Follow PHASE.md / APPENDIX.md. Do not curl APIs with secrets.";
   return [
     `Working directory: ${projectDir}`,
     endpoint
@@ -455,7 +474,12 @@ export class PiAdapter implements CodingTool {
   readonly id = "pi";
 
   async createSession(opts: CreateSessionOptions): Promise<CodingSession> {
-    const mode: CodingSessionMode = opts.mode === "investigate" ? "investigate" : "implement";
+    const mode: CodingSessionMode =
+      opts.mode === "investigate"
+        ? "investigate"
+        : opts.mode === "recover"
+          ? "recover"
+          : "implement";
     const model = piModelFor(opts.endpoint, opts.modelId);
     if (!model) {
       throw new Error(
@@ -567,6 +591,8 @@ export class PiAdapter implements CodingTool {
     state.pendingContext = [];
     if (state.mode === "investigate") {
       parts.unshift(PI_INVESTIGATE_SYSTEM_PROMPT);
+    } else if (state.mode === "recover") {
+      parts.unshift(VERIFY_RECOVER_SYSTEM_PROMPT);
     }
     if (system) parts.unshift(system);
     const text = parts.length > 0 ? `${parts.join("\n\n")}\n\n${prompt}` : prompt;

@@ -5,6 +5,7 @@ import {
   normalizePlanContinueIntentStructured,
   formatPlanContinueIntentPromptBlock,
   textSignalsPlanExpand,
+  textSignalsPlanInvestigate,
 } from "./plan-continue-intent.js";
 
 const CHAT_EXTEND_MSG = `I need you to now please investigate the project JamPress, and JamRoast.
@@ -57,5 +58,15 @@ describe("plan-continue-intent", () => {
     });
     assert.match(block, /REOPENED/i);
     assert.match(block, /expand_scope/);
+  });
+
+  it("textSignalsPlanInvestigate detects repo walk requests", () => {
+    assert.equal(
+      textSignalsPlanInvestigate(
+        "Please investigate the JamPress codebase and flesh out Likely areas with real paths",
+      ),
+      true,
+    );
+    assert.equal(textSignalsPlanInvestigate("What does In scope mean?"), false);
   });
 });

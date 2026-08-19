@@ -38,6 +38,7 @@ Return ONLY a JSON object with these fields:
 
 Rules:
 - "investigate / research / learn from / look at X and plan" → needsInvestigation true, siblingInvestigation when X is another product
+- Detailed briefs that already list requirements or file paths still need needsInvestigation true — the planner must validate paths and read the repo before writing Likely areas
 - "plan a small button tweak / copy change" with no walk → needsInvestigation false
 - thorough / deep / exhaustive → investigateEngine pi
 - quick / lightweight → investigateEngine mastra
