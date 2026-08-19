@@ -22,7 +22,11 @@ import {
   toolchainBumpVersionCmd,
   toolchainPublishCmd,
   npmRegistryEnvValues,
+  ensureProjectNpmrc,
   writeNpmRegistryMeta,
+  bumpWorkspacePackageVersion,
+  readWorkspacePackageJson,
+  resolveWorkspacePackageDir,
   type NpmRegistryMeta,
   type PropagationResult,
 } from "@slopcontrol/artifacts";
@@ -573,6 +577,8 @@ export async function consumeLibraryFromRegistry(opts: {
   /** Defaults to the registry's dist-tags latest. */
   version?: string;
   commitBump?: boolean;
+  /** When true, run pnpm/npm add even if package.json has no existing dep. */
+  allowNew?: boolean;
   runner?: typeof runToolchainCommand;
 }): Promise<{
   ok: boolean;
@@ -590,14 +596,21 @@ export async function consumeLibraryFromRegistry(opts: {
       `no published version of ${opts.packageName} in the local registry`,
     );
   }
-  const consumer = findRegisteredConsumers({
+  let consumer = findRegisteredConsumers({
     projects: [{ name: basename(opts.projectRoot), rootPath: opts.projectRoot }],
     packageName: opts.packageName,
   })[0];
   if (!consumer) {
-    throw new Error(
-      `${opts.projectRoot} does not depend on ${opts.packageName}`,
-    );
+    if (!opts.allowNew) {
+      throw new Error(
+        `${opts.projectRoot} does not depend on ${opts.packageName} — pass allowNew to install it`,
+      );
+    }
+    consumer = {
+      name: basename(opts.projectRoot),
+      rootPath: opts.projectRoot,
+      depSpec: "(new)",
+    };
   }
   const propagation = await propagateLibraryVersion({
     consumers: [consumer],
@@ -617,5 +630,211 @@ export async function consumeLibraryFromRegistry(opts: {
     packageName: opts.packageName,
     version,
     propagation,
+  };
+}
+
+export type WorkspacePackagePublishStep = {
+  step: "install" | "build" | "bump" | "publish";
+  command: string[];
+  code: number;
+  durationMs: number;
+  note?: string;
+};
+
+export type WorkspacePackagePublishReport = {
+  ok: boolean;
+  name: string;
+  version: string;
+  packageDir: string;
+  steps: WorkspacePackagePublishStep[];
+  propagation?: PropagationResult[];
+  meta: NpmRegistryMeta;
+};
+
+/** Resolve packageDir from absolute path or project root + relative packagePath. */
+export function resolvePublishPackageDir(opts: {
+  packageDir?: string;
+  projectRoot?: string;
+  packagePath?: string;
+}): string {
+  const abs = opts.packageDir?.trim();
+  if (abs) {
+    if (!existsSync(abs)) {
+      throw new Error(`packageDir must be an existing directory`);
+    }
+    return abs;
+  }
+  const root = opts.projectRoot?.trim();
+  const rel = opts.packagePath?.trim();
+  if (!root || !rel) {
+    throw new Error(
+      "pass packageDir (absolute) or projectRoot + packagePath (e.g. packages/service-token)",
+    );
+  }
+  return resolveWorkspacePackageDir(root, rel);
+}
+
+/**
+ * Publish a nested workspace package (e.g. burntjam/packages/service-token):
+ * install → build → semver bump → npm publish → optional consumer propagation.
+ * Unlike design_library_publish, this does not require componentLibrary: true.
+ */
+export async function publishWorkspacePackageToRegistry(opts: {
+  dataDir: string;
+  projectRoot: string;
+  packagePath: string;
+  bump?: "patch" | "minor" | "major";
+  propagate?: boolean;
+  /** Wire explicit consumer projects even when they do not yet declare the dep. */
+  consumerProjectIds?: string[];
+  projects?: Array<{ id?: string; name: string; rootPath: string }>;
+  runner?: typeof runToolchainCommand;
+  commandTimeoutMs?: number;
+}): Promise<WorkspacePackagePublishReport> {
+  const runner = opts.runner ?? runToolchainCommand;
+  const packageDir = resolveWorkspacePackageDir(opts.projectRoot, opts.packagePath);
+  const meta = await startNpmRegistry(opts.dataDir);
+  const registryEnv = npmRegistryEnvValues(meta);
+  const timeoutMs = opts.commandTimeoutMs ?? 10 * 60_000;
+  const steps: WorkspacePackagePublishStep[] = [];
+
+  const run = (
+    step: WorkspacePackagePublishStep["step"],
+    command: string[],
+    cwd: string = packageDir,
+  ) =>
+    runner({
+      cmd: command,
+      cwd,
+      env: registryEnv,
+      timeoutMs,
+      redactSecrets: [meta.authToken],
+    }).then((r) => {
+      steps.push({
+        step,
+        command,
+        code: r.code,
+        durationMs: r.durationMs,
+      });
+      return r;
+    });
+
+  const pkg = readWorkspacePackageJson(packageDir);
+  if (pkg.scripts?.build) {
+    const install = await run("install", ["npm", "install"], packageDir);
+    if (install.code !== 0) {
+      throw new Error(
+        `workspace package install failed (${install.code}): ${(install.stderr || install.stdout).slice(0, 800)}`,
+      );
+    }
+    const build = await run("build", ["npm", "run", "build"], packageDir);
+    if (build.code !== 0) {
+      throw new Error(
+        `workspace package build failed (${build.code}): ${(build.stderr || build.stdout).slice(0, 800)}`,
+      );
+    }
+  }
+
+  const bumped = bumpWorkspacePackageVersion(packageDir, opts.bump ?? "patch");
+  const { name } = bumped;
+  let { version } = bumped;
+
+  steps.push({
+    step: "bump",
+    command: ["(package.json)", "semver", opts.bump ?? "patch"],
+    code: 0,
+    durationMs: 0,
+    note: `${name}@${version}`,
+  });
+
+  let publishStdout = "";
+  try {
+    const pub = await publishToNpmRegistry({ dataDir: opts.dataDir, packageDir });
+    publishStdout = pub.stdout;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!REPUBLISH_CONFLICT_RE.test(msg)) throw err;
+    const rebumped = bumpWorkspacePackageVersion(packageDir, "patch");
+    version = rebumped.version;
+    steps.push({
+      step: "bump",
+      command: ["(package.json)", "semver", "patch"],
+      code: 0,
+      durationMs: 0,
+      note: `409 retry → ${version}`,
+    });
+    const pub = await publishToNpmRegistry({ dataDir: opts.dataDir, packageDir });
+    publishStdout = pub.stdout;
+  }
+
+  steps.push({
+    step: "publish",
+    command: ["npm", "publish", "--registry", meta.url],
+    code: 0,
+    durationMs: 0,
+    note: publishStdout.trim().slice(0, 200) || "published",
+  });
+
+  meta.publishedPackages = {
+    ...(meta.publishedPackages ?? {}),
+    [name]: {
+      version,
+      publishedAt: new Date().toISOString(),
+      toolchainKind: "workspace-npm",
+    },
+  };
+  meta.updatedAt = new Date().toISOString();
+  writeNpmRegistryMeta(opts.dataDir, meta);
+
+  let propagation: PropagationResult[] | undefined;
+  const allProjects = opts.projects ?? [];
+  if (opts.propagate !== false && allProjects.length) {
+    const fromDeps = findRegisteredConsumers({
+      projects: allProjects,
+      packageName: name,
+      excludeRootPath: packageDir,
+    });
+    const byId = new Map(fromDeps.map((c) => [c.rootPath, c]));
+    for (const id of opts.consumerProjectIds ?? []) {
+      const p = allProjects.find((proj) => proj.id === id);
+      if (!p || byId.has(p.rootPath)) continue;
+      byId.set(p.rootPath, {
+        id: p.id,
+        name: p.name,
+        rootPath: p.rootPath,
+        depSpec: "(wire)",
+      });
+    }
+    const consumers = [...byId.values()];
+    for (const consumer of consumers) {
+      ensureProjectNpmrc({
+        projectRoot: consumer.rootPath,
+        registryUrl: meta.url,
+        authToken: meta.authToken,
+        scopes: meta.scopes,
+      });
+    }
+    propagation = await propagateLibraryVersion({
+      consumers,
+      packageName: name,
+      version,
+      resolveToolchain: (root: string) =>
+        resolveProjectToolchain({
+          projectRoot: root,
+          configured: readProjectConfig(root).toolchain,
+        }).spec,
+      runner,
+      timeoutMs: 5 * 60_000,
+    });
+  }
+
+  return {
+    ok: true,
+    name,
+    version,
+    packageDir,
+    steps,
+    propagation,
+    meta,
   };
 }

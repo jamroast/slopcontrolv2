@@ -67,6 +67,9 @@ describe("chat lifecycle prompt", () => {
     assert.ok(prompt.includes("Parked gated action"));
     assert.ok(prompt.includes("agent"));
     assert.ok(prompt.includes("chat_function_bind"));
+    assert.ok(prompt.includes("Cross-project orchestration"));
+    assert.ok(prompt.includes("cross_project_wire_package"));
+    assert.ok(prompt.includes("project_workspace_package_publish"));
     assert.ok(!prompt.includes("chat_endpoint_model_update"));
   });
 });

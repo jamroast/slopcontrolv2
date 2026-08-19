@@ -23,6 +23,7 @@ Waiting on long stages:
 - After those start, call wait_for_run with the runId. Do not tell the operator the work finished until wait_for_run (or the start tool's wait appendix) reports a settled stage such as in_review, complete, blocked, or failed.
 - While still researching/developing, say that plainly. When it settles, brief them on the outcome and next step (review, design, or develop).
 - COMPONENT LIBRARIES: publish with design_library_publish; consumers update via project_library_consume. Never npm/pnpm link.
+- NESTED WORKSPACE PACKAGES (apps with packages/*): publish with project_workspace_package_publish or cross_project_wire_package — NOT design_library_publish (that is for componentLibrary:true project roots only). npm_registry_publish alone does not build.
 - ENV: after env-template changes, project_env_sync refreshes runtime env files.
 
 Gating rules you must respect:
@@ -145,12 +146,47 @@ export function buildGlobalChatPrompt(opts: {
     return `- ${project.name} (projectId: ${project.id}) ${project.rootPath} — ${active} open phases, ${busy} active runs, ${review} awaiting review`;
   });
 
+  const crossProjectPlaybook = `## Cross-project orchestration (global master chat)
+
+You coordinate work ACROSS registered projects using the full lifecycle — not ad-hoc shell commands.
+
+**Investigate first (read-only):**
+- list_cross_project_deps on a consumer projectId — npm packages + design elements in play
+- npm_registry_list / npm_registry_status — what is actually published (Verdaccio storage beats empty REGISTRY.json hints)
+- ask on publisher or consumer with explicit projectId — trace code paths, auth, missing deps
+- list_phases / list_runs per projectId — see what is blocked (in_review, developing, failed checks)
+
+**Publish paths (pick ONE — never pass bare projectId to npm_registry_publish):**
+| Source | Tool | When |
+| jamroast-components root (componentLibrary:true) | design_library_publish | @jamroast/components UI library |
+| Nested packages/* inside an app (e.g. burntjam/packages/service-token) | project_workspace_package_publish OR cross_project_wire_package | @jam/service-token and similar |
+| Raw publish only (no build) | npm_registry_publish with packageDir OR projectId+packagePath | Re-publish already-built dist |
+
+**Wire consumers:**
+- cross_project_wire_package — one-shot publish + install on listed consumerProjectIds (master chat preferred)
+- OR npm_registry_ensure_rc on consumer → project_library_consume with allowNew:true for first-time deps
+- Then start_change / plan_loop / advance_run on the CONSUMER project for code that uses the package
+
+**Typical Jam estate flow (@jam/service-token):**
+1. ask on JamRoast — confirm packages/service-token + JWKS/token routes
+2. cross_project_wire_package publisher=JamRoast packagePath=packages/service-token consumers=[JamPress]
+3. list_runs on JamPress — advance_run when phase reaches in_review
+4. Never use npm_registry_publish with only projectId — always include packagePath
+
+**Lifecycle hooks (always pass projectId explicitly in global chat):**
+- Shaping: ask → promote_ask OR plan_loop_start/continue/accept/promote
+- Execution: start_change → wait_for_run → advance_run → start_development → wait_for_run
+- Design: design_loop_start when UI intent (skip for stockAdoption)
+- Coding: agent only when operator wants a mutating session — prefer ask for read-only traces`;
+
   return `You are the SlopControl global operator agent. You manage the whole SlopControl platform across projects.
 
 ${LIFECYCLE_CONTRACT}
 
+${crossProjectPlaybook}
+
 ## Your role (global scope)
-Cross-project oversight: check health, inspect any project's phases/runs (pass its projectId explicitly), draft asks, and recommend where work should happen. For deep single-project work (reading its BLUEPRINT in detail, design loops), suggest opening a project-scoped chat. You also manage model configuration: chat_models_list shows each function (research, coding, classification, ask, agent, judge, …), its current model, and the models providers advertise. Use chat_function_bind to map a function to a model (creates the endpoint mapping if it is missing). chat_model_set only overrides this conversation.
+Cross-project oversight: check health, inspect any project's phases/runs (pass its projectId explicitly), draft asks, and recommend where work should happen. Drive publish→consume→develop pipelines with the tools above — do not tell the operator to run manual npm publish unless a tool failed. For deep single-project work (reading its BLUEPRINT in detail, design loops), suggest opening a project-scoped chat. You also manage model configuration: chat_models_list shows each function (research, coding, classification, ask, agent, judge, …), its current model, and the models providers advertise. Use chat_function_bind to map a function to a model (creates the endpoint mapping if it is missing). chat_model_set only overrides this conversation.
 
 ## Projects (${projects.length})
 ${lines.join("\n") || "- (none registered)"}${formatPendingConfirmPrompt(opts.pendingActions ?? [])}`;

@@ -111,6 +111,8 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   "design_element_extract",
   "design_element_import",
   "design_library_publish",
+  "project_workspace_package_publish",
+  "cross_project_wire_package",
   "project_library_consume",
   "project_build_process_configure",
   "project_set_coding_tool",
@@ -328,6 +330,37 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   }),
   list_runs: z.object({ projectId: optionalProject }).passthrough(),
   list_phases: z.object({ projectId: optionalProject }).passthrough(),
+  design_library_publish: z.object({
+    projectId: optionalProject,
+    bump: z.enum(["patch", "minor", "major"]).optional(),
+    propagate: z.boolean().optional(),
+  }),
+  project_workspace_package_publish: z.object({
+    projectId: optionalProject,
+    packagePath: z.string().min(1),
+    bump: z.enum(["patch", "minor", "major"]).optional(),
+    propagate: z.boolean().optional(),
+    consumerProjectIds: z.array(z.string().min(1)).optional(),
+  }),
+  cross_project_wire_package: z.object({
+    publisherProjectId: z.string().min(1),
+    packagePath: z.string().min(1),
+    consumerProjectIds: z.array(z.string().min(1)).min(1),
+    bump: z.enum(["patch", "minor", "major"]).optional(),
+    propagate: z.boolean().optional(),
+  }),
+  project_library_consume: z.object({
+    projectId: optionalProject,
+    packageName: z.string().min(1),
+    version: z.string().optional(),
+    allowNew: z.boolean().optional(),
+  }),
+  npm_registry_publish: z.object({
+    packageDir: z.string().min(1).optional(),
+    projectId: optionalProject,
+    packagePath: z.string().min(1).optional(),
+    tag: z.string().optional(),
+  }),
 };
 
 const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
@@ -386,6 +419,16 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Re-run research for a failed planning run. Skips research agent when RESEARCH.md is already solid. Requires runId.",
   promote_ask:
     "Promote an ask into a phase. Pass askId, or omit to promote this chat's latched ask.",
+  design_library_publish:
+    "Publish a component-library PROJECT ROOT (componentLibrary:true, e.g. jamroast-components): build → bump → publish → propagate to consumers. Requires projectId.",
+  project_workspace_package_publish:
+    "Publish a NESTED package inside an app project (e.g. JamRoast packages/service-token). install → build → bump → npm publish → wire consumers. Pass projectId + packagePath. NOT for jamroast-components root.",
+  cross_project_wire_package:
+    "Master-chat cross-project wire: publish nested package from publisherProjectId/packagePath and pnpm-add on consumerProjectIds. Preferred one-shot after list_cross_project_deps.",
+  project_library_consume:
+    "Install/update a registry package on one consumer via its toolchain (pnpm add). Pass allowNew:true for first-time deps. Run npm_registry_ensure_rc first when scopes are missing.",
+  npm_registry_publish:
+    "Raw npm publish only (no build). Pass packageDir OR projectId+packagePath. Prefer project_workspace_package_publish for nested packages.",
   stop_session:
     "Interrupt a live ask/agent/design_loop/plan_loop turn. Requires kind and id.",
 };

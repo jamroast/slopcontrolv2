@@ -1751,6 +1751,7 @@ app.post("/projects/:id/design-library/consume", async (req, res) => {
     packageName?: string;
     version?: string;
     commitBump?: boolean;
+    allowNew?: boolean;
   };
   if (!body.packageName) {
     res.status(400).json({ error: "packageName is required" });
@@ -1764,6 +1765,7 @@ app.post("/projects/:id/design-library/consume", async (req, res) => {
       packageName: body.packageName,
       version: body.version,
       commitBump: body.commitBump,
+      allowNew: body.allowNew === true,
     });
     log.info("project", "design library consume", {
       projectId: project.id,
@@ -5431,10 +5433,38 @@ app.get("/npm-registry/packages", (_req, res) => {
 });
 
 app.post("/npm-registry/publish", async (req, res) => {
-  const packageDir =
-    typeof req.body?.packageDir === "string" ? req.body.packageDir.trim() : "";
+  const body = (req.body ?? {}) as {
+    packageDir?: string;
+    projectId?: string;
+    packagePath?: string;
+    tag?: string;
+  };
+  let packageDir = body.packageDir?.trim() ?? "";
+  if (!packageDir && body.projectId?.trim()) {
+    const project = store.getProject(body.projectId.trim());
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    try {
+      const { resolvePublishPackageDir } = await import("./npm-registry.js");
+      packageDir = resolvePublishPackageDir({
+        projectRoot: project.rootPath,
+        packagePath: body.packagePath,
+      });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : String(err),
+        hint: "Pass packageDir (absolute) or projectId + packagePath (e.g. packages/service-token)",
+      });
+      return;
+    }
+  }
   if (!packageDir || !existsSync(packageDir)) {
-    res.status(400).json({ error: "packageDir must be an existing directory" });
+    res.status(400).json({
+      error: "packageDir must be an existing directory",
+      hint: "Pass packageDir (absolute) or projectId + packagePath relative to the project root",
+    });
     return;
   }
   try {
@@ -5442,10 +5472,11 @@ app.post("/npm-registry/publish", async (req, res) => {
     const result = await publishToNpmRegistry({
       dataDir: defaultDataDir(),
       packageDir,
-      tag: typeof req.body?.tag === "string" ? req.body.tag : undefined,
+      tag: typeof body.tag === "string" ? body.tag : undefined,
     });
     res.json({
       ok: true,
+      packageDir,
       stdout: result.stdout.slice(0, 2_000),
       registryUrl: result.meta.url,
       packages: listNpmRegistryPackages(defaultDataDir()),
@@ -5534,6 +5565,125 @@ app.post("/projects/:id/design-library/publish", async (req, res) => {
       consumers: report.propagation?.length ?? 0,
     });
     res.json(report);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+/**
+ * Publish a nested workspace package (e.g. packages/service-token inside JamRoast):
+ * install → build → bump → npm publish → propagate / wire consumers.
+ * Use from global master chat when bridging app projects (not componentLibrary roots).
+ */
+app.post("/projects/:id/workspace-package/publish", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const body = (req.body ?? {}) as {
+    packagePath?: string;
+    bump?: "patch" | "minor" | "major";
+    propagate?: boolean;
+    consumerProjectIds?: string[];
+  };
+  if (!body.packagePath?.trim()) {
+    res.status(400).json({
+      error: "packagePath is required",
+      hint: "Relative path under the project root, e.g. packages/service-token",
+    });
+    return;
+  }
+  try {
+    const { publishWorkspacePackageToRegistry } = await import("./npm-registry.js");
+    const report = await publishWorkspacePackageToRegistry({
+      dataDir: defaultDataDir(),
+      projectRoot: project.rootPath,
+      packagePath: body.packagePath.trim(),
+      bump: body.bump,
+      propagate: body.propagate,
+      consumerProjectIds: body.consumerProjectIds,
+      projects: store
+        .listProjects()
+        .map((p) => ({ id: p.id, name: p.name, rootPath: p.rootPath })),
+    });
+    log.info("project", "workspace package published", {
+      projectId: project.id,
+      packagePath: body.packagePath,
+      name: report.name,
+      version: report.version,
+    });
+    res.json(report);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+/**
+ * Cross-project wire: publish a nested package from one project and install it
+ * on explicit consumer projects (master-chat orchestration).
+ */
+app.post("/cross-project/wire-package", async (req, res) => {
+  const body = (req.body ?? {}) as {
+    publisherProjectId?: string;
+    packagePath?: string;
+    consumerProjectIds?: string[];
+    bump?: "patch" | "minor" | "major";
+    propagate?: boolean;
+  };
+  const publisherId = body.publisherProjectId?.trim();
+  const packagePath = body.packagePath?.trim();
+  const consumerIds = Array.isArray(body.consumerProjectIds)
+    ? body.consumerProjectIds.filter((id) => typeof id === "string" && id.trim())
+    : [];
+  if (!publisherId || !packagePath) {
+    res.status(400).json({
+      error: "publisherProjectId and packagePath are required",
+    });
+    return;
+  }
+  if (consumerIds.length === 0) {
+    res.status(400).json({
+      error: "consumerProjectIds must list at least one target project",
+    });
+    return;
+  }
+  const publisher = store.getProject(publisherId);
+  if (!publisher) {
+    res.status(404).json({ error: "Publisher project not found" });
+    return;
+  }
+  const allProjects = store
+    .listProjects()
+    .map((p) => ({ id: p.id, name: p.name, rootPath: p.rootPath }));
+  try {
+    const { publishWorkspacePackageToRegistry } = await import("./npm-registry.js");
+    const report = await publishWorkspacePackageToRegistry({
+      dataDir: defaultDataDir(),
+      projectRoot: publisher.rootPath,
+      packagePath,
+      bump: body.bump,
+      propagate: body.propagate !== false,
+      consumerProjectIds: consumerIds,
+      projects: allProjects,
+    });
+    log.info("cross-project", "wire package", {
+      publisherProjectId: publisherId,
+      packagePath,
+      name: report.name,
+      version: report.version,
+      consumers: consumerIds,
+    });
+    res.json({
+      ...report,
+      publisherProjectId: publisherId,
+      consumerProjectIds: consumerIds,
+      next: `Consumers wired to ${report.name}@^${report.version}. Continue with start_change/advance_run on consumer phases that need code changes.`,
+    });
   } catch (err) {
     res.status(400).json({
       error: err instanceof Error ? err.message : String(err),

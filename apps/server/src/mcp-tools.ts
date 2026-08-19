@@ -1251,7 +1251,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "npm_registry_publish",
       description:
-        "npm publish a package directory to the local SlopControl registry (starts registry if needed).",
+        "npm publish a package to the local SlopControl registry (starts registry if needed). Prefer project_workspace_package_publish for nested packages (build+bump+propagate). Pass packageDir OR projectId+packagePath.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1259,9 +1259,16 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             type: "string",
             description: "Absolute path to a folder with package.json",
           },
+          projectId: {
+            type: "string",
+            description: "Registered project id when using packagePath",
+          },
+          packagePath: {
+            type: "string",
+            description: "Path relative to project root, e.g. packages/service-token",
+          },
           tag: { type: "string" },
         },
-        required: ["packageDir"],
       },
     },
     {
@@ -1300,7 +1307,78 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
-      name: "project_build_process_state",      description:
+      name: "project_workspace_package_publish",
+      description:
+        "Publish a NESTED workspace package from an app project (e.g. JamRoast packages/service-token → @jam/service-token): install → build → semver bump → npm publish → optional propagate/wire to consumer projects. Use when componentLibrary is false but a packages/* folder should feed other apps. NOT for jamroast-components root — use design_library_publish there.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          packagePath: {
+            type: "string",
+            description: "Relative to project root, e.g. packages/service-token",
+          },
+          bump: {
+            type: "string",
+            enum: ["patch", "minor", "major"],
+          },
+          propagate: { type: "boolean" },
+          consumerProjectIds: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Wire these consumer projects (pnpm add) even if they do not yet declare the dep",
+          },
+        },
+        required: ["projectId", "packagePath"],
+      },
+    },
+    {
+      name: "cross_project_wire_package",
+      description:
+        "Master-chat orchestration: publish a nested package from publisherProjectId/packagePath and install it on consumerProjectIds (ensure .npmrc scopes + pnpm add). Use after list_cross_project_deps / npm_registry_list confirms the package name. Then continue consumer phases with start_change/advance_run.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          publisherProjectId: { type: "string" },
+          packagePath: { type: "string" },
+          consumerProjectIds: {
+            type: "array",
+            items: { type: "string" },
+          },
+          bump: {
+            type: "string",
+            enum: ["patch", "minor", "major"],
+          },
+          propagate: { type: "boolean" },
+        },
+        required: ["publisherProjectId", "packagePath", "consumerProjectIds"],
+      },
+    },
+    {
+      name: "project_library_consume",
+      description:
+        "Update this project to a published library version from the local SlopControl registry via the project's own toolchain (e.g. pnpm add @jamroast/components@^x.y.z) and commit the bump. Version defaults to the registry's latest. Pass allowNew:true to add a package not yet in package.json (after npm_registry_ensure_rc).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          packageName: { type: "string" },
+          version: {
+            type: "string",
+            description: "Target version (default: registry latest)",
+          },
+          allowNew: {
+            type: "boolean",
+            description: "Install even when package.json has no existing dep",
+          },
+        },
+        required: ["projectId", "packageName"],
+      },
+    },
+    {
+      name: "project_build_process_state",
+      description:
         "Read a project's build-process state: resolved BuildToolchain (commands as data) + recorded BUILD_PROCESS.json evidence. No LLM call.",
       inputSchema: {
         type: "object",
@@ -1336,23 +1414,6 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           },
         },
         required: ["projectId"],
-      },
-    },
-    {
-      name: "project_library_consume",
-      description:
-        "Update this project to a published library version from the local SlopControl registry via the project's own toolchain (e.g. pnpm add @jamroast/components@^x.y.z) and commit the bump. Version defaults to the registry's latest. Use for projects imported before publish-time propagation existed.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          projectId: { type: "string" },
-          packageName: { type: "string" },
-          version: {
-            type: "string",
-            description: "Target version (default: registry latest)",
-          },
-        },
-        required: ["projectId", "packageName"],
       },
     },
     {
@@ -3571,6 +3632,8 @@ export async function dispatchSlopcontrolTool(
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             packageDir: args.packageDir,
+            projectId: args.projectId,
+            packagePath: args.packagePath,
             tag: args.tag,
           }),
         });
@@ -3612,6 +3675,45 @@ export async function dispatchSlopcontrolTool(
             }),
           },
         );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "project_workspace_package_publish") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/workspace-package/publish`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              packagePath: args.packagePath,
+              bump: args.bump,
+              propagate: args.propagate,
+              consumerProjectIds: args.consumerProjectIds,
+            }),
+          },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "cross_project_wire_package") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/cross-project/wire-package`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            publisherProjectId: args.publisherProjectId,
+            packagePath: args.packagePath,
+            consumerProjectIds: args.consumerProjectIds,
+            bump: args.bump,
+            propagate: args.propagate,
+          }),
+        });
         const body = await res.text();
         return { content: [{ type: "text", text: body }], isError: !res.ok };
       });
@@ -3668,6 +3770,7 @@ export async function dispatchSlopcontrolTool(
             body: JSON.stringify({
               packageName: args.packageName,
               ...(args.version ? { version: args.version } : {}),
+              ...(args.allowNew === true ? { allowNew: true } : {}),
             }),
           },
         );

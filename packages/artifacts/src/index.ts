@@ -81,6 +81,7 @@ export * from "./verify-recovery-execute.js";
 export * from "./verify-recovery-evidence.js";
 export * from "./ci-workflows.js";
 export * from "./library-propagate.js";
+export * from "./workspace-package.js";
 export * from "./cross-project-catalog.js";
 export * from "./sibling-code-refs.js";
 export * from "./plan-loop.js";
