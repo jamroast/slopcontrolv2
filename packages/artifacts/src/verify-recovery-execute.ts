@@ -27,6 +27,13 @@ const DENY_PATTERNS: RegExp[] = [
 
 const ALLOW_LOW_CONFIDENCE = false;
 
+/**
+ * Best-effort heuristic guard on model-proposed commands — NOT a sandbox.
+ * Normalization (flag clusters, leading ./) plus rm-target path confinement
+ * close the obvious bypasses, but a determined adversarial command can still
+ * evade pattern matching; do not run recovery unattended on hostile input.
+ */
+
 /** Parse RECOVERY_EXECUTE JSON from Pi recover session output. */
 export function parseRecoveryExecutePayload(
   text: string,
@@ -61,6 +68,42 @@ function segmentsOf(command: string): string[] {
     .filter(Boolean);
 }
 
+/** Normalize rm-style flag clusters so the deny-list sees one canonical form. */
+function normalizeRmFlags(segment: string): string {
+  return segment.replace(
+    /\brm\s+(-[a-zA-Z]*[rf][a-zA-Z]*|--recursive\s+--force|--force\s+--recursive)\b/gi,
+    (match, flags: string) =>
+      /rf|fr/i.test(flags.replace(/-/g, "")) || match.includes("--")
+        ? "rm -rf"
+        : match,
+  );
+}
+
+function normalizeExecuteForMatching(execute: string): string {
+  return segmentsOf(execute)
+    .map((seg) => normalizeRmFlags(seg).replace(/\brm\s+(-\S+\s+)?\.\//g, "rm $1"))
+    .join(" && ");
+}
+
+/** Non-flag arguments of an rm segment, resolved and confined to the project root. */
+function validateRmTargets(
+  segment: string,
+  verifyCwd: string,
+  projectRoot: string,
+): string | null {
+  const tokens = segment.split(/\s+/).filter(Boolean);
+  if (tokens[0] !== "rm") return null;
+  for (const raw of tokens.slice(1)) {
+    const token = raw.replace(/^["']|["']$/g, "");
+    if (!token || token.startsWith("-")) continue;
+    const abs = resolve(verifyCwd, token);
+    if (!pathInsideRoot(abs, projectRoot)) {
+      return `rm target escapes project root: ${token}`;
+    }
+  }
+  return null;
+}
+
 function pathInsideRoot(target: string, root: string): boolean {
   const absRoot = resolve(root);
   const absTarget = resolve(root, target);
@@ -81,8 +124,10 @@ export function validateRecoveryExecute(opts: {
     return { ok: false, reason: "confidence low — operator escalation required" };
   }
 
+  const normalized = normalizeExecuteForMatching(execute);
+
   for (const re of DENY_PATTERNS) {
-    if (re.test(execute)) {
+    if (re.test(normalized)) {
       return { ok: false, reason: `denied pattern: ${re.source}` };
     }
   }
@@ -109,9 +154,28 @@ export function validateRecoveryExecute(opts: {
         return { ok: false, reason: `cd escapes project root: ${target}` };
       }
     }
+    const rmViolation = validateRmTargets(seg, verifyAbs, projectAbs);
+    if (rmViolation) {
+      return { ok: false, reason: rmViolation };
+    }
   }
 
   return { ok: true, normalized: execute };
+}
+
+/** Minimal environment for recovery commands — model-proposed commands never see secrets. */
+const RECOVERY_ENV_ALLOWLIST = /^PATH$|^HOME$|^TMPDIR$|^TEMP$|^TMP$|^TERM$|^SHELL$|^USER$|^LOGNAME$|^LANG$|^LC_|^CI$|^npm_config_|^PNPM_HOME$|^NPM_CONFIG|^YARN_|^COMPOSE_|^DOCKER_/;
+
+export function buildRecoveryEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value !== undefined && RECOVERY_ENV_ALLOWLIST.test(key)) {
+      env[key] = value;
+    }
+  }
+  return env;
 }
 
 export function runRecoveryExecute(opts: {
@@ -123,9 +187,9 @@ export function runRecoveryExecute(opts: {
   const shell = process.env.SHELL?.trim() || "/bin/bash";
 
   return new Promise((resolvePromise) => {
-    const child = spawn(shell, ["-lc", opts.execute], {
+    const child = spawn(shell, ["-c", opts.execute], {
       cwd: opts.verifyCwd,
-      env: process.env,
+      env: buildRecoveryEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -198,14 +262,12 @@ export function verifyRecoveryAlreadyAttempted(text: string): boolean {
 }
 
 export function formatVerifyRecoveryLog(opts: {
-  phase: "proposed" | "executed" | "rejected";
+  phase: "executed" | "rejected";
   execute?: string;
   exitCode?: number;
   detail?: string;
 }): string {
   switch (opts.phase) {
-    case "proposed":
-      return `${VERIFY_RECOVERY_MARKER} proposed ${opts.execute ?? ""} — ${opts.detail ?? ""}`.trim();
     case "executed":
       return `${VERIFY_RECOVERY_MARKER} executed "${opts.execute ?? ""}" exit=${opts.exitCode ?? "?"}${opts.detail ? ` — ${opts.detail}` : ""}`;
     case "rejected":
