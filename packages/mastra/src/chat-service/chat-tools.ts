@@ -408,6 +408,10 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Bind accepted plan to a new phase and start research (returns runId). Pass loopId (or omit latched). After research reaches in_review, use advance_run with that runId — plan_loop_promote does not start development.",
   design_loop_start:
     "Start a look-and-feel design loop (mock HTML exploration). Requires brief — pass the operator's words in brief. In global chat always pass projectId. When several loops exist on a project, pass loopId on accept/discard/continue/get. Notification-driven when live turn active.",
+  design_loop_accept:
+    "Freeze the chosen design loop as accepted. Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first). Clears this chat's design latch.",
+  design_loop_discard:
+    "Discard a design loop that lost the exploration. Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId and prefer explicit loopId — discarding the wrong loop is unrecoverable. Clears this chat's design latch.",
   start_change:
     "Start research for a new phase. Requires description — pass the operator's full task definition (title, goal, affected areas, success criteria). Do not call with only projectId. Optional dependsOn for phase ordering.",
   ask: "Investigate the project (read source, explain why something is broken). Pass the operator's words through in message — do not replace a page/route/product-gap question with a source-claim checklist. Optional investigateTool: mastra (faster) | pi (thorough) | auto. Thorough vs quick intent in the operator message is classified by the LLM, never keyword-matched; with no expressed intent the fast mastra path runs. Prefer this over gated agent for read-only traces. Requires message. You may pass askId or newAsk; the chat service will choose continue vs a new ask so this never resumes some other open ask on the project.",

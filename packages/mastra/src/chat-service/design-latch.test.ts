@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -116,8 +116,30 @@ function makeService(opts?: {
   return {
     service,
     store,
+    dir,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
+}
+
+function writeDesignLoopMeta(
+  projectRoot: string,
+  loopId: string,
+  opts?: { brief?: string; status?: string; currentVersion?: number },
+): void {
+  const dir = join(projectRoot, ".slopcontrol", "design-loops", loopId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, "META.json"),
+    JSON.stringify({
+      id: loopId,
+      projectId: "p1",
+      brief: opts?.brief ?? "mock brief",
+      status: opts?.status ?? "open",
+      currentVersion: opts?.currentVersion ?? 1,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }),
+  );
 }
 
 describe("design loop latch", () => {
@@ -455,6 +477,123 @@ describe("design loop latch", () => {
       );
       assert.equal(filled.loopId, "bca8e590-aaaa-bbbb-cccc-ddddeeeeffff");
       assert.equal(filled.projectId, "p1");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("global chat fills from latch via args.projectId when conversation project is null", () => {
+    const { service, cleanup } = makeService();
+    try {
+      const conversation = service.createConversation({ projectId: null });
+      const svc = service as unknown as {
+        fillLatchedToolArgs: (
+          id: string,
+          t: string,
+          a: Record<string, unknown>,
+          p?: string | null,
+        ) => Record<string, unknown>;
+        designLatches: Map<string, { loopId: string; projectId?: string }>;
+      };
+      svc.designLatches.set(conversation.id, {
+        loopId: "dl-9",
+        projectId: "p1",
+      });
+      // Global chat path: conversation.projectId is null, the agent passed
+      // projectId only in the tool args (the jamroast-components failure).
+      const filled = svc.fillLatchedToolArgs(
+        conversation.id,
+        "design_loop_accept",
+        { projectId: "p1" },
+        null,
+      );
+      assert.equal(filled.loopId, "dl-9");
+      assert.equal(filled.projectId, "p1");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("explicit loopId + projectId seeds the latch for later omission", () => {
+    const { service, dir, cleanup } = makeService();
+    try {
+      writeDesignLoopMeta(dir, "dl-seed", { brief: "seeded loop" });
+      const conversation = service.createConversation({ projectId: null });
+      const svc = service as unknown as {
+        fillLatchedToolArgs: (
+          id: string,
+          t: string,
+          a: Record<string, unknown>,
+          p?: string | null,
+        ) => Record<string, unknown>;
+        resolveDesignLatch: (
+          id: string,
+          p?: string | null,
+        ) => { loopId: string; projectId?: string } | undefined;
+      };
+      // First call passes both explicitly — no latch exists yet.
+      const first = svc.fillLatchedToolArgs(
+        conversation.id,
+        "design_loop_get",
+        { loopId: "dl-seed", projectId: "p1" },
+        null,
+      );
+      assert.equal(first.loopId, "dl-seed");
+      const latch = svc.resolveDesignLatch(conversation.id, "p1");
+      assert.equal(latch?.loopId, "dl-seed");
+      assert.equal(latch?.projectId, "p1");
+      // Second call can omit loopId — the seeded latch fills it.
+      const second = svc.fillLatchedToolArgs(
+        conversation.id,
+        "design_loop_get",
+        { projectId: "p1" },
+        null,
+      );
+      assert.equal(second.loopId, "dl-seed");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("explicit different loopId switches the latch", () => {
+    const { service, dir, cleanup } = makeService();
+    try {
+      writeDesignLoopMeta(dir, "dl-a", { brief: "loop a" });
+      writeDesignLoopMeta(dir, "dl-b", { brief: "loop b" });
+      const conversation = service.createConversation({ projectId: null });
+      const svc = service as unknown as {
+        fillLatchedToolArgs: (
+          id: string,
+          t: string,
+          a: Record<string, unknown>,
+          p?: string | null,
+        ) => Record<string, unknown>;
+        resolveDesignLatch: (
+          id: string,
+          p?: string | null,
+        ) => { loopId: string } | undefined;
+        designLatches: Map<string, { loopId: string; projectId?: string }>;
+      };
+      svc.designLatches.set(conversation.id, {
+        loopId: "dl-a",
+        projectId: "p1",
+      });
+      // Agent targets the other loop explicitly (multiple open loops).
+      svc.fillLatchedToolArgs(
+        conversation.id,
+        "design_loop_get",
+        { loopId: "dl-b", projectId: "p1" },
+        null,
+      );
+      assert.equal(svc.resolveDesignLatch(conversation.id, "p1")?.loopId, "dl-b");
+      // Subsequent omission now fills the switched loop.
+      const filled = svc.fillLatchedToolArgs(
+        conversation.id,
+        "design_loop_continue",
+        { projectId: "p1", message: "darker" },
+        null,
+      );
+      assert.equal(filled.loopId, "dl-b");
     } finally {
       cleanup();
     }
