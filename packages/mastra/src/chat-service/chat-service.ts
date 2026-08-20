@@ -5,17 +5,20 @@ import type { Memory } from "@mastra/memory";
 import {
   classifyAskResumeViaLlm,
   classifyChatConfirmViaLlm,
+  classifyDesignTurnIntentViaLlm,
   classifyPlanTurnIntentViaLlm,
   LlmRegistry,
   loadProvidersConfig,
   type AskResumeClassification,
   type ChatConfirmClassification,
+  type DesignTurnIntent,
   type ParkedChatAction,
   type PlanTurnIntent,
 } from "@slopcontrol/llm";
 import {
   appendLoopChatMessage,
   buildChatTaskDescription,
+  listDesignLoops,
   listPlanLoops,
   loopChatUserFeedbackSinceVersion,
   readLoopChatMessages,
@@ -108,6 +111,15 @@ import {
   type PlanResumeLatch,
   type PlanTurnDecision,
 } from "./plan-routing.js";
+import {
+  decideDesignTurn,
+  DESIGN_LOOP_ID_DEPENDENT_TOOLS,
+  formatDesignLoopLatchPrompt,
+  isDesignLoopOpen,
+  parseDesignLoopStatusFromDispatch,
+  parseDesignLoopVersionFromDispatch,
+  type DesignResumeLatch,
+} from "./design-routing.js";
 import type {
   AwaitedLiveTurn,
   AwaitedRun,
@@ -168,6 +180,10 @@ export interface ChatServiceDeps {
     latch: PlanResumeLatch;
     planExcerpt?: string;
   }) => Promise<PlanTurnIntent>;
+  classifyDesignTurn?: (opts: {
+    message: string;
+    latch: DesignResumeLatch;
+  }) => Promise<DesignTurnIntent>;
   confirmTimeoutMs?: number;
   turnTimeoutMs?: number;
   /** How long confirm/auto-wait blocks for a busy run (default 90s). */
@@ -242,6 +258,7 @@ export class ChatService {
   private readonly askLatches = new Map<string, AskResumeLatch>();
   /** Last plan loop this conversation started or continued. */
   private readonly planLatches = new Map<string, PlanResumeLatch>();
+  private readonly designLatches = new Map<string, DesignResumeLatch>();
   /** Operator utterance for the in-flight sendMessage (ask routing). */
   private turnOperatorMessage = "";
   /**
@@ -360,6 +377,7 @@ export class ChatService {
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
     this.planLatches.delete(id);
+    this.designLatches.delete(id);
     this.awaitedRuns.delete(id);
     this.awaitedLiveTurns.delete(id);
     this.deliveredLiveNotifications.delete(id);
@@ -389,6 +407,7 @@ export class ChatService {
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
     this.planLatches.delete(id);
+    this.designLatches.delete(id);
     this.awaitedRuns.delete(id);
     this.awaitedLiveTurns.delete(id);
     this.deliveredRunNotifications.delete(id);
@@ -443,6 +462,7 @@ export class ChatService {
       this.clearProceedLatchesForConversation(c.id);
       this.askLatches.delete(c.id);
       this.planLatches.delete(c.id);
+      this.designLatches.delete(c.id);
       this.awaitedRuns.delete(c.id);
       this.awaitedLiveTurns.delete(c.id);
       this.deliveredLiveNotifications.delete(c.id);
@@ -1234,6 +1254,27 @@ export class ChatService {
     this.trackLifecycleRunBeforeDispatch(conversation, action.tool, action.args);
 
     if (LIVE_TURN_ASYNC_TOOLS.has(action.tool)) {
+      // Global chat has no pinned project — the agent must pass projectId
+      // explicitly, otherwise live-turn tracking would silently no-op and
+      // the operator would never see live_settled.
+      const liveProjectId =
+        conversation.projectId ??
+        (typeof action.args.projectId === "string"
+          ? action.args.projectId.trim()
+          : "");
+      if (!liveProjectId) {
+        const text = `${action.tool} requires projectId in global chat — pick the target project from the projects list and pass its projectId.`;
+        this.emit(conversation, {
+          type: "confirm_resolved",
+          tool: action.tool,
+          token: opts.token,
+          approved: false,
+        });
+        if (!opts.skipSynthetic) {
+          await this.runSyntheticTurn(conversation, `[tool error] ${text}`);
+        }
+        return { ok: false, reply: text };
+      }
       this.registerAwaitedLiveTurn(conversation, action.tool, action.args);
       this.runAsyncLiveTurnDispatch(conversation, action.tool, action.args);
       const text = liveTurnStartedMessage(action.tool);
@@ -1430,6 +1471,30 @@ export class ChatService {
     return latch;
   }
 
+  private resolveDesignLatch(
+    conversationId: string,
+    projectId?: string | null,
+  ): DesignResumeLatch | undefined {
+    const mem = this.designLatches.get(conversationId);
+    if (mem?.loopId) return mem;
+    if (!projectId) return undefined;
+    const project = this.deps.context.getProject(projectId);
+    if (!project) return undefined;
+    const open = listDesignLoops(project.rootPath).filter((l) =>
+      isDesignLoopOpen(l.status),
+    );
+    if (open.length !== 1) return undefined;
+    const loop = open[0]!;
+    const latch: DesignResumeLatch = {
+      loopId: loop.id,
+      title: loop.brief.split("\n")[0]?.slice(0, 120),
+      status: loop.status,
+      currentVersion: loop.currentVersion,
+    };
+    this.designLatches.set(conversationId, latch);
+    return latch;
+  }
+
   private async classifyPlanTurnDecision(opts: {
     message: string;
     latch: PlanResumeLatch;
@@ -1478,6 +1543,24 @@ export class ChatService {
       latchLastUser: latch.lastUserLine,
       currentVersion: latch.currentVersion,
       planExcerpt,
+    });
+  }
+
+  private async classifyDesignTurnViaLlm(
+    message: string,
+    latch: DesignResumeLatch,
+  ): Promise<DesignTurnIntent> {
+    const registry = LlmRegistry.fromFile(this.deps.endpointsPath);
+    const { endpoint, modelId } = registry.resolveEndpointForRole(
+      "classification",
+    );
+    return classifyDesignTurnIntentViaLlm({
+      endpoint,
+      modelId,
+      message,
+      latchTitle: latch.title,
+      latchLastUser: latch.lastUserLine,
+      currentVersion: latch.currentVersion,
     });
   }
 
@@ -1620,6 +1703,63 @@ export class ChatService {
     return null;
   }
 
+  private async maybeRerouteDesignLoopTool(
+    conversation: ChatConversation,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ name: string; args: Record<string, unknown> } | null> {
+    if (name !== "design_loop_get") return null;
+    const latch = this.resolveDesignLatch(conversation.id, conversation.projectId);
+    if (!latch?.loopId || !isDesignLoopOpen(latch.status)) return null;
+
+    const operatorMessage = this.turnOperatorMessage.trim();
+    if (!operatorMessage) return null;
+
+    let action: "continue" | "accept" | "status" | "unrelated" = "status";
+    let reason = "";
+    try {
+      const classified = this.deps.classifyDesignTurn
+        ? await this.deps.classifyDesignTurn({
+            message: operatorMessage,
+            latch,
+          })
+        : await this.classifyDesignTurnViaLlm(operatorMessage, latch);
+      if (classified.action !== "unrelated") {
+        action = classified.action as typeof action;
+        reason = classified.notes ?? "";
+      }
+    } catch {
+      const decision = decideDesignTurn({ operatorMessage, latch });
+      if (decision.action === "unrelated") return null;
+      return null; // ambiguous without a classifier — stay read-only
+    }
+
+    if (action === "status" || action === "unrelated") {
+      return null;
+    }
+
+    const loopId = latch.loopId;
+    if (action === "continue") {
+      this.emit(conversation, {
+        type: "status",
+        summary: `rerouting design_loop_get → design_loop_continue (${reason || "visual feedback"})`,
+      });
+      return {
+        name: "design_loop_continue",
+        args: { ...args, loopId, message: operatorMessage },
+      };
+    }
+    // accept
+    this.emit(conversation, {
+      type: "status",
+      summary: `rerouting design_loop_get → design_loop_accept (${reason || "operator satisfied"})`,
+    });
+    return {
+      name: "design_loop_accept",
+      args: { ...args, loopId },
+    };
+  }
+
   private fillLoopIdFromLatch(
     conversationId: string,
     tool: string,
@@ -1631,6 +1771,21 @@ export class ChatService {
       typeof args.loopId === "string" ? args.loopId.trim() : "";
     if (existing) return args;
     const latch = this.resolvePlanLatch(conversationId, projectId);
+    if (!latch?.loopId) return args;
+    return { ...args, loopId: latch.loopId };
+  }
+
+  private fillDesignLoopIdFromLatch(
+    conversationId: string,
+    tool: string,
+    args: Record<string, unknown>,
+    projectId?: string | null,
+  ): Record<string, unknown> {
+    if (!DESIGN_LOOP_ID_DEPENDENT_TOOLS.has(tool)) return args;
+    const existing =
+      typeof args.loopId === "string" ? args.loopId.trim() : "";
+    if (existing) return args;
+    const latch = this.resolveDesignLatch(conversationId, projectId);
     if (!latch?.loopId) return args;
     return { ...args, loopId: latch.loopId };
   }
@@ -1652,6 +1807,7 @@ export class ChatService {
   ): Record<string, unknown> {
     let next = this.fillAskIdFromLatch(conversationId, tool, args);
     next = this.fillLoopIdFromLatch(conversationId, tool, next, projectId);
+    next = this.fillDesignLoopIdFromLatch(conversationId, tool, next, projectId);
     next = this.backfillPlanAcceptArgs(tool, next);
     return next;
   }
@@ -1712,6 +1868,16 @@ export class ChatService {
     if (rerouted) {
       nextName = rerouted.name;
       nextArgs = rerouted.args;
+    }
+
+    const reroutedDesign = await this.maybeRerouteDesignLoopTool(
+      conversation,
+      nextName,
+      nextArgs,
+    );
+    if (reroutedDesign) {
+      nextName = reroutedDesign.name;
+      nextArgs = reroutedDesign.args;
     }
 
     if (nextName === "ask") {
@@ -1848,6 +2014,7 @@ export class ChatService {
     if (!result.isError) {
       this.rememberAskFromDispatch(conversation, nextName, nextArgs, result);
       this.rememberPlanFromDispatch(conversation, nextName, nextArgs, result);
+      this.rememberDesignFromDispatch(conversation, nextName, nextArgs, result);
     }
     return result;
   }
@@ -2036,6 +2203,49 @@ export class ChatService {
       loopId,
       title,
       status: status || (name === "plan_loop_accept" ? "accepted" : "open"),
+      lastUserLine: this.turnOperatorMessage.trim() || undefined,
+      currentVersion,
+    });
+  }
+
+  private rememberDesignFromDispatch(
+    conversation: ChatConversation,
+    name: string,
+    args: Record<string, unknown>,
+    result: ChatToolResult,
+  ): void {
+    const raw = result.content.map((c) => c.text).join("\n");
+    // Terminal dispatches clear the latch — accepted/discarded loops are no
+    // longer revision targets (unlike plan promote, which hands to a phase).
+    if (name === "design_loop_accept" || name === "design_loop_discard") {
+      const id =
+        parseLoopIdFromDispatch(raw) ||
+        (typeof args.loopId === "string" ? args.loopId : "");
+      const latch = this.designLatches.get(conversation.id);
+      if (latch && (!id || latch.loopId === id)) {
+        this.designLatches.delete(conversation.id);
+      }
+      return;
+    }
+    if (name !== "design_loop_start" && name !== "design_loop_continue") {
+      return;
+    }
+    const loopId =
+      parseLoopIdFromDispatch(raw) ||
+      (typeof args.loopId === "string" ? args.loopId.trim() : "");
+    if (!loopId) return;
+    const status = parseDesignLoopStatusFromDispatch(raw);
+    const currentVersion =
+      parseDesignLoopVersionFromDispatch(raw) ??
+      this.designLatches.get(conversation.id)?.currentVersion;
+    const title =
+      typeof args.brief === "string" && args.brief.trim()
+        ? args.brief.trim().split("\n")[0]?.slice(0, 80)
+        : this.designLatches.get(conversation.id)?.title;
+    this.designLatches.set(conversation.id, {
+      loopId,
+      title,
+      status: status || "open",
       lastUserLine: this.turnOperatorMessage.trim() || undefined,
       currentVersion,
     });
@@ -2514,6 +2724,14 @@ export class ChatService {
       planLatch && isPlanLoopOpen(planLatch.status)
         ? `\n\n${formatPlanLoopLatchPrompt(planLatch)}`
         : "";
+    const designLatch = this.resolveDesignLatch(
+      conversation.id,
+      conversation.projectId,
+    );
+    const designLatchBlock =
+      designLatch && isDesignLoopOpen(designLatch.status)
+        ? `\n\n${formatDesignLoopLatchPrompt(designLatch)}`
+        : "";
     const systemPrompt = (
       conversation.projectId
         ? buildProjectChatPrompt({
@@ -2526,7 +2744,7 @@ export class ChatService {
             deps: this.deps.context,
             pendingActions,
           })
-    ).concat(planLatchBlock);
+    ).concat(planLatchBlock, designLatchBlock);
 
     const tools = buildChatTools({
       dispatch: (name, args) => {

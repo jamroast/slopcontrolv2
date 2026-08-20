@@ -1266,7 +1266,8 @@ describe("chat tool input schemas", () => {
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.get_ask!.parse({ askId: "a1" }));
     assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.get_agent!.parse({}));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.get_agent!.parse({ agentId: "ag1" }));
-    assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.design_loop_get!.parse({}));
+    assert.ok(CHAT_TOOL_INPUT_SCHEMA.design_loop_get!.parse({}));
+    assert.ok(CHAT_TOOL_INPUT_SCHEMA.design_loop_get!.parse({ loopId: "d1" }));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({ loopId: "l1" }));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({}));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_accept!.parse({}));
@@ -1289,7 +1290,10 @@ describe("chat tool input schemas", () => {
         tool: "mastra",
       }),
     );
-    assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.design_loop_continue!.parse({ loopId: "l1" }));
+    assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.design_loop_continue!.parse({}));
+    assert.ok(
+      CHAT_TOOL_INPUT_SCHEMA.design_loop_continue!.parse({ message: "darker chrome" }),
+    );
     assert.ok(
       CHAT_TOOL_INPUT_SCHEMA.design_loop_continue!.parse({
         loopId: "l1",

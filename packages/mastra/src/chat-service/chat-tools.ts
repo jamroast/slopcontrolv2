@@ -174,7 +174,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
   }),
   design_loop_get: z.object({
-    loopId: z.string().min(1),
+    loopId: z.string().min(1).optional(),
     projectId: optionalProject,
   }),
   plan_loop_get: z.object({
@@ -217,7 +217,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   }),
   design_loop_continue: z
     .object({
-      loopId: z.string().min(1),
+      loopId: z.string().min(1).optional(),
       message: z.string().min(1),
       projectId: optionalProject,
     })
@@ -385,7 +385,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   get_agent:
     "One agent session. Requires agentId from list_agents. Returns latest messages, not the full history dump.",
   design_loop_get:
-    "One design loop. Requires loopId from list_design_loops. Use notes; do not paste HTML into the operator reply.",
+    "One design loop. Pass loopId, or omit to use this chat's latched design loop (from design_loop_start/continue). Read-only status — when the operator gives visual feedback, call design_loop_continue (not design_loop_get). Do not poll while a design live turn is active. Use notes; do not paste HTML into the operator reply.",
   plan_loop_get:
     "One plan loop. Pass loopId, or omit to use this chat's latched plan loop (from plan_loop_start/continue). Returns nextStep and blockers. Read-only status check — when the operator wants to revise the plan, call plan_loop_continue (not plan_loop_get). Do not poll while a plan_loop live turn is active — wait for live_settled.",
   plan_loop_start:
@@ -399,7 +399,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   plan_loop_promote:
     "Bind accepted plan to a new phase and start research (returns runId). Pass loopId (or omit latched). After research reaches in_review, use advance_run with that runId — plan_loop_promote does not start development.",
   design_loop_start:
-    "Start a look-and-feel design loop (mock HTML). Requires brief — pass the operator's words in brief. Notification-driven when live turn active.",
+    "Start a look-and-feel design loop (mock HTML exploration). Requires brief — pass the operator's words in brief. In global chat you MUST pass projectId. Notification-driven when live turn active. For the formal phase UI-SPEC pass, the lifecycle dispatches start_design automatically — do not park it manually.",
   start_change:
     "Start research for a new phase. Requires description — pass the operator's full task definition (title, goal, affected areas, success criteria). Do not call with only projectId. Optional dependsOn for phase ordering.",
   ask: "Investigate the project (read source, explain why something is broken). Pass the operator's words through in message — do not replace a page/route/product-gap question with a source-claim checklist. Optional investigateTool: mastra (faster) | pi (thorough) | auto. Thorough vs quick intent in the operator message is classified by the LLM, never keyword-matched; with no expressed intent the fast mastra path runs. Prefer this over gated agent for read-only traces. Requires message. You may pass askId or newAsk; the chat service will choose continue vs a new ask so this never resumes some other open ask on the project.",
