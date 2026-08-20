@@ -14,6 +14,7 @@ export const DESIGN_LOOP_ID_DEPENDENT_TOOLS = new Set([
   "design_loop_continue",
   "design_loop_acceptance",
   "design_loop_accept",
+  "design_loop_abandon",
   "design_loop_retry",
   "design_loop_pin",
   "design_loop_unpin",
@@ -156,4 +157,17 @@ export function parseDesignLoopVersionFromDispatch(
     if (fromLine !== undefined) return fromLine;
   }
   return undefined;
+}
+
+/** Parse a version number from tool args (undefined when missing/invalid). */
+export function parseLoopDiscardVersion(
+  args: Record<string, unknown>,
+): number | undefined {
+  const raw =
+    typeof args.version === "number"
+      ? args.version
+      : typeof args.version === "string"
+        ? Number(args.version.trim())
+        : Number.NaN;
+  return Number.isFinite(raw) && raw >= 1 ? raw : undefined;
 }

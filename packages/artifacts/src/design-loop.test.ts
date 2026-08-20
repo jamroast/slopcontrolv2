@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { describe, it, after } from "node:test";
 import {
   acceptDesignLoop,
+  abandonDesignLoop,
   appendDesignLoopTranscript,
   bindAcceptedDesignLoopToPhase,
   createDesignLoopMeta,
@@ -438,5 +439,50 @@ describe("design-loop", () => {
     assert.match(block, /ember\.png/);
     assert.match(block, /competing logo/);
     assert.match(block, /logo/);
+  });
+
+  it("abandonDesignLoop marks the loop abandoned with reason and transcript", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-dloop-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({ projectId: "p1", brief: "wrong direction" });
+    writeDesignLoopMeta(root, meta);
+
+    const abandoned = abandonDesignLoop({
+      projectRoot: root,
+      loopId: meta.id,
+      reason: "operator cancelled — completely wrong design",
+    });
+    assert.equal(abandoned.status, "abandoned");
+    assert.equal(abandoned.abandonReason, "operator cancelled — completely wrong design");
+    assert.ok(abandoned.abandonedAt);
+
+    // Persisted + transcript recorded.
+    const reread = readDesignLoopMeta(root, meta.id);
+    assert.equal(reread?.status, "abandoned");
+    assert.match(
+      readDesignLoopTranscript(root, meta.id) ?? "",
+      /Design loop abandoned: operator cancelled/,
+    );
+
+    // Idempotent.
+    const again = abandonDesignLoop({ projectRoot: root, loopId: meta.id });
+    assert.equal(again.status, "abandoned");
+
+    // Unknown loop throws.
+    assert.throws(() =>
+      abandonDesignLoop({ projectRoot: root, loopId: "nope" }),
+    );
+  });
+
+  it("abandonDesignLoop refuses implemented loops", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-dloop-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({ projectId: "p1", brief: "shipped" });
+    meta.status = "implemented";
+    writeDesignLoopMeta(root, meta);
+    assert.throws(
+      () => abandonDesignLoop({ projectRoot: root, loopId: meta.id }),
+      /already implemented/,
+    );
   });
 });

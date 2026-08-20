@@ -302,6 +302,30 @@ export function formatDesignLoopMcpEnvelope(body: string, ok: boolean): string {
   }
 }
 
+async function resolveLoopCurrentVersion(
+  kind: "design" | "plan",
+  projectId: string,
+  loopId: string,
+  serverUrl: string,
+): Promise<number | undefined> {
+  if (!projectId || !loopId) return undefined;
+  const segment = kind === "design" ? "design-loops" : "plan-loops";
+  const res = await fetch(
+    `${serverUrl}/projects/${encodeURIComponent(projectId)}/${segment}/${encodeURIComponent(loopId)}`,
+  );
+  if (!res.ok) return undefined;
+  try {
+    const parsed = JSON.parse(await res.text()) as {
+      loop?: { currentVersion?: number };
+      currentVersion?: number;
+    };
+    const v = parsed.loop?.currentVersion ?? parsed.currentVersion;
+    return typeof v === "number" && v >= 1 ? v : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function formatAskMcpEnvelope(body: string, ok: boolean): string {
   try {
     const parsed = JSON.parse(body) as {
@@ -1139,14 +1163,32 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           loopId: { type: "string" },
           version: {
             type: "number",
-            description: "Version number to discard (e.g. 8)",
+            description:
+              "Version number to discard (e.g. 8). Defaults to loop currentVersion when omitted.",
           },
           reason: {
             type: "string",
             description: "Optional reason recorded on the version + transcript",
           },
         },
-        required: ["projectId", "loopId", "version"],
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "design_loop_abandon",
+      description:
+        "Abandon a WHOLE design loop (operator: 'this design is completely wrong — cancel it'). Marks the loop abandoned; versions stay on disk. Do NOT use design_loop_discard to cancel a loop — that only marks one VERSION invalid. Requires projectId + loopId (list_design_loops first when unsure).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          reason: {
+            type: "string",
+            description: "Optional reason recorded on the loop + transcript",
+          },
+        },
+        required: ["projectId", "loopId"],
       },
     },
     {
@@ -1789,10 +1831,14 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
         properties: {
           projectId: { type: "string" },
           loopId: { type: "string" },
-          version: { type: "number" },
+          version: {
+            type: "number",
+            description:
+              "Version number to discard. Defaults to loop currentVersion when omitted.",
+          },
           reason: { type: "string" },
         },
-        required: ["projectId", "loopId", "version"],
+        required: ["projectId", "loopId"],
       },
     },
     {
@@ -3355,7 +3401,23 @@ export async function dispatchSlopcontrolTool(
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
         const loopId = String(args.loopId ?? "");
-        const version = Number(args.version);
+        let version = Number(args.version);
+        if (!Number.isFinite(version) || version < 1) {
+          version =
+            (await resolveLoopCurrentVersion("plan", projectId, loopId, SERVER_URL)) ??
+            Number.NaN;
+        }
+        if (!Number.isFinite(version) || version < 1) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ error: "version (number) required" }),
+              },
+            ],
+            isError: true,
+          };
+        }
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/versions/${encodeURIComponent(String(version))}/discard`,
           {
@@ -4232,15 +4294,53 @@ export async function dispatchSlopcontrolTool(
 
     if (name === "design_loop_discard") {
       return wrap(async () => {
-        const projectId = String(args.projectId ?? "");
-        const loopId = String(args.loopId ?? "");
-        const version = Number(args.version);
+        const projectId = String(args.projectId ?? "").trim();
+        const loopId = String(args.loopId ?? "").trim();
+        // Attributive errors: the agent cannot fix what it cannot see. A
+        // bare "version required" sends it hunting for a version when the
+        // real problem is a missing projectId or wrong loopId.
+        if (!projectId) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error:
+                    "projectId required — in global chat pass it explicitly on every design tool call",
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        if (!loopId) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({
+                  error:
+                    "loopId required — call list_design_loops to find the loop on this project",
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
+        let version = Number(args.version);
+        if (!Number.isFinite(version) || version < 1) {
+          version =
+            (await resolveLoopCurrentVersion("design", projectId, loopId, SERVER_URL)) ??
+            Number.NaN;
+        }
         if (!Number.isFinite(version) || version < 1) {
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify({ error: "version (number) required" }),
+                text: JSON.stringify({
+                  error: `could not resolve currentVersion for design loop ${loopId} on project ${projectId} — check the loop exists via list_design_loops, then pass version explicitly`,
+                }),
               },
             ],
             isError: true,
@@ -4248,6 +4348,28 @@ export async function dispatchSlopcontrolTool(
         }
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/versions/${encodeURIComponent(String(version))}/discard`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reason: args.reason }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [
+            { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
+          ],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "design_loop_abandon") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/abandon`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },

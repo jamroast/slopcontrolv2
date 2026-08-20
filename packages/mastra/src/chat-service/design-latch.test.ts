@@ -217,7 +217,7 @@ describe("design loop latch", () => {
     }
   });
 
-  it("accept and discard clear the latch", () => {
+  it("accept clears the latch; discard keeps latch and updates version", () => {
     const { service, cleanup } = makeService();
     try {
       const conversation = service.createConversation({ projectId: "p1" });
@@ -235,6 +235,25 @@ describe("design loop latch", () => {
       };
       svc.rememberDesignFromDispatch(conversation, "design_loop_start", {}, result);
       assert.ok(svc.resolveDesignLatch(conversation.id, "p1"));
+      svc.rememberDesignFromDispatch(
+        conversation,
+        "design_loop_discard",
+        { loopId: "dl-1" },
+        {
+          content: [
+            {
+              type: "text",
+              text: 'loopId: dl-1\nstatus: open\n---\n{"version":6}',
+            },
+          ],
+        },
+      );
+      const afterDiscard = svc.resolveDesignLatch(conversation.id, "p1") as {
+        loopId: string;
+        currentVersion?: number;
+      };
+      assert.equal(afterDiscard.loopId, "dl-1");
+      assert.equal(afterDiscard.currentVersion, 6);
       svc.rememberDesignFromDispatch(
         conversation,
         "design_loop_accept",
@@ -477,6 +496,72 @@ describe("design loop latch", () => {
       );
       assert.equal(filled.loopId, "bca8e590-aaaa-bbbb-cccc-ddddeeeeffff");
       assert.equal(filled.projectId, "p1");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("abandon clears the latch", () => {
+    const { service, cleanup } = makeService();
+    try {
+      const conversation = service.createConversation({ projectId: "p1" });
+      const svc = service as unknown as {
+        rememberDesignFromDispatch: (
+          c: unknown,
+          n: string,
+          a: Record<string, unknown>,
+          r: ChatToolResult,
+        ) => void;
+        resolveDesignLatch: (id: string, p?: string | null) => unknown;
+      };
+      svc.rememberDesignFromDispatch(
+        conversation,
+        "design_loop_start",
+        {},
+        { content: [{ type: "text", text: "loopId: dl-1\nstatus: open" }] },
+      );
+      assert.ok(svc.resolveDesignLatch(conversation.id, "p1"));
+      svc.rememberDesignFromDispatch(
+        conversation,
+        "design_loop_abandon",
+        { loopId: "dl-1", reason: "completely wrong" },
+        { content: [{ type: "text", text: "loopId: dl-1\nstatus: abandoned" }] },
+      );
+      assert.equal(svc.resolveDesignLatch(conversation.id, "p1"), undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("global chat discard backfills version from latch currentVersion", () => {
+    const { service, cleanup } = makeService();
+    try {
+      const conversation = service.createConversation({ projectId: null });
+      const svc = service as unknown as {
+        fillLatchedToolArgs: (
+          id: string,
+          t: string,
+          a: Record<string, unknown>,
+          p?: string | null,
+        ) => Record<string, unknown>;
+        designLatches: Map<
+          string,
+          { loopId: string; projectId?: string; currentVersion?: number }
+        >;
+      };
+      svc.designLatches.set(conversation.id, {
+        loopId: "c20498ef-1111-2222-3333-444455556666",
+        projectId: "p1",
+        currentVersion: 7,
+      });
+      const filled = svc.fillLatchedToolArgs(
+        conversation.id,
+        "design_loop_discard",
+        { projectId: "p1" },
+        null,
+      );
+      assert.equal(filled.loopId, "c20498ef-1111-2222-3333-444455556666");
+      assert.equal(filled.version, 7);
     } finally {
       cleanup();
     }

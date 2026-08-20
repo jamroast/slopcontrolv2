@@ -120,6 +120,7 @@ import {
   isDesignLoopOpen,
   parseDesignLoopStatusFromDispatch,
   parseDesignLoopVersionFromDispatch,
+  parseLoopDiscardVersion,
   type DesignResumeLatch,
   type DesignTurnDecision,
 } from "./design-routing.js";
@@ -1934,6 +1935,57 @@ export class ChatService {
     };
   }
 
+  private fillLoopVersionFromLatch(
+    conversationId: string,
+    tool: string,
+    args: Record<string, unknown>,
+    projectId?: string | null,
+  ): Record<string, unknown> {
+    if (tool !== "design_loop_discard" && tool !== "plan_loop_discard") {
+      return args;
+    }
+    if (parseLoopDiscardVersion(args) !== undefined) return args;
+
+    const resolvedProjectId =
+      projectId ??
+      (typeof args.projectId === "string" ? args.projectId.trim() : undefined);
+    const loopId =
+      typeof args.loopId === "string" ? args.loopId.trim() : undefined;
+
+    if (tool === "design_loop_discard") {
+      const latch = this.resolveDesignLatch(
+        conversationId,
+        resolvedProjectId,
+        loopId,
+      );
+      if (latch?.currentVersion) {
+        return { ...args, version: latch.currentVersion };
+      }
+      if (resolvedProjectId && loopId) {
+        const meta = this.latchFromDesignLoopId(resolvedProjectId, loopId);
+        if (meta?.currentVersion) {
+          return { ...args, version: meta.currentVersion };
+        }
+      }
+      return args;
+    }
+
+    const latch = this.resolvePlanLatch(conversationId, resolvedProjectId);
+    if (latch?.currentVersion) {
+      return { ...args, version: latch.currentVersion };
+    }
+    if (resolvedProjectId && loopId) {
+      const project = this.deps.context.getProject(resolvedProjectId);
+      if (project) {
+        const meta = readPlanLoopMeta(project.rootPath, loopId);
+        if (meta?.currentVersion) {
+          return { ...args, version: meta.currentVersion };
+        }
+      }
+    }
+    return args;
+  }
+
   private backfillPlanAcceptArgs(
     tool: string,
     args: Record<string, unknown>,
@@ -1952,6 +2004,7 @@ export class ChatService {
     let next = this.fillAskIdFromLatch(conversationId, tool, args);
     next = this.fillLoopIdFromLatch(conversationId, tool, next, projectId);
     next = this.fillDesignLoopIdFromLatch(conversationId, tool, next, projectId);
+    next = this.fillLoopVersionFromLatch(conversationId, tool, next, projectId);
     next = this.backfillPlanAcceptArgs(tool, next);
     return next;
   }
@@ -2408,15 +2461,29 @@ export class ChatService {
     result: ChatToolResult,
   ): void {
     const raw = result.content.map((c) => c.text).join("\n");
-    // Terminal dispatches clear the latch — accepted/discarded loops are no
-    // longer revision targets (unlike plan promote, which hands to a phase).
-    if (name === "design_loop_accept" || name === "design_loop_discard") {
+    if (name === "design_loop_accept" || name === "design_loop_abandon") {
       const id =
         parseLoopIdFromDispatch(raw) ||
         (typeof args.loopId === "string" ? args.loopId : "");
       const latch = this.designLatches.get(conversation.id);
       if (latch && (!id || latch.loopId === id)) {
         this.designLatches.delete(conversation.id);
+      }
+      return;
+    }
+    if (name === "design_loop_discard") {
+      const id =
+        parseLoopIdFromDispatch(raw) ||
+        (typeof args.loopId === "string" ? args.loopId : "");
+      const latch = this.designLatches.get(conversation.id);
+      if (!latch || (id && latch.loopId !== id)) return;
+      const currentVersion = parseDesignLoopVersionFromDispatch(raw);
+      if (currentVersion !== undefined) {
+        this.designLatches.set(conversation.id, {
+          ...latch,
+          currentVersion,
+          status: parseDesignLoopStatusFromDispatch(raw) || latch.status,
+        });
       }
       return;
     }

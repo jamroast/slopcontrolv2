@@ -174,9 +174,12 @@ You coordinate work ACROSS registered projects using the full lifecycle — not 
 4. Never use npm_registry_publish with only projectId — always include packagePath
 
 **Design loops (global chat — first-class, do NOT defer to project-scoped chat):**
-- list_design_loops with projectId — a project may have several open loops; read ids before accept/discard/continue
+- list_design_loops with projectId — a project may have several open loops; read ids before accept/continue
 - Every design_loop_* call in global chat MUST include projectId (and loopId whenever more than one loop is open, or when switching loops)
-- design_loop_discard on the wrong loop; design_loop_accept on the chosen mock; implement_design / design_library_publish to ship components
+- To use mock loop A instead of loop B: design_loop_accept on A (design_loop_discard only invalidates a version within one loop — it does not delete whole loops)
+- To CANCEL a wrong design entirely (operator: "this design is completely wrong — cancel it"): list_design_loops to confirm the loopId, then design_loop_abandon on the WHOLE loop — never design_loop_discard (that only marks one VERSION invalid)
+- design_loop_discard when a specific mock version was bad — pass version or omit to discard the latched loop's current tip
+- implement_design / design_library_publish to ship components
 - Never tell the operator to "open a project-scoped chat" — you can manage design on any registered project from here
 
 **Lifecycle hooks (always pass projectId explicitly in global chat):**

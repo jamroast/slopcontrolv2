@@ -14,7 +14,7 @@ const requireDesignPack = createRequire(import.meta.url);
 
 const SLOP_DIR = ".slopcontrol";
 
-export type DesignLoopStatus = "open" | "accepted" | "implemented";
+export type DesignLoopStatus = "open" | "accepted" | "implemented" | "abandoned";
 
 export type DesignLoopLastError = {
   version: number;
@@ -40,6 +40,9 @@ export type DesignLoopMeta = {
   lastError?: DesignLoopLastError;
   /** Dynamic conceptual-model scope frame (product / shell / screen / component / flow). */
   scope?: import("./design-conceptual-model.js").DesignScope;
+  /** Operator-supplied reason when status === "abandoned". */
+  abandonReason?: string;
+  abandonedAt?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -1213,6 +1216,43 @@ export function listDesignLoops(projectRoot: string): DesignLoopMeta[] {
     if (meta) out.push(meta);
   }
   return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+/**
+ * Abandon a whole design loop (operator: "this design is completely wrong —
+ * cancel it"). Marks the loop abandoned; versions stay on disk for audit.
+ * Distinct from invalidateDesignLoopVersion, which only marks ONE version
+ * invalid and rewinds the tip. Idempotent.
+ */
+export function abandonDesignLoop(opts: {
+  projectRoot: string;
+  loopId: string;
+  reason?: string;
+}): DesignLoopMeta {
+  const meta = readDesignLoopMeta(opts.projectRoot, opts.loopId);
+  if (!meta) throw new Error(`Design loop not found: ${opts.loopId}`);
+  if (meta.status === "abandoned") return meta;
+  if (meta.status === "implemented") {
+    throw new Error(
+      `Design loop already implemented: ${opts.loopId} — its design shipped to a phase; abandon the phase instead`,
+    );
+  }
+  const now = new Date().toISOString();
+  const next: DesignLoopMeta = {
+    ...meta,
+    status: "abandoned",
+    abandonReason: opts.reason?.trim() || undefined,
+    abandonedAt: now,
+    updatedAt: now,
+  };
+  writeDesignLoopMeta(opts.projectRoot, next);
+  appendDesignLoopTranscript(
+    opts.projectRoot,
+    opts.loopId,
+    "assistant",
+    `Design loop abandoned${opts.reason?.trim() ? `: ${opts.reason.trim()}` : ""}`,
+  );
+  return next;
 }
 
 export function createDesignLoopMeta(opts: {

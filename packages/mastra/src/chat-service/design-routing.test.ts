@@ -8,6 +8,7 @@ import {
   isDesignLoopOpen,
   parseDesignLoopStatusFromDispatch,
   parseDesignLoopVersionFromDispatch,
+  parseLoopDiscardVersion,
 } from "./design-routing.js";
 import { parseLoopIdFromDispatch } from "./plan-routing.js";
 
@@ -120,6 +121,13 @@ describe("design routing", () => {
       7,
     );
     assert.equal(parseDesignLoopVersionFromDispatch("not json"), undefined);
+  });
+
+  it("parseLoopDiscardVersion reads version from args", () => {
+    assert.equal(parseLoopDiscardVersion({ version: 3 }), 3);
+    assert.equal(parseLoopDiscardVersion({ version: "5" }), 5);
+    assert.equal(parseLoopDiscardVersion({}), undefined);
+    assert.equal(parseLoopDiscardVersion({ version: 0 }), undefined);
   });
 
   it("shared parseLoopIdFromDispatch reads design envelopes", () => {

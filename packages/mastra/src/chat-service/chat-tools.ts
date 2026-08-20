@@ -273,6 +273,14 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   }),
   design_loop_discard: z.object({
     loopId: z.string().min(1).optional(),
+    version: z.number().int().positive().optional(),
+    reason: z.string().optional(),
+    projectId: optionalProject,
+  }),
+  plan_loop_discard: z.object({
+    loopId: z.string().min(1).optional(),
+    version: z.number().int().positive().optional(),
+    reason: z.string().optional(),
     projectId: optionalProject,
   }),
   start_change: z.object({
@@ -411,7 +419,9 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   design_loop_accept:
     "Freeze the chosen design loop as accepted. Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first). Clears this chat's design latch.",
   design_loop_discard:
-    "Discard a design loop that lost the exploration. Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId and prefer explicit loopId — discarding the wrong loop is unrecoverable. Clears this chat's design latch.",
+    "Soft-discard a bad mock VERSION (marks invalid; rewinds tip if it was latest). Pass version (e.g. 7), or omit to discard this chat's latched loop's currentVersion. Does NOT delete an entire loop — when the operator says the whole design is wrong, call design_loop_abandon instead. Global chat: always pass projectId.",
+  design_loop_abandon:
+    "Cancel a WHOLE design loop when the operator says the design is completely wrong. Pass loopId, or omit to use this chat's latched design loop; global chat must pass projectId. Clears this chat's design latch. Do NOT use design_loop_discard to cancel a loop — that only marks one VERSION invalid.",
   start_change:
     "Start research for a new phase. Requires description — pass the operator's full task definition (title, goal, affected areas, success criteria). Do not call with only projectId. Optional dependsOn for phase ordering.",
   ask: "Investigate the project (read source, explain why something is broken). Pass the operator's words through in message — do not replace a page/route/product-gap question with a source-claim checklist. Optional investigateTool: mastra (faster) | pi (thorough) | auto. Thorough vs quick intent in the operator message is classified by the LLM, never keyword-matched; with no expressed intent the fast mastra path runs. Prefer this over gated agent for read-only traces. Requires message. You may pass askId or newAsk; the chat service will choose continue vs a new ask so this never resumes some other open ask on the project.",

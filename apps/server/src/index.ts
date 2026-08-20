@@ -69,6 +69,7 @@ import {
   assertActiveDesignLoopBase,
   buildDesignLoopVersionTree,
   invalidateDesignLoopVersion,
+  abandonDesignLoop,
   resolveDesignLoopTip,
   getDesignLoopVersionNode,
   buildLiveSiteInventory,
@@ -4566,6 +4567,31 @@ app.post(
     }
   },
 );
+
+app.post("/projects/:id/design-loops/:loopId/abandon", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const meta = readDesignLoopMeta(project.rootPath, req.params.loopId);
+  if (!meta || meta.projectId !== project.id) {
+    res.status(404).json({ error: "Design loop not found" });
+    return;
+  }
+  try {
+    const loop = abandonDesignLoop({
+      projectRoot: project.rootPath,
+      loopId: meta.id,
+      reason: typeof req.body?.reason === "string" ? req.body.reason : undefined,
+    });
+    res.json({ loop, loopId: meta.id });
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+});
 
 app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
   const project = store.getProject(req.params.id);
