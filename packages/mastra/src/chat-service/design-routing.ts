@@ -73,6 +73,28 @@ export function formatDesignLoopLatchPrompt(latch: DesignResumeLatch): string {
   return lines.filter(Boolean).join("\n");
 }
 
+export function formatDesignTurnRoutingPrefix(opts: {
+  latch: DesignResumeLatch;
+  decision: Exclude<DesignTurnDecision, { action: "ambiguous" }>;
+}): string {
+  const { latch, decision } = opts;
+  const tool =
+    decision.action === "continue"
+      ? "design_loop_continue"
+      : decision.action === "accept"
+        ? "design_loop_accept"
+        : decision.action === "status"
+          ? "design_loop_get"
+          : null;
+  if (!tool) return "";
+  return [
+    `[Design loop routing: loopId=${latch.loopId} v${latch.currentVersion ?? "?"} — operator intent=${decision.action} (${decision.reason}).`,
+    tool === "design_loop_get"
+      ? "Read-only status check is OK."
+      : `You MUST park ${tool} with the operator's feedback — do NOT call design_loop_get instead.]`,
+  ].join(" ");
+}
+
 /** Parse design loop status from a dispatch envelope or JSON body. */
 export function parseDesignLoopStatusFromDispatch(
   raw: string,

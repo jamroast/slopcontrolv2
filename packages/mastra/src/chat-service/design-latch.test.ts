@@ -353,4 +353,80 @@ describe("design loop latch", () => {
       cleanup();
     }
   });
+
+  it("global chat confirm of design_loop_start without projectId fails explicitly", async () => {
+    const dispatched: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (name, args): Promise<ChatToolResult> => {
+        dispatched.push({ name, args });
+        return { content: [{ type: "text", text: "{}" }] };
+      },
+    });
+    try {
+      // Global chat: no pinned project.
+      const conversation = service.createConversation({ projectId: null });
+      const token = (
+        service as unknown as {
+          requestConfirmation: (
+            c: ChatConversation,
+            t: string,
+            a: Record<string, unknown>,
+          ) => { token: string };
+        }
+      ).requestConfirmation(conversation, "design_loop_start", {
+        brief: "login page mock",
+      }).token;
+
+      const result = await service.confirm({
+        conversationId: conversation.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+      assert.equal(result.ok, false);
+      assert.match(result.reply ?? "", /requires projectId in global chat/);
+      assert.equal(dispatched.length, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("global chat confirm of design_loop_start with projectId dispatches", async () => {
+    const dispatched: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (name, args): Promise<ChatToolResult> => {
+        dispatched.push({ name, args });
+        return { content: [{ type: "text", text: "loopId: dl-9\nstatus: open" }] };
+      },
+    });
+    try {
+      const conversation = service.createConversation({ projectId: null });
+      const token = (
+        service as unknown as {
+          requestConfirmation: (
+            c: ChatConversation,
+            t: string,
+            a: Record<string, unknown>,
+          ) => { token: string };
+        }
+      ).requestConfirmation(conversation, "design_loop_start", {
+        brief: "login page mock",
+        projectId: "p1",
+      }).token;
+
+      const result = await service.confirm({
+        conversationId: conversation.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+      assert.equal(result.ok, true);
+      // Async live turn: dispatch happens in the background.
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(dispatched.length, 1);
+      assert.equal(dispatched[0]!.name, "design_loop_start");
+    } finally {
+      cleanup();
+    }
+  });
 });

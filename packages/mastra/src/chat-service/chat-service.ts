@@ -115,10 +115,12 @@ import {
   decideDesignTurn,
   DESIGN_LOOP_ID_DEPENDENT_TOOLS,
   formatDesignLoopLatchPrompt,
+  formatDesignTurnRoutingPrefix,
   isDesignLoopOpen,
   parseDesignLoopStatusFromDispatch,
   parseDesignLoopVersionFromDispatch,
   type DesignResumeLatch,
+  type DesignTurnDecision,
 } from "./design-routing.js";
 import type {
   AwaitedLiveTurn,
@@ -1703,6 +1705,50 @@ export class ChatService {
     return null;
   }
 
+  private async classifyDesignTurnDecision(opts: {
+    message: string;
+    latch: DesignResumeLatch;
+  }): Promise<Exclude<DesignTurnDecision, { action: "ambiguous" }>> {
+    try {
+      const classified = this.deps.classifyDesignTurn
+        ? await this.deps.classifyDesignTurn({
+            message: opts.message,
+            latch: opts.latch,
+          })
+        : await this.classifyDesignTurnViaLlm(opts.message, opts.latch);
+      const action = classified.action;
+      if (action === "continue" || action === "accept") {
+        return { action, reason: classified.notes ?? "" };
+      }
+      return { action: action === "unrelated" ? "unrelated" : "status", reason: classified.notes ?? "" };
+    } catch {
+      const fallback = decideDesignTurn({
+        operatorMessage: opts.message,
+        latch: opts.latch,
+      });
+      if (fallback.action !== "ambiguous") return fallback;
+      return { action: "status", reason: "classification unavailable" };
+    }
+  }
+
+  private async maybePrependDesignTurnRouting(
+    conversation: ChatConversation,
+    text: string,
+  ): Promise<string> {
+    const latch = this.resolveDesignLatch(conversation.id, conversation.projectId);
+    if (!latch?.loopId || !isDesignLoopOpen(latch.status)) return text;
+    const operatorMessage = this.turnOperatorMessage.trim() || text.trim();
+    if (!operatorMessage) return text;
+
+    const decision = await this.classifyDesignTurnDecision({
+      message: operatorMessage,
+      latch,
+    });
+    if (decision.action === "unrelated") return text;
+    const prefix = formatDesignTurnRoutingPrefix({ latch, decision });
+    return prefix ? `${prefix}\n\n${text}` : text;
+  }
+
   private async maybeRerouteDesignLoopTool(
     conversation: ChatConversation,
     name: string,
@@ -1715,34 +1761,19 @@ export class ChatService {
     const operatorMessage = this.turnOperatorMessage.trim();
     if (!operatorMessage) return null;
 
-    let action: "continue" | "accept" | "status" | "unrelated" = "status";
-    let reason = "";
-    try {
-      const classified = this.deps.classifyDesignTurn
-        ? await this.deps.classifyDesignTurn({
-            message: operatorMessage,
-            latch,
-          })
-        : await this.classifyDesignTurnViaLlm(operatorMessage, latch);
-      if (classified.action !== "unrelated") {
-        action = classified.action as typeof action;
-        reason = classified.notes ?? "";
-      }
-    } catch {
-      const decision = decideDesignTurn({ operatorMessage, latch });
-      if (decision.action === "unrelated") return null;
-      return null; // ambiguous without a classifier — stay read-only
-    }
-
-    if (action === "status" || action === "unrelated") {
+    const decision = await this.classifyDesignTurnDecision({
+      message: operatorMessage,
+      latch,
+    });
+    if (decision.action === "status" || decision.action === "unrelated") {
       return null;
     }
 
     const loopId = latch.loopId;
-    if (action === "continue") {
+    if (decision.action === "continue") {
       this.emit(conversation, {
         type: "status",
-        summary: `rerouting design_loop_get → design_loop_continue (${reason || "visual feedback"})`,
+        summary: `rerouting design_loop_get → design_loop_continue (${decision.reason || "visual feedback"})`,
       });
       return {
         name: "design_loop_continue",
@@ -1752,7 +1783,7 @@ export class ChatService {
     // accept
     this.emit(conversation, {
       type: "status",
-      summary: `rerouting design_loop_get → design_loop_accept (${reason || "operator satisfied"})`,
+      summary: `rerouting design_loop_get → design_loop_accept (${decision.reason || "operator satisfied"})`,
     });
     return {
       name: "design_loop_accept",
@@ -1981,6 +2012,31 @@ export class ChatService {
             {
               type: "text",
               text: "No loopId: this chat has no latched plan loop. Call plan_loop_start first or pass loopId.",
+            },
+          ],
+        };
+      }
+    } else if (DESIGN_LOOP_ID_DEPENDENT_TOOLS.has(nextName)) {
+      // In global chat the conversation has no pinned project — the latch
+      // resolve needs the projectId the agent passed in args.
+      nextArgs = this.fillDesignLoopIdFromLatch(
+        conversation.id,
+        nextName,
+        nextArgs,
+        conversation.projectId ??
+          (typeof nextArgs.projectId === "string"
+            ? nextArgs.projectId.trim()
+            : undefined),
+      );
+      const filled =
+        typeof nextArgs.loopId === "string" ? nextArgs.loopId.trim() : "";
+      if (!filled) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `No loopId: this chat has no latched design loop. Call design_loop_start first or pass loopId (from list_design_loops).`,
             },
           ],
         };
@@ -2638,9 +2694,9 @@ export class ChatService {
       const turnText = confirmPrefix
         ? `${confirmPrefix}\n\n---\nOperator message:\n${text}`
         : text;
-      const routedText = await this.maybePrependPlanTurnRouting(
+      const routedText = await this.maybePrependDesignTurnRouting(
         conversation,
-        turnText,
+        await this.maybePrependPlanTurnRouting(conversation, turnText),
       );
       const turn = this.runTurn(conversation, routedText, { synthetic: false });
       let done = false;

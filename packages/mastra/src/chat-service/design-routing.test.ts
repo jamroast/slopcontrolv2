@@ -4,6 +4,7 @@ import {
   decideDesignTurn,
   DESIGN_LOOP_ID_DEPENDENT_TOOLS,
   formatDesignLoopLatchPrompt,
+  formatDesignTurnRoutingPrefix,
   isDesignLoopOpen,
   parseDesignLoopStatusFromDispatch,
   parseDesignLoopVersionFromDispatch,
@@ -73,6 +74,28 @@ describe("design routing", () => {
       assert.ok(DESIGN_LOOP_ID_DEPENDENT_TOOLS.has(tool), tool);
     }
     assert.ok(!DESIGN_LOOP_ID_DEPENDENT_TOOLS.has("design_loop_start"));
+  });
+
+  it("formatDesignTurnRoutingPrefix steers away from design_loop_get", () => {
+    const latch = { loopId: "d1", currentVersion: 3, status: "open" };
+    const cont = formatDesignTurnRoutingPrefix({
+      latch,
+      decision: { action: "continue", reason: "visual feedback" },
+    });
+    assert.match(cont, /MUST park design_loop_continue/);
+    assert.match(cont, /do NOT call design_loop_get/);
+    const status = formatDesignTurnRoutingPrefix({
+      latch,
+      decision: { action: "status", reason: "checking" },
+    });
+    assert.match(status, /Read-only status check is OK/);
+    assert.equal(
+      formatDesignTurnRoutingPrefix({
+        latch,
+        decision: { action: "unrelated", reason: "off topic" },
+      }),
+      "",
+    );
   });
 
   it("parses status from envelope header and JSON body", () => {
