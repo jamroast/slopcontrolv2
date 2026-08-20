@@ -429,4 +429,34 @@ describe("design loop latch", () => {
       cleanup();
     }
   });
+
+  it("global chat discard fills loopId from latch when projectId is in args", () => {
+    const { service, cleanup } = makeService();
+    try {
+      const conversation = service.createConversation({ projectId: null });
+      const svc = service as unknown as {
+        fillLatchedToolArgs: (
+          id: string,
+          t: string,
+          a: Record<string, unknown>,
+          p?: string | null,
+        ) => Record<string, unknown>;
+        designLatches: Map<string, { loopId: string; projectId?: string }>;
+      };
+      svc.designLatches.set(conversation.id, {
+        loopId: "bca8e590-aaaa-bbbb-cccc-ddddeeeeffff",
+        projectId: "p1",
+      });
+      const filled = svc.fillLatchedToolArgs(
+        conversation.id,
+        "design_loop_discard",
+        { projectId: "p1" },
+        "p1",
+      );
+      assert.equal(filled.loopId, "bca8e590-aaaa-bbbb-cccc-ddddeeeeffff");
+      assert.equal(filled.projectId, "p1");
+    } finally {
+      cleanup();
+    }
+  });
 });

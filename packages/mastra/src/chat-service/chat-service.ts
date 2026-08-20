@@ -20,6 +20,7 @@ import {
   buildChatTaskDescription,
   listDesignLoops,
   listPlanLoops,
+  readDesignLoopMeta,
   loopChatUserFeedbackSinceVersion,
   readLoopChatMessages,
   readPlanLoopMeta,
@@ -1476,11 +1477,37 @@ export class ChatService {
   private resolveDesignLatch(
     conversationId: string,
     projectId?: string | null,
+    hintLoopId?: string,
   ): DesignResumeLatch | undefined {
     const mem = this.designLatches.get(conversationId);
-    if (mem?.loopId) return mem;
-    if (!projectId) return undefined;
-    const project = this.deps.context.getProject(projectId);
+    if (mem?.loopId) {
+      if (
+        hintLoopId &&
+        hintLoopId !== mem.loopId &&
+        (projectId ?? mem.projectId)
+      ) {
+        const switched = this.latchFromDesignLoopId(
+          projectId ?? mem.projectId!,
+          hintLoopId,
+        );
+        if (switched) {
+          this.designLatches.set(conversationId, switched);
+          return switched;
+        }
+      }
+      return mem;
+    }
+    const resolvedProjectId = projectId?.trim() || undefined;
+    if (!resolvedProjectId) return undefined;
+    if (hintLoopId) {
+      const latched = this.latchFromDesignLoopId(resolvedProjectId, hintLoopId);
+      if (latched) {
+        this.designLatches.set(conversationId, latched);
+        return latched;
+      }
+      return undefined;
+    }
+    const project = this.deps.context.getProject(resolvedProjectId);
     if (!project) return undefined;
     const open = listDesignLoops(project.rootPath).filter((l) =>
       isDesignLoopOpen(l.status),
@@ -1489,12 +1516,56 @@ export class ChatService {
     const loop = open[0]!;
     const latch: DesignResumeLatch = {
       loopId: loop.id,
+      projectId: resolvedProjectId,
       title: loop.brief.split("\n")[0]?.slice(0, 120),
       status: loop.status,
       currentVersion: loop.currentVersion,
     };
     this.designLatches.set(conversationId, latch);
     return latch;
+  }
+
+  private latchFromDesignLoopId(
+    projectId: string,
+    loopId: string,
+  ): DesignResumeLatch | undefined {
+    const project = this.deps.context.getProject(projectId);
+    if (!project) return undefined;
+    const meta = readDesignLoopMeta(project.rootPath, loopId);
+    if (!meta) return undefined;
+    return {
+      loopId: meta.id,
+      projectId,
+      title: meta.brief.split("\n")[0]?.slice(0, 120),
+      status: meta.status,
+      currentVersion: meta.currentVersion,
+    };
+  }
+
+  /** Global chat has no pinned project — resolve from args or the design latch. */
+  private effectiveProjectId(
+    conversation: ChatConversation,
+    args: Record<string, unknown>,
+  ): string | undefined {
+    return (
+      conversation.projectId ??
+      (typeof args.projectId === "string" ? args.projectId.trim() : undefined) ??
+      this.designLatches.get(conversation.id)?.projectId
+    );
+  }
+
+  private seedDesignLatchFromExplicitArgs(
+    conversationId: string,
+    args: Record<string, unknown>,
+  ): void {
+    const loopId = typeof args.loopId === "string" ? args.loopId.trim() : "";
+    const projectId =
+      typeof args.projectId === "string" ? args.projectId.trim() : "";
+    if (!loopId || !projectId) return;
+    const latched = this.latchFromDesignLoopId(projectId, loopId);
+    if (latched) {
+      this.designLatches.set(conversationId, latched);
+    }
   }
 
   private async classifyPlanTurnDecision(opts: {
@@ -1735,7 +1806,11 @@ export class ChatService {
     conversation: ChatConversation,
     text: string,
   ): Promise<string> {
-    const latch = this.resolveDesignLatch(conversation.id, conversation.projectId);
+    const latch = this.resolveDesignLatch(
+      conversation.id,
+      this.designLatches.get(conversation.id)?.projectId ??
+        conversation.projectId,
+    );
     if (!latch?.loopId || !isDesignLoopOpen(latch.status)) return text;
     const operatorMessage = this.turnOperatorMessage.trim() || text.trim();
     if (!operatorMessage) return text;
@@ -1755,7 +1830,14 @@ export class ChatService {
     args: Record<string, unknown>,
   ): Promise<{ name: string; args: Record<string, unknown> } | null> {
     if (name !== "design_loop_get") return null;
-    const latch = this.resolveDesignLatch(conversation.id, conversation.projectId);
+    const projectId = this.effectiveProjectId(conversation, args);
+    const hintLoopId =
+      typeof args.loopId === "string" ? args.loopId.trim() : undefined;
+    const latch = this.resolveDesignLatch(
+      conversation.id,
+      projectId,
+      hintLoopId,
+    );
     if (!latch?.loopId || !isDesignLoopOpen(latch.status)) return null;
 
     const operatorMessage = this.turnOperatorMessage.trim();
@@ -1777,7 +1859,12 @@ export class ChatService {
       });
       return {
         name: "design_loop_continue",
-        args: { ...args, loopId, message: operatorMessage },
+        args: {
+          ...args,
+          loopId,
+          ...(projectId ? { projectId } : {}),
+          message: operatorMessage,
+        },
       };
     }
     // accept
@@ -1787,7 +1874,11 @@ export class ChatService {
     });
     return {
       name: "design_loop_accept",
-      args: { ...args, loopId },
+      args: {
+        ...args,
+        loopId,
+        ...(projectId ? { projectId } : {}),
+      },
     };
   }
 
@@ -1813,12 +1904,34 @@ export class ChatService {
     projectId?: string | null,
   ): Record<string, unknown> {
     if (!DESIGN_LOOP_ID_DEPENDENT_TOOLS.has(tool)) return args;
+    const resolvedProjectId =
+      projectId ??
+      (typeof args.projectId === "string" ? args.projectId.trim() : undefined);
+    this.seedDesignLatchFromExplicitArgs(conversationId, {
+      ...args,
+      ...(resolvedProjectId ? { projectId: resolvedProjectId } : {}),
+    });
     const existing =
       typeof args.loopId === "string" ? args.loopId.trim() : "";
-    if (existing) return args;
-    const latch = this.resolveDesignLatch(conversationId, projectId);
+    const hintLoopId = existing || undefined;
+    const latch = this.resolveDesignLatch(
+      conversationId,
+      resolvedProjectId,
+      hintLoopId,
+    );
+    if (existing) {
+      return resolvedProjectId && !args.projectId
+        ? { ...args, projectId: resolvedProjectId }
+        : args;
+    }
     if (!latch?.loopId) return args;
-    return { ...args, loopId: latch.loopId };
+    return {
+      ...args,
+      loopId: latch.loopId,
+      ...(latch.projectId && !args.projectId
+        ? { projectId: latch.projectId }
+        : {}),
+    };
   }
 
   private backfillPlanAcceptArgs(
@@ -1978,6 +2091,15 @@ export class ChatService {
         };
       }
     } else if (nextName === "design_loop_continue") {
+      nextArgs = this.fillDesignLoopIdFromLatch(
+        conversation.id,
+        nextName,
+        nextArgs,
+        conversation.projectId ??
+          (typeof nextArgs.projectId === "string"
+            ? nextArgs.projectId.trim()
+            : undefined),
+      );
       nextArgs = backfillLoopContinueMessage(
         nextArgs,
         this.turnOperatorMessage.trim(),
@@ -1991,6 +2113,20 @@ export class ChatService {
             {
               type: "text",
               text: "design_loop_continue requires message — pass the operator's revision feedback in message.",
+            },
+          ],
+        };
+      }
+      const contLoopId =
+        typeof nextArgs.loopId === "string" ? nextArgs.loopId.trim() : "";
+      if (!contLoopId) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                "No loopId for design_loop_continue. In global chat pass projectId + loopId (list_design_loops when several loops are open), or design_loop_start first to latch one.",
             },
           ],
         };
@@ -2036,7 +2172,8 @@ export class ChatService {
           content: [
             {
               type: "text",
-              text: `No loopId: this chat has no latched design loop. Call design_loop_start first or pass loopId (from list_design_loops).`,
+              text:
+                "No loopId for this design action. Pass loopId from list_design_loops (required when several loops are open on a project). Global chat must always include projectId on design_loop_* tools.",
             },
           ],
         };
@@ -2300,6 +2437,10 @@ export class ChatService {
         : this.designLatches.get(conversation.id)?.title;
     this.designLatches.set(conversation.id, {
       loopId,
+      projectId:
+        (typeof args.projectId === "string" ? args.projectId.trim() : undefined) ??
+        conversation.projectId ??
+        this.designLatches.get(conversation.id)?.projectId,
       title,
       status: status || "open",
       lastUserLine: this.turnOperatorMessage.trim() || undefined,
@@ -2782,7 +2923,8 @@ export class ChatService {
         : "";
     const designLatch = this.resolveDesignLatch(
       conversation.id,
-      conversation.projectId,
+      conversation.projectId ??
+        this.designLatches.get(conversation.id)?.projectId,
     );
     const designLatchBlock =
       designLatch && isDesignLoopOpen(designLatch.status)
@@ -2823,7 +2965,7 @@ export class ChatService {
             conversation.id,
             tool,
             args,
-            conversation.projectId,
+            this.effectiveProjectId(conversation, args),
           ),
         ),
       onFreeToolResult: (name, _args, rawText, isError) => {

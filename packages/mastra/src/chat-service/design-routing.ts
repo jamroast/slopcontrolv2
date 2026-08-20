@@ -1,6 +1,8 @@
 /** Chat-owned design loop this conversation last used. */
 export type DesignResumeLatch = {
   loopId: string;
+  /** Owning project — required for global chat latch fill / rehydrate. */
+  projectId?: string;
   title?: string;
   status?: string;
   lastUserLine?: string;
@@ -59,6 +61,7 @@ export function formatDesignLoopLatchPrompt(latch: DesignResumeLatch): string {
   const lines = [
     "## Active design loop (this chat)",
     `- loopId: ${latch.loopId}`,
+    latch.projectId ? `- projectId: ${latch.projectId}` : null,
     latch.currentVersion
       ? `- current version: v${latch.currentVersion}`
       : null,
@@ -67,7 +70,8 @@ export function formatDesignLoopLatchPrompt(latch: DesignResumeLatch): string {
     "",
     "When the operator gives visual feedback, dissatisfaction, or asks for design changes (colours, layout, spacing, copy, components):",
     "- call **design_loop_continue** (gated) — NOT design_loop_get.",
-    "- omit loopId to use this latched loop; message is backfilled from the operator's words.",
+    "- omit loopId to use this latched loop (global chat: keep passing projectId).",
+    "- To switch loops on the same project, pass the other loopId explicitly — list_design_loops when unsure.",
     "- design_loop_get is read-only status only — it never revises the mock.",
   ];
   return lines.filter(Boolean).join("\n");
