@@ -26,7 +26,7 @@ export const OpenCodeEngineSchema = z.object({
 export type OpenCodeEngine = z.infer<typeof OpenCodeEngineSchema>;
 
 export const CodingConfigSchema = z.object({
-  engine: z.string().min(1).default("opencode"),
+  engine: z.string().min(1).default("pi"),
   /** shared = one OpenCode :4096; per_project = one daemon per project (lazy ports 4100+) */
   mode: z.enum(["shared", "per_project"]).default("per_project"),
   opencode: OpenCodeEngineSchema.optional(),
@@ -68,7 +68,7 @@ export const SlopcontrolYamlSchema = z.object({
       health: { http: "http://127.0.0.1:3021" },
     })
     .optional(),
-  coding: CodingConfigSchema.default({ engine: "opencode", mode: "per_project" }),
+  coding: CodingConfigSchema.default({ engine: "pi", mode: "per_project" }),
 });
 
 export type SlopcontrolYaml = z.infer<typeof SlopcontrolYamlSchema>;
@@ -92,8 +92,8 @@ web:
   health: { http: "http://127.0.0.1:3021" }
 
 coding:
-  engine: opencode          # must match coding-tools registry id
-  mode: per_project         # shared = one :4096; per_project = lazy OpenCode per project (ports 4100+)
+  engine: pi                # must match coding-tools registry id (pi = in-process SDK, no daemon)
+  mode: per_project         # shared = one :4096; per_project = lazy OpenCode per project (ports 4100+) — opencode only
   opencode:
     port: 4096
     hostname: "127.0.0.1"

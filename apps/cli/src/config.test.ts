@@ -15,14 +15,14 @@ describe("slopcontrol.yaml schema", () => {
     const cfg = SlopcontrolYamlSchema.parse({});
     assert.equal(cfg.version, 1);
     assert.equal(cfg.server.port, 3020);
-    assert.equal(cfg.coding.engine, "opencode");
+    assert.equal(cfg.coding.engine, "pi");
     assert.match(cfg.server.health.http, /3020/);
   });
 
   it("parses DEFAULT_SLOPCONTROL_YAML", () => {
     const raw = parseYaml(DEFAULT_SLOPCONTROL_YAML);
     const cfg = SlopcontrolYamlSchema.parse(raw);
-    assert.equal(cfg.coding.engine, "opencode");
+    assert.equal(cfg.coding.engine, "pi");
     assert.equal(cfg.web?.enabled, false);
     assert.equal(cfg.coding.opencode?.port, 4096);
   });

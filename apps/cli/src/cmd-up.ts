@@ -82,7 +82,7 @@ export async function cmdUp(
         );
         codingHealthNote = `  coding  ${coding.healthUrl} (${coding.engineId}, shared)`;
       } else {
-        const engineId = config.coding.engine.trim() || "opencode";
+        const engineId = config.coding.engine.trim() || "pi";
         if (!quietConsole) {
           console.log(
             `coding.engine=${engineId} — runs in-process inside the server (no daemon to start)`,

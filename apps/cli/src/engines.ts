@@ -53,7 +53,7 @@ export function resolveCodingEngine(
   config: SlopcontrolYaml,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ): EngineStartPlan | null {
-  const engineId = config.coding.engine.trim() || "opencode";
+  const engineId = config.coding.engine.trim() || "pi";
   const known = listCodingTools().map((t) => t.id);
   if (!known.includes(engineId)) {
     throw new Error(

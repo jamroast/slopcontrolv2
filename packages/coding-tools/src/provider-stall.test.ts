@@ -70,14 +70,17 @@ describe("coding engine supervisor", () => {
   it("returns distinct adapters for different projects in per_project mode", () => {
     clearCodingEngineAdapterCache();
     const t1 = getCodingToolForProject({
+      toolId: "opencode",
       projectId: "p1",
       mode: "per_project",
     });
     const t2 = getCodingToolForProject({
+      toolId: "opencode",
       projectId: "p2",
       mode: "per_project",
     });
     const t1b = getCodingToolForProject({
+      toolId: "opencode",
       projectId: "p1",
       mode: "per_project",
     });
@@ -92,6 +95,7 @@ describe("coding engine supervisor", () => {
   it("shared mode uses default OpenCode port", () => {
     clearCodingEngineAdapterCache();
     const t = getCodingToolForProject({
+      toolId: "opencode",
       projectId: "p1",
       mode: "shared",
     });
@@ -99,5 +103,11 @@ describe("coding engine supervisor", () => {
       (t as { getBaseUrl?: () => string }).getBaseUrl?.() ?? "",
       /:4096$/,
     );
+  });
+
+  it("defaults to the pi adapter (in-process, no daemon)", () => {
+    clearCodingEngineAdapterCache();
+    const t = getCodingToolForProject({ projectId: "p1" });
+    assert.equal(t.id, "pi");
   });
 });

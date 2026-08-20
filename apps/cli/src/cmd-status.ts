@@ -45,7 +45,7 @@ export async function cmdStatus(cwd: string = process.cwd()): Promise<void> {
             (codingPid?.pid ? `  pid=${codingPid.pid}` : ""),
         );
       } else {
-        const engineId = config.coding.engine.trim() || "opencode";
+        const engineId = config.coding.engine.trim() || "pi";
         console.log(`coding (${engineId}): in-process (no daemon)`);
       }
     } else if (config.coding.engine.trim() === "pi") {

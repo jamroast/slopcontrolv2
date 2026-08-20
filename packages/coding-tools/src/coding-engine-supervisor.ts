@@ -68,14 +68,13 @@ export interface CodingToolForProjectInput {
 }
 
 /**
- * Resolve a CodingTool for a project. In `per_project` mode, trunks to a
- * dedicated OpenCode baseUrl (lazy-spawned via ensureOpenCodeRunning).
- * In `shared` mode, uses the registry singleton / shared :4096 daemon.
+ * Resolve a CodingTool for a project. Pi runs in-process (no daemon), so
+ * only the `opencode` id uses the per-project/shared daemon modes below.
  */
 export function getCodingToolForProject(
   input: CodingToolForProjectInput,
 ): CodingTool {
-  const toolId = input.toolId?.trim() || "opencode";
+  const toolId = input.toolId?.trim() || "pi";
   const mode = input.mode ?? resolveCodingEngineMode();
 
   if (toolId !== "opencode") {

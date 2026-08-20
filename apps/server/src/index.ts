@@ -1380,7 +1380,7 @@ app.get("/projects", (_req, res) => {
             projectRoot: project.rootPath,
             configured: config.toolchain ?? null,
           }).source !== "none",
-        codingToolId: config.codingToolId ?? "opencode",
+        codingToolId: config.codingToolId ?? "pi",
         askInvestigateTool: config.askInvestigateTool ?? "auto",
       };
     }),
