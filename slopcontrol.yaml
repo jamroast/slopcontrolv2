@@ -16,7 +16,7 @@ web:
   health: { http: "http://127.0.0.1:3021" }
 
 coding:
-  engine: opencode
+  engine: pi
   mode: per_project
   opencode:
     port: 4096

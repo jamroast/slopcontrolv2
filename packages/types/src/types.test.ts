@@ -56,6 +56,7 @@ describe("@slopcontrol/types", () => {
 
   it("ProjectConfigSchema accepts optional testServices", () => {
     const defaults = ProjectConfigSchema.parse({});
+    assert.equal(defaults.codingToolId, "pi");
     assert.equal(defaults.askInvestigateTool, "auto");
     assert.equal(defaults.testServices, undefined);
     const parsed = ProjectConfigSchema.parse({ testServices: ["db", "redis"] });

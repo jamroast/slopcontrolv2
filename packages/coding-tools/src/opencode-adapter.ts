@@ -29,6 +29,8 @@ interface OpenCodeSessionState {
   endpoint?: LlmEndpoint;
   onEvent?: CodingEventListener;
   eventAbort?: AbortController;
+  /** OpenCode directory SSE — closed via signal + generator.return on abort */
+  eventStream?: AsyncGenerator<unknown, unknown, unknown>;
   /** Rolling text from tool/event stream for probe detection */
   recentEventText: string;
   /** Last OpenCode event timestamp (ms) for idle detection */
@@ -41,6 +43,17 @@ interface OpenCodeSessionState {
 }
 
 const sessions = new Map<string, OpenCodeSessionState>();
+
+/** Tear down the directory SSE subscription (fetch reader + retry loop). */
+function closeEventStream(state: OpenCodeSessionState): void {
+  state.eventAbort?.abort();
+  state.eventAbort = undefined;
+  const stream = state.eventStream;
+  state.eventStream = undefined;
+  if (stream) {
+    void stream.return(undefined).catch(() => undefined);
+  }
+}
 
 const DEFAULT_TURN_TIMEOUT_MS = Number(
   process.env.SLOPCONTROL_CODING_TURN_MS ?? 600_000,
@@ -565,7 +578,7 @@ export class OpenCodeAdapter implements CodingTool {
       DEFAULT_IDLE_MS,
     );
     if (ack.aborted) {
-      state.eventAbort?.abort();
+      closeEventStream(state);
       sessions.delete(session.id);
       throw new OpenCodeAckTimeoutError(ack.abortReason ?? "unknown");
     }
@@ -646,7 +659,7 @@ export class OpenCodeAdapter implements CodingTool {
     const state = sessions.get(session.id);
     if (!state) return;
 
-    state.eventAbort?.abort();
+    closeEventStream(state);
     state.turnWaiter?.resolve({
       kind: "error",
       message: "Session aborted by SlopControl",
@@ -673,8 +686,10 @@ export class OpenCodeAdapter implements CodingTool {
     try {
       events = await state.client.event.subscribe({
         query: { directory: state.projectDir },
+        signal: abort.signal,
       });
     } catch (error) {
+      closeEventStream(state);
       state.onEvent?.({
         type: "event.error",
         payload: {
@@ -683,6 +698,8 @@ export class OpenCodeAdapter implements CodingTool {
       });
       throw error;
     }
+
+    state.eventStream = events.stream;
 
     void (async () => {
       try {

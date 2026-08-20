@@ -759,7 +759,7 @@ export const ProjectConfigSchema = z.object({
    * (e.g. `["DATABASE_", "CLERK_"]`). Default empty — no wholesale OS dump.
    */
   envPassthroughPrefixes: z.array(z.string().min(1)).optional(),
-  codingToolId: z.string().default("opencode"),
+  codingToolId: z.string().default("pi"),
   /**
    * Ask investigation walker: `auto` (LLM intent, then fast path), `mastra` (fast tools), or `pi` (thorough).
    * Per-turn `investigateTool` and LLM engine intent (thorough vs quick) override this.
