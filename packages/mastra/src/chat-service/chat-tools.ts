@@ -90,6 +90,7 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   "design_loop_pin",
   "design_loop_unpin",
   "design_loop_discard",
+  "design_loop_abandon",
   "review_design_loop",
   "generate_design_image",
   "import_design_image",
@@ -274,6 +275,11 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   design_loop_discard: z.object({
     loopId: z.string().min(1).optional(),
     version: z.number().int().positive().optional(),
+    reason: z.string().optional(),
+    projectId: optionalProject,
+  }),
+  design_loop_abandon: z.object({
+    loopId: z.string().min(1).optional(),
     reason: z.string().optional(),
     projectId: optionalProject,
   }),

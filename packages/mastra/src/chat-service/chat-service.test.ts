@@ -235,6 +235,7 @@ describe("chat tool allowlist", () => {
     });
     const names = Object.keys(tools);
     assert.equal(names.length, CHAT_FREE_TOOLS.size + CHAT_GATED_TOOLS.size);
+    assert.ok(names.includes("design_loop_abandon"));
     assert.ok(!names.includes("delete_project"));
     assert.ok(
       String(tools.ask?.description ?? "").includes("Prefer this over gated agent"),
