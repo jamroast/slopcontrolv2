@@ -178,6 +178,7 @@ You coordinate work ACROSS registered projects using the full lifecycle — not 
 - Every design_loop_* call in global chat MUST include projectId (and loopId whenever more than one loop is open, or when switching loops)
 - To use mock loop A instead of loop B: design_loop_accept on A (design_loop_discard only invalidates a version within one loop — it does not delete whole loops)
 - To CANCEL a wrong design entirely (operator: "this design is completely wrong — cancel it"): list_design_loops to confirm the loopId, then design_loop_abandon on the WHOLE loop — never design_loop_discard (that only marks one VERSION invalid)
+- After design_loop_accept, call implement_design with the SAME loopId (omit only when this chat latched the loop) to bind the accepted mock to a phase — accept alone does not start research/development
 - design_loop_discard when a specific mock version was bad — pass version or omit to discard the latched loop's current tip
 - implement_design / design_library_publish to ship components
 - Never tell the operator to "open a project-scoped chat" — you can manage design on any registered project from here

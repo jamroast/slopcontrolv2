@@ -2461,7 +2461,10 @@ export class ChatService {
     result: ChatToolResult,
   ): void {
     const raw = result.content.map((c) => c.text).join("\n");
-    if (name === "design_loop_accept" || name === "design_loop_abandon") {
+    // Abandon is terminal — drop the latch. Accept/implement are handoffs,
+    // not termini: accept flows into implement_design, so the latch must
+    // survive with an updated status for the backfill to work.
+    if (name === "design_loop_abandon") {
       const id =
         parseLoopIdFromDispatch(raw) ||
         (typeof args.loopId === "string" ? args.loopId : "");
@@ -2469,6 +2472,19 @@ export class ChatService {
       if (latch && (!id || latch.loopId === id)) {
         this.designLatches.delete(conversation.id);
       }
+      return;
+    }
+    if (name === "design_loop_accept" || name === "implement_design") {
+      const id =
+        parseLoopIdFromDispatch(raw) ||
+        (typeof args.loopId === "string" ? args.loopId : "");
+      const latch = this.designLatches.get(conversation.id);
+      if (!latch || (id && latch.loopId !== id)) return;
+      const status =
+        name === "implement_design"
+          ? "implemented"
+          : parseDesignLoopStatusFromDispatch(raw) || "accepted";
+      this.designLatches.set(conversation.id, { ...latch, status });
       return;
     }
     if (name === "design_loop_discard") {

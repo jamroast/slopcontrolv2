@@ -217,7 +217,7 @@ describe("design loop latch", () => {
     }
   });
 
-  it("accept clears the latch; discard keeps latch and updates version", () => {
+  it("accept keeps the latch with accepted status; discard updates version", () => {
     const { service, cleanup } = makeService();
     try {
       const conversation = service.createConversation({ projectId: "p1" });
@@ -260,7 +260,12 @@ describe("design loop latch", () => {
         { loopId: "dl-1" },
         { content: [{ type: "text", text: "loopId: dl-1\nstatus: accepted" }] },
       );
-      assert.equal(svc.resolveDesignLatch(conversation.id, "p1"), undefined);
+      const afterAccept = svc.resolveDesignLatch(conversation.id, "p1") as {
+        loopId: string;
+        status?: string;
+      };
+      assert.equal(afterAccept.loopId, "dl-1");
+      assert.equal(afterAccept.status, "accepted");
     } finally {
       cleanup();
     }
@@ -390,6 +395,60 @@ describe("design loop latch", () => {
         ),
         null,
       );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("implement_design backfills loopId from the accepted latch and marks it implemented", () => {
+    const { service, cleanup } = makeService();
+    try {
+      const conversation = service.createConversation({ projectId: "p1" });
+      const svc = service as unknown as {
+        rememberDesignFromDispatch: (
+          c: unknown,
+          n: string,
+          a: Record<string, unknown>,
+          r: ChatToolResult,
+        ) => void;
+        fillLatchedToolArgs: (
+          id: string,
+          t: string,
+          a: Record<string, unknown>,
+          p?: string | null,
+        ) => Record<string, unknown>;
+        designLatches: Map<
+          string,
+          { loopId: string; projectId?: string; status?: string }
+        >;
+      };
+      svc.rememberDesignFromDispatch(
+        conversation,
+        "design_loop_start",
+        { brief: "login mock" },
+        { content: [{ type: "text", text: "loopId: dl-1\nstatus: open" }] },
+      );
+      svc.rememberDesignFromDispatch(
+        conversation,
+        "design_loop_accept",
+        { loopId: "dl-1" },
+        { content: [{ type: "text", text: "loopId: dl-1\nstatus: accepted" }] },
+      );
+      // The accept→implement handoff: agent omits loopId, latch fills it.
+      const filled = svc.fillLatchedToolArgs(
+        conversation.id,
+        "implement_design",
+        {},
+        "p1",
+      );
+      assert.equal(filled.loopId, "dl-1");
+      svc.rememberDesignFromDispatch(
+        conversation,
+        "implement_design",
+        { loopId: "dl-1" },
+        { content: [{ type: "text", text: "loopId: dl-1\nstatus: implemented" }] },
+      );
+      assert.equal(svc.designLatches.get(conversation.id)?.status, "implemented");
     } finally {
       cleanup();
     }
