@@ -1510,11 +1510,24 @@ export class ChatService {
     }
     const project = this.deps.context.getProject(resolvedProjectId);
     if (!project) return undefined;
-    const open = listDesignLoops(project.rootPath).filter((l) =>
-      isDesignLoopOpen(l.status),
-    );
-    if (open.length !== 1) return undefined;
-    const loop = open[0]!;
+    const loops = listDesignLoops(project.rootPath);
+    const open = loops.filter((l) => isDesignLoopOpen(l.status));
+    if (open.length === 1) {
+      const loop = open[0]!;
+      const latch: DesignResumeLatch = {
+        loopId: loop.id,
+        projectId: resolvedProjectId,
+        title: loop.brief.split("\n")[0]?.slice(0, 120),
+        status: loop.status,
+        currentVersion: loop.currentVersion,
+      };
+      this.designLatches.set(conversationId, latch);
+      return latch;
+    }
+    if (open.length > 1) return undefined;
+    const accepted = loops.filter((l) => l.status === "accepted");
+    if (accepted.length !== 1) return undefined;
+    const loop = accepted[0]!;
     const latch: DesignResumeLatch = {
       loopId: loop.id,
       projectId: resolvedProjectId,
@@ -2478,7 +2491,22 @@ export class ChatService {
       const id =
         parseLoopIdFromDispatch(raw) ||
         (typeof args.loopId === "string" ? args.loopId : "");
-      const latch = this.designLatches.get(conversation.id);
+      let latch = this.designLatches.get(conversation.id);
+      if (!latch && name === "design_loop_accept" && id) {
+        const projectId =
+          (typeof args.projectId === "string" ? args.projectId.trim() : undefined) ??
+          conversation.projectId ??
+          undefined;
+        if (projectId) {
+          const seeded = this.latchFromDesignLoopId(projectId, id);
+          // Only seed when the loop is handoff-eligible (accepted). Seeding an
+          // open/abandoned loop on an accept dispatch would pin a stale state.
+          if (seeded && seeded.status === "accepted") {
+            latch = seeded;
+            this.designLatches.set(conversation.id, seeded);
+          }
+        }
+      }
       if (!latch || (id && latch.loopId !== id)) return;
       const status =
         name === "implement_design"

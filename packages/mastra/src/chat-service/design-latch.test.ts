@@ -400,6 +400,127 @@ describe("design loop latch", () => {
     }
   });
 
+  it("resolveDesignLatch seeds from the sole accepted loop when memory latch is empty", () => {
+    const { service, dir, cleanup } = makeService();
+    try {
+      writeDesignLoopMeta(dir, "dl-acc", {
+        status: "accepted",
+        brief: "accepted mock",
+        currentVersion: 9,
+      });
+      const conversation = service.createConversation({ projectId: null });
+      const svc = service as unknown as {
+        resolveDesignLatch: (
+          id: string,
+          p?: string | null,
+        ) => { loopId: string; status?: string } | undefined;
+        fillLatchedToolArgs: (
+          id: string,
+          t: string,
+          a: Record<string, unknown>,
+          p?: string | null,
+        ) => Record<string, unknown>;
+      };
+      const latch = svc.resolveDesignLatch(conversation.id, "p1");
+      assert.equal(latch?.loopId, "dl-acc");
+      assert.equal(latch?.status, "accepted");
+      const filled = svc.fillLatchedToolArgs(
+        conversation.id,
+        "implement_design",
+        { projectId: "p1" },
+        null,
+      );
+      assert.equal(filled.loopId, "dl-acc");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("resolveDesignLatch prefers an open loop over a sole accepted loop", () => {
+    const { service, dir, cleanup } = makeService();
+    try {
+      writeDesignLoopMeta(dir, "dl-acc", { status: "accepted" });
+      writeDesignLoopMeta(dir, "dl-open", { status: "open" });
+      const conversation = service.createConversation({ projectId: null });
+      const svc = service as unknown as {
+        resolveDesignLatch: (
+          id: string,
+          p?: string | null,
+        ) => { loopId: string; status?: string } | undefined;
+      };
+      const latch = svc.resolveDesignLatch(conversation.id, "p1");
+      assert.equal(latch?.loopId, "dl-open");
+      assert.equal(latch?.status, "open");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("accept dispatch does not seed a latch for an open loop", () => {
+    const { service, dir, cleanup } = makeService();
+    try {
+      writeDesignLoopMeta(dir, "dl-open", { status: "open" });
+      const conversation = service.createConversation({ projectId: "p1" });
+      const svc = service as unknown as {
+        rememberDesignFromDispatch: (
+          c: unknown,
+          n: string,
+          a: Record<string, unknown>,
+          r: ChatToolResult,
+        ) => void;
+        designLatches: Map<string, { loopId: string; status?: string }>;
+      };
+      // Dispatch claims accept succeeded but the loop on disk is still open —
+      // do not pin a stale "accepted" latch.
+      svc.rememberDesignFromDispatch(
+        conversation,
+        "design_loop_accept",
+        { loopId: "dl-open", projectId: "p1" },
+        { content: [{ type: "text", text: "loopId: dl-open\nstatus: accepted" }] },
+      );
+      assert.equal(svc.designLatches.has(conversation.id), false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("relaunch_design_research backfills loopId from accepted latch", () => {
+    const { service, dir, cleanup } = makeService();
+    try {
+      writeDesignLoopMeta(dir, "dl-1", { status: "accepted" });
+      const conversation = service.createConversation({ projectId: "p1" });
+      const svc = service as unknown as {
+        rememberDesignFromDispatch: (
+          c: unknown,
+          n: string,
+          a: Record<string, unknown>,
+          r: ChatToolResult,
+        ) => void;
+        fillLatchedToolArgs: (
+          id: string,
+          t: string,
+          a: Record<string, unknown>,
+          p?: string | null,
+        ) => Record<string, unknown>;
+      };
+      svc.rememberDesignFromDispatch(
+        conversation,
+        "design_loop_accept",
+        { loopId: "dl-1", projectId: "p1" },
+        { content: [{ type: "text", text: "loopId: dl-1\nstatus: accepted" }] },
+      );
+      const filled = svc.fillLatchedToolArgs(
+        conversation.id,
+        "relaunch_design_research",
+        { projectId: "p1" },
+        "p1",
+      );
+      assert.equal(filled.loopId, "dl-1");
+    } finally {
+      cleanup();
+    }
+  });
+
   it("implement_design backfills loopId from the accepted latch and marks it implemented", () => {
     const { service, cleanup } = makeService();
     try {

@@ -64,13 +64,15 @@ describe("design routing", () => {
     assert.match(text, /NOT design_loop_get/);
   });
 
-  it("id-dependent set covers revision and terminal tools", () => {
+  it("id-dependent set covers revision, handoff, and terminal tools", () => {
     for (const tool of [
       "design_loop_get",
       "design_loop_continue",
       "design_loop_accept",
       "design_loop_discard",
       "design_loop_retry",
+      "implement_design",
+      "relaunch_design_research",
     ]) {
       assert.ok(DESIGN_LOOP_ID_DEPENDENT_TOOLS.has(tool), tool);
     }

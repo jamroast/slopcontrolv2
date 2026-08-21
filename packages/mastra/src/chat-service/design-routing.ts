@@ -22,6 +22,7 @@ export const DESIGN_LOOP_ID_DEPENDENT_TOOLS = new Set([
   "design_loop_import_design",
   "review_design_loop",
   "implement_design",
+  "relaunch_design_research",
 ]);
 
 export type DesignTurnAction = "continue" | "accept" | "status" | "unrelated";
