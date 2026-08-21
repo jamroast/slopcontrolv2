@@ -137,6 +137,7 @@ import {
   writeUiSpec,
   runVerifyPreflight,
   promotePhaseDocFromWorktree,
+  designMockHtmlIsComplete,
   extractHtmlDocument,
   scaffoldDesignLoopMock,
   readPhaseDesignAcceptance,
@@ -4055,7 +4056,77 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
       });
     }
 
-    let html = extracted;
+    // Truncation continue: clipped generations (token cap / timeout) drop the
+    // document tail. The deterministic review guard catches it; ONE bounded
+    // LLM continue in the same thread asks the agent to complete the doc.
+    if (!designMockHtmlIsComplete(extracted)) {
+      const tail = extracted.slice(-400);
+      slog.warn("design-loop", "mock HTML truncated; asking agent to complete", {
+        loopId,
+        extractedChars: extracted.length,
+      });
+      try {
+        const continued = await runAgentLiveTurn(
+          this.ctx.agents.designLoopAgent,
+          `Your mock HTML document was truncated before </html> (the tail you emitted ended with:\n\`\`\`\n${tail}\n\`\`\`).\nResume and complete the SAME design: emit the full self-contained HTML document again from the top (do not continue mid-tag), closing body/html, then the completion marker.`,
+          project.id,
+          `design-loop-${loopId}-v${version}`,
+          {
+            maxSteps: 2,
+            timeoutMs: 300_000,
+            onProgress: input.onProgress,
+            abortSignal: input.abortSignal,
+            synthesizeIfNarration: false,
+            statusLabel: "design complete truncated mock",
+          },
+        );
+        const reExtracted = extractHtmlDocument(continued.reply);
+        if (reExtracted && designMockHtmlIsComplete(reExtracted)) {
+          raw = continued.reply;
+          slog.info("design-loop", "completed truncated mock via continue", {
+            loopId,
+            completedChars: reExtracted.length,
+          });
+        } else {
+          slog.warn("design-loop", "continue still incomplete; keeping prior mock / scaffold", {
+            loopId,
+          });
+          const base = workingPreviousHtml ?? previousHtml;
+          if (base?.trim()) {
+            return finishDesign({
+              html: base,
+              notes: `${assetPatchNotes} Mock generation truncated twice — kept prior mock; call design_loop_retry to try again.`.trim(),
+              usedScaffold: false,
+            });
+          }
+          return finishDesign({
+            ...resolveDesignLoopGenerateFallback({
+              brief,
+              previousHtml: base,
+              errorDetail: "mock HTML truncated (agent continue also incomplete)",
+              scaffold: scaffoldDesignLoopMock,
+            }),
+          });
+        }
+      } catch (err) {
+        if (err instanceof LiveTurnInterruptedError) throw err;
+        const detail = err instanceof Error ? err.message : String(err);
+        slog.warn("design-loop", "truncation continue failed; fallback", {
+          loopId,
+          error: detail,
+        });
+        return finishDesign({
+          ...resolveDesignLoopGenerateFallback({
+            brief,
+            previousHtml: workingPreviousHtml ?? previousHtml,
+            errorDetail: `mock HTML truncated; continue failed: ${detail}`,
+            scaffold: scaffoldDesignLoopMock,
+          }),
+        });
+      }
+    }
+
+    let html = extractHtmlDocument(raw) ?? extracted;
     let softDriftNotes = "";
 
     // Apply pinned SHARED ELEMENTS before drift so menubar/toggle cleanup

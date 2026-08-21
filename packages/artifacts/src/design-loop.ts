@@ -1303,6 +1303,26 @@ export function extractHtmlDocument(text: string): string | null {
   return null;
 }
 
+/**
+ * Deterministic completeness check for a candidate mock document.
+ * Generated mocks are one self-contained HTML document; a clipped
+ * generation (token cap / timeout) drops the tail and must continue,
+ * not ship. Review-guard shaped: substring checks only, no judgement.
+ */
+export function designMockHtmlIsComplete(html: string): boolean {
+  const trimmed = html.trim();
+  if (!trimmed) return false;
+  return /<\/html>\s*$/i.test(trimmed);
+}
+
+/**
+ * Completion marker the design-loop agent must emit after the document
+ * (MOCK_HTML_COMPLETE) or for asset-only continues (MOCK_ASSETS_ONLY).
+ */
+export function designMockHasCompletionMarker(raw: string): boolean {
+  return /MOCK_HTML_COMPLETE/i.test(raw) || /MOCK_ASSETS_ONLY/i.test(raw);
+}
+
 function wrapHtmlFragment(fragment: string): string {
   return `<!DOCTYPE html>
 <html lang="en">

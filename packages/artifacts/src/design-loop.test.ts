@@ -13,6 +13,7 @@ import { describe, it, after } from "node:test";
 import {
   acceptDesignLoop,
   abandonDesignLoop,
+  designMockHtmlIsComplete,
   appendDesignLoopTranscript,
   bindAcceptedDesignLoopToPhase,
   createDesignLoopMeta,
@@ -439,6 +440,19 @@ describe("design-loop", () => {
     assert.match(block, /ember\.png/);
     assert.match(block, /competing logo/);
     assert.match(block, /logo/);
+  });
+
+  it("designMockHtmlIsComplete rejects clipped documents", () => {
+    assert.equal(
+      designMockHtmlIsComplete("<!DOCTYPE html><html><body>x</body></html>"),
+      true,
+    );
+    assert.equal(
+      designMockHtmlIsComplete("<!DOCTYPE html><html><body><main><section"),
+      false,
+    );
+    assert.equal(designMockHtmlIsComplete("<div>fragment</div>"), false);
+    assert.equal(designMockHtmlIsComplete(""), false);
   });
 
   it("abandonDesignLoop marks the loop abandoned with reason and transcript", () => {
