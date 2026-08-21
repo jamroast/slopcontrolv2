@@ -3,10 +3,7 @@ import { join } from "node:path";
 import { extractSection } from "./markdown.js";
 import { extractCheckCells } from "./check-runners.js";
 import { readPhaseDesignAcceptance } from "./design-loop.js";
-import {
-  detectThemeToggleInHtml,
-  packHasThemeModes,
-} from "./design-conceptual-model.js";
+import { packHasThemeModes } from "./design-conceptual-model.js";
 import {
   mockHasContentAlignedMenubar,
   readPhaseDesignPack,
@@ -324,7 +321,12 @@ export function checksAreImportOrderOnlyStyleFix(checksText: string): boolean {
   return !automatedChecksProveThemeToggleStyleVisibility(body);
 }
 
-function phaseHasAcceptedShellOrThemeDesign(
+/**
+ * Theme/shell claim-vs-proof applies only when this implement delta includes
+ * theme_modes or applied_shell — not because a kitchen-sink mock HTML happens
+ * to contain a theme toggle.
+ */
+export function phaseThemeShellInImplementScope(
   opts?: ClaimProofOpts,
 ): boolean {
   if (!opts?.projectRoot || !opts.phaseId) return false;
@@ -338,39 +340,36 @@ function phaseHasAcceptedShellOrThemeDesign(
     return true;
   }
   const pack = readPhaseDesignPack(opts.projectRoot, opts.phaseId);
-  if (packHasThemeModes(pack)) return true;
-  const mockPath = join(
-    opts.projectRoot,
-    ".slopcontrol",
-    "phases",
-    opts.phaseId,
-    "design",
-    "mock.html",
+  return Boolean(
+    packHasThemeModes(pack) ||
+      pack?.inScope?.includes("applied_shell"),
   );
-  if (existsSync(mockPath)) {
-    try {
-      return detectThemeToggleInHtml(readFileSync(mockPath, "utf-8"));
-    } catch {
-      return false;
-    }
-  }
-  return false;
 }
 
 function themeShellClaimApplies(
   phaseDoc: string,
   opts?: ClaimProofOpts,
 ): boolean {
+  // Authoritative signal: the implement delta is scoped to theme/shell work
+  // (acceptance tick or pack.inScope). Kitchen-sink bound mocks and PRESERVE
+  // prose never widen a narrow delta.
+  if (phaseThemeShellInImplementScope(opts)) return true;
+  // Greenfield (no bound design pack): prose claims are the only signal, so
+  // a phase that claims theme-shell delivery in Success Criteria / Scope must
+  // prove it. With a bound pack that excludes theme/shell, prose mentions are
+  // drift for the draft judge, not this deterministic gate.
+  const hasBoundDesign = Boolean(
+    opts?.projectRoot &&
+      opts.phaseId &&
+      (readPhaseDesignPack(opts.projectRoot, opts.phaseId) ||
+        readPhaseDesignAcceptance(opts.projectRoot, opts.phaseId)),
+  );
+  if (hasBoundDesign) return false;
   const claimSurface = claimSurfaceFromPhaseDoc(phaseDoc);
-  const claimsMount = phaseClaimsMenubarThemeToggle(claimSurface);
-  const claimsVisible = phaseClaimsThemeToggleVisible(claimSurface);
-  const mentionsToggle =
-    /\bThemeToggle\b/i.test(claimSurface) ||
-    /\btheme\s*toggle\b/i.test(claimSurface) ||
-    /\bday\s*(?:and|[\/&-])?\s*night\b/i.test(claimSurface);
-  const designBound = phaseHasAcceptedShellOrThemeDesign(opts);
-  // Design-bound theme/shell forces mount proofs even without prose mentions.
-  return claimsMount || claimsVisible || (designBound && mentionsToggle) || designBound;
+  return (
+    phaseClaimsMenubarThemeToggle(claimSurface) ||
+    phaseClaimsThemeToggleVisible(claimSurface)
+  );
 }
 
 /**
@@ -414,13 +413,9 @@ export function validateThemeShellVisibilityClaimProof(
     return [];
   }
 
-  const claimSurface = claimSurfaceFromPhaseDoc(phaseDoc);
-  // Always require style proof when mount claim applies for theme shell —
-  // design/ask false-greens proved mount without paint.
-  const forceVisibility =
-    phaseClaimsThemeToggleVisible(claimSurface) ||
-    phaseClaimsMenubarThemeToggle(claimSurface) ||
-    phaseHasAcceptedShellOrThemeDesign(opts);
+  // Style visibility proof is required whenever the theme-shell gate applies
+  // (in-scope delta, or greenfield prose claim) — mounted ≠ visible.
+  const forceVisibility = themeShellClaimApplies(phaseDoc, opts);
 
   if (!forceVisibility) return [];
 
@@ -516,18 +511,20 @@ function phaseHasAppliedShellWithContentAlignedMenubar(
 ): boolean {
   if (!opts?.projectRoot || !opts.phaseId) return false;
   const acceptance = readPhaseDesignAcceptance(opts.projectRoot, opts.phaseId);
-  const appliedShell = Boolean(
-    acceptance?.features.some((f) => f.accepted && f.id === "applied_shell"),
-  );
   const pack = readPhaseDesignPack(opts.projectRoot, opts.phaseId);
-  const packShell =
-    pack?.inScope?.includes("applied_shell") &&
-    (pack.shell?.some((s) =>
+  const shellInScope =
+    pack?.inScope?.includes("applied_shell") ||
+    acceptance?.features.some((f) => f.accepted && f.id === "applied_shell");
+  if (!shellInScope) return false;
+
+  if (
+    pack?.shell?.some((s) =>
       /content-max|menubar__inner|inner bar/i.test(s),
-    ) ??
-      false);
-  if (packShell) return true;
-  if (!appliedShell && !pack?.inScope?.includes("applied_shell")) return false;
+    )
+  ) {
+    return true;
+  }
+
   const mockPath = join(
     opts.projectRoot,
     ".slopcontrol",

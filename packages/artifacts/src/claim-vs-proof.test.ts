@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, describe, it } from "node:test";
 import {
   automatedChecksHaveFiniteResolveProof,
   automatedChecksProveContentAlignedMenubar,
@@ -11,6 +20,7 @@ import {
   phaseClaimsFullWidthMenubar,
   phaseClaimsMenubarThemeToggle,
   phaseClaimsThemeToggleVisible,
+  phaseThemeShellInImplementScope,
   successCriteriaClaimsModuleResolve,
   validateModuleResolveClaimProof,
   validatePhaseDocForDev,
@@ -456,6 +466,16 @@ grep -q 'text-text-secondary\\|--text-secondary' src/app/globals.css node_module
 });
 
 describe("claim-vs-proof claim surface + Next resolve", () => {
+  const roots: string[] = [];
+  after(() => {
+    for (const r of roots) {
+      try {
+        rmSync(r, { recursive: true, force: true });
+      } catch {
+        /* ignore */
+      }
+    }
+  });
   it("ignores ThemeToggle only in Research notes under Scope", () => {
     const doc = `# Phase demo
 
@@ -489,6 +509,138 @@ pnpm test || exit 1
       checks: ["pnpm test || exit 1"],
     });
     assert.ok(validateThemeShellMountClaimProof(doc).length > 0);
+  });
+
+  it("does not bind theme-shell proofs from mock HTML when only focus_sign_in is inScope", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-claim-narrow-"));
+    roots.push(root);
+    const phaseId = "17-sign-in-only";
+    const designDir = join(root, ".slopcontrol", "phases", phaseId, "design");
+    mkdirSync(designDir, { recursive: true });
+    writeFileSync(
+      join(designDir, "ACCEPTANCE.json"),
+      `${JSON.stringify(
+        {
+          version: 9,
+          features: [
+            { id: "focus_sign_in", label: "Component — sign.in", accepted: true },
+            { id: "theme_modes", label: "Theme modes", accepted: false },
+            { id: "applied_shell", label: "Applied shell", accepted: false },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    writeFileSync(
+      join(designDir, "DESIGN_PACK.json"),
+      `${JSON.stringify(
+        {
+          name: "kitchen sink mock",
+          version: 9,
+          loopId: "loop-1",
+          projectId: "p1",
+          sourceMockVersion: 9,
+          tokens: "",
+          logos: [],
+          typography: [],
+          shell: ["Support dark and light mode (theme toggle)."],
+          contentPillars: [],
+          inScope: ["focus_sign_in"],
+          alreadyApplied: ["theme_modes", "applied_shell"],
+          mustNot: ["PRESERVE — do not change shell"],
+          mockPath: "design/mock.html",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    writeFileSync(
+      join(designDir, "mock.html"),
+      `<!DOCTYPE html><html><body><button data-theme-toggle>Day/Night</button></body></html>`,
+    );
+
+    const opts = { projectRoot: root, phaseId };
+    assert.equal(phaseThemeShellInImplementScope(opts), false);
+
+    const doc = `# Phase ${phaseId}
+
+## Scope
+
+Extract **SignIn** and **UserPill** from the accepted mock.
+
+**IN SCOPE (this phase only):**
+- focus_sign_in: Component — sign.in
+
+**PRESERVE / OUT OF SCOPE (mustNot — do not re-theme):**
+- theme_modes, applied_shell — already applied in prior phases.
+- Do **not** change menubar chrome or \`theme-toggle.tsx\`.
+
+## File Changes
+- src/components/shell/sign-in.tsx (NEW)
+- src/components/shell/user-pill.tsx (enhance)
+- src/components/shell/menubar.tsx (unchanged)
+- src/components/shell/theme-toggle.tsx (unchanged)
+
+## Success Criteria
+- SignIn and UserPill exported and mounted in playground App
+- Library typecheck and build pass
+
+## Automated Checks
+
+\`\`\`bash
+grep -q "<SignIn" playground/src/App.tsx || exit 1
+grep -q "<UserPill" playground/src/App.tsx || exit 1
+pnpm typecheck || exit 1
+pnpm build || exit 1
+\`\`\`
+`;
+    assert.deepEqual(validateThemeShellMountClaimProof(doc, opts), []);
+    assert.deepEqual(validateThemeShellVisibilityClaimProof(doc, opts), []);
+    assert.equal(
+      validatePhaseDocForDev(doc, opts).ok,
+      true,
+      validatePhaseDocForDev(doc, opts).issues.join("; "),
+    );
+  });
+
+  it("still requires theme-shell proofs when theme_modes is inScope", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-claim-theme-scope-"));
+    roots.push(root);
+    const phaseId = "18-theme-refresh";
+    const designDir = join(root, ".slopcontrol", "phases", phaseId, "design");
+    mkdirSync(designDir, { recursive: true });
+    writeFileSync(
+      join(designDir, "DESIGN_PACK.json"),
+      `${JSON.stringify(
+        {
+          name: "theme",
+          version: 1,
+          loopId: "loop-1",
+          projectId: "p1",
+          sourceMockVersion: 1,
+          tokens: "",
+          logos: [],
+          typography: [],
+          shell: [],
+          contentPillars: [],
+          inScope: ["theme_modes"],
+          mustNot: [],
+          mockPath: "design/mock.html",
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    const opts = { projectRoot: root, phaseId };
+    assert.equal(phaseThemeShellInImplementScope(opts), true);
+
+    const doc = phaseDoc({
+      scope: "Wire dual-theme tokens",
+      successCriteria: "- Build passes",
+      checks: ["pnpm test || exit 1"],
+    });
+    assert.ok(validateThemeShellMountClaimProof(doc, opts).length > 0);
   });
 
   it("accepts pnpm build / next build as finite resolve proofs", () => {

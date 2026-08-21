@@ -5573,6 +5573,7 @@ ${draftPhasePack.elements
 ${draftAcceptanceBlock}
 CRITICAL: Scope, File Changes, Success Criteria, and Automated Checks MUST cover every IN SCOPE feature above.
 Do NOT plan OUT OF SCOPE features. Unticked items are mustNot for this phase.
+Do NOT claim theme/shell delivery (ThemeToggle, menubar chrome, day/night modes) in Scope or Success Criteria unless the acceptance above ticks theme_modes / applied_shell — PRESERVE mentions belong in mustNot, not in claims. Claiming out-of-scope theme work forces unprovable mount/visibility checks and the gate will reject the draft.
 File Changes must reference DESIGN_PACK logos/tokens/scope/theme and \`.slopcontrol/phases/${phase.id}/design/mock.html\` — do not invent a competing mark.
 ${draftPlanNote}${draftThemeNote}${draftElementsNote}${draftCrossDepPack ? `\n${draftCrossDepPack}\n` : ""}${draftPackBlock ? `\n${draftPackBlock}\n` : ""}${draftBoundMock ? `\n${draftBoundMock}\n` : ""}
 `
