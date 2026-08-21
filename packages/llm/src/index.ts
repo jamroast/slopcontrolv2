@@ -33,6 +33,12 @@ export interface MastraModelConfig {
   url?: string;
   apiKey?: string;
   headers?: Record<string, string>;
+  /** Sampling params forwarded to the agent loop (agent.stream modelSettings). */
+  defaultParams?: {
+    temperature?: number;
+    maxTokens?: number;
+    topP?: number;
+  };
 }
 
 export function defaultConfigPath(dataDir?: string): string {
@@ -223,6 +229,7 @@ export function toMastraModelConfig(
     url: resolved.baseUrl,
     apiKey: apiKey || "not-needed",
     headers: resolved.headers,
+    defaultParams: resolved.defaultParams,
   };
 }
 

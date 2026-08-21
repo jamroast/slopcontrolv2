@@ -275,6 +275,7 @@ import {
   tryMenubarEmbedSimilarity,
   filterRasterVisionPaths,
   type LlmRegistry,
+type MastraModelConfig,
 } from "@slopcontrol/llm";
 import {
   ensureChangeIntentAsync,
@@ -1002,8 +1003,27 @@ async function runAgentLiveTurn(
 
   const runStream = async (): Promise<string> => {
     throwIfAborted();
+    const defaultParams = (
+      agent as {
+        model?: { defaultParams?: MastraModelConfig["defaultParams"] };
+      }
+    ).model?.defaultParams;
+    const modelSettings = defaultParams
+      ? {
+          ...(defaultParams.maxTokens !== undefined
+            ? { maxTokens: defaultParams.maxTokens }
+            : {}),
+          ...(defaultParams.temperature !== undefined
+            ? { temperature: defaultParams.temperature }
+            : {}),
+          ...(defaultParams.topP !== undefined
+            ? { topP: defaultParams.topP }
+            : {}),
+        }
+      : undefined;
     const streamResult = await agent.stream(prompt, {
       maxSteps,
+      ...(modelSettings ? { modelSettings } : {}),
       ...(memoryOpt ? { memory: memoryOpt } : {}),
       ...(signal ? { abortSignal: signal } : {}),
     });
