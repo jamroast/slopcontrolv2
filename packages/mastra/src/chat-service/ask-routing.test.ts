@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   applyAskResumeDecision,
+  askLatchAppliesToProject,
   ASK_ID_DEPENDENT_TOOLS,
   askTitleFromOperatorMessage,
   composeAskDispatchMessage,
@@ -111,9 +112,35 @@ describe("decideAskResume", () => {
     });
     assert.equal(d.kind, "continue");
   });
+
+  it("starts new when latch projectId differs from target project", () => {
+    const d = decideAskResume({
+      operatorMessage: "double check env vars for verifier flip",
+      args: {},
+      latch: {
+        ...dockerLatch,
+        projectId: "fb671505-1517-41bd-86b4-55304d770647",
+      },
+      projectId: "8301239a-b4c7-42a1-b575-0cc6b190640f",
+    });
+    assert.equal(d.kind, "new");
+    if (d.kind === "new") assert.equal(d.reason, "cross-project");
+  });
 });
 
 describe("ask routing helpers", () => {
+  it("askLatchAppliesToProject matches same project and rejects cross-project", () => {
+    const latch: AskResumeLatch = {
+      askId: "ask-1",
+      projectId: "p-components",
+      status: "open",
+    };
+    assert.equal(askLatchAppliesToProject(latch, "p-components"), true);
+    assert.equal(askLatchAppliesToProject(latch, "p-jamroast"), false);
+    assert.equal(askLatchAppliesToProject(latch, undefined), true);
+    assert.equal(askLatchAppliesToProject(null, "p-jamroast"), false);
+  });
+
   it("extracts routes and source paths", () => {
     const a = extractAnchors("see src/app/product/page.tsx and /product/skills");
     assert.ok(a.has("/product"));

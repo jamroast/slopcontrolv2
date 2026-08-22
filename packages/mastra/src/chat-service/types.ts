@@ -128,7 +128,7 @@ export interface ChatContextDeps {
   listRuns(projectId?: string): Run[];
   getProject(id: string): Project | undefined;
   /** Optional — used to see if a chat ask latch is still open. */
-  getAsk?(id: string): Pick<AskSession, "id" | "status" | "title"> | undefined;
+  getAsk?(id: string): Pick<AskSession, "id" | "status" | "title" | "projectId"> | undefined;
 }
 
 export interface PendingAction {

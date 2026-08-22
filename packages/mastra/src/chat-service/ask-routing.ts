@@ -3,10 +3,24 @@ import type { AskStatus } from "@slopcontrol/types";
 /** Chat-owned ask session this conversation last used. */
 export type AskResumeLatch = {
   askId: string;
+  /** Owning project — required for global chat latch fill / rehydrate. */
+  projectId?: string;
   title?: string;
   lastUserLine?: string;
   status?: AskStatus | string;
 };
+
+/** True when the latched ask may be reused for a tool call on projectId. */
+export function askLatchAppliesToProject(
+  latch: AskResumeLatch | null | undefined,
+  projectId?: string | null,
+): boolean {
+  const target = projectId?.trim();
+  if (!latch?.askId) return false;
+  if (!target) return true;
+  if (!latch.projectId) return true;
+  return latch.projectId === target;
+}
 
 export type AskToolArgs = {
   askId?: string;
@@ -98,6 +112,7 @@ export function decideAskResume(input: {
   operatorMessage: string;
   args: AskToolArgs;
   latch?: AskResumeLatch | null;
+  projectId?: string | null;
 }): AskResumeDecision {
   const askId =
     typeof input.args.askId === "string" ? input.args.askId.trim() : "";
@@ -120,6 +135,14 @@ export function decideAskResume(input: {
       kind: "new",
       title: askTitleFromOperatorMessage(input.operatorMessage),
       reason: latch?.askId ? `latch not open (${latch.status})` : "no latch",
+    };
+  }
+
+  if (!askLatchAppliesToProject(latch, input.projectId)) {
+    return {
+      kind: "new",
+      title: askTitleFromOperatorMessage(input.operatorMessage),
+      reason: "cross-project",
     };
   }
 

@@ -226,7 +226,12 @@ function getChatService(): ChatService {
         getAsk: (id) => {
           const ask = store.getAsk(id);
           return ask
-            ? { id: ask.id, status: ask.status, title: ask.title }
+            ? {
+                id: ask.id,
+                status: ask.status,
+                title: ask.title,
+                projectId: ask.projectId,
+              }
             : undefined;
         },
       },

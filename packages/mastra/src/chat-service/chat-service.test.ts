@@ -1481,10 +1481,7 @@ describe("chat dispatch result shaping", () => {
 
 describe("chat ask session routing", () => {
   type AskHost = {
-    askLatches: Map<
-      string,
-      { askId: string; title?: string; lastUserLine?: string; status?: string }
-    >;
+    askLatches: Map<string, import("./ask-routing.js").AskResumeLatch>;
     turnOperatorMessage: string;
     dispatchRouted: (
       c: ChatConversation,
@@ -1587,10 +1584,97 @@ describe("chat ask session routing", () => {
     });
     try {
       const conv = service.createConversation({ projectId: "p1" });
-      host(service).askLatches.set(conv.id, dockerLatch);
+      host(service).askLatches.set(conv.id, { ...dockerLatch, projectId: "p1" });
       await route(service, conv, "ask", { message: "brief" }, "what about the registry?");
       assert.equal(dispatched[0]!.args.askId, "ask-docker");
       assert.equal(dispatched[0]!.args.newAsk, undefined);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("starts a new ask in global chat when latch belongs to a different project", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, events, cleanup } = makeService({
+      dispatch: async (name, args) => {
+        dispatched.push({ name, args });
+        return {
+          content: [
+            {
+              type: "text",
+              text: "askId: ask-jamroast\nstatus: open\n---\nok",
+            },
+          ],
+        };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: null });
+      host(service).askLatches.set(conv.id, {
+        askId: "ask-components",
+        projectId: "fb671505-1517-41bd-86b4-55304d770647",
+        title: "Verify SignIn component exists in library",
+        status: "open",
+      });
+      await route(
+        service,
+        conv,
+        "ask",
+        {
+          projectId: "8301239a-b4c7-42a1-b575-0cc6b190640f",
+          message: "double check env vars",
+        },
+        "Lets double check first",
+      );
+      assert.equal(dispatched[0]!.args.newAsk, true);
+      assert.equal(dispatched[0]!.args.askId, undefined);
+      assert.equal(
+        host(service).askLatches.get(conv.id)?.projectId,
+        "8301239a-b4c7-42a1-b575-0cc6b190640f",
+      );
+      assert.equal(host(service).askLatches.get(conv.id)?.askId, "ask-jamroast");
+      // Operator-facing signal: named as a cross-project switch, not a generic new ask.
+      const statusEvents = events.filter(
+        (e) =>
+          e.type === "status" &&
+          /different project/.test(
+            (e as { summary?: string }).summary ?? "",
+          ),
+      );
+      assert.ok(
+        statusEvents.length > 0,
+        "expected a 'different project' status event",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("does not fill askId on get_ask when latch project differs from args", async () => {
+    let called = false;
+    const { service, cleanup } = makeService({
+      dispatch: async () => {
+        called = true;
+        return { content: [{ type: "text", text: "{}" }] };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: null });
+      host(service).askLatches.set(conv.id, {
+        askId: "ask-components",
+        projectId: "p-components",
+        status: "open",
+      });
+      const result = await route(
+        service,
+        conv,
+        "get_ask",
+        { projectId: "p-jamroast" },
+        "show ask",
+      );
+      assert.equal(result.isError, true);
+      assert.equal(called, false);
+      assert.match(result.content[0]!.text, /No askId/);
     } finally {
       cleanup();
     }

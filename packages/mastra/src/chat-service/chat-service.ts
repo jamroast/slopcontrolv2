@@ -91,6 +91,7 @@ import {
 } from "./wait-run.js";
 import {
   applyAskResumeDecision,
+  askLatchAppliesToProject,
   ASK_ID_DEPENDENT_TOOLS,
   composeAskDispatchMessage,
   decideAskResume,
@@ -1425,13 +1426,35 @@ export class ChatService {
     });
   }
 
-  private resolveAskLatch(conversationId: string): AskResumeLatch | undefined {
+  private resolveAskLatch(
+    conversationId: string,
+    projectId?: string | null,
+  ): AskResumeLatch | undefined {
     const latch = this.askLatches.get(conversationId);
     if (!latch) return undefined;
+    const target = projectId?.trim() || undefined;
     const live = this.deps.context.getAsk?.(latch.askId);
-    if (!live) return latch;
+    // Backfill owning project from the live ask when the latch predates scoping.
+    const latchProjectId = latch.projectId ?? live?.projectId;
+    if (target) {
+      if (latchProjectId && latchProjectId !== target) return undefined;
+      // Legacy latch with no project metadata anywhere: cannot prove the ask
+      // belongs to the target project — do not continue it in global chat
+      // (would 404 server-side on project mismatch).
+      if (
+        !latchProjectId &&
+        !this.getConversation(conversationId).projectId
+      ) {
+        return undefined;
+      }
+    }
+    if (!live)
+      return latchProjectId === latch.projectId
+        ? latch
+        : { ...latch, projectId: latchProjectId };
     return {
       ...latch,
+      projectId: latchProjectId,
       status: live.status,
       title: live.title ?? latch.title,
     };
@@ -1441,12 +1464,16 @@ export class ChatService {
     conversationId: string,
     tool: string,
     args: Record<string, unknown>,
+    projectId?: string | null,
   ): Record<string, unknown> {
     if (!ASK_ID_DEPENDENT_TOOLS.has(tool)) return args;
     const existing =
       typeof args.askId === "string" ? args.askId.trim() : "";
     if (existing) return args;
-    const latch = this.resolveAskLatch(conversationId);
+    const resolvedProjectId =
+      projectId ??
+      (typeof args.projectId === "string" ? args.projectId.trim() : undefined);
+    const latch = this.resolveAskLatch(conversationId, resolvedProjectId);
     if (!latch?.askId) return args;
     return { ...args, askId: latch.askId };
   }
@@ -2014,7 +2041,7 @@ export class ChatService {
     args: Record<string, unknown>,
     projectId?: string | null,
   ): Record<string, unknown> {
-    let next = this.fillAskIdFromLatch(conversationId, tool, args);
+    let next = this.fillAskIdFromLatch(conversationId, tool, args, projectId);
     next = this.fillLoopIdFromLatch(conversationId, tool, next, projectId);
     next = this.fillDesignLoopIdFromLatch(conversationId, tool, next, projectId);
     next = this.fillLoopVersionFromLatch(conversationId, tool, next, projectId);
@@ -2111,7 +2138,15 @@ export class ChatService {
         };
       }
     } else if (ASK_ID_DEPENDENT_TOOLS.has(nextName)) {
-      nextArgs = this.fillAskIdFromLatch(conversation.id, nextName, nextArgs);
+      nextArgs = this.fillAskIdFromLatch(
+        conversation.id,
+        nextName,
+        nextArgs,
+        conversation.projectId ??
+          (typeof nextArgs.projectId === "string"
+            ? nextArgs.projectId.trim()
+            : undefined),
+      );
       const filled =
         typeof nextArgs.askId === "string" ? nextArgs.askId.trim() : "";
       if (!filled) {
@@ -2285,7 +2320,16 @@ export class ChatService {
     const operatorMessage =
       this.turnOperatorMessage.trim() ||
       (typeof args.message === "string" ? args.message : "");
-    const latch = this.resolveAskLatch(conversation.id);
+    const targetProjectId =
+      conversation.projectId ??
+      (typeof args.projectId === "string" ? args.projectId.trim() : undefined);
+    const rawLatch = this.askLatches.get(conversation.id);
+    const latch = this.resolveAskLatch(conversation.id, targetProjectId);
+    const crossProject = Boolean(
+      rawLatch?.askId &&
+        isAskOpen(rawLatch.status) &&
+        !askLatchAppliesToProject(rawLatch, targetProjectId),
+    );
 
     // LLM-first: classify continue-vs-new via the classification role.
     // Regex heuristics (decideAskResume) are fallback only on LLM failure.
@@ -2322,6 +2366,7 @@ export class ChatService {
             message: typeof args.message === "string" ? args.message : undefined,
           },
           latch,
+          projectId: targetProjectId,
         });
         if (fallback.kind === "continue") {
           decision = {
@@ -2348,14 +2393,18 @@ export class ChatService {
         }
       }
     } else {
-      // No open latch — always start a new ask
+      // No applicable latch — start a new ask (cross-project, closed, or none)
       decision = {
         kind: "new",
         title:
           (typeof args.title === "string" && args.title.trim()) ||
           operatorMessage.split("\n")[0]?.slice(0, 80) ||
           "New investigation",
-        reason: latch?.askId ? `latch not open (${latch.status})` : "no latch",
+        reason: crossProject
+          ? "cross-project"
+          : rawLatch?.askId
+            ? `latch not open (${rawLatch.status})`
+            : "no latch",
       };
     }
     this.emit(conversation, {
@@ -2363,7 +2412,9 @@ export class ChatService {
       summary:
         decision.kind === "continue"
           ? `continuing ask ${decision.askId}`
-          : `starting new ask: ${decision.title}`,
+          : crossProject
+            ? `starting new ask (different project): ${decision.title}`
+            : `starting new ask: ${decision.title}`,
     });
     const routed = applyAskResumeDecision(decision, args);
     const composed = composeAskDispatchMessage({
@@ -2405,6 +2456,10 @@ export class ChatService {
         : this.askLatches.get(conversation.id)?.title;
     this.askLatches.set(conversation.id, {
       askId,
+      projectId:
+        (typeof args.projectId === "string" ? args.projectId.trim() : undefined) ??
+        conversation.projectId ??
+        undefined,
       title,
       lastUserLine: this.turnOperatorMessage.trim() || undefined,
       status: status || "open",

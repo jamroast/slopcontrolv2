@@ -184,6 +184,7 @@ You coordinate work ACROSS registered projects using the full lifecycle — not 
 - Never tell the operator to "open a project-scoped chat" — you can manage design on any registered project from here
 
 **Lifecycle hooks (always pass projectId explicitly in global chat):**
+- Ask latch is per-project — switching projects in global chat starts a new ask unless you pass an explicit askId for that project
 - Shaping: ask → promote_ask OR plan_loop_start/continue/accept/promote
 - Execution: start_change → wait_for_run → advance_run → start_development → wait_for_run
 - Design: design_loop_start when UI intent (skip for stockAdoption)
