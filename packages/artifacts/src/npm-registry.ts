@@ -31,7 +31,9 @@ export function resolveProjectRegistryScopes(opts: {
   configScopes?: string[];
 }): string[] {
   if (opts.configScopes?.length) {
-    return normalizeScopes(opts.configScopes);
+    // Config order is the operator's explicit priority (registryScopes[0]
+    // is the default publish scope) — preserve it, do not sort.
+    return normalizeScopes(opts.configScopes, { preserveOrder: true });
   }
   const npmrcPath = join(opts.projectRoot, ".npmrc");
   if (existsSync(npmrcPath)) {
@@ -49,8 +51,31 @@ export function resolveProjectRegistryScopes(opts: {
   return [...NPM_PRIVATE_SCOPES];
 }
 
-function normalizeScopes(scopes: string[]): string[] {
-  return [...new Set(scopes.map((s) => s.trim()).filter(Boolean))].sort();
+function normalizeScopes(
+  scopes: string[],
+  opts?: { preserveOrder?: boolean },
+): string[] {
+  const unique = [...new Set(scopes.map((s) => s.trim()).filter(Boolean))];
+  return opts?.preserveOrder ? unique : unique.sort();
+}
+
+/**
+ * The scope a project publishes NEW packages under. A multi-scope project
+ * (e.g. a component library consuming both @jam and @jamroast) can pin its
+ * publish scope explicitly via config publishScope; otherwise the first
+ * resolved registry scope wins (config registryScopes[0] before discovery,
+ * alphabetical within discovery).
+ */
+export function resolveProjectPublishScope(opts: {
+  projectRoot: string;
+  configScopes?: string[];
+  publishScope?: string;
+}): string {
+  if (opts.publishScope?.trim()) return opts.publishScope.trim();
+  return resolveProjectRegistryScopes({
+    projectRoot: opts.projectRoot,
+    configScopes: opts.configScopes,
+  })[0]!;
 }
 
 export const NpmRegistryMetaSchema = z.object({

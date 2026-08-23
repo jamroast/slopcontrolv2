@@ -811,6 +811,13 @@ export const ProjectConfigSchema = z.object({
    * lines pointing at the SlopControl registry → ["@slopcontrol"].
    */
   registryScopes: z.array(z.string().min(1)).optional(),
+  /**
+   * The scope this project publishes NEW packages under when it has several
+   * in registryScopes (e.g. a component library with both @jam and @jamroast
+   * in .npmrc pins publishScope: "@jamroast"). Defaults to the first
+   * resolved registry scope.
+   */
+  publishScope: z.string().min(1).optional(),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;

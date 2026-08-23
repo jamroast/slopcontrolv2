@@ -14,6 +14,7 @@ import {
   npmRegistryPackageFreshness,
   readNpmRegistryMeta,
   resolveProjectRegistryScopes,
+  resolveProjectPublishScope,
   scaffoldElementNpmPackage,
   buildVerdaccioConfigYaml,
   writeNpmRegistryMeta,
@@ -312,29 +313,31 @@ describe("npm-registry layout + rc", () => {
     assert.doesNotMatch(yaml, /@jamroast\/\*/);
   });
 
-  it("resolveProjectRegistryScopes: config > .npmrc discovery > default", () => {
-    const root = tmp("scopes");
+  it("resolveProjectPublishScope: explicit publishScope > config[0] > discovery", () => {
+    const root = tmp("pubscope");
     try {
-      // Default with nothing present.
-      assert.deepEqual(resolveProjectRegistryScopes({ projectRoot: root }), [
-        "@slopcontrol",
-      ]);
-      // .npmrc discovery (Jam-estate shape).
       writeFileSync(
         join(root, ".npmrc"),
         "@jam:registry=http://127.0.0.1:4873/\n@jamroast:registry=http://127.0.0.1:4873/\n",
       );
-      assert.deepEqual(resolveProjectRegistryScopes({ projectRoot: root }), [
-        "@jam",
-        "@jamroast",
-      ]);
-      // Config wins over discovery.
-      assert.deepEqual(
-        resolveProjectRegistryScopes({
+      // Discovery: alphabetical first wins when nothing explicit is set.
+      assert.equal(resolveProjectPublishScope({ projectRoot: root }), "@jam");
+      // Config registryScopes order wins over discovery.
+      assert.equal(
+        resolveProjectPublishScope({
           projectRoot: root,
-          configScopes: ["@acme"],
+          configScopes: ["@jamroast", "@jam"],
         }),
-        ["@acme"],
+        "@jamroast",
+      );
+      // Explicit publishScope wins over everything (the estate pin).
+      assert.equal(
+        resolveProjectPublishScope({
+          projectRoot: root,
+          configScopes: ["@jamroast"],
+          publishScope: "@jamroast",
+        }),
+        "@jamroast",
       );
     } finally {
       rmSync(root, { recursive: true, force: true });

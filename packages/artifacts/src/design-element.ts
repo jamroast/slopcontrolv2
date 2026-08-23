@@ -34,11 +34,36 @@ import {
 } from "./design-loop-selections.js";
 import {
   jamPackageNameForElement,
-  resolveProjectRegistryScopes,
+  resolveProjectPublishScope,
   scaffoldElementNpmPackage,
 } from "./npm-registry.js";
 
 const SLOP_DIR = ".slopcontrol";
+
+/** Publish scope for this project: explicit config publishScope → config
+ * registryScopes[0] → .npmrc discovery → @slopcontrol default. */
+function elementPublishScope(projectRoot: string): string {
+  let configScopes: string[] | undefined;
+  let publishScope: string | undefined;
+  const cfgPath = join(projectRoot, SLOP_DIR, "config.json");
+  if (existsSync(cfgPath)) {
+    try {
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf-8")) as {
+        registryScopes?: string[];
+        publishScope?: string;
+      };
+      configScopes = cfg.registryScopes;
+      publishScope = cfg.publishScope;
+    } catch {
+      /* ignore */
+    }
+  }
+  return resolveProjectPublishScope({
+    projectRoot,
+    configScopes,
+    publishScope,
+  });
+}
 
 export const DesignElementKindSchema = z.enum(["control", "shell", "pattern"]);
 export type DesignElementKind = z.infer<typeof DesignElementKindSchema>;
@@ -568,7 +593,7 @@ export function listExtractableDesignElementsFromMock(
     [...(opts?.publishedIds ?? [])].map((id) => slugElementId(id)),
   );
   const npmScope = opts?.projectRoot
-    ? resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0]
+    ? elementPublishScope(opts.projectRoot)
     : undefined;
   return collectExtractableRegions(html).map((r) => {
     const source = opts?.projectRoot
@@ -941,7 +966,7 @@ export function publishDesignElement(
   }
   if (hasCode) writeSrcTree(join(dir, "src"), srcFiles);
   // Always scaffold @<scope>/<id> — code entry when present, else mock/tokens exports.
-  const scope = resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0];
+  const scope = elementPublishScope(opts.projectRoot);
   scaffoldElementNpmPackage({
     outDir: join(dir, "npm-package"),
     elementId: id,
@@ -1203,9 +1228,7 @@ export function bindThemeToggle(button: HTMLElement, root: HTMLElement = documen
 
   const npmPackage = jamPackageNameForElement(
     elementId,
-    opts.projectRoot
-      ? resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0]
-      : undefined,
+    opts.projectRoot ? elementPublishScope(opts.projectRoot) : undefined,
   );
 
   const spec = [
@@ -2009,7 +2032,7 @@ export function prepareDesignElementNpmPackage(opts: {
   // under the project's scope at publish time. Fall back to re-resolving
   // only when the bundle predates persisted package names.
   const scope = bundle.meta.npmPackage?.match(/^(@[\w.-]+)\//)?.[1] ??
-    resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0];
+    elementPublishScope(opts.projectRoot);
   const scaffold = scaffoldElementNpmPackage({
     outDir: join(bundle.rootPath, "npm-package"),
     elementId: id,
@@ -2049,10 +2072,7 @@ export function recordDesignElementNpmPublish(opts: {
     ...JSON.parse(readFileSync(metaPath, "utf-8")),
     npmPackage:
       opts.npmPackage ||
-      jamPackageNameForElement(
-        opts.elementId,
-        resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0],
-      ),
+      jamPackageNameForElement(opts.elementId, elementPublishScope(opts.projectRoot)),
     npmVersion: opts.npmVersion,
     updatedAt: new Date().toISOString(),
   });
