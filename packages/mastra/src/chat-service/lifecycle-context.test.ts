@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, after } from "node:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildGlobalChatPrompt,
   buildProjectChatPrompt,
@@ -14,6 +17,17 @@ const emptyDeps: ChatContextDeps = {
   listRuns: () => [],
   getProject: () => undefined,
 };
+
+const roots: string[] = [];
+after(() => {
+  for (const r of roots) {
+    try {
+      rmSync(r, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  }
+});
 
 const project: Project = {
   id: "p1",
@@ -105,5 +119,53 @@ describe("project knowledge in chat prompt", () => {
     assert.ok(!blank.includes("## Project knowledge"));
     const missing = buildProjectChatPrompt({ project, deps: emptyDeps });
     assert.ok(!missing.includes("## Project knowledge"));
+  });
+
+  it("builds the publish-path playbook from the registered projects, not hardcoded names", () => {
+    const lib = mkdtempSync(join(tmpdir(), "slop-lc-lib-"));
+    const app = mkdtempSync(join(tmpdir(), "slop-lc-app-"));
+    roots.push(lib, app);
+    mkdirSync(join(lib, ".slopcontrol"), { recursive: true });
+    writeFileSync(
+      join(lib, ".slopcontrol", "config.json"),
+      JSON.stringify({ componentLibrary: true }),
+    );
+    mkdirSync(join(app, ".slopcontrol"), { recursive: true });
+    writeFileSync(
+      join(app, ".slopcontrol", "config.json"),
+      JSON.stringify({ componentLibrary: false }),
+    );
+    const libProject: Project = {
+      id: "lib",
+      name: "acme-components",
+      rootPath: lib,
+      blueprintVersion: 0,
+      createdAt: "",
+      updatedAt: "",
+    };
+    const appProject: Project = {
+      id: "app",
+      name: "acme-app",
+      rootPath: app,
+      blueprintVersion: 0,
+      createdAt: "",
+      updatedAt: "",
+    };
+    const prompt = buildGlobalChatPrompt({
+      deps: {
+        listProjects: () => [libProject, appProject],
+        listPhases: () => [],
+        listRuns: () => [],
+        getProject: () => undefined,
+      },
+    });
+    // Rows come from config: componentLibrary root vs nested-packages app.
+    assert.match(prompt, /acme-components \| componentLibrary:true root → design_library_publish/);
+    assert.match(prompt, /acme-app \| app with nested packages/);
+    // The flow example names the actual registered projects.
+    assert.match(prompt, /cross_project_wire_package publisher=acme-components/);
+    assert.match(prompt, /consumers=\[acme-app\]/);
+    // No Jam-estate names leak.
+    assert.doesNotMatch(prompt, /JamRoast|JamPress|jamroast-components|@jam\/service-token|burntjam/);
   });
 });

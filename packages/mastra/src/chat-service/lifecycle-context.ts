@@ -148,6 +148,43 @@ export function buildGlobalChatPrompt(opts: {
     return `- ${project.name} (projectId: ${project.id}) ${project.rootPath} — ${active} open phases, ${busy} active runs, ${review} awaiting review`;
   });
 
+  // Publish-path rows are computed from the live registry, not hardcoded —
+  // each registered project is classified by its own config.
+  const publishRows = projects.map((project) => {
+    let kind: string;
+    try {
+      const cfg = readProjectConfig(project.rootPath);
+      kind = cfg.componentLibrary
+        ? "componentLibrary:true root → design_library_publish"
+        : "app with nested packages/* → project_workspace_package_publish OR cross_project_wire_package";
+    } catch {
+      kind = "app with nested packages/* → project_workspace_package_publish OR cross_project_wire_package";
+    }
+    return `| ${project.name} | ${kind} |`;
+  });
+  const publishTable =
+    publishRows.length > 0
+      ? `| Project | Publish path |\n|---|---|\n${publishRows.join("\n")}`
+      : "| (none registered) | |";
+  const firstComponentLib = projects.find((p) => {
+    try {
+      return readProjectConfig(p.rootPath).componentLibrary;
+    } catch {
+      return false;
+    }
+  });
+  const firstApp = projects.find((p) => p.id !== firstComponentLib?.id);
+  const flowExample =
+    firstComponentLib && firstApp
+      ? `1. ask on ${firstComponentLib.name} — confirm package paths
+2. cross_project_wire_package publisher=${firstComponentLib.name} consumers=[${firstApp.name}]
+3. list_runs on ${firstApp.name} — advance_run when phase reaches in_review`
+      : projects.length >= 2
+        ? `1. ask on the publisher project — confirm package paths
+2. cross_project_wire_package publisher=<pub> consumers=[<consumer>]
+3. list_runs on the consumer — advance_run when phase reaches in_review`
+        : "1. register a publisher + consumer project first";
+
   const crossProjectPlaybook = `## Cross-project orchestration (global master chat)
 
 You coordinate work ACROSS registered projects using the full lifecycle — not ad-hoc shell commands.
@@ -159,9 +196,8 @@ You coordinate work ACROSS registered projects using the full lifecycle — not 
 - list_phases / list_runs per projectId — see what is blocked (in_review, developing, failed checks)
 
 **Publish paths (pick ONE — never pass bare projectId to npm_registry_publish):**
-| Source | Tool | When |
-| jamroast-components root (componentLibrary:true) | design_library_publish | @jamroast/components UI library |
-| Nested packages/* inside an app (e.g. burntjam/packages/service-token) | project_workspace_package_publish OR cross_project_wire_package | @jam/service-token and similar |
+${publishTable}
+
 | Raw publish only (no build) | npm_registry_publish with packageDir OR projectId+packagePath | Re-publish already-built dist |
 
 **Wire consumers:**
@@ -169,10 +205,8 @@ You coordinate work ACROSS registered projects using the full lifecycle — not 
 - OR npm_registry_ensure_rc on consumer → project_library_consume with allowNew:true for first-time deps
 - Then start_change / plan_loop / advance_run on the CONSUMER project for code that uses the package
 
-**Typical Jam estate flow (@jam/service-token):**
-1. ask on JamRoast — confirm packages/service-token + JWKS/token routes
-2. cross_project_wire_package publisher=JamRoast packagePath=packages/service-token consumers=[JamPress]
-3. list_runs on JamPress — advance_run when phase reaches in_review
+**Typical publish→wire→advance flow:**
+${flowExample}
 4. Never use npm_registry_publish with only projectId — always include packagePath
 
 **Design loops (global chat — first-class, do NOT defer to project-scoped chat):**
