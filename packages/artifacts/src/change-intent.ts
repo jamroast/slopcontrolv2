@@ -132,7 +132,7 @@ const LOGO_TYPO_RE = /\bnew\s+logs?\b/i;
  * library's stock widgets (design-by-reference — no generative design pass).
  */
 const STOCK_ADOPTION_RE =
-  /\b(?:stock\s+(?:[\w-]+\s+){0,3}(?:component|widget|menubar|theme|theming|ui)|component\s+library|from\s+(?:the\s+)?[\w@/-]*components(?:\s+project)?\b|[\w@/-]*components\s+project|jamroast-components)\b/i;
+  /\b(?:stock\s+(?:[\w-]+\s+){0,3}(?:component|widget|menubar|theme|theming|ui)|component\s+library|from\s+(?:the\s+)?[\w@/-]*components(?:\s+project)?\b|[\w@/-]*components\s+project)\b/i;
 const STOCK_ADOPTION_VERB_RE =
   /\b(?:strip|replace|adopt|use|switch\s+to|reset\s+to|standardi[sz]e\s+on|pull\s+in)\b/i;
 

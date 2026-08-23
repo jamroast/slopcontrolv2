@@ -20,7 +20,7 @@ describe("continue-intent-llm", () => {
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("look and feel"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("reuseProjectDesign"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("shareFrom"));
-    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("jamroast-components"));
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("the components library"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("navAlign"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("logo_invent"));
     assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("unhappy with the logos"));

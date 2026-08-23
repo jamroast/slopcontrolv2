@@ -30,7 +30,7 @@ CRITICAL: Output ONLY a single JSON object. No prose, no markdown fences.
 Return ONLY a JSON object with these fields:
 - needsInvestigation: boolean — true when the operator wants codebase/sibling research before planning (investigate, learn from, deep dive, present a plan after research, compare to another app). false for narrow tweaks with no repo walk needed.
 - investigateEngine: "auto" | "mastra" | "pi" — pi for thorough/deep/exhaustive; mastra for quick/light; auto when unspecified.
-- siblingInvestigation: boolean — true when the brief names another project/app to learn from (JamPress, sibling, other repo).
+- siblingInvestigation: boolean — true when the brief names another project/app to learn from (a sibling, another registered project, another repo).
 - scopeKind: optional — feature | bugfix | refactor | integration | spike
 - focus: optional string — concrete component/feature focus (never bare words like "management")
 - preserve: optional string[] — areas to freeze

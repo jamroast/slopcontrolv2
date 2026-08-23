@@ -13,8 +13,8 @@ CRITICAL: Output ONLY a single JSON object. No prose, no markdown fences.
 Return ONLY a JSON object with these fields:
 - useElements: optional array of { id: string, fromProject?: string } — ALL named shared design elements (e.g. menubar, theme-toggle, sign-in, dashboard-shell, dashboard-sidebar, user-pill, view-switcher)
 - useElement: optional { id: string, fromProject?: string } — legacy singular; if you set useElements, also set useElement to the first item
-- importAllElementsFrom: optional string — sibling/registry project name when the operator wants ALL published elements from that project (e.g. "import the elements from jamroast-components")
-- useNpmPackage: optional { name: string, version?: string, fromProject?: string } — scoped package like @jam/theme-toggle
+- importAllElementsFrom: optional string — sibling/registry project name when the operator wants ALL published elements from that project (e.g. "import the elements from the components project")
+- useNpmPackage: optional { name: string, version?: string, fromProject?: string } — scoped package like @acme/theme-toggle
 - useProjectInfra: optional { projectName?: string, rootPath?: string } — reuse packages/elements from a named project (not npm link)
 - forbidNpmLink: boolean — always true
 - notes: string — 1 sentence; if they asked for npm link / pnpm link, say to use the private registry instead
@@ -22,10 +22,10 @@ Return ONLY a JSON object with these fields:
 Rules:
 - "use theme-toggle from MyBrand" → useElements=[{id:"theme-toggle", fromProject:"MyBrand"}], useElement=same
 - Listed ids (menubar, theme-toggle, sign-in, …) → include EVERY listed id in useElements (do NOT collapse to theme-toggle only)
-- "import the elements from jamroast-components" / "import the design components from X" / "pull in the elements from X" → importAllElementsFrom="jamroast-components" (or X as stated). Do NOT reduce this to theme-toggle-only.
-- "add @jam/theme-toggle" / "pnpm add @…/…" → useNpmPackage
+- "import the elements from the components project" / "import the design components from X" / "pull in the elements from X" → importAllElementsFrom="the components project" (or X as stated). Do NOT reduce this to theme-toggle-only.
+- "add @acme/theme-toggle" / "pnpm add @…/…" → useNpmPackage
 - "reuse packages from ProjectX" / "use infra from X" → useProjectInfra
-- "using jamroast-components" / "mock with X-components" without element language → useProjectInfra with projectName set
+- "using the components library" / "mock with X-components" without element language → useProjectInfra with projectName set
 - "look and feel" / "match chrome" / "same menubar and theme toggle" from a named sibling → useElements for each named control (at least theme-toggle + menubar when both implied), importAllElementsFrom when they say elements/components plural, AND useProjectInfra with that projectName
 - Never set forbidNpmLink to false. Prefer registry installs over link/file: sibling hacks.
 - Omit fields that do not apply. Empty intent: all optional fields omitted, forbidNpmLink true, notes "".
@@ -45,7 +45,7 @@ export interface ClassifyDependencyIntentViaLlmOptions {
 export function shouldClassifyDependencyIntent(text: string): boolean {
   const t = text ?? "";
   return (
-    /@(jam|slopcontrol)\//i.test(t) ||
+    /@[\w.-]+\//.test(t) ||
     /\b(use|from|package|element|registry|pnpm\s+add|npm\s+add|npm\s+link|pnpm\s+link|shared\s+lib|infra(structure)?)\b/i.test(
       t,
     )

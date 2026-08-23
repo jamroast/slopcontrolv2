@@ -16,8 +16,8 @@ Return ONLY a JSON object with these fields:
 - needsInteraction (boolean): true only when fill/submit (or equivalent) must be proven
 - brandTheming (boolean): true when the ask is brand identity, palette, logo, wordmark, visual identity, or applying sibling theming/design that needs a design pass
 - themeWiringOnly (boolean): true when the ask is only wiring a theme toggle / data-theme / light-dark switch with no new brand identity (coding only — not a design pass). Mutually exclusive with brandTheming.
-- stockAdoption (boolean): true when the ask strips custom/hand-rolled UI in favor of STOCK components/theming from the project's shared component library (e.g. "strip it away and use the stock menubar theming from jamroast-components"). Design-by-reference: the design already exists in the library, so NO design pass is needed. When stockAdoption is true, brandTheming MUST be false. Contrast: porting another app's bespoke look-and-feel is sibling theme adoption (brandTheming=true, stockAdoption=false); adopting the shared library's stock widgets is stockAdoption=true.
-- assetSwap (boolean): true when the ask wires/swaps/points at an EXISTING asset by filename (e.g. "make sure jamlight-circular-mark-v1.png is used rather than the alpha logo", "use the pinned logo in the footer too"). No new artwork is created — pure coding. When assetSwap is true, brandTheming MUST be false. Contrast: "new logo", "generate an icon", "redesign the mark" is creation (brandTheming=true, assetSwap=false).
+- stockAdoption (boolean): true when the ask strips custom/hand-rolled UI in favor of STOCK components/theming from the project's shared component library (e.g. "strip it away and use the stock menubar theming from the components library"). Design-by-reference: the design already exists in the library, so NO design pass is needed. When stockAdoption is true, brandTheming MUST be false. Contrast: porting another app's bespoke look-and-feel is sibling theme adoption (brandTheming=true, stockAdoption=false); adopting the shared library's stock widgets is stockAdoption=true.
+- assetSwap (boolean): true when the ask wires/swaps/points at an EXISTING asset by filename (e.g. "make sure circular-mark-v1.png is used rather than the alpha logo", "use the pinned logo in the footer too"). No new artwork is created — pure coding. When assetSwap is true, brandTheming MUST be false. Contrast: "new logo", "generate an icon", "redesign the mark" is creation (brandTheming=true, assetSwap=false).
 - requestsMissingThemeControl (boolean): true when the operator says a menubar day/night or theme toggle is missing / not appearing / must be added or shown
 - mustNot (optional string[]): extra constraints
 - refinementOf (optional string or string[]): prior phase id hint if refining a mount
@@ -32,7 +32,7 @@ Classification rules:
 - Do NOT invent needsInteraction=true for chrome-hide or backend.
 - Do NOT set needsInteraction for non-form clicks (theme toggle, nav links, decorative controls) — clickable ≠ fill/submit form contract.
 - Example: an inert landing UserPill / Sign In control that should navigate to /sign-in is changeKind "other" with needsInteraction false. Clerk / <SignIn> existing as a destination page does not make the landing click a form engagement.
-- Do NOT use status/roadmap questions or promote boilerplate ("generate a task to promote…") as the title — use the product work (e.g. "Port JamPress theming + cleaner logo").`;
+- Do NOT use status/roadmap questions or promote boilerplate ("generate a task to promote…") as the title — use the product work (e.g. "Port sibling theming + cleaner logo").`;
 
 export interface ExtractChangeIntentViaLlmOptions {
   endpoint: LlmEndpoint;
