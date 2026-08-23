@@ -265,3 +265,72 @@ export function buildProjectInventory(
     markdown,
   };
 }
+
+/**
+ * Discover shell/chrome component files for mount-check generation.
+ * Generic: any project layout works (JamPress finds jampress-menubar.tsx;
+ * other projects find whatever they have). Capped for prompt safety.
+ */
+export function discoverShellComponentPaths(
+  projectRoot: string,
+  opts?: { maxPaths?: number },
+): string[] {
+  const { treePaths } = buildProjectInventory(projectRoot);
+  const shell = treePaths.filter(
+    (p) =>
+      !p.endsWith("/") &&
+      /\.(tsx?|jsx?|css)$/.test(p) &&
+      /menubar|menu-bar|navbar|nav-bar|topbar|top-bar|shell|header|layout/i.test(
+        p,
+      ),
+  );
+  const appShell = treePaths.filter(
+    (p) =>
+      /^(playground\/src\/App\.|src\/App\.|src\/app\/layout\.)/i.test(p),
+  );
+  const globalsCss = treePaths.filter((p) =>
+    /^(src\/app\/globals\.css|src\/index\.css|playground\/src\/index\.css)$/i.test(
+      p,
+    ),
+  );
+  const out = [...new Set([...shell, ...appShell, ...globalsCss])].sort();
+  return out.slice(0, opts?.maxPaths ?? 12);
+}
+
+/**
+ * Discover text-bearing wordmarks under public/brand (for stale-wordmark
+ * rejection checks). Returns the visible text contents found in SVGs.
+ */
+export function discoverBrandWordmarkTexts(
+  projectRoot: string,
+  opts?: { maxTexts?: number },
+): string[] {
+  const brandDir = join(projectRoot, "public", "brand");
+  if (!existsSync(brandDir)) return [];
+  const out = new Set<string>();
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 3 || out.size >= (opts?.maxTexts ?? 8)) return;
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      try {
+        if (statSync(full).isDirectory()) {
+          walk(full, depth + 1);
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (!/\.svg$/i.test(name)) continue;
+      try {
+        const body = readFileSync(full, "utf-8").slice(0, 20_000);
+        for (const m of body.matchAll(/>([A-Z][A-Za-z]{2,24})</g)) {
+          out.add(m[1]!);
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  walk(brandDir, 0);
+  return [...out];
+}

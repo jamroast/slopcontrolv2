@@ -34,6 +34,10 @@ import {
 } from "./change-intent.js";
 import type { ChangeIntent } from "./change-intent.js";
 import { probeProjectForDecisions } from "./blueprint-probes.js";
+import {
+  discoverBrandWordmarkTexts,
+  discoverShellComponentPaths,
+} from "./project-inventory.js";
 
 export const SLOP_DIR = ".slopcontrol";
 
@@ -2360,17 +2364,50 @@ export function scaffoldPhaseDoc(opts: {
 - Manual smoke of the reported failure path succeeds when applicable`
     : designBoundShell
       ? `- ThemeToggle mounted in shell menubar and visible (utilities / tokens resolve)
-- Menubar/JampressMenubar mounted in playground App **or** product layout shell (marketing/portal)
+- Menubar mounted in playground App **or** product layout shell (marketing/portal)
 - Landing/content-max menubar inner bar uses \`var(--content-max)\` when applied_shell requires it
 - Build succeeds (\`pnpm build\` / \`next build\` / \`vite build\` as applicable)`
       : brand
         ? `- Brand tokens / logos applied; no SlopControl tile+circle fallback SVGs under public/brand/
 - Shells reference the new lockup (not unused orphan files only)
 - Token names match family or PHASE documents intentional remaps
-- Manual visual smoke vs sibling brand (JamPress / family) when applicable`
+- Manual visual smoke vs sibling brand when applicable`
         : `- Change is implemented and builds
 - Automated Checks pass
 - Manual smoke of the reported failure path succeeds when applicable`;
+
+  // Shell paths come from project discovery (any layout), never hardcoded
+  // project files. JamPress discovers jampress-menubar.tsx via the same
+  // code path as any other project's shell components.
+  const shellPaths = opts.projectRoot
+    ? discoverShellComponentPaths(opts.projectRoot)
+    : [];
+  const shellTsx = shellPaths.filter((p) => /\.tsx$/.test(p));
+  const playgroundApp = shellPaths.find((p) => /App\.tsx$/.test(p));
+  const layoutShells = shellTsx.filter((p) =>
+    /layout|shell|marketing|portal/i.test(p),
+  );
+  const globalsCss = shellPaths.filter((p) => /\.css$/.test(p));
+  const brandWordmarks = opts.projectRoot
+    ? discoverBrandWordmarkTexts(opts.projectRoot)
+    : [];
+  const wordmarkRejectLine = brandWordmarks.length
+    ? `\n! grep -RqlE '${brandWordmarks.map((w) => `>${w}<`).join("|")}' public/brand 2>/dev/null || exit 1`
+    : "";
+
+  const themeGrepTarget =
+    shellTsx.length > 0
+      ? shellTsx.join(" ")
+      : "src/components/shell/menubar.tsx src/components/layout/*menubar*.tsx";
+  const menubarGrepTarget = [
+    ...(layoutShells.length
+      ? layoutShells
+      : ["src/components/layout/*shell*.tsx", "src/components/shell/*.tsx"]),
+    ...(playgroundApp ? [playgroundApp] : ["playground/src/App.tsx"]),
+  ].join(" ");
+  const cssGrepTarget = globalsCss.length
+    ? globalsCss.join(" ")
+    : "src/app/globals.css playground/src/index.css";
 
   const shellChecksBlock = `\`\`\`bash
 ${testCmd}
@@ -2379,11 +2416,11 @@ ${testCmd}
 Structural (design shell — mount + content-max + visibility):
 
 \`\`\`bash
-grep -n '<ThemeToggle' src/components/layout/jampress-menubar.tsx src/components/shell/menubar.tsx 2>/dev/null | head -1 || grep -rn '<ThemeToggle' src --include='*menubar*' | head -1 || exit 1
-grep -nE '--content-max|maxWidth.*content-max|max-w-\\[var\\(--content-max\\)\\]' src/components/layout/jampress-menubar.tsx src/components/shell/menubar.tsx 2>/dev/null | head -1 || grep -rnE '--content-max|maxWidth.*content-max' src --include='*menubar*' | head -1 || exit 1
-grep -n 'JampressMenubar\\|<Menubar' src/components/layout/marketing-shell.tsx src/components/layout/portal-shell.tsx playground/src/App.tsx 2>/dev/null | head -1 || grep -rn 'JampressMenubar\\|<Menubar' src/components/layout playground/src --include='*.tsx' | head -1 || exit 1
+grep -rn '<ThemeToggle' ${themeGrepTarget} 2>/dev/null | head -1 || grep -rn '<ThemeToggle' src --include='*menubar*' | head -1 || exit 1
+grep -rnE '--content-max|maxWidth.*content-max|max-w-\\[var\\(--content-max\\)\\]' ${themeGrepTarget} 2>/dev/null | head -1 || grep -rnE '--content-max|maxWidth.*content-max' src --include='*menubar*' | head -1 || exit 1
+grep -rn 'Menubar' ${menubarGrepTarget} 2>/dev/null | head -1 || grep -rn 'Menubar' src/components/layout playground/src --include='*.tsx' | head -1 || exit 1
 pnpm build || npm run build || npx next build || pnpm exec vite build || exit 1
-grep -qE 'text-text-secondary|--text-secondary' src/app/globals.css node_modules/@jamroast/components/dist/styles/*.css playground/src/index.css 2>/dev/null || exit 1
+grep -qE 'text-text-secondary|--text-secondary' ${cssGrepTarget} 2>/dev/null || exit 1
 \`\`\``;
 
   const checksBlock = engagement
@@ -2407,8 +2444,7 @@ Structural (brand — reject design fallbacks + glued wordmarks):
 
 \`\`\`bash
 ! grep -Rql 'Status:\\*\\* draft' public/brand 2>/dev/null || exit 1
-! grep -RqlE '<circle[^>]+r="72".*<text' public/brand 2>/dev/null || exit 1
-! grep -RqlE '>JamLight<|>JamPress<' public/brand 2>/dev/null || exit 1
+! grep -RqlE '<circle[^>]+r="72".*<text' public/brand 2>/dev/null || exit 1${wordmarkRejectLine}
 \`\`\``
         : `\`\`\`bash
 ${testCmd}

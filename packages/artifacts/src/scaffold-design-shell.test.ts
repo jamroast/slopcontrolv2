@@ -98,18 +98,84 @@ describe("scaffoldPhaseDoc design-bound shell", () => {
   it("keeps brand scaffold when no design acceptance", () => {
     const doc = scaffoldPhaseDoc({
       phaseId: "09-brand",
-      description: "Port sibling theming and cleaner logos for JamPress",
+      description: "Port sibling theming and cleaner logos for the app",
       research: "ThemeToggle research dump should appear for non-design scaffold",
       testCommand: "npm test",
       intent: {
         title: "Brand theming",
         goal: "Apply sibling brand palette and logos",
         changeKind: "other",
-        description: "Port sibling theming and cleaner logos for JamPress",
+        description: "Port sibling theming and cleaner logos for the app",
       } as never,
     });
     assert.match(doc, /public\/brand/);
     assert.match(doc, /Research notes/);
     assert.equal(validatePhaseDocForDev(doc).ok, true);
+  });
+
+  it("generates checks from discovered shell paths for a generic (non-Jam) project", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-scaffold-generic-"));
+    roots.push(root);
+    const phaseId = "01-shell";
+    const designDir = join(root, ".slopcontrol", "phases", phaseId, "design");
+    mkdirSync(designDir, { recursive: true });
+    writeFileSync(
+      join(designDir, "ACCEPTANCE.json"),
+      `${JSON.stringify({
+        version: 1,
+        features: [{ id: "theme_modes", label: "Theme modes", accepted: true }],
+      }, null, 2)}\n`,
+    );
+    // Generic project layout — no Jam paths anywhere.
+    mkdirSync(join(root, "src", "components", "chrome"), { recursive: true });
+    writeFileSync(join(root, "src", "components", "chrome", "app-navbar.tsx"), "export {}\n");
+    mkdirSync(join(root, "playground", "src"), { recursive: true });
+    writeFileSync(join(root, "playground", "src", "App.tsx"), "export {}\n");
+    writeFileSync(join(root, "src", "index.css"), ":root {}\n");
+
+    const doc = scaffoldPhaseDoc({
+      phaseId,
+      description: "Dual-theme shell",
+      testCommand: "npm test",
+      projectRoot: root,
+    });
+    // Checks reference the discovered paths, not Jam file names.
+    assert.match(doc, /app-navbar\.tsx/);
+    assert.match(doc, /src\/index\.css/);
+    assert.doesNotMatch(doc, /jampress-menubar/);
+    assert.doesNotMatch(doc, /JampressMenubar/);
+    assert.doesNotMatch(doc, /@jamroast/);
+  });
+
+  it("JamPress-shaped project discovers the same paths it used to hardcode", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-scaffold-jampress-"));
+    roots.push(root);
+    const phaseId = "01-shell";
+    const designDir = join(root, ".slopcontrol", "phases", phaseId, "design");
+    mkdirSync(designDir, { recursive: true });
+    writeFileSync(
+      join(designDir, "ACCEPTANCE.json"),
+      `${JSON.stringify({
+        version: 1,
+        features: [{ id: "applied_shell", label: "Shell", accepted: true }],
+      }, null, 2)}\n`,
+    );
+    // JamPress layout — discovery must surface these exact paths.
+    mkdirSync(join(root, "src", "components", "layout"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "components", "layout", "jampress-menubar.tsx"),
+      "export {}\n",
+    );
+    mkdirSync(join(root, "playground", "src"), { recursive: true });
+    writeFileSync(join(root, "playground", "src", "App.tsx"), "export {}\n");
+
+    const doc = scaffoldPhaseDoc({
+      phaseId,
+      description: "Dual-theme shell",
+      testCommand: "npm test",
+      projectRoot: root,
+    });
+    assert.match(doc, /jampress-menubar\.tsx/);
+    assert.match(doc, /playground\/src\/App\.tsx/);
   });
 });
