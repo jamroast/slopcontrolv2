@@ -13,6 +13,7 @@ import {
   npmRegistryEnvValues,
   npmRegistryPackageFreshness,
   readNpmRegistryMeta,
+  resolveProjectRegistryScopes,
   scaffoldElementNpmPackage,
   buildVerdaccioConfigYaml,
   writeNpmRegistryMeta,
@@ -40,8 +41,9 @@ describe("npm-registry layout + rc", () => {
       const meta = ensureNpmRegistryLayout(dataDir);
       assert.match(meta.url, /127\.0\.0\.1/);
       assert.ok(meta.authToken.length >= 8);
-      assert.ok(meta.scopes.includes("@jam"));
-      assert.ok(meta.scopes.includes("@jamroast"));
+      // Default is @slopcontrol only; estate/project scopes come from
+      // prior meta, published packages, or project .npmrc discovery.
+      assert.deepEqual(meta.scopes, ["@slopcontrol"]);
       const again = ensureNpmRegistryLayout(dataDir);
       assert.equal(again.authToken, meta.authToken);
       // Publish evidence must survive re-ensure (server restart path).
@@ -60,11 +62,12 @@ describe("npm-registry layout + rc", () => {
         after.publishedPackages["@jamroast/components"]?.version,
         "0.0.2",
       );
+      // Published scopes union into meta.scopes + Verdaccio config.
+      assert.ok(after.scopes.includes("@jamroast"));
       const cfg = readFileSync(
         join(dataDir, "npm-registry", "config.yaml"),
         "utf-8",
       );
-      assert.match(cfg, /@jam\/\*/);
       assert.match(cfg, /@jamroast\/\*/);
       assert.match(cfg, /proxy: npmjs/);
       assert.ok(readNpmRegistryMeta(dataDir));
@@ -225,9 +228,9 @@ describe("npm-registry layout + rc", () => {
         registryUrl: "http://127.0.0.1:4873/",
         authToken: "tok12345678",
       });
-      assert.match(block, /@jam:registry=/);
-      assert.match(block, /@jamroast:registry=/);
       assert.match(block, /@slopcontrol:registry=/);
+      // Default @slopcontrol scope; @jam/@jamroast come from per-project
+      // registryScopes config or npmrc discovery (covered below).
       assert.match(block, /_authToken=tok12345678/);
 
       ensureProjectNpmrc({
@@ -238,7 +241,7 @@ describe("npm-registry layout + rc", () => {
       const body = readFileSync(join(root, ".npmrc"), "utf-8");
       assert.match(body, /shamefully-hoist/);
       assert.match(body, /BEGIN slopcontrol-npm-registry/);
-      assert.match(body, /@jam:registry=/);
+      assert.match(body, /@slopcontrol:registry=/);
 
       ensureProjectNpmrc({
         projectRoot: root,
@@ -294,6 +297,48 @@ describe("npm-registry layout + rc", () => {
       port: 4873,
     });
     assert.match(yaml, /listen: 127\.0\.0\.1:4873/);
+  });
+
+  it("buildVerdaccioConfigYaml renders custom scopes", () => {
+    const yaml = buildVerdaccioConfigYaml({
+      storageDir: "/tmp/storage",
+      htpasswdPath: "/tmp/htpasswd",
+      host: "127.0.0.1",
+      port: 4873,
+      scopes: ["@acme", "@slopcontrol"],
+    });
+    assert.match(yaml, /@acme\/\*/);
+    assert.match(yaml, /@slopcontrol\/\*/);
+    assert.doesNotMatch(yaml, /@jamroast\/\*/);
+  });
+
+  it("resolveProjectRegistryScopes: config > .npmrc discovery > default", () => {
+    const root = tmp("scopes");
+    try {
+      // Default with nothing present.
+      assert.deepEqual(resolveProjectRegistryScopes({ projectRoot: root }), [
+        "@slopcontrol",
+      ]);
+      // .npmrc discovery (Jam-estate shape).
+      writeFileSync(
+        join(root, ".npmrc"),
+        "@jam:registry=http://127.0.0.1:4873/\n@jamroast:registry=http://127.0.0.1:4873/\n",
+      );
+      assert.deepEqual(resolveProjectRegistryScopes({ projectRoot: root }), [
+        "@jam",
+        "@jamroast",
+      ]);
+      // Config wins over discovery.
+      assert.deepEqual(
+        resolveProjectRegistryScopes({
+          projectRoot: root,
+          configScopes: ["@acme"],
+        }),
+        ["@acme"],
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
@@ -438,7 +483,8 @@ describe("consumer propagation", () => {
 
 describe("element npm scaffold", () => {
   it("jamPackageNameForElement and scaffoldElementNpmPackage", () => {
-    assert.equal(jamPackageNameForElement("theme-toggle"), "@jam/theme-toggle");
+    assert.equal(jamPackageNameForElement("theme-toggle"), "@slopcontrol/theme-toggle");
+    assert.equal(jamPackageNameForElement("theme-toggle", "@jam"), "@jam/theme-toggle");
     const out = tmp("pkg");
     try {
       const scaffold = scaffoldElementNpmPackage({
@@ -451,12 +497,12 @@ describe("element npm scaffold", () => {
         mockHtml: "<button class='theme-toggle'>x</button>",
         tokensCss: ".theme-toggle{}",
       });
-      assert.equal(scaffold.packageName, "@jam/theme-toggle");
+      assert.equal(scaffold.packageName, "@slopcontrol/theme-toggle");
       assert.equal(scaffold.packageVersion, "3.0.0");
       const pkg = JSON.parse(
         readFileSync(join(out, "package.json"), "utf-8"),
       ) as { name: string; version: string; exports: Record<string, unknown> };
-      assert.equal(pkg.name, "@jam/theme-toggle");
+      assert.equal(pkg.name, "@slopcontrol/theme-toggle");
       assert.equal(pkg.version, "3.0.0");
       assert.equal(pkg.exports["./mock.html"], "./mock.html");
       assert.equal(pkg.exports["./tokens.css"], "./tokens.css");
@@ -475,7 +521,7 @@ describe("element npm scaffold", () => {
         srcFiles: {},
         mockHtml: "<header class='menubar'></header>",
       });
-      assert.equal(scaffold.packageName, "@jam/menubar");
+      assert.equal(scaffold.packageName, "@slopcontrol/menubar");
       const pkg = JSON.parse(
         readFileSync(join(out, "package.json"), "utf-8"),
       ) as { main: string; exports: Record<string, unknown> };
@@ -489,6 +535,7 @@ describe("element npm scaffold", () => {
   it("prepareDesignElementNpmPackage + recordDesignElementNpmPublish", () => {
     const root = tmp("el");
     try {
+      writeFileSync(join(root, ".npmrc"), "@jam:registry=http://127.0.0.1:4873/\n");
       const meta = publishDesignElement({
         projectRoot: root,
         elementId: "theme-toggle",

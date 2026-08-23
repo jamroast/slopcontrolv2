@@ -64,6 +64,11 @@ describe("collectBuildProcessEvidence", () => {
         "utf-8",
       );
       writeFileSync(join(root, "pnpm-lock.yaml"), "lockfileVersion: 9\n", "utf-8");
+      // Jam-estate shape: scopes discovered from the project's .npmrc.
+      writeFileSync(
+        join(root, ".npmrc"),
+        "@jamroast:registry=http://127.0.0.1:4873/\n",
+      );
       const evidence = collectBuildProcessEvidence({
         projectRoot: root,
         configuredToolchain: null,

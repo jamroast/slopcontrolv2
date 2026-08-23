@@ -34,6 +34,7 @@ import {
 } from "./design-loop-selections.js";
 import {
   jamPackageNameForElement,
+  resolveProjectRegistryScopes,
   scaffoldElementNpmPackage,
 } from "./npm-registry.js";
 
@@ -566,6 +567,9 @@ export function listExtractableDesignElementsFromMock(
   const published = new Set(
     [...(opts?.publishedIds ?? [])].map((id) => slugElementId(id)),
   );
+  const npmScope = opts?.projectRoot
+    ? resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0]
+    : undefined;
   return collectExtractableRegions(html).map((r) => {
     const source = opts?.projectRoot
       ? collectSourceFilesForElement(opts.projectRoot, r.id)
@@ -579,7 +583,7 @@ export function listExtractableDesignElementsFromMock(
       alreadyPublished: published.has(r.id),
       hasProjectSource: source.sourcePaths.length > 0,
       sourcePaths: source.sourcePaths,
-      npmPackage: jamPackageNameForElement(r.id),
+      npmPackage: jamPackageNameForElement(r.id, npmScope),
     };
   });
 }
@@ -936,7 +940,8 @@ export function publishDesignElement(
     writeFileSync(join(dir, "tokens.css"), opts.tokensCss.trim() + "\n", "utf-8");
   }
   if (hasCode) writeSrcTree(join(dir, "src"), srcFiles);
-  // Always scaffold @jam/<id> — code entry when present, else mock/tokens exports.
+  // Always scaffold @<scope>/<id> — code entry when present, else mock/tokens exports.
+  const scope = resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0];
   scaffoldElementNpmPackage({
     outDir: join(dir, "npm-package"),
     elementId: id,
@@ -946,6 +951,7 @@ export function publishDesignElement(
     description: meta.label,
     mockHtml: opts.mockHtml,
     tokensCss: opts.tokensCss,
+    scope,
   });
   writeFileSync(
     join(dir, "META.json"),
@@ -990,6 +996,7 @@ export function publishDesignElement(
       description: meta.label,
       mockHtml: opts.mockHtml,
       tokensCss: opts.tokensCss,
+      scope,
     });
     upsertIndexEntry(regRoot, meta);
   }
@@ -1194,7 +1201,12 @@ export function bindThemeToggle(button: HTMLElement, root: HTMLElement = documen
       ? fromProject.srcFiles
       : themeFallbackSrc;
 
-  const npmPackage = jamPackageNameForElement(elementId);
+  const npmPackage = jamPackageNameForElement(
+    elementId,
+    opts.projectRoot
+      ? resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0]
+      : undefined,
+  );
 
   const spec = [
     `# ${label}`,
@@ -1993,6 +2005,11 @@ export function prepareDesignElementNpmPackage(opts: {
   if (!bundle) {
     throw new Error(`Element bundle missing: ${id}@${version}`);
   }
+  // The published ELEMENT.json npmPackage is authoritative — it was minted
+  // under the project's scope at publish time. Fall back to re-resolving
+  // only when the bundle predates persisted package names.
+  const scope = bundle.meta.npmPackage?.match(/^(@[\w.-]+)\//)?.[1] ??
+    resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0];
   const scaffold = scaffoldElementNpmPackage({
     outDir: join(bundle.rootPath, "npm-package"),
     elementId: id,
@@ -2002,6 +2019,7 @@ export function prepareDesignElementNpmPackage(opts: {
     description: bundle.meta.label,
     mockHtml: bundle.mockHtml,
     tokensCss: bundle.tokensCss,
+    scope,
   });
   return {
     packageRoot: scaffold.packageRoot,
@@ -2029,7 +2047,12 @@ export function recordDesignElementNpmPublish(opts: {
   }
   const meta = DesignElementMetaSchema.parse({
     ...JSON.parse(readFileSync(metaPath, "utf-8")),
-    npmPackage: opts.npmPackage || jamPackageNameForElement(opts.elementId),
+    npmPackage:
+      opts.npmPackage ||
+      jamPackageNameForElement(
+        opts.elementId,
+        resolveProjectRegistryScopes({ projectRoot: opts.projectRoot })[0],
+      ),
     npmVersion: opts.npmVersion,
     updatedAt: new Date().toISOString(),
   });

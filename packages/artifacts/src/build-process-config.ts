@@ -31,7 +31,10 @@ import {
   goldenProjectNpmrc,
   renderCiWorkflowYaml,
 } from "./ci-workflows.js";
-import { NPM_PRIVATE_SCOPES } from "./npm-registry.js";
+import {
+  NPM_PRIVATE_SCOPES,
+  resolveProjectRegistryScopes,
+} from "./npm-registry.js";
 
 /** Files/dirs sampled into the evidence bundle (content truncated). */
 const EVIDENCE_FILES = [
@@ -241,11 +244,18 @@ export function collectBuildProcessEvidence(opts: {
     // must follow (pnpm ignores env refs in committed .npmrc; containers
     // generate .npmrc from build ARGs). Prevents improvised misconfigurations.
     if (referenceSpec.kind.startsWith("node-")) {
+      // Golden registry patterns for node projects: reviewed idioms the LLM
+      // must follow (pnpm ignores env refs in committed .npmrc; containers
+      // generate .npmrc from build ARGs). Scopes come from the project's
+      // config / .npmrc discovery, not a hardcoded list.
+      const projectScopes = resolveProjectRegistryScopes({
+        projectRoot: root,
+      });
       parts.push(
         "Golden committed .npmrc for node projects (literal loopback — adapt scopes to this project):",
-        goldenProjectNpmrc(NPM_PRIVATE_SCOPES),
+        goldenProjectNpmrc(projectScopes),
         "Golden Dockerfile dependency stage for node consumers (ARG-driven, generated .npmrc, frozen install — adapt to the project's stage layout):",
-        goldenDockerfileDepsSection(NPM_PRIVATE_SCOPES),
+        goldenDockerfileDepsSection(projectScopes),
         "",
       );
     }

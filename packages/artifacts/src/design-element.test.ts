@@ -49,6 +49,13 @@ function tmp(name: string): string {
   return mkdtempSync(join(tmpdir(), `sc-el-${name}-`));
 }
 
+/** Simulate a Jam-estate project: .npmrc carries the estate scope. */
+function tmpJam(name: string): string {
+  const root = tmp(name);
+  writeFileSync(join(root, ".npmrc"), "@jam:registry=http://127.0.0.1:4873/\n");
+  return root;
+}
+
 const SAMPLE_MOCK = `<!DOCTYPE html>
 <html data-theme="dark">
 <head><style>
@@ -65,7 +72,7 @@ const SAMPLE_MOCK = `<!DOCTYPE html>
 
 describe("design-element publish / resolve", () => {
   it("publishes to project library and bumps versions", () => {
-    const root = tmp("pub");
+    const root = tmpJam("pub");
     try {
       const v1 = publishDesignElement({
         projectRoot: root,
@@ -277,7 +284,7 @@ describe("design-element extract / import / pack", () => {
   });
 
   it("extractAndPublishDesignElementFromLoop writes library entry", () => {
-    const root = tmp("extract-loop");
+    const root = tmpJam("extract-loop");
     try {
       const loop = createDesignLoopMeta({
         projectId: "p1",
@@ -368,7 +375,8 @@ describe("listExtractableDesignElementsFromMock", () => {
     );
     assert.equal(
       listed.find((c) => c.id === "menubar")?.npmPackage,
-      "@jam/menubar",
+      // No projectRoot → built-in default scope.
+      "@slopcontrol/menubar",
     );
   });
 
@@ -401,6 +409,7 @@ describe("listExtractableDesignElementsFromMock", () => {
     const extracted = extractDesignElementFromMock({
       html: RICH_MOCK,
       elementId: "menubar",
+      projectRoot: tmpJam("extract-listed"),
     });
     assert.equal(extracted.elementId, "menubar");
     assert.equal(extracted.label, "Menubar / top navigation");
@@ -422,7 +431,7 @@ describe("listExtractableDesignElementsFromMock", () => {
   });
 
   it("copies project source into src and scaffolds @jam package", () => {
-    const root = tmp("src-menubar");
+    const root = tmpJam("src-menubar");
     try {
       const srcPath = join(
         root,
@@ -468,7 +477,7 @@ describe("listExtractableDesignElementsFromMock", () => {
       });
       assert.equal(meta.id, "menubar");
       assert.equal(meta.hasCode, true);
-      assert.equal(jamPackageNameForElement(meta.id), "@jam/menubar");
+      assert.equal(jamPackageNameForElement(meta.id, "@jam"), "@jam/menubar");
       const pkgPath = join(
         root,
         ".slopcontrol",
@@ -508,7 +517,7 @@ describe("listExtractableDesignElementsFromMock", () => {
   });
 
   it("mock-only element still gets npm-package with mock export", () => {
-    const root = tmp("mock-only");
+    const root = tmpJam("mock-only");
     try {
       const meta = publishDesignElement({
         projectRoot: root,

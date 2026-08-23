@@ -26,7 +26,7 @@ describe("ci workflow templates", () => {
   it("ci.yml generates .npmrc from secrets for registry-aware toolchains", () => {
     const spec = defaultToolchainSpec("node-pnpm");
     assert.ok(spec);
-    const yaml = renderCiWorkflowYaml(spec)!;
+    const yaml = renderCiWorkflowYaml(spec, ["@jam", "@jamroast", "@slopcontrol"])!;
     const npmrcIdx = yaml.indexOf("Generate .npmrc from SlopControl secrets");
     const installIdx = yaml.indexOf("pnpm install --frozen-lockfile");
     assert.ok(npmrcIdx !== -1, "npmrc step present");

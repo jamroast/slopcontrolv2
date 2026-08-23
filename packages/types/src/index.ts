@@ -805,6 +805,12 @@ export const ProjectConfigSchema = z.object({
    * changes should auto-publish to the registry after phases complete.
    */
   componentLibrary: z.boolean().default(false),
+  /**
+   * Private npm scopes this project publishes/consumes (e.g. ["@acme"]).
+   * Resolution: this config → scopes discovered from the project's .npmrc
+   * lines pointing at the SlopControl registry → ["@slopcontrol"].
+   */
+  registryScopes: z.array(z.string().min(1)).optional(),
 });
 
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
