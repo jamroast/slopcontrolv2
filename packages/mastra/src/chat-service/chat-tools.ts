@@ -400,7 +400,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
 
 const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   get_run:
-    "Get one run by runId (from list_runs). Requires runId — do not call this without a specific run id.",
+    "Get one run by runId (from list_runs). Requires runId. Returns research_conclusion (never truncated) when in_review — use instead of reading truncated research_output.",
   wait_for_run:
     "Poll a run until it leaves researching/drafting/designing/developing (or times out). Requires runId from list_runs or a just-started lifecycle tool. Use this instead of repeatedly calling get_run. When it returns a settled stage, brief the operator — do not invent progress.",
   get_run_steps:
@@ -412,7 +412,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   list_phases:
     "List phases for the project (id, status, title).",
   get_operator_suggestions:
-    "Operator next-actions for the current project state.",
+    "Operator next-actions: blocked-run diagnosis, handoffFollowUps with ready start_change briefs, and estateNotes (research-surfaced constraints). Prefer this over ask when follow-up work is already in a completed phase handoff.",
   get_development_report:
     "Development report for a run. Prefer list_runs first, then pass runId.",
   get_ask:
@@ -662,11 +662,11 @@ function compactList(items: unknown, label: string): string | null {
  * Drop session dumps / HTML / nested reports so a 4k clip cannot hide the
  * operator-facing answer (same class of bug as agent `{ reply }` last).
  */
-export function compactChatToolPayload(raw: string, _toolName?: string): string {
+export function compactChatToolPayload(raw: string, toolName?: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return raw;
   const max =
-    _toolName === "ask"
+    toolName === "ask"
       ? CHAT_ASK_TOOL_RESULT_MAX_CHARS
       : CHAT_TOOL_RESULT_MAX_CHARS;
 
@@ -686,6 +686,16 @@ export function compactChatToolPayload(raw: string, _toolName?: string): string 
 
   try {
     const parsed = JSON.parse(trimmed) as unknown;
+    if (toolName === "get_run" && parsed && typeof parsed === "object") {
+      const runShaped = shapeGetRunForChat(parsed as Record<string, unknown>);
+      if (runShaped) return runShaped;
+    }
+    if (toolName === "get_operator_suggestions" && parsed && typeof parsed === "object") {
+      const sugShaped = shapeOperatorSuggestionsForChat(
+        parsed as Record<string, unknown>,
+      );
+      if (sugShaped) return sugShaped;
+    }
     const shaped = shapeJsonForChat(parsed);
     if (shaped) return shaped;
   } catch {
@@ -693,6 +703,69 @@ export function compactChatToolPayload(raw: string, _toolName?: string): string 
   }
 
   return extractDispatchedReply(raw);
+}
+
+function shapeOperatorSuggestionsForChat(obj: Record<string, unknown>): string | null {
+  const parts: string[] = [];
+  if (typeof obj.message === "string" && obj.message.trim()) {
+    parts.push(obj.message.trim());
+  }
+  const followUps = obj.handoffFollowUps;
+  if (Array.isArray(followUps) && followUps.length > 0) {
+    parts.push("Handoff follow-ups (prefer start_change over new ask):");
+    for (const item of followUps.slice(0, 5)) {
+      if (!item || typeof item !== "object") continue;
+      const row = item as Record<string, unknown>;
+      const step = typeof row.nextStep === "string" ? row.nextStep : "";
+      const brief =
+        typeof row.startChangeBrief === "string" ? row.startChangeBrief : "";
+      if (step) parts.push(`- ${step}`);
+      if (brief) parts.push(clipText(brief, 800));
+    }
+  }
+  const estate = obj.estateNotes;
+  if (Array.isArray(estate) && estate.length > 0) {
+    parts.push("Estate constraints:");
+    for (const note of estate) {
+      if (typeof note === "string" && note.trim()) parts.push(`- ${note.trim()}`);
+    }
+  }
+  const sug = obj.suggestions;
+  if (sug && typeof sug === "object" && !Array.isArray(sug)) {
+    const s = sug as Record<string, unknown>;
+    if (typeof s.title === "string") parts.push(`Diagnosis: ${s.title}`);
+    if (Array.isArray(s.actions)) {
+      for (const a of s.actions.slice(0, 6)) {
+        if (typeof a === "string") parts.push(`- ${a}`);
+      }
+    }
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
+}
+
+function shapeGetRunForChat(obj: Record<string, unknown>): string | null {
+  const researchConclusion =
+    typeof obj.research_conclusion === "string" && obj.research_conclusion.trim()
+      ? obj.research_conclusion.trim()
+      : "";
+  if (!researchConclusion) return null;
+  const runId = typeof obj.id === "string" ? obj.id : "";
+  const stage = typeof obj.stage === "string" ? obj.stage : "";
+  const phaseId =
+    typeof obj.phase_id === "string" ? obj.phase_id : "";
+  const lines = [
+    runId ? `run ${runId}${stage ? ` stage=${stage}` : ""}` : null,
+    phaseId ? `phase ${phaseId}` : null,
+    `Research conclusion: ${researchConclusion}`,
+  ].filter(Boolean);
+  const researchLen =
+    typeof obj.research_output === "string" ? obj.research_output.length : 0;
+  if (researchLen > 4_000) {
+    lines.push(
+      `(Full RESEARCH.md is ${researchLen} chars — conclusion above is authoritative; get_phase_status for phase doc.)`,
+    );
+  }
+  return lines.join("\n");
 }
 
 function shapeJsonForChat(parsed: unknown): string | null {

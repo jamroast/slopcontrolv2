@@ -23,6 +23,9 @@ import {
   readRunHandoff,
   readLatestHandoffForPhase,
   handoffSummary,
+  collectHandoffFollowUpSuggestions,
+  detectResearchConstraintNote,
+  readResearchConclusionForPhase,
   buildAskTaskDescription,
   writeAskArtifacts,
   isAskAgentTimeoutError,
@@ -1230,6 +1233,10 @@ function buildRunPayload(run: Run) {
     readRunHandoff(project.rootPath, run.id) ??
     (phase ? readLatestHandoffForPhase(project.rootPath, phase.id) : null);
   const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
+  const researchConclusion =
+    phase && (run.stage === "in_review" || run.stage === "accepted")
+      ? readResearchConclusionForPhase(project.rootPath, phase.id)
+      : "";
 
   return {
     id: run.id,
@@ -1240,6 +1247,7 @@ function buildRunPayload(run: Run) {
     merged_run_ids: run.mergedRunIds,
     archive: archiveManifest,
     research_output: phase ? safeReadResearch(project.rootPath, phase.id) : "",
+    research_conclusion: researchConclusion || null,
     dev_output: devOutput,
     phase_doc: phaseDoc,
     phase_id: phase?.id ?? null,
@@ -6935,16 +6943,32 @@ app.get("/projects/:projectId/operator-suggestions", (req, res) => {
   }
 
   if (!diagnosis) {
+    const handoffFollowUps = collectHandoffFollowUpSuggestions(project.rootPath, 5);
+    const research = phaseId
+      ? safeReadResearch(project.rootPath, phaseId)
+      : "";
+    const estateNote = research ? detectResearchConstraintNote(research) : null;
     res.json({
       projectId: project.id,
       phaseId: phaseId ?? null,
       runId: runId ?? null,
       suggestions: null,
+      handoffFollowUps:
+        handoffFollowUps.length > 0 ? handoffFollowUps : null,
+      estateNotes: estateNote ? [estateNote] : null,
       message:
-        "No persisted diagnosis yet. After a failed/blocked develop run, suggestions appear here.",
+        handoffFollowUps.length > 0
+          ? "No blocked-run diagnosis — see handoffFollowUps for ready follow-up work from completed phases."
+          : "No persisted diagnosis yet. After a failed/blocked develop run, suggestions appear here.",
     });
     return;
   }
+
+  const handoffFollowUps = collectHandoffFollowUpSuggestions(project.rootPath, 3);
+  const research = phaseId
+    ? safeReadResearch(project.rootPath, phaseId)
+    : "";
+  const estateNote = research ? detectResearchConstraintNote(research) : null;
 
   res.json({
     projectId: project.id,
@@ -6963,6 +6987,8 @@ app.get("/projects/:projectId/operator-suggestions", (req, res) => {
       fingerprint: diagnosis.fingerprint,
       updatedAt: diagnosis.updatedAt,
     },
+    handoffFollowUps: handoffFollowUps.length > 0 ? handoffFollowUps : null,
+    estateNotes: estateNote ? [estateNote] : null,
   });
 });
 

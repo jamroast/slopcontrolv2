@@ -731,7 +731,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "get_operator_suggestions",
       description:
-        "Structured operator actions for the latest blocked/failed develop run (or a specific phase/run). Use this to tell the human how to fix env/keys/services — do not invent worktree-only product workarounds.",
+        "Structured operator actions for the latest blocked/failed develop run (or a specific phase/run). Also returns handoffFollowUps from completed phases (ready start_change briefs) and estateNotes (research-surfaced constraints). Use this to tell the human how to fix env/keys/services — do not invent worktree-only product workarounds.",
       inputSchema: {
         type: "object",
         properties: {

@@ -1,4 +1,10 @@
-import { readProjectConfig, readRunHandoff, readDiagnosis, readLatestDiagnosisForPhase } from "@slopcontrol/artifacts";
+import {
+  readProjectConfig,
+  readRunHandoff,
+  readDiagnosis,
+  readLatestDiagnosisForPhase,
+  readResearchConclusionForPhase,
+} from "@slopcontrol/artifacts";
 
 export type RunSettledInput = {
   id: string;
@@ -28,11 +34,19 @@ export function buildRunSettledGuidance(
   ctx?: RunSettledContext,
 ): string {
   if (run.stage === "in_review") {
-    return [
+    const rootPath = projectRootForRun(run, ctx);
+    const conclusion =
+      rootPath && run.phaseId
+        ? readResearchConclusionForPhase(rootPath, run.phaseId)
+        : "";
+    const parts = [
       "Research is ready for operator review.",
+      conclusion ? `Research conclusion: ${conclusion}` : null,
       "Park advance_run (or start_development) when they want to proceed — do not send them to a dashboard Approve button.",
       "Use submit_review request_changes only to send the plan back.",
-    ].join(" ");
+      "Call get_run for research_conclusion if the brief was truncated.",
+    ].filter(Boolean);
+    return parts.join(" ");
   }
 
   if (run.stage === "complete") {

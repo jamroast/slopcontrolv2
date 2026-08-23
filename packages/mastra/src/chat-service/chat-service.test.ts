@@ -1431,6 +1431,37 @@ describe("chat dispatch result shaping", () => {
     );
   });
 
+  it("surfaces get_run research_conclusion instead of clipping research_output", () => {
+    const raw = JSON.stringify({
+      id: "run-abc",
+      stage: "in_review",
+      phase_id: "11-test",
+      research_conclusion: "Repoint esbuild to src/dev.ts; keep targeted externals.",
+      research_output: "# RESEARCH\n".repeat(500),
+    });
+    const shaped = compactChatToolPayload(raw, "get_run");
+    assert.match(shaped, /Research conclusion: Repoint esbuild/);
+    assert.ok(!shaped.includes("# RESEARCH"));
+  });
+
+  it("surfaces handoffFollowUps from get_operator_suggestions", () => {
+    const raw = JSON.stringify({
+      handoffFollowUps: [
+        {
+          phaseId: "10-x",
+          nextStep: "Fix container exit-0 restart loop",
+          startChangeBrief: "Title: Fix container\n\nGoal: bundle src/dev.ts",
+        },
+      ],
+      estateNotes: ["@jam/service-token extensionless ESM imports"],
+      message: "No blocked-run diagnosis",
+    });
+    const shaped = compactChatToolPayload(raw, "get_operator_suggestions");
+    assert.match(shaped, /Handoff follow-ups/);
+    assert.match(shaped, /exit-0 restart loop/);
+    assert.match(shaped, /@jam\/service-token/);
+  });
+
   it("surfaces development-report summary instead of a nested dump", () => {
     const dump = JSON.stringify({
       projectId: "p1",

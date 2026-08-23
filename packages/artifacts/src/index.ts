@@ -46,6 +46,7 @@ export * from "./learnings.js";
 export * from "./failure-classify.js";
 export * from "./compose-teardown.js";
 export * from "./change-intent.js";
+export * from "./research-intent-reconcile.js";
 export * from "./blueprint-probes.js";
 export * from "./redact-secrets.js";
 export * from "./plan-progress.js";

@@ -78,6 +78,7 @@ import {
   phaseDocAlignsWithResearch,
   clearMisalignedPhaseDoc,
   formatChangeIntentPromptBlock,
+  type ChangeIntent,
   buildAdjacentPhaseContextPack,
   buildSiblingBrandRefPack,
   descriptionMentionsBrandTheming,
@@ -233,6 +234,7 @@ import {
   type ContinueIntent,
   type PlanContinueIntent,
   type DependencyIntent,
+  reconcileChangeIntentFromResearch,
 } from "@slopcontrol/artifacts";
 import {
   ensureGitInitialized,
@@ -266,6 +268,7 @@ import {
   PLAN_START_INTENT_DEFAULT,
   type PlanStartIntent,
   classifyDependencyIntentViaLlm,
+  classifyIntentResearchConflict,
   classifyElementHonorViaLlm,
   classifyVerifyFailureViaLlm,
   classifyAskInvestigateEngineViaLlm,
@@ -2183,6 +2186,42 @@ export class ChangeOrchestrator {
   /**
    * Shared CROSS-PROJECT DEPS + DEPENDENCY INTENT prompt blocks for ask/agent/plan/research.
    */
+  /**
+   * LLM-classify whether RESEARCH.md explicitly contradicts the phase's
+   * Change Intent (never regex — the negation phrasing is judgement).
+   * Returns null on any failure (no annotation, draft proceeds unmodified).
+   */
+  private async detectIntentResearchConflict(
+    intent: ChangeIntent,
+    research: string,
+  ): Promise<{ rejectedWording: string; correction?: string } | null> {
+    if (!research.trim()) return null;
+    try {
+      const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
+        "classification",
+      );
+      const conflict = await classifyIntentResearchConflict({
+        endpoint,
+        modelId,
+        intentText: `${intent.title}\n${intent.goal}\n${intent.rawDescription}`,
+        research,
+        timeoutMs: 90_000,
+      });
+      if (!conflict.hasConflict || !conflict.rejectedWording?.trim()) {
+        return null;
+      }
+      return {
+        rejectedWording: conflict.rejectedWording.trim(),
+        correction: conflict.correction?.trim(),
+      };
+    } catch (err) {
+      slog.warn("design-loop", "intent-research conflict classify failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
   private async buildCrossProjectDependencyPrompt(opts: {
     projectRoot: string;
     message?: string;
@@ -5378,6 +5417,26 @@ Phase id: ${phase.id}`;
       return "failed";
     }
 
+    const intentForReconcile = await ensureChangeIntentAsync(
+      project.rootPath,
+      phase.id,
+      phase.description,
+      { registry: this.ctx.registry },
+    );
+    const reconciled = reconcileChangeIntentFromResearch(
+      project.rootPath,
+      phase.id,
+      intentForReconcile,
+      await this.detectIntentResearchConflict(intentForReconcile, researchDoc),
+    );
+    if (reconciled.updated) {
+      log(
+        project,
+        run,
+        `--- Reconciled Change Intent from research ---\n${reconciled.patches.map((p) => `- ${p}`).join("\n")}`,
+      );
+    }
+
     onStage?.("drafting");
     return this.draftPhase({
       project,
@@ -5487,6 +5546,18 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
 `
             : "";
 
+    const hasDockerCompose =
+      existsSync(join(project.rootPath, "docker-compose.yml")) ||
+      existsSync(join(project.rootPath, "docker-compose.yaml"));
+    const infraSmokeNote =
+      intent.changeKind === "backend" && hasDockerCompose
+        ? `
+Infra / container smoke (mandatory — docker-compose.yml present):
+- ## Automated Checks MUST include a finite runtime probe: \`docker compose up -d --build <svc>\` plus \`trap 'docker compose down' EXIT\`, then curl/wget the mapped port.
+- Prove the container stays Up (not Restarting/exited) and returns a non-empty response — build-only checks alone are insufficient for backend infra phases.
+`
+        : "";
+
     const draftAcceptance = readPhaseDesignAcceptance(
       project.rootPath,
       phase.id,
@@ -5593,7 +5664,7 @@ Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 
 ${intentBlock}
-${draftAcceptanceNote}${designRoutingNote}${draftAntiAuditThemeNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
+${draftAcceptanceNote}${designRoutingNote}${infraSmokeNote}${draftAntiAuditThemeNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
 Do NOT reuse or retitle a prior phase plan (e.g. host.docker.internal / extra_hosts)
 unless RESEARCH explicitly asks for that work. If RESEARCH is about model naming /
 :cloud passthrough / model-resolver, the PHASE must plan that — not networking.
@@ -6184,13 +6255,27 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     log(project, run, `--- Review feedback ---\n${feedback ?? ""}`);
     const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
     const research = readResearch(project.rootPath, phase.id);
-    const intent = await ensureChangeIntentAsync(
+    let intent = await ensureChangeIntentAsync(
       project.rootPath,
       phase.id,
       phase.description,
       { registry: this.ctx.registry },
     );
-    const intentBlock = formatChangeIntentPromptBlock(intent);
+    const reconciled = reconcileChangeIntentFromResearch(
+      project.rootPath,
+      phase.id,
+      intent,
+      await this.detectIntentResearchConflict(intent, research),
+    );
+    if (reconciled.updated) {
+      log(
+        project,
+        run,
+        `--- Reconciled Change Intent on review revise ---\n${reconciled.patches.map((p) => `- ${p}`).join("\n")}`,
+      );
+      intent = reconciled.intent;
+    }
+    let intentBlock = formatChangeIntentPromptBlock(intent);
     const brandAsk = changeIntentIsBrandTheming(intent);
     const themeWiringOnly = changeIntentIsThemeWiringOnly(intent);
     const stockAdoptionAsk = intent.stockAdoption === true;
