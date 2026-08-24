@@ -25,6 +25,9 @@ export const VerifyFailureLlmSchema = z.object({
   summary: z.string(),
   tags: z.array(z.string()),
   codingAgentShouldFix: z.boolean(),
+  /** True when this failure is fixable by the harness/environment (deps
+   * install, starting a service, fixing a port/hostname), not product code. */
+  harnessRecoverable: z.boolean().optional(),
   audience: z.enum(["operator", "coding"]),
   operatorActions: z.array(z.string()),
   lesson: z.string().optional(),
@@ -48,6 +51,8 @@ export interface VerifyFailureSignals {
   httpStatus?: number | null;
   /** ECONNREFUSED seen in output. */
   connectionRefused?: boolean;
+  /** ENOTFOUND / getaddrinfo / no such host — hostname cannot resolve. */
+  hostnameUnresolved?: boolean;
 }
 
 export const VERIFY_FAILURE_SYSTEM_PROMPT = `You are SlopControl's verify-failure router. A step in a project's verification suite failed. Classify the failure into exactly one class so the right audience hears about it. Respond with ONLY a single JSON object.
@@ -63,6 +68,7 @@ Classes:
 Rules:
 - Never recommend switching product models to free-tier IDs; tests should use llmTestProfile=local/fixture instead.
 - codingAgentShouldFix: true for "process" (broken check) and "product"; false for "infra", "env", "model" — those need an operator or harness change.
+- harnessRecoverable: true when the failure can be fixed by changing the harness environment — installing deps, starting a missing service/container, fixing a port or hostname binding — WITHOUT touching product code. true for infra like a stopped database the harness can start; false when only the operator can fix it (missing API key, entitlement) or the fix is product code.
 - audience mirrors that: "coding" when the coding agent should fix it, "operator" otherwise.
 - operatorActions: concrete operator steps, only when audience is "operator"; otherwise an empty array.
 - tags: short kebab-case labels for routing/search (e.g. ["db","connection-refused"], ["check-timeout","broken-check"], ["missing-env","ollama"]). Empty array when nothing distinctive.
@@ -115,6 +121,10 @@ export function parseVerifyFailureLlmPayload(parsed: unknown): VerifyFailureLlmR
       ? asObj.tags.filter((t): t is string => typeof t === "string")
       : [],
     codingAgentShouldFix: shouldFix,
+    harnessRecoverable:
+      typeof asObj.harnessRecoverable === "boolean"
+        ? asObj.harnessRecoverable
+        : undefined,
     audience: audienceRaw,
     operatorActions: Array.isArray(asObj.operatorActions)
       ? asObj.operatorActions.filter(

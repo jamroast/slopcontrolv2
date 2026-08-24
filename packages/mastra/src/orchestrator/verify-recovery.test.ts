@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { recoverInvestigateWithRetry } from "./verify-recovery.js";
+import { attemptVerifyRecovery, recoverInvestigateWithRetry } from "./verify-recovery.js";
 import type { RecoveryExecutePayload } from "@slopcontrol/artifacts";
 
 const PAYLOAD: RecoveryExecutePayload = {
@@ -81,5 +81,45 @@ describe("recoverInvestigateWithRetry", () => {
       /failed after 2 attempts: investigator emitted no RECOVERY_EXECUTE JSON/,
     );
     assert.equal(calls, 2);
+  });
+});
+
+describe("attemptVerifyRecovery eligibility", () => {
+  const step = {
+    name: "post-merge-root-verify:testCommand",
+    command: "npm test",
+    exitCode: 1,
+    output: "getaddrinfo ENOTFOUND jamauth-postgres",
+  };
+
+  it("not applicable when the classifier did not mark it harness-recoverable", async () => {
+    const result = await attemptVerifyRecovery({
+      projectRoot: "/tmp/nope",
+      verifyCwd: "/tmp/nope",
+      step,
+      diagnosis: { harnessRecoverable: false },
+    });
+    assert.equal(result.kind, "not_applicable");
+  });
+
+  it("not applicable with no diagnosis at all (fail closed)", async () => {
+    const result = await attemptVerifyRecovery({
+      projectRoot: "/tmp/nope",
+      verifyCwd: "/tmp/nope",
+      step,
+    });
+    assert.equal(result.kind, "not_applicable");
+  });
+
+  it("proceeds past the gate when the classifier marks it harness-recoverable", async () => {
+    // A testCommand infra failure (ENOTFOUND) used to be regex-ineligible;
+    // now the classifier's flag is the only gate.
+    const result = await attemptVerifyRecovery({
+      projectRoot: "/tmp/nope",
+      verifyCwd: "/tmp/nope",
+      step,
+      diagnosis: { harnessRecoverable: true },
+    });
+    assert.notEqual(result.kind, "not_applicable");
   });
 });

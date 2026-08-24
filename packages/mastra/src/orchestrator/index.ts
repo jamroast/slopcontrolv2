@@ -53,7 +53,6 @@ import {
   promoteLearning,
   isMissingNodeBinFailure,
   verifyRecoveryExhausted,
-  isHarnessRecoverableStep,
   readAppendix,
   readBlueprint,
   readPhaseDoc,
@@ -1679,16 +1678,23 @@ export async function runSuccessChecks(
         ...installStep,
         output: `Dependency install failed.\n${install.output}`,
       };
-      if (
-        !opts?.recoveryAttempted &&
-        opts?.registry &&
-        isHarnessRecoverableStep(failureStep)
-      ) {
+      if (!opts?.recoveryAttempted && opts?.registry) {
+        // Classify the install failure (LLM) to decide recovery eligibility —
+        // never a step-name regex.
+        const installDiagnosis = await diagnoseVerifyFailureLlmFirst(
+          opts.registry,
+          {
+            output: failureStep.output,
+            firstFailure: failureStep,
+            sourcePhaseId: opts?.phaseId,
+          },
+        );
         const recovery = await attemptVerifyRecovery({
           projectRoot: project.rootPath,
           verifyCwd: cwd,
           step: failureStep,
           registry: opts.registry,
+          diagnosis: installDiagnosis,
         });
         if (recovery.kind === "executed" && recovery.exitCode === 0) {
           return runSuccessChecks(project, phaseDoc, cwd, {
@@ -8401,14 +8407,15 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           );
 
         // Structural flag from runSuccessChecks is authoritative; the output
-        // marker is kept as a fallback for pre-flag result shapes.
+        // marker is kept as a fallback for pre-flag result shapes. Recovery
+        // eligibility came from the classifier's harnessRecoverable flag.
         const harnessRecoveryExhausted =
           (checks.recoveryAttempted === true ||
             verifyRecoveryExhausted(
               `${checks.output}\n${checks.firstFailure?.output ?? ""}`,
             )) &&
           checks.firstFailure != null &&
-          isHarnessRecoverableStep(checks.firstFailure);
+          diagnosis.harnessRecoverable === true;
 
         if (
           harnessRecoveryExhausted &&
@@ -8447,7 +8454,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             appendAppendix(
               project.rootPath,
               phase.id,
-              `${lastDiagnosisCard}\n\nDEV_BLOCKED — infra strikes exhausted.`,
+              `${lastDiagnosisCard}\n\nDEV_BLOCKED — infra strikes exhausted. Restore the dependency the diagnosis names (${diagnosis.rootCause.slice(0, 160)}), then retry_root_verify — retry_development re-runs the same failing command.`,
             );
             log(project, run, COMPLETION_TOKENS.DEV_BLOCKED);
             writePhaseStatus(project.rootPath, phase.id, "blocked");
@@ -8494,7 +8501,9 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               lastDiagnosisCard,
               "",
               `DEV_BLOCKED — same failure diagnosis repeated ${diagnosisStreak} times without progress.`,
-              "Operator/coding must change approach (fix PHASE check, product code, or restore infra) before retry_development.",
+              diagnosis.class === "infra" || diagnosis.audience === "operator"
+                ? `Restore the dependency the diagnosis names (${diagnosis.rootCause.slice(0, 160)}), then retry_root_verify — do NOT retry_development; the same command will fail the same way.`
+                : "Operator/coding must change approach (fix PHASE check or product code) before retry_development.",
             ].join("\n"),
           );
           log(project, run, COMPLETION_TOKENS.DEV_BLOCKED);

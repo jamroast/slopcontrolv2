@@ -201,6 +201,15 @@ describe("extractFailureSignals", () => {
 
     const refused = extractFailureSignals("connect ECONNREFUSED 127.0.0.1:5432");
     assert.equal(refused.connectionRefused, true);
+
+    const unresolved = extractFailureSignals(
+      "getaddrinfo ENOTFOUND jamauth-postgres",
+    );
+    assert.equal(unresolved.hostnameUnresolved, true);
+    assert.equal(unresolved.connectionRefused, false);
+
+    const neither = extractFailureSignals("AssertionError: boom");
+    assert.equal(neither.hostnameUnresolved, false);
   });
 
   it("reports null missing-command fields when no command was parsed", () => {

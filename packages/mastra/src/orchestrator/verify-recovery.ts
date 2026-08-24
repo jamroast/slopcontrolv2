@@ -3,7 +3,6 @@ import type { LlmRegistry } from "@slopcontrol/llm";
 import {
   buildVerifyRecoveryEvidence,
   formatVerifyRecoveryLog,
-  isHarnessRecoverableStep,
   parseRecoveryExecutePayload,
   promoteLearning,
   validateAndRunRecoveryExecute,
@@ -135,8 +134,14 @@ export async function attemptVerifyRecovery(opts: {
   verifyCwd: string;
   step: VerifyRecoveryStepInput;
   registry?: LlmRegistry;
+  /** Classification already computed upstream — eligibility comes from the
+   * classifier's harnessRecoverable judgement, not a step-name regex. */
+  diagnosis?: { harnessRecoverable?: boolean };
 }): Promise<VerifyRecoveryAttemptResult> {
-  if (!isHarnessRecoverableStep(opts.step)) {
+  // Eligibility: the LLM classifier decided whether this failure is
+  // harness-recoverable (harnessRecoverable) — never a step-name regex.
+  // When no classification is available, fail closed (not recoverable).
+  if (opts.diagnosis?.harnessRecoverable !== true) {
     return { kind: "not_applicable" };
   }
 

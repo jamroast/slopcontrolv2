@@ -20,6 +20,9 @@ export type ClassifiedFailure = {
   learning?: LearningCandidate;
   /** Infra failures should not be "fixed" by the coding agent rewriting app code. */
   codingAgentShouldFix: boolean;
+  /** Classifier: fixable by the harness/environment (deps, services, ports,
+   * hostname), not product code. Undefined when unclassified. */
+  harnessRecoverable?: boolean;
   /** Who should act on this failure. */
   audience: "operator" | "coding";
   /** Concrete operator steps (keys, services, sync) — empty when coding should fix. */
@@ -153,6 +156,7 @@ export type FailureDiagnosis = {
   nextActions: string;
   fingerprint: string;
   codingAgentShouldFix: boolean;
+  harnessRecoverable?: boolean;
   audience: "operator" | "coding";
   operatorActions: string[];
   /** Classifier tags (e.g. long-lived, host-utility) for retry routing. */
@@ -848,6 +852,7 @@ export type FailureClassificationSignals = {
   exitCode: number | null;
   httpStatus: number | null;
   connectionRefused: boolean;
+  hostnameUnresolved: boolean;
 };
 
 export function extractFailureSignals(
@@ -868,6 +873,10 @@ export function extractFailureSignals(
     exitCode: opts?.exitCode ?? null,
     httpStatus: http?.[1] ? Number.parseInt(http[1], 10) : null,
     connectionRefused: /econnrefused|connection refused/i.test(stepCtx),
+    hostnameUnresolved:
+      /enotfound|getaddrinfo|no such host|could not resolve|name or service not known/i.test(
+        stepCtx,
+      ),
   };
 }
 
@@ -878,6 +887,7 @@ export type LlmFailureClassification = {
   summary?: string;
   tags?: string[];
   codingAgentShouldFix?: boolean;
+  harnessRecoverable?: boolean;
   audience?: string;
   operatorActions?: string[];
   lesson?: string;
@@ -944,6 +954,10 @@ export function mergeLlmFailureClassification(
       : `Verify failure classified as ${kind} by the LLM classifier; address the root cause in the summary before re-running.`;
   const built = build(failureClassToLearningKind(kind), confidence, summary, tags, {
     codingAgentShouldFix,
+    harnessRecoverable:
+      typeof llm.harnessRecoverable === "boolean"
+        ? llm.harnessRecoverable
+        : undefined,
     lesson,
     evidence: opts?.evidence,
     opts: { sourcePhaseId: opts?.sourcePhaseId, sourceRunId: opts?.sourceRunId },
@@ -1081,6 +1095,7 @@ function toFailureDiagnosis(
     nextActions,
     fingerprint,
     codingAgentShouldFix: classified.codingAgentShouldFix,
+    harnessRecoverable: classified.harnessRecoverable,
     audience: classified.audience,
     operatorActions: classified.operatorActions,
     tags: classified.tags,
@@ -1227,6 +1242,7 @@ function build(
   tags: string[],
   extra: {
     codingAgentShouldFix: boolean;
+    harnessRecoverable?: boolean;
     lesson: string;
     evidence?: string;
     opts?: { sourcePhaseId?: string; sourceRunId?: string };
@@ -1246,6 +1262,7 @@ function build(
     summary,
     tags,
     codingAgentShouldFix: extra.codingAgentShouldFix,
+    harnessRecoverable: extra.harnessRecoverable,
     audience,
     operatorActions,
     learning: {

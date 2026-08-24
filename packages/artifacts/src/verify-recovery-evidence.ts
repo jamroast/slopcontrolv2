@@ -75,15 +75,6 @@ function learningHintsForFailure(
   return hints;
 }
 
-export function isHarnessRecoverableStep(step: VerifyRecoveryStepInput): boolean {
-  if (!step.name) return false;
-  if (INSTALL_STEP.test(step.name)) return true;
-  if (/^compose|^docker|^port-/i.test(step.name)) return true;
-  const ctx = `${step.name}\n${step.command ?? ""}\n${step.output ?? ""}`;
-  if (parseInstallErrno(ctx)) return true;
-  return false;
-}
-
 export function buildVerifyRecoveryEvidence(opts: {
   verifyCwd: string;
   projectRoot: string;
