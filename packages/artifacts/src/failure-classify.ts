@@ -1154,7 +1154,7 @@ function nextActionsFor(
   step?: VerifyFailureStep,
 ): string {
   if (classified.class === "infra") {
-    return "Operator: restore runtime dependencies (or fix verifyPreflightCommand), then retry_development. Coding agent: do not invent bring-up scripts.";
+    return "Operator: restore the named dependency (or fix verifyPreflightCommand), then retry_root_verify — retry_development re-runs the same failing command. Coding agent: do not invent bring-up scripts.";
   }
   if (
     classified.class === "process" &&

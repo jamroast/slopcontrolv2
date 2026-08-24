@@ -8334,6 +8334,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             nextActions: diagnosis.nextActions,
             fingerprint: diagnosis.fingerprint,
             codingAgentShouldFix: diagnosis.codingAgentShouldFix,
+            harnessRecoverable: diagnosis.harnessRecoverable,
             tags: diagnosis.tags,
             failingStep: diagnosis.failingStep,
             phaseId: phase.id,
@@ -8405,6 +8406,54 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           /Merge blocked by dirty\/untracked|would be overwritten by merge|slopcontrol-overwrite/i.test(
             `${diagnosis.title}\n${diagnosis.evidence}\n${checks.firstFailure.output}`,
           );
+
+        // Harness-recoverable failure and recovery not yet attempted this
+        // pass → investigate + heal BEFORE counting an infra strike. The
+        // classifier's harnessRecoverable flag is the eligibility gate.
+        if (
+          diagnosis.harnessRecoverable === true &&
+          checks.recoveryAttempted !== true &&
+          !verifyRecoveryExhausted(
+            `${checks.output}\n${checks.firstFailure?.output ?? ""}`,
+          ) &&
+          checks.firstFailure != null
+        ) {
+          const recovery = await attemptVerifyRecovery({
+            projectRoot: project.rootPath,
+            verifyCwd: project.rootPath,
+            step: checks.firstFailure,
+            registry: this.ctx.registry,
+            diagnosis,
+          });
+          if (recovery.kind === "executed") {
+            log(
+              project,
+              run,
+              `--- Verify recovery executed (exit ${recovery.exitCode}) ---\n${recovery.log.slice(0, 600)}`,
+            );
+            if (recovery.exitCode === 0) {
+              // Healed — re-run root checks before any strike/retry routing.
+              const rerun = await runSuccessChecks(project, phaseDoc, project.rootPath, {
+                mode: "verify",
+                forceDepsInstall: true,
+                phaseId: phase.id,
+                recoveryAttempted: true,
+                registry: this.ctx.registry,
+              });
+              if (rerun.ok) {
+                log(project, run, "--- Root verify passed after recovery ---");
+                checks = rerun;
+                // Fall through to the success path below.
+              }
+            }
+          } else if (recovery.kind !== "not_applicable") {
+            log(
+              project,
+              run,
+              `--- Verify recovery ${recovery.kind} ---\n${("reason" in recovery ? recovery.reason : "").slice(0, 400)}`,
+            );
+          }
+        }
 
         // Structural flag from runSuccessChecks is authoritative; the output
         // marker is kept as a fallback for pre-flag result shapes. Recovery
@@ -8563,6 +8612,20 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             project,
             run,
             "--- High-confidence diagnosis; skipping supervisor enrichment ---",
+          );
+          lastErrorHash = currentErrorHash;
+          lastErrorCount = currentErrorCount;
+          continue;
+        }
+
+        // Infra/operator failures are not fixable by another coding turn —
+        // skip the supervisor-enriched coding retry entirely when the
+        // classifier says the coding agent should not fix this.
+        if (diagnosis.codingAgentShouldFix === false) {
+          log(
+            project,
+            run,
+            "--- Skipping coding retry: classifier says not coding-fixable (infra/operator) ---",
           );
           lastErrorHash = currentErrorHash;
           lastErrorCount = currentErrorCount;
@@ -9004,6 +9067,41 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         phaseId: phase.id,
         registry: this.ctx.registry,
       });
+    }
+
+    // Harness-recoverable failure (e.g. stopped test database) — classify,
+    // investigate, heal, re-run before declaring the retry failed.
+    if (!checks.ok && checks.firstFailure) {
+      const diagnosis = await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
+        output: checks.summary || checks.output,
+        firstFailure: checks.firstFailure,
+        sourcePhaseId: phase.id,
+        sourceRunId: run.id,
+      });
+      if (diagnosis.harnessRecoverable === true) {
+        const recovery = await attemptVerifyRecovery({
+          projectRoot: project.rootPath,
+          verifyCwd: project.rootPath,
+          step: checks.firstFailure,
+          registry: this.ctx.registry,
+          diagnosis,
+        });
+        if (recovery.kind === "executed" && recovery.exitCode === 0) {
+          log(
+            project,
+            run,
+            `--- Verify recovery executed on retry (exit 0); re-running checks ---`,
+          );
+          checks = await runSuccessChecks(project, phaseDoc, project.rootPath, {
+            mode: "verify",
+            forceDepsInstall: true,
+            skipPhaseDocValidation: true,
+            phaseId: phase.id,
+            recoveryAttempted: true,
+            registry: this.ctx.registry,
+          });
+        }
+      }
     }
 
     if (checks.ok) {

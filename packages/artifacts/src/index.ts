@@ -1207,6 +1207,8 @@ export type PersistedDiagnosis = {
   nextActions: string;
   fingerprint: string;
   codingAgentShouldFix: boolean;
+  /** Classifier: fixable by harness/environment (deps, services, ports). */
+  harnessRecoverable?: boolean;
   /** Classifier tags for coding-retry routing (long-lived, host-utility, …). */
   tags?: string[];
   failingStep?: {
