@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
+  dockerRowIsWorktreeOwned,
+  freeHostPortsScopedToWorktrees,
+  parseDockerPsRow,
   snapshotCanonicalRuntimeEnv,
   tearDownComposeInDir,
 } from "./compose-teardown.js";
@@ -69,5 +72,70 @@ describe("snapshotCanonicalRuntimeEnv", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  describe("freeHostPortsScopedToWorktrees", () => {
+    it("returns not-attempted for an empty port list", () => {
+      const r = freeHostPortsScopedToWorktrees({
+        ports: [],
+        worktreesRoot: "/tmp/nope",
+      });
+      assert.equal(r.attempted, false);
+      assert.equal(r.ok, true);
+    });
+
+    it("never touches non-worktree containers (operator stack safe)", () => {
+      // No worktree dir on disk → no worktree-owned container can match,
+      // even if something publishes a canonical port.
+      const r = freeHostPortsScopedToWorktrees({
+        ports: [5432],
+        worktreesRoot: "/tmp/slop-no-such-worktrees",
+      });
+      assert.equal(r.ok, true);
+      assert.ok(
+        !r.output.includes("Stopped") ||
+          r.output.includes("No worktree-owned"),
+        `unexpected stop: ${r.output}`,
+      );
+    });
+
+    it("ownership: worktree paths and slopwt- projects only", () => {
+      const wt = "/home/x/.slopcontrol/worktrees/proj-1";
+      // Worktree working_dir → owned
+      assert.equal(
+        dockerRowIsWorktreeOwned({ workingDir: `${wt}/01-phase` }, wt),
+        true,
+      );
+      // slopwt- compose project → owned even without working_dir
+      assert.equal(
+        dockerRowIsWorktreeOwned({ composeProject: "slopwt-01-phase" }, wt),
+        true,
+      );
+      // Operator stack at project root → not owned
+      assert.equal(
+        dockerRowIsWorktreeOwned({ workingDir: "/home/x/Projects/app" }, wt),
+        false,
+      );
+      // Operator compose project name → not owned
+      assert.equal(
+        dockerRowIsWorktreeOwned({ composeProject: "jamauth" }, wt),
+        false,
+      );
+      // No labels at all → not owned (never stop unlabeled containers on canonical ports)
+      assert.equal(dockerRowIsWorktreeOwned({}, wt), false);
+    });
+
+    it("parseDockerPsRow reads the label columns", () => {
+      const row = parseDockerPsRow(
+        'abc123\t0.0.0.0:5430->5432/tcp\tjamauth-postgres\t/Users/x/Projects/jamauth\tjamauth',
+      );
+      assert.equal(row?.id, "abc123");
+      assert.equal(row?.portsCol, "0.0.0.0:5430->5432/tcp");
+      assert.equal(row?.name, "jamauth-postgres");
+      assert.equal(row?.workingDir, "/Users/x/Projects/jamauth");
+      assert.equal(row?.composeProject, "jamauth");
+      assert.equal(parseDockerPsRow(""), null);
+      assert.equal(parseDockerPsRow("  "), null);
+    });
   });
 });

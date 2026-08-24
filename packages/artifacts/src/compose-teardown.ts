@@ -693,9 +693,135 @@ export function freeHostPorts(ports: number[]): ComposeTeardownResult {
   };
 }
 
+/** Parse one `docker ps --format` row (id, ports, name, working_dir, project). */
+type DockerPsRow = {
+  id: string;
+  portsCol: string;
+  name?: string;
+  workingDir?: string;
+  composeProject?: string;
+};
+
+/** Worktree ownership: working_dir under the worktrees tree, or slopwt-* compose project. */
+export function dockerRowIsWorktreeOwned(
+  row: Pick<DockerPsRow, "workingDir" | "composeProject">,
+  worktreesRoot: string,
+): boolean {
+  const wtRoot = worktreesRoot.endsWith("/")
+    ? worktreesRoot
+    : `${worktreesRoot}/`;
+  const wd = row.workingDir?.trim() ?? "";
+  const cp = row.composeProject?.trim() ?? "";
+  return (wd !== "" && wd.startsWith(wtRoot)) || (cp !== "" && cp.startsWith("slopwt-"));
+}
+
+/** Parse the tab-separated docker ps format used by the scoped frees. */
+export function parseDockerPsRow(line: string): DockerPsRow | null {
+  if (!line.trim()) return null;
+  const [id, portsCol, name, workingDir, composeProject] = line.split("\t");
+  if (!id) return null;
+  return {
+    id: id.trim(),
+    portsCol: portsCol ?? "",
+    name: name?.trim() || undefined,
+    workingDir,
+    composeProject,
+  };
+}
+
+/**
+ * Stop containers publishing the given host ports, restricted to containers
+ * owned by this project's worktrees (working_dir under the worktrees tree,
+ * or compose project name starting with slopwt-). Operator stacks on the
+ * project root are never stopped.
+ */
+export function freeHostPortsScopedToWorktrees(opts: {
+  ports: number[];
+  worktreesRoot: string;
+}): ComposeTeardownResult {
+  const unique = [
+    ...new Set(opts.ports.filter((p) => Number.isFinite(p) && p > 0)),
+  ];
+  if (unique.length === 0) {
+    return { attempted: false, ok: true, output: "" };
+  }
+  const ps = spawnSync(
+    "docker",
+    [
+      "ps",
+      "--format",
+      '{{.ID}}\t{{.Ports}}\t{{.Names}}\t{{.Label "com.docker.compose.project.working_dir"}}\t{{.Label "com.docker.compose.project"}}',
+    ],
+    { encoding: "utf-8", timeout: 30_000 },
+  );
+  if (ps.error || (ps.status ?? 1) !== 0) {
+    return {
+      attempted: true,
+      ok: false,
+      output: `docker ps failed: ${ps.error?.message ?? ps.stderr ?? "exit"}`,
+    };
+  }
+  const ids: string[] = [];
+  const names: string[] = [];
+  const matchedPorts = new Set<number>();
+  for (const line of (ps.stdout ?? "").split("\n")) {
+    const row = parseDockerPsRow(line);
+    if (!row) continue;
+    if (!dockerRowIsWorktreeOwned(row, opts.worktreesRoot)) continue;
+    for (const port of unique) {
+      if (row.portsCol.includes(`:${port}->`)) {
+        ids.push(row.id);
+        if (row.name) names.push(row.name);
+        matchedPorts.add(port);
+        break;
+      }
+    }
+  }
+  if (ids.length === 0) {
+    return {
+      attempted: true,
+      ok: true,
+      output: `No worktree-owned containers publishing host ports ${unique.join(", ")}`,
+    };
+  }
+  const stop = spawnSync("docker", ["stop", ...ids], {
+    encoding: "utf-8",
+    timeout: 120_000,
+  });
+  const output = [
+    `Stopped ${ids.length} worktree container(s) on :${[...matchedPorts].join(",:")}: ${names.join(", ") || ids.join(", ")}`,
+    stop.stdout ?? "",
+    stop.stderr ?? "",
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  return {
+    attempted: true,
+    ok: (stop.status ?? 1) === 0,
+    output,
+  };
+}
+
+/** Port-based stop is safe only for the SlopControl isolation band — those
+ * ports are allocated by us, never by an operator stack. */
+function splitPortsForTeardown(
+  ports: number[],
+): { isolation: number[]; canonical: number[] } {
+  const isolation: number[] = [];
+  const canonical: number[] = [];
+  for (const p of ports) {
+    (isWorktreeIsolationPort(p) ? isolation : canonical).push(p);
+  }
+  return { isolation, canonical };
+}
+
 /**
  * Stop containers publishing canonical product ports and worktree isolation
- * ports. Does not trust a poisoned live root `.env` for the port list.
+ * ports — scoped: isolation-band ports are port-matched (they're ours by
+ * construction), canonical ports only stop worktree-owned containers (the
+ * operator's stack at the project root is never killed mid-verify).
+ * Does not trust a poisoned live root `.env` for the port list.
  */
 export function freePublishedHostPorts(
   projectRoot: string,
@@ -721,7 +847,30 @@ export function freePublishedHostPorts(
     }
   }
   for (const p of opts?.extraPorts ?? []) ports.add(p);
-  return freeHostPorts([...ports]);
+
+  const { isolation, canonical } = splitPortsForTeardown([...ports]);
+  const out: ComposeTeardownResult[] = [];
+  // Isolation band: port match alone is safe (SlopControl-allocated).
+  if (isolation.length > 0) {
+    out.push(freeHostPorts(isolation));
+  }
+  // Canonical ports: only worktree-owned containers may be stopped.
+  if (canonical.length > 0 && opts?.dataDir && opts?.projectId) {
+    out.push(
+      freeHostPortsScopedToWorktrees({
+        ports: canonical,
+        worktreesRoot: projectWorktreesDir(opts.dataDir, opts.projectId),
+      }),
+    );
+  }
+  if (out.length === 0) {
+    return { attempted: false, ok: true, output: "" };
+  }
+  return {
+    attempted: out.some((r) => r.attempted),
+    ok: out.every((r) => r.ok),
+    output: out.map((r) => r.output).filter(Boolean).join("\n"),
+  };
 }
 
 /**

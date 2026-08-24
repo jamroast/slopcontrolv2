@@ -7980,7 +7980,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               log(
                 project,
                 run,
-                `--- Freeing worktree compose ports before root verify ---`,
+                `--- Tearing down worktree compose + freeing isolation ports before root verify ---`,
               );
               const allWtDown = tearDownAllProjectWorktreeCompose({
                 dataDir: this.ctx.dataDir,
@@ -8021,7 +8021,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                 log(
                   project,
                   run,
-                  `--- Freed published DB host ports (${freed.ok ? "ok" : "warn"}) ---\n${freed.output.slice(0, 800)}`,
+                  `--- Freed isolation ports + worktree-owned canonical ports (${freed.ok ? "ok" : "warn"}) ---\n${freed.output.slice(0, 800)}`,
                 );
               }
               log(
