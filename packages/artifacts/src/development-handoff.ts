@@ -348,14 +348,24 @@ export function buildDevelopmentHandoff(
         if (!operatorRequirements.includes(a)) operatorRequirements.push(a);
       }
     }
+    const infraBlocked =
+      input.diagnosis?.class === "infra" ||
+      input.diagnosis?.tags?.some((t) =>
+        /^(infra|runtime-dependency|db|postgres|redis)$/.test(t),
+      );
     if (input.merge?.autoMerged && input.merge?.commit) {
       nextSteps.unshift(
         "Phase merged but root verify failed — call MCP retry_root_verify to re-run post-merge checks on project root (no coding).",
       );
+    } else if (infraBlocked) {
+      nextSteps.unshift(
+        "Call MCP get_operator_suggestions for remediation, then retry_root_verify after restoring runtime dependencies (do not retry_development — the same verify command will fail the same way).",
+      );
+    } else {
+      nextSteps.unshift(
+        "Call MCP get_operator_suggestions for remediation, then retry_development.",
+      );
     }
-    nextSteps.unshift(
-      "Call MCP get_operator_suggestions for remediation, then retry_development.",
-    );
     if (!knowledge.some((k) => /blocked|diagnosis/i.test(k))) {
       knowledge.push(
         input.diagnosis?.title

@@ -107,6 +107,92 @@ function rewriteUrlPort(url: string, newPort: number): string {
   );
 }
 
+function isLocalVerifyHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "host.docker.internal"
+  );
+}
+
+/** Top-level service names from compose files (generic — not product-specific). */
+export function listComposeServiceNames(projectRoot: string): string[] {
+  const names = new Set<string>();
+  for (const name of COMPOSE_FILES) {
+    const path = join(projectRoot, name);
+    if (!existsSync(path)) continue;
+    let body = "";
+    try {
+      body = readFileSync(path, "utf-8");
+    } catch {
+      continue;
+    }
+    if (!/^services:\s*$/m.test(body)) continue;
+    for (const m of body.matchAll(/^  ([a-zA-Z0-9_.-]+):\s*$/gm)) {
+      const svc = m[1];
+      if (svc && svc !== "services") names.add(svc);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Rewrite docker-compose service hostnames to localhost + canonical host port
+ * when verify runs on the host (subprocess tests), not inside the compose network.
+ */
+export function rewriteComposeServiceUrlForHostVerify(
+  url: string,
+  opts: { hostPort: number; composeServiceNames: ReadonlySet<string> },
+): string {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname;
+    if (isLocalVerifyHost(host)) return url;
+    const isIpv4 = /^\d+\.\d+\.\d+\.\d+$/.test(host);
+    const isComposeService =
+      opts.composeServiceNames.has(host) ||
+      (!isIpv4 && !host.includes(".") && host.length > 0);
+    if (!isComposeService) return url;
+    parsed.hostname = "localhost";
+    if (!parsed.port || parsed.port === "5432") {
+      parsed.port = String(opts.hostPort);
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+/** Overlay host-reachable DB URLs for verify subprocesses (generic compose-aware). */
+export function applyHostVerifyEnvOverlay(
+  projectRoot: string,
+  env: Record<string, string>,
+): { env: Record<string, string>; notes: string[] } {
+  const services = new Set(listComposeServiceNames(projectRoot));
+  if (services.size === 0) {
+    return { env, notes: [] };
+  }
+  const hostPort = deriveCanonicalDbPort(projectRoot);
+  const notes: string[] = [];
+  const out = { ...env };
+  for (const key of URL_ENV_KEYS) {
+    const val = out[key];
+    if (!val) continue;
+    const rewritten = rewriteComposeServiceUrlForHostVerify(val, {
+      hostPort,
+      composeServiceNames: services,
+    });
+    if (rewritten !== val) {
+      out[key] = rewritten;
+      notes.push(
+        `host-verify: ${key} compose hostname → localhost:${hostPort}`,
+      );
+    }
+  }
+  return { env: out, notes };
+}
+
 function patchUrlKeysInEnv(body: string, newPort: number): string {
   let next = body;
   for (const key of URL_ENV_KEYS) {

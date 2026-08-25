@@ -35,6 +35,9 @@ describe("test-services", () => {
     for (const ok of ["db", "database", "postgres", "postgresql", "mysql", "redis", "mongo", "minio"]) {
       assert.equal(isInfraServiceName(ok), true, ok);
     }
+    for (const ok of ["app-postgres", "my-redis", "stack-db"]) {
+      assert.equal(isInfraServiceName(ok), true, ok);
+    }
     for (const no of ["web", "api", "app", "frontend", "worker"]) {
       assert.equal(isInfraServiceName(no), false, no);
     }

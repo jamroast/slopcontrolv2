@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
+  applyHostVerifyEnvOverlay,
   dockerRowIsWorktreeOwned,
   freeHostPortsScopedToWorktrees,
+  listComposeServiceNames,
   parseDockerPsRow,
+  rewriteComposeServiceUrlForHostVerify,
   snapshotCanonicalRuntimeEnv,
   tearDownComposeInDir,
 } from "./compose-teardown.js";
@@ -136,6 +139,50 @@ describe("snapshotCanonicalRuntimeEnv", () => {
       assert.equal(row?.composeProject, "jamauth");
       assert.equal(parseDockerPsRow(""), null);
       assert.equal(parseDockerPsRow("  "), null);
+    });
+  });
+
+  describe("host verify env overlay", () => {
+    it("listComposeServiceNames reads top-level service keys", () => {
+      const root = mkdtempSync(join(tmpdir(), "slop-compose-svc-"));
+      try {
+        writeFileSync(
+          join(root, "docker-compose.yml"),
+          "services:\n  app-db:\n    image: postgres:16\n  web:\n    build: .\n",
+        );
+        assert.deepEqual(listComposeServiceNames(root).sort(), ["app-db", "web"]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("rewrites compose service hostnames to localhost for host verify", () => {
+      const services = new Set(["app-db"]);
+      const url = "postgresql://u:p@app-db:5432/mydb";
+      const out = rewriteComposeServiceUrlForHostVerify(url, {
+        hostPort: 5430,
+        composeServiceNames: services,
+      });
+      assert.match(out, /localhost:5430/);
+      assert.doesNotMatch(out, /app-db/);
+    });
+
+    it("applyHostVerifyEnvOverlay is generic (compose-derived, not product-specific)", () => {
+      const root = mkdtempSync(join(tmpdir(), "slop-compose-overlay-"));
+      try {
+        writeFileSync(
+          join(root, "docker-compose.yml"),
+          'services:\n  svc-postgres:\n    ports:\n      - "5430:5432"\n',
+        );
+        writeFileSync(join(root, ".env"), "DB_PORT=5430\n");
+        const { env, notes } = applyHostVerifyEnvOverlay(root, {
+          DATABASE_URL: "postgresql://u:p@svc-postgres:5432/db",
+        });
+        assert.match(env.DATABASE_URL ?? "", /localhost:5430/);
+        assert.ok(notes.some((n) => n.includes("host-verify")));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 });

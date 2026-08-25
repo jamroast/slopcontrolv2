@@ -125,6 +125,7 @@ import {
   snapshotCanonicalRuntimeEnv,
   restoreCanonicalRuntimeEnv,
   loadCanonicalRuntimeEnv,
+  applyHostVerifyEnvOverlay,
   stopComposeContainersUnderWorktrees,
   scrubIsolationKeysFromProcessEnv,
   scrubIsolationKeysFromEnvRecord,
@@ -1557,6 +1558,35 @@ function failResult(
   };
 }
 
+/** Cwd where verify failed — root for post-merge steps, worktree otherwise. */
+function verifyCwdForFailureStep(
+  step: SuccessCheckStep,
+  projectRoot: string,
+  worktreePath: string,
+): string {
+  if (/^post-merge-root-verify/i.test(step.name)) return projectRoot;
+  return worktreePath;
+}
+
+function mergeRecoveryIntoChecks(
+  checks: SuccessCheckResult,
+  recoveryLog: string,
+): SuccessCheckResult {
+  const mergedOutput = `${checks.output}\n\n${recoveryLog}`;
+  const firstFailure = checks.firstFailure
+    ? {
+        ...checks.firstFailure,
+        output: `${checks.firstFailure.output}\n\n${recoveryLog}`,
+      }
+    : checks.firstFailure;
+  return {
+    ...checks,
+    recoveryAttempted: true,
+    output: mergedOutput,
+    firstFailure,
+  };
+}
+
 function isExit127CommandNotFoundFailure(
   checks: SuccessCheckResult,
 ): boolean {
@@ -1627,6 +1657,16 @@ export async function runSuccessChecks(
     llmOverlay = { ...projectEnv.env, ...llm.env };
     if (mode === "verify") {
       llmOverlay = scrubIsolationKeysFromEnvRecord(llmOverlay);
+    }
+    if (mode === "verify" || mode === "full") {
+      const hostOverlay = applyHostVerifyEnvOverlay(
+        project.rootPath,
+        llmOverlay,
+      );
+      llmOverlay = hostOverlay.env;
+      for (const note of hostOverlay.notes) {
+        parts.push(`Env note: ${note}`);
+      }
     }
     // Wall-clock budget for deps/test/Automated Checks (not build — that keeps baseRunner).
     const budgetMs = resolveCheckTimeoutMs();
@@ -7429,7 +7469,17 @@ Honor UI-SPEC / tokens / design assets when present. Finish remaining work, run 
             .join("\n\n---\n\n");
         } else if (lastFailWasPostMergeRootVerify) {
           lastFailWasPostMergeRootVerify = false;
-          prompt = `POST-MERGE ROOT VERIFY failed — worktree build passed and the phase branch merged, but tests on the **project root** failed.
+          const postMergeInfra =
+            lastHandoffDiagnosis?.class === "infra" ||
+            lastHandoffDiagnosis?.tags?.some((t) =>
+              /^(infra|runtime-dependency|db|postgres|redis)$/.test(t),
+            );
+          prompt = postMergeInfra
+            ? `POST-MERGE ROOT VERIFY failed due to infrastructure/runtime — not missing product code.
+Do NOT rewrite application code or invent bring-up scripts in the app repo.
+Append/update \`## Operator handoff\` in APPENDIX with what the operator must restore (services, env, verifyPreflightCommand).
+Do NOT print DEV_COMPLETE until project-root verify would pass (operator may use retry_root_verify after fixing the harness).`
+            : `POST-MERGE ROOT VERIFY failed — worktree build passed and the phase branch merged, but tests on the **project root** failed.
 Do NOT re-assert DEV_COMPLETE until project-root \`npm test\` / Automated Checks pass.
 Git merge only moves tracked files; gitignored outputs (e.g. \`drizzle/\`) are synced from the worktree by SlopControl before root verify — edit those artifacts in the worktree so the next sync lands the correct files on root.
 Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the failing assertion on root, append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only when root verify would pass.`;
@@ -8153,7 +8203,14 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           }
         }
 
-        if (checks.ok) {
+        const tryCompleteDevelopOnGreenChecks = async (
+          greenChecks: SuccessCheckResult,
+        ): Promise<
+          | { kind: "complete"; result: Awaited<ReturnType<typeof finishDevelop>> }
+          | { kind: "gate_failed"; checks: SuccessCheckResult }
+        | null> => {
+          if (!greenChecks.ok) return null;
+          let okChecks = greenChecks;
           const appendixForGate = readAppendix(project.rootPath, phase.id);
           const researchForGate = readResearch(project.rootPath, phase.id);
           const apiGate = evaluateApiRoutingCompleteGate({
@@ -8179,31 +8236,30 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                 "",
               ].join("\n"),
             );
-            checks = {
+            okChecks = {
               ok: false,
-              output: [checks.output, gateStep.output].join("\n\n"),
-              steps: [...(checks.steps ?? []), gateStep],
+              output: [okChecks.output, gateStep.output].join("\n\n"),
+              steps: [...(okChecks.steps ?? []), gateStep],
               firstFailure: gateStep,
               summary: buildCheckSummary(
                 false,
-                [...(checks.steps ?? []), gateStep],
+                [...(okChecks.steps ?? []), gateStep],
                 gateStep,
               ),
             };
             log(project, run, `--- ${gateStep.output} ---`);
+            return { kind: "gate_failed", checks: okChecks };
           }
-        }
 
-        if (checks.ok) {
           persistCheckOutput(
             project,
             run,
             `iter${iteration}-success`,
-            checks.output,
+            okChecks.output,
             true,
-            checks,
+            okChecks,
           );
-          log(project, run, checks.output);
+          log(project, run, okChecks.output);
 
           if (autoMerge && config.removeWorktreeOnComplete !== false) {
             try {
@@ -8212,8 +8268,6 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                 projectId: project.id,
                 phaseId: phase.id,
                 dataDir: this.ctx.dataDir,
-                // Phase tip is on main after successful auto-merge; drop the
-                // slop/* branch so it does not look like an unmerged leftover.
                 deleteBranch: true,
               });
               log(project, run, `--- ${removed.message} ---`);
@@ -8228,7 +8282,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             }
           }
           lastChecksOk = true;
-          lastChecksSummary = checks.summary || checks.output.slice(-2000);
+          lastChecksSummary = okChecks.summary || okChecks.output.slice(-2000);
           if (autoMerge && config.removeWorktreeOnComplete !== false) {
             lastMergeInfo = {
               ...lastMergeInfo,
@@ -8276,7 +8330,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             if (publishFailure) {
               this.persistDiagnosis(
                 project,
-                  run,
+                run,
                 buildLibraryPublishFailureDiagnosis({
                   summary: publishFailure,
                   phaseId: phase.id,
@@ -8286,13 +8340,22 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               );
             }
           }
-          return finishDevelop("complete", {
-            worktreePath:
-              autoMerge && config.removeWorktreeOnComplete !== false
-                ? undefined
-                : worktree.path,
-            worktreeBranch: worktree.branch,
-          });
+          return {
+            kind: "complete",
+            result: finishDevelop("complete", {
+              worktreePath:
+                autoMerge && config.removeWorktreeOnComplete !== false
+                  ? undefined
+                  : worktree.path,
+              worktreeBranch: worktree.branch,
+            }),
+          };
+        };
+
+        if (checks.ok) {
+          const completion = await tryCompleteDevelopOnGreenChecks(checks);
+          if (completion?.kind === "complete") return completion.result;
+          if (completion?.kind === "gate_failed") checks = completion.checks;
         }
 
         lastChecksOk = false;
@@ -8418,9 +8481,14 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           ) &&
           checks.firstFailure != null
         ) {
+          const verifyCwd = verifyCwdForFailureStep(
+            checks.firstFailure,
+            project.rootPath,
+            worktree.path,
+          );
           const recovery = await attemptVerifyRecovery({
             projectRoot: project.rootPath,
-            verifyCwd: project.rootPath,
+            verifyCwd,
             step: checks.firstFailure,
             registry: this.ctx.registry,
             diagnosis,
@@ -8431,21 +8499,45 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               run,
               `--- Verify recovery executed (exit ${recovery.exitCode}) ---\n${recovery.log.slice(0, 600)}`,
             );
+            checks = mergeRecoveryIntoChecks(checks, recovery.log);
             if (recovery.exitCode === 0) {
-              // Healed — re-run root checks before any strike/retry routing.
-              const rerun = await runSuccessChecks(project, phaseDoc, project.rootPath, {
-                mode: "verify",
-                forceDepsInstall: true,
-                phaseId: phase.id,
-                recoveryAttempted: true,
-                registry: this.ctx.registry,
-              });
+              const rerunMode =
+                verifyCwd === project.rootPath ? "verify" : "full";
+              const rerun = await runSuccessChecks(
+                project,
+                phaseDoc,
+                verifyCwd,
+                {
+                  mode: rerunMode,
+                  forceDepsInstall: verifyCwd === project.rootPath,
+                  phaseId: phase.id,
+                  recoveryAttempted: true,
+                  registry: this.ctx.registry,
+                  skipPhaseDocValidation: verifyCwd === project.rootPath,
+                },
+              );
               if (rerun.ok) {
-                log(project, run, "--- Root verify passed after recovery ---");
+                log(
+                  project,
+                  run,
+                  "--- Verify passed after recovery ---",
+                );
                 checks = rerun;
-                // Fall through to the success path below.
+              } else {
+                checks = {
+                  ...rerun,
+                  recoveryAttempted: true,
+                  output: `${checks.output}\n\n${rerun.output}`,
+                };
               }
             }
+          } else if (recovery.kind === "rejected") {
+            log(
+              project,
+              run,
+              `--- Verify recovery rejected ---\n${recovery.reason.slice(0, 400)}`,
+            );
+            checks = mergeRecoveryIntoChecks(checks, recovery.log);
           } else if (recovery.kind !== "not_applicable") {
             log(
               project,
@@ -8453,6 +8545,12 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               `--- Verify recovery ${recovery.kind} ---\n${("reason" in recovery ? recovery.reason : "").slice(0, 400)}`,
             );
           }
+        }
+
+        if (checks.ok) {
+          const completion = await tryCompleteDevelopOnGreenChecks(checks);
+          if (completion?.kind === "complete") return completion.result;
+          if (completion?.kind === "gate_failed") checks = completion.checks;
         }
 
         // Structural flag from runSuccessChecks is authoritative; the output
@@ -8493,6 +8591,30 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
           !harnessRecoveryExhausted &&
           (diagnosis.class === "infra" || diagnosis.audience === "operator")
         ) {
+          if (diagnosis.codingAgentShouldFix === false) {
+            log(
+              project,
+              run,
+              "--- Blocking: infra/operator failure (coding agent cannot fix) ---",
+            );
+            appendAppendix(
+              project.rootPath,
+              phase.id,
+              [
+                lastDiagnosisCard,
+                "",
+                lastMergeInfo.autoMerged && lastMergeInfo.commit
+                  ? `DEV_BLOCKED — restore the dependency the diagnosis names (${diagnosis.rootCause.slice(0, 160)}), then retry_root_verify — do NOT retry_development.`
+                  : `DEV_BLOCKED — restore runtime dependencies, then retry_root_verify or fix verifyPreflightCommand before retry_development.`,
+              ].join("\n"),
+            );
+            log(project, run, COMPLETION_TOKENS.DEV_BLOCKED);
+            writePhaseStatus(project.rootPath, phase.id, "blocked");
+            return finishDevelop("blocked", {
+              worktreePath: worktree.path,
+              worktreeBranch: worktree.branch,
+            });
+          }
           infraStrikeCount += 1;
           if (infraStrikeCount >= 2) {
             log(
@@ -8612,20 +8734,6 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             project,
             run,
             "--- High-confidence diagnosis; skipping supervisor enrichment ---",
-          );
-          lastErrorHash = currentErrorHash;
-          lastErrorCount = currentErrorCount;
-          continue;
-        }
-
-        // Infra/operator failures are not fixable by another coding turn —
-        // skip the supervisor-enriched coding retry entirely when the
-        // classifier says the coding agent should not fix this.
-        if (diagnosis.codingAgentShouldFix === false) {
-          log(
-            project,
-            run,
-            "--- Skipping coding retry: classifier says not coding-fixable (infra/operator) ---",
           );
           lastErrorHash = currentErrorHash;
           lastErrorCount = currentErrorCount;
@@ -9079,27 +9187,38 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         sourceRunId: run.id,
       });
       if (diagnosis.harnessRecoverable === true) {
+        const verifyCwd = verifyCwdForFailureStep(
+          checks.firstFailure,
+          project.rootPath,
+          worktree.path,
+        );
         const recovery = await attemptVerifyRecovery({
           projectRoot: project.rootPath,
-          verifyCwd: project.rootPath,
+          verifyCwd,
           step: checks.firstFailure,
           registry: this.ctx.registry,
           diagnosis,
         });
-        if (recovery.kind === "executed" && recovery.exitCode === 0) {
-          log(
-            project,
-            run,
-            `--- Verify recovery executed on retry (exit 0); re-running checks ---`,
-          );
-          checks = await runSuccessChecks(project, phaseDoc, project.rootPath, {
-            mode: "verify",
-            forceDepsInstall: true,
-            skipPhaseDocValidation: true,
-            phaseId: phase.id,
-            recoveryAttempted: true,
-            registry: this.ctx.registry,
-          });
+        if (recovery.kind === "executed") {
+          if (recovery.exitCode === 0) {
+            log(
+              project,
+              run,
+              `--- Verify recovery executed on retry (exit 0); re-running checks ---`,
+            );
+            checks = await runSuccessChecks(project, phaseDoc, verifyCwd, {
+              mode: verifyCwd === project.rootPath ? "verify" : "full",
+              forceDepsInstall: verifyCwd === project.rootPath,
+              skipPhaseDocValidation: verifyCwd === project.rootPath,
+              phaseId: phase.id,
+              recoveryAttempted: true,
+              registry: this.ctx.registry,
+            });
+          } else {
+            checks = mergeRecoveryIntoChecks(checks, recovery.log);
+          }
+        } else if (recovery.kind === "rejected") {
+          checks = mergeRecoveryIntoChecks(checks, recovery.log);
         }
       }
     }

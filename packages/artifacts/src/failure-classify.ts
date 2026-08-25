@@ -654,6 +654,7 @@ export function classifyVerifyFailure(
       ["infra", "runtime-dependency", ...serviceHint],
       {
         codingAgentShouldFix: false,
+        harnessRecoverable: true,
         lesson:
           "Verify failures that show connection refused / unreachable hosts / stopped containers are infrastructure — not application bugs. Bring the required runtime services up (or set verifyPreflightCommand) before re-running tests. Do not invent app-repo scripts to paper over missing local services, and do not burn coding iterations on env bring-up.",
         evidence: stepCtx.slice(-800),

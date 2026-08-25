@@ -18,7 +18,7 @@ const COMPOSE_FILE_CANDIDATES = [
 
 /** Service names treated as backing infra (safe to auto-start before tests). */
 const INFRA_SERVICE_RE =
-  /^(db|database|postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|redis|valkey|minio|localstack)$/;
+  /^(?:db|database|postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|redis|valkey|minio|localstack)$|(?:^|-)(?:postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|redis|valkey|db|database)$/i;
 
 export interface TestServicesResult {
   /** Whether any bring-up was attempted. */
