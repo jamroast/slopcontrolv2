@@ -110,6 +110,13 @@ import {
   writeDiagnosis,
   type PersistedDiagnosis,
   buildPlanningFailureDiagnosis,
+  buildPlanningRevisionFailureDiagnosis,
+  buildRevisionArtifactOutcome,
+  writeRevisionOutcome,
+  summarizeRevisionOutcome,
+  type RevisionOutcome,
+  type RevisionTarget,
+  type RevisionArtifactOutcome,
   readDiagnosis,
   readLatestDiagnosisForPhase,
   clearPhaseDiagnosis,
@@ -656,6 +663,11 @@ export interface ReviewInput {
   run: Run;
   decision: "approve" | "request_changes";
   feedback?: string;
+}
+
+export interface SubmitReviewResult {
+  stage: RunStage;
+  revision?: RevisionOutcome;
 }
 
 export interface OpenProjectResult {
@@ -6255,7 +6267,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     return "in_review";
   }
 
-  async submitReview(input: ReviewInput): Promise<RunStage> {
+  async submitReview(input: ReviewInput): Promise<SubmitReviewResult> {
     const { project, phase, run, decision, feedback } = input;
 
     if (decision === "approve") {
@@ -6280,7 +6292,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           `--- Cannot approve: PHASE.md failed validation ---\n${claimRefined.issues.map((i) => `- ${i}`).join("\n")}`,
         );
         writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return "in_review";
+        return { stage: "in_review" };
       }
       const intent = await ensureChangeIntentAsync(
         project.rootPath,
@@ -6296,7 +6308,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           `--- Cannot approve: PHASE.md misaligned with Change Intent ---\n${intentAlign.issues.map((i) => `- ${i}`).join("\n")}`,
         );
         writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return "in_review";
+        return { stage: "in_review" };
       }
       const antiAudit = phaseDocRejectsMissingThemeAudit({
         description: phase.description,
@@ -6312,7 +6324,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           `--- Cannot approve: review-only PHASE rejected for missing theme control ---\n${antiAudit.issues.map((i) => `- ${i}`).join("\n")}`,
         );
         writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return "in_review";
+        return { stage: "in_review" };
       }
       writePhaseStatus(project.rootPath, phase.id, "accepted");
       mergePhaseIntoBlueprint(
@@ -6329,7 +6341,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         phase.dependsOn ?? [],
       );
       log(project, run, "--- Phase approved; ready for development ---");
-      return "accepted";
+      return { stage: "accepted" };
     }
 
     log(project, run, `--- Review feedback ---\n${feedback ?? ""}`);
@@ -6410,6 +6422,28 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     log(project, run, `--- Revision targets: ${targets} ---`);
     const judge = this.bindDocRevisionJudge();
 
+    const revisionState: {
+      research?: RevisionArtifactOutcome;
+      phase?: RevisionArtifactOutcome;
+    } = {};
+    const finish = (): SubmitReviewResult =>
+      this.finalizeReviewRevision(project, phase, run, {
+        targets,
+        feedback: feedback ?? "",
+        research:
+          revisionState.research ??
+          buildRevisionArtifactOutcome({
+            artifact: "research",
+            attempted: false,
+          }),
+        phase:
+          revisionState.phase ??
+          buildRevisionArtifactOutcome({
+            artifact: "phase",
+            attempted: false,
+          }),
+      });
+
     let researchAfter = research;
     if (targets === "research" || targets === "both") {
       const researchRev = await this.reviseResearchDoc({
@@ -6427,8 +6461,20 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           run,
           "--- RESEARCH revision harvest failed; blocking (retry won't help a structural failure) ---",
         );
-        writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return "in_review";
+        revisionState.research = buildRevisionArtifactOutcome({
+          artifact: "research",
+          attempted: true,
+          harvested: false,
+          failReason: "harvest failed",
+        });
+        if (targets === "both") {
+          revisionState.phase = buildRevisionArtifactOutcome({
+            artifact: "phase",
+            attempted: false,
+            skipReason: "research revision failed",
+          });
+        }
+        return finish();
       }
       let verdict = await verifyDocRevisionApplied({
         before: research,
@@ -6457,8 +6503,20 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
             run,
             "--- RESEARCH revision retry harvest failed; blocking ---",
           );
-          writePhaseStatus(project.rootPath, phase.id, "in_review");
-          return "in_review";
+          revisionState.research = buildRevisionArtifactOutcome({
+            artifact: "research",
+            attempted: true,
+            harvested: false,
+            failReason: "retry harvest failed",
+          });
+          if (targets === "both") {
+            revisionState.phase = buildRevisionArtifactOutcome({
+              artifact: "phase",
+              attempted: false,
+              skipReason: "research revision failed",
+            });
+          }
+          return finish();
         }
         verdict = await verifyDocRevisionApplied({
           before: research,
@@ -6472,11 +6530,33 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
             run,
             `--- RESEARCH revision still rejected after retry: ${verdict.reason} ---`,
           );
-          writePhaseStatus(project.rootPath, phase.id, "in_review");
-          return "in_review";
+          revisionState.research = buildRevisionArtifactOutcome({
+            artifact: "research",
+            attempted: true,
+            before: research,
+            after: researchAfter,
+            harvested: true,
+            verdict,
+          });
+          if (targets === "both") {
+            revisionState.phase = buildRevisionArtifactOutcome({
+              artifact: "phase",
+              attempted: false,
+              skipReason: "research revision failed",
+            });
+          }
+          return finish();
         }
       }
       log(project, run, `--- RESEARCH revision applied (${verdict.reason}) ---`);
+      revisionState.research = buildRevisionArtifactOutcome({
+        artifact: "research",
+        attempted: true,
+        before: research,
+        after: researchAfter,
+        harvested: true,
+        verdict,
+      });
     }
 
     if (targets === "phase" || targets === "both") {
@@ -6490,14 +6570,20 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         designRoutingNote,
       });
       const phaseAfter = phaseRev.doc;
+      let phaseAfterDoc = phaseAfter;
       if (!phaseRev.harvested) {
         log(
           project,
           run,
           "--- PHASE revision harvest failed; blocking (retry won't help a structural failure) ---",
         );
-        writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return "in_review";
+        revisionState.phase = buildRevisionArtifactOutcome({
+          artifact: "phase",
+          attempted: true,
+          harvested: false,
+          failReason: "harvest failed",
+        });
+        return finish();
       }
       let verdict = await verifyDocRevisionApplied({
         before: phaseDoc,
@@ -6526,12 +6612,18 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
             run,
             "--- PHASE revision retry harvest failed; blocking ---",
           );
-          writePhaseStatus(project.rootPath, phase.id, "in_review");
-          return "in_review";
+          revisionState.phase = buildRevisionArtifactOutcome({
+            artifact: "phase",
+            attempted: true,
+            harvested: false,
+            failReason: "retry harvest failed",
+          });
+          return finish();
         }
+        phaseAfterDoc = retryRev.doc;
         verdict = await verifyDocRevisionApplied({
           before: phaseDoc,
-          after: retryRev.doc,
+          after: phaseAfterDoc,
           feedback: feedback ?? "",
           judge,
         });
@@ -6541,15 +6633,75 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
             run,
             `--- PHASE revision still rejected after retry: ${verdict.reason} ---`,
           );
-          writePhaseStatus(project.rootPath, phase.id, "in_review");
-          return "in_review";
+          revisionState.phase = buildRevisionArtifactOutcome({
+            artifact: "phase",
+            attempted: true,
+            before: phaseDoc,
+            after: phaseAfterDoc,
+            harvested: true,
+            verdict,
+          });
+          return finish();
         }
       }
       log(project, run, `--- PHASE revision applied (${verdict.reason}) ---`);
+      revisionState.phase = buildRevisionArtifactOutcome({
+        artifact: "phase",
+        attempted: true,
+        before: phaseDoc,
+        after: phaseAfterDoc,
+        harvested: true,
+        verdict,
+      });
     }
 
+    return finish();
+  }
+
+  private finalizeReviewRevision(
+    project: Project,
+    phase: Phase,
+    run: Run,
+    opts: {
+      targets: RevisionTarget;
+      feedback: string;
+      research: RevisionArtifactOutcome;
+      phase: RevisionArtifactOutcome;
+    },
+  ): SubmitReviewResult {
+    const ok =
+      (!opts.research.attempted || opts.research.ok) &&
+      (!opts.phase.attempted || opts.phase.ok);
+    const outcome: RevisionOutcome = {
+      targets: opts.targets,
+      ok,
+      updatedAt: new Date().toISOString(),
+      research: opts.research,
+      phase: opts.phase,
+    };
+    writeRevisionOutcome(project.rootPath, run.id, outcome);
+    log(
+      project,
+      run,
+      `--- Revision outcome: ${summarizeRevisionOutcome(outcome)} ---`,
+    );
+    if (!ok) {
+      this.persistDiagnosis(
+        project,
+        run,
+        buildPlanningRevisionFailureDiagnosis({
+          outcome,
+          feedback: opts.feedback,
+          phaseId: phase.id,
+          runId: run.id,
+        }),
+        phase.id,
+      );
+    } else {
+      clearRunDiagnosis(project.rootPath, run.id, phase.id);
+    }
     writePhaseStatus(project.rootPath, phase.id, "in_review");
-    return "in_review";
+    return { stage: "in_review", revision: outcome };
   }
 
   /** Classify which artifact(s) review feedback should revise. LLM on the

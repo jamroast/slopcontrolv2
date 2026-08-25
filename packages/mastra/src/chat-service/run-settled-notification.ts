@@ -4,6 +4,8 @@ import {
   readDiagnosis,
   readLatestDiagnosisForPhase,
   readResearchConclusionForPhase,
+  readRevisionOutcome,
+  summarizeRevisionOutcome,
 } from "@slopcontrol/artifacts";
 
 export type RunSettledInput = {
@@ -39,6 +41,15 @@ export function buildRunSettledGuidance(
       rootPath && run.phaseId
         ? readResearchConclusionForPhase(rootPath, run.phaseId)
         : "";
+    const revisionOutcome =
+      rootPath != null ? readRevisionOutcome(rootPath, run.id) : null;
+    const diagnosis =
+      rootPath != null
+        ? (readDiagnosis(rootPath, run.id) ??
+          (run.phaseId
+            ? readLatestDiagnosisForPhase(rootPath, run.phaseId)
+            : null))
+        : null;
     const parts = [
       "Research is ready for operator review.",
       conclusion ? `Research conclusion: ${conclusion}` : null,
@@ -46,6 +57,19 @@ export function buildRunSettledGuidance(
       "Use submit_review request_changes only to send the plan back.",
       "Call get_run for research_conclusion if the brief was truncated.",
     ].filter(Boolean);
+    if (revisionOutcome && !revisionOutcome.ok) {
+      parts.push(
+        `Review revision did not fully apply (${summarizeRevisionOutcome(revisionOutcome)}). Call get_run for revision_outcome and operator_suggestions — do not judge readiness from RESEARCH.md alone; read PHASE.md too.`,
+      );
+    } else if (revisionOutcome?.ok) {
+      parts.push(
+        `Review revision applied (${summarizeRevisionOutcome(revisionOutcome)}). Read both RESEARCH.md and PHASE.md before approving.`,
+      );
+    } else if (diagnosis?.tags?.includes("review-revision")) {
+      parts.push(
+        "A prior review revision left planning diagnosis on this run — call get_run for revision_outcome and operator_suggestions.",
+      );
+    }
     return parts.join(" ");
   }
 

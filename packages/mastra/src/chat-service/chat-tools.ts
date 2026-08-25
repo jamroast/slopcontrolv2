@@ -457,7 +457,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   advance_run:
     "Preferred proceed tool. Requires runId. Confirming it walks the current gate until work is running: in_review → approve review → start_development (or start_design if required). Use this when the operator says go ahead / accept / start development / continue. Never auto-merges. Stay in this chat.",
   submit_review:
-    "Approve or request changes on an in_review research/draft. Requires runId and decision (approve | request_changes). request_changes auto-routes feedback to RESEARCH.md and/or PHASE.md (LLM-classified) and returns which files changed. Confirming approve then keeps advancing until work is running (same continuer as advance_run). Prefer advance_run when they want to proceed. Stay in this chat — do not send the operator to a dashboard Approve button.",
+    "Approve or request changes on an in_review research/draft. Requires runId and decision (approve | request_changes). request_changes auto-routes feedback to RESEARCH.md and/or PHASE.md (LLM-classified), verifies edits, and writes revision_outcome on the run — call get_run to see which artifacts changed or why revision failed. Confirming approve then keeps advancing until work is running (same continuer as advance_run). Prefer advance_run when they want to proceed. Stay in this chat — do not send the operator to a dashboard Approve button.",
   retry_draft:
     "Re-run PHASE.md draft only when RESEARCH.md is solid. Requires runId. Use when research succeeded but draft failed — not rerun_research.",
   rerun_research:

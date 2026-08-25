@@ -33,6 +33,7 @@ import {
   isNotApplicableDesignSection,
 } from "./change-intent.js";
 import type { ChangeIntent } from "./change-intent.js";
+import type { PersistedDiagnosis } from "./diagnosis.js";
 import { probeProjectForDecisions } from "./blueprint-probes.js";
 import {
   discoverBrandWordmarkTexts,
@@ -85,6 +86,7 @@ export * from "./build-process-config.js";
 export * from "./verify-recovery-execute.js";
 export * from "./verify-recovery-evidence.js";
 export * from "./verify-doc-revision.js";
+export * from "./revision-outcome.js";
 export * from "./ci-workflows.js";
 export * from "./library-propagate.js";
 export * from "./workspace-package.js";
@@ -1197,32 +1199,7 @@ export function phaseDiagnosisPath(projectRoot: string, phaseId: string): string
   return join(phaseDir(projectRoot, phaseId), "diagnosis.json");
 }
 
-export type PersistedDiagnosis = {
-  audience: "operator" | "coding";
-  operatorActions: string[];
-  class: string;
-  confidence: string;
-  title: string;
-  rootCause: string;
-  evidence: string;
-  nextActions: string;
-  fingerprint: string;
-  codingAgentShouldFix: boolean;
-  /** Classifier: fixable by harness/environment (deps, services, ports). */
-  harnessRecoverable?: boolean;
-  /** Classifier tags for coding-retry routing (long-lived, host-utility, …). */
-  tags?: string[];
-  failingStep?: {
-    name: string;
-    command?: string;
-    exitCode: number;
-    /** Stable id matching verify_steps[].id when present. */
-    stepId?: string;
-  };
-  phaseId?: string;
-  runId?: string;
-  updatedAt: string;
-};
+export type { PersistedDiagnosis } from "./diagnosis.js";
 
 /** Replace failure diagnosis with a success stub when the phase completes. */
 export function clearPhaseDiagnosis(

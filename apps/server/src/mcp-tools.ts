@@ -759,7 +759,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "submit_review",
       description:
-        "Approve or request changes on an in_review research/draft. decision=approve accepts PHASE.md so coding can start. decision=request_changes re-drafts with feedback. Chat should call this (gated) instead of sending the operator to the dashboard. Confirming start_development while still in_review also accepts the review, then starts coding.",
+        "Approve or request changes on an in_review research/draft. decision=approve accepts PHASE.md so coding can start. decision=request_changes LLM-classifies feedback to RESEARCH.md and/or PHASE.md, verifies edits landed, and persists revision_outcome on the run (get_run.revision_outcome) plus planning diagnosis when revision fails. Chat should call this (gated) instead of sending the operator to the dashboard. Confirming start_development while still in_review also accepts the review, then starts coding.",
       inputSchema: {
         type: "object",
         properties: {

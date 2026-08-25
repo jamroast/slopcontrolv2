@@ -26,6 +26,7 @@ import {
   collectHandoffFollowUpSuggestions,
   detectResearchConstraintNote,
   readResearchConclusionForPhase,
+  readRevisionOutcome,
   buildAskTaskDescription,
   writeAskArtifacts,
   isAskAgentTimeoutError,
@@ -1237,6 +1238,7 @@ function buildRunPayload(run: Run) {
     phase && (run.stage === "in_review" || run.stage === "accepted")
       ? readResearchConclusionForPhase(project.rootPath, phase.id)
       : "";
+  const revisionOutcome = readRevisionOutcome(project.rootPath, run.id);
 
   return {
     id: run.id,
@@ -1296,6 +1298,7 @@ function buildRunPayload(run: Run) {
         }
       : null,
     verify_ok: verifySteps ? verifySteps.ok : null,
+    revision_outcome: revisionOutcome,
   };
 }
 
@@ -7312,30 +7315,30 @@ app.post("/runs", async (req, res) => {
       // Approve is sync/fast; request_changes can call the LLM so run async.
       if (action.decision === "approve") {
         const { orchestrator } = getRuntime(project.rootPath);
-        const stage = await orchestrator.submitReview({
+        const result = await orchestrator.submitReview({
           project,
           phase,
           run,
           decision: "approve",
           feedback: action.feedback,
         });
-        touchRunStage(run.id, stage);
+        touchRunStage(run.id, result.stage);
         updatePhaseStatus(phase.id, "accepted");
-        res.json({ run: store.getRun(run.id), stage });
+        res.json({ run: store.getRun(run.id), stage: result.stage });
         return;
       }
 
       touchRunStage(run.id, "drafting");
       runInBackground(run.id, async () => {
         const { orchestrator } = getRuntime(project.rootPath);
-        const stage = await orchestrator.submitReview({
+        const result = await orchestrator.submitReview({
           project,
           phase,
           run,
           decision: "request_changes",
           feedback: action.feedback,
         });
-        touchRunStage(run.id, stage);
+        touchRunStage(run.id, result.stage);
         updatePhaseStatus(phase.id, "in_review");
       });
 
