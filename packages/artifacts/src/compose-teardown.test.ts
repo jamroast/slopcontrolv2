@@ -9,7 +9,7 @@ import {
   freeHostPortsScopedToWorktrees,
   listComposeServiceNames,
   parseDockerPsRow,
-  rewriteComposeServiceUrlForHostVerify,
+  validateHostVerifyRewrite,
   snapshotCanonicalRuntimeEnv,
   tearDownComposeInDir,
 } from "./compose-teardown.js";
@@ -156,30 +156,136 @@ describe("snapshotCanonicalRuntimeEnv", () => {
       }
     });
 
-    it("rewrites compose service hostnames to localhost for host verify", () => {
+    it("validateHostVerifyRewrite accepts service hostname → localhost:published", () => {
       const services = new Set(["app-db"]);
-      const url = "postgresql://u:p@app-db:5432/mydb";
-      const out = rewriteComposeServiceUrlForHostVerify(url, {
-        hostPort: 5430,
-        composeServiceNames: services,
-      });
-      assert.match(out, /localhost:5430/);
-      assert.doesNotMatch(out, /app-db/);
+      const env = { DATABASE_URL: "postgresql://u:p@app-db:5432/mydb" };
+      const ok = validateHostVerifyRewrite(
+        {
+          key: "DATABASE_URL",
+          original: "postgresql://u:p@app-db:5432/mydb",
+          rewritten: "postgresql://u:p@localhost:5430/mydb",
+        },
+        env,
+        services,
+        { "app-db": 5430 },
+        5432,
+      );
+      assert.equal(ok, true);
+      // Wrong port rejected.
+      assert.equal(
+        validateHostVerifyRewrite(
+          {
+            key: "DATABASE_URL",
+            original: "postgresql://u:p@app-db:5432/mydb",
+            rewritten: "postgresql://u:p@localhost:1234/mydb",
+          },
+          env,
+          services,
+          { "app-db": 5430 },
+          5432,
+        ),
+        false,
+      );
+      // Hostname not a declared service rejected.
+      assert.equal(
+        validateHostVerifyRewrite(
+          {
+            key: "DATABASE_URL",
+            original: "postgresql://u:p@other:5432/mydb",
+            rewritten: "postgresql://u:p@localhost:5430/mydb",
+          },
+          env,
+          services,
+          { "app-db": 5430 },
+          5432,
+        ),
+        false,
+      );
     });
 
-    it("applyHostVerifyEnvOverlay is generic (compose-derived, not product-specific)", () => {
+    it("applyHostVerifyEnvOverlay validates rewrites from the evaluator", async () => {
       const root = mkdtempSync(join(tmpdir(), "slop-compose-overlay-"));
       try {
         writeFileSync(
           join(root, "docker-compose.yml"),
           'services:\n  svc-postgres:\n    ports:\n      - "5430:5432"\n',
         );
-        writeFileSync(join(root, ".env"), "DB_PORT=5430\n");
-        const { env, notes } = applyHostVerifyEnvOverlay(root, {
-          DATABASE_URL: "postgresql://u:p@svc-postgres:5432/db",
+        const env = { DATABASE_URL: "postgresql://u:p@svc-postgres:5432/db" };
+        const evaluate = async () => ({
+          rewrites: [
+            {
+              key: "DATABASE_URL",
+              original: "postgresql://u:p@svc-postgres:5432/db",
+              rewritten: "postgresql://u:p@localhost:5430/db",
+              reason: "compose-internal service",
+            },
+          ],
         });
-        assert.match(env.DATABASE_URL ?? "", /localhost:5430/);
+        const { env: out, notes } = await applyHostVerifyEnvOverlay(
+          root,
+          env,
+          evaluate,
+        );
+        assert.match(out.DATABASE_URL ?? "", /localhost:5430/);
         assert.ok(notes.some((n) => n.includes("host-verify")));
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("applyHostVerifyEnvOverlay fails closed when no evaluator is bound", async () => {
+      const root = mkdtempSync(join(tmpdir(), "slop-compose-overlay-"));
+      try {
+        writeFileSync(
+          join(root, "docker-compose.yml"),
+          'services:\n  svc-postgres:\n    ports:\n      - "5430:5432"\n',
+        );
+        const env = { DATABASE_URL: "postgresql://u:p@svc-postgres:5432/db" };
+        const { env: out, notes } = await applyHostVerifyEnvOverlay(root, env);
+        assert.equal(
+          out.DATABASE_URL,
+          "postgresql://u:p@svc-postgres:5432/db",
+        );
+        assert.equal(notes.length, 0);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it("applyHostVerifyEnvOverlay rejects bad evaluator mappings", async () => {
+      const root = mkdtempSync(join(tmpdir(), "slop-compose-overlay-"));
+      try {
+        writeFileSync(
+          join(root, "docker-compose.yml"),
+          'services:\n  svc-postgres:\n    ports:\n      - "5430:5432"\n',
+        );
+        const env = { DATABASE_URL: "postgresql://u:p@svc-postgres:5432/db" };
+        const evaluate = async () => ({
+          rewrites: [
+            // wrong port
+            {
+              key: "DATABASE_URL",
+              original: "postgresql://u:p@svc-postgres:5432/db",
+              rewritten: "postgresql://u:p@localhost:1234/db",
+            },
+            // hostname not a declared service
+            {
+              key: "DATABASE_URL",
+              original: "postgresql://u:p@other-host:5432/db",
+              rewritten: "postgresql://u:p@localhost:5430/db",
+            },
+          ],
+        });
+        const { env: out, notes } = await applyHostVerifyEnvOverlay(
+          root,
+          env,
+          evaluate,
+        );
+        assert.equal(
+          out.DATABASE_URL,
+          "postgresql://u:p@svc-postgres:5432/db",
+        );
+        assert.ok(notes.some((n) => n.includes("rejected")));
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

@@ -271,6 +271,7 @@ import {
   classifyIntentResearchConflict,
   classifyElementHonorViaLlm,
   classifyVerifyFailureViaLlm,
+  classifyHostVerifyEnvViaLlm,
   classifyAskInvestigateEngineViaLlm,
   judgeClaimProofViaLlm,
   judgeNarrationOnlyViaLlm,
@@ -1659,9 +1660,37 @@ export async function runSuccessChecks(
       llmOverlay = scrubIsolationKeysFromEnvRecord(llmOverlay);
     }
     if (mode === "verify" || mode === "full") {
-      const hostOverlay = applyHostVerifyEnvOverlay(
+      // LLM evaluates which env values point at compose-internal services;
+      // deterministic validation applies only accepted rewrites. Fail closed
+      // (no overlay) when the classification role is unbound.
+      const evaluateHostEnv = (() => {
+        try {
+          const { endpoint, modelId } =
+            opts?.registry?.resolveEndpointForRole("classification") ?? {};
+          if (!endpoint) return undefined;
+          return (input: {
+            env: Record<string, string>;
+            services: string[];
+            publishedPorts: Record<string, number>;
+            canonicalDbPort: number;
+          }) =>
+            classifyHostVerifyEnvViaLlm({
+              endpoint,
+              modelId,
+              env: input.env,
+              services: input.services,
+              publishedPorts: input.publishedPorts,
+              canonicalDbPort: input.canonicalDbPort,
+              timeoutMs: 90_000,
+            });
+        } catch {
+          return undefined;
+        }
+      })();
+      const hostOverlay = await applyHostVerifyEnvOverlay(
         project.rootPath,
         llmOverlay,
+        evaluateHostEnv,
       );
       llmOverlay = hostOverlay.env;
       for (const note of hostOverlay.notes) {

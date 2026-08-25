@@ -137,56 +137,124 @@ export function listComposeServiceNames(projectRoot: string): string[] {
   return [...names];
 }
 
-/**
- * Rewrite docker-compose service hostnames to localhost + canonical host port
- * when verify runs on the host (subprocess tests), not inside the compose network.
- */
-export function rewriteComposeServiceUrlForHostVerify(
-  url: string,
-  opts: { hostPort: number; composeServiceNames: ReadonlySet<string> },
-): string {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname;
-    if (isLocalVerifyHost(host)) return url;
-    const isIpv4 = /^\d+\.\d+\.\d+\.\d+$/.test(host);
-    const isComposeService =
-      opts.composeServiceNames.has(host) ||
-      (!isIpv4 && !host.includes(".") && host.length > 0);
-    if (!isComposeService) return url;
-    parsed.hostname = "localhost";
-    if (!parsed.port || parsed.port === "5432") {
-      parsed.port = String(opts.hostPort);
+/** Per-service published host ports (service → host port). */
+export function collectComposePublishedPorts(
+  projectRoot: string,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const name of COMPOSE_FILES) {
+    const path = join(projectRoot, name);
+    if (!existsSync(path)) continue;
+    let body = "";
+    try {
+      body = readFileSync(path, "utf-8");
+    } catch {
+      continue;
     }
-    return parsed.toString();
-  } catch {
-    return url;
+    let current: string | null = null;
+    for (const line of body.split("\n")) {
+      const svc = line.match(/^\s{2}([a-zA-Z0-9_.-]+):\s*$/);
+      if (svc) {
+        current = svc[1] ?? null;
+        continue;
+      }
+      if (!current) continue;
+      // ports: - "HOST:CONTAINER" or ${VAR:-HOST}:CONTAINER
+      const m = line.match(/["'](\d{2,5}):\d{2,5}["']/);
+      const v = line.match(/\$\{[A-Z0-9_]+:-(\d{2,5})\}:\d{2,5}/);
+      const raw = m?.[1] ?? v?.[1];
+      const n = raw ? Number(raw) : null;
+      if (n && !isWorktreeIsolationPort(n)) out[current] = n;
+    }
   }
+  return out;
 }
 
-/** Overlay host-reachable DB URLs for verify subprocesses (generic compose-aware). */
-export function applyHostVerifyEnvOverlay(
+/** Accept an evaluated rewrite only when the original hostname is a declared
+ * compose service and the rewritten value targets localhost + a published
+ * port for that service (or the canonical DB port fallback). */
+export function validateHostVerifyRewrite(
+  rewrite: { key: string; original: string; rewritten: string },
+  env: Record<string, string>,
+  services: ReadonlySet<string>,
+  publishedPorts: Record<string, number>,
+  canonicalDbPort: number,
+): boolean {
+  const current = env[rewrite.key];
+  if (current === undefined || current !== rewrite.original) return false;
+  const originalHost = hostnameFromValue(rewrite.original);
+  const rewrittenHost = hostnameFromValue(rewrite.rewritten);
+  if (!originalHost || !rewrittenHost) return false;
+  if (!services.has(originalHost)) return false;
+  if (rewrittenHost !== "localhost") return false;
+  const portForService = publishedPorts[originalHost];
+  const expected = String(portForService ?? canonicalDbPort);
+  const port = rewrite.rewritten.match(/:(\d{2,5})(?:\/|$|[?&])/);
+  if (portForService && port?.[1] !== expected) return false;
+  if (!portForService && port?.[1] && port[1] !== expected) return false;
+  return true;
+}
+
+function hostnameFromValue(value: string): string | null {
+  // URL with scheme:// — hostname is after optional userinfo, before :port or /
+  const afterScheme = value.match(/^[a-z][a-z0-9+.-]*:\/\/(.+)$/i)?.[1];
+  const target = afterScheme ?? value;
+  // Strip userinfo (user:pass@) when present.
+  const atHost = target.includes("@")
+    ? (target.split("@").pop() ?? target)
+    : target;
+  const host = atHost.split(/[/:]/, 1)[0];
+  if (!host) return null;
+  return host;
+}
+
+/** Overlay host-reachable values for verify subprocesses. The evaluator is
+ * injected by the orchestrator (LLM classification); with no evaluator
+ * bound, fail closed (no overlay) — never heuristics. */
+export async function applyHostVerifyEnvOverlay(
   projectRoot: string,
   env: Record<string, string>,
-): { env: Record<string, string>; notes: string[] } {
+  evaluate?: (input: {
+    env: Record<string, string>;
+    services: string[];
+    publishedPorts: Record<string, number>;
+    canonicalDbPort: number;
+  }) => Promise<{ rewrites: { key: string; original: string; rewritten: string }[] }>,
+): Promise<{ env: Record<string, string>; notes: string[] }> {
   const services = new Set(listComposeServiceNames(projectRoot));
   if (services.size === 0) {
     return { env, notes: [] };
   }
-  const hostPort = deriveCanonicalDbPort(projectRoot);
+  if (!evaluate) {
+    return { env, notes: [] };
+  }
+  const publishedPorts = collectComposePublishedPorts(projectRoot);
+  const canonicalDbPort = deriveCanonicalDbPort(projectRoot);
+  const evaluated = await evaluate({
+    env,
+    services: [...services],
+    publishedPorts,
+    canonicalDbPort,
+  });
   const notes: string[] = [];
   const out = { ...env };
-  for (const key of URL_ENV_KEYS) {
-    const val = out[key];
-    if (!val) continue;
-    const rewritten = rewriteComposeServiceUrlForHostVerify(val, {
-      hostPort,
-      composeServiceNames: services,
-    });
-    if (rewritten !== val) {
-      out[key] = rewritten;
+  for (const rewrite of evaluated.rewrites) {
+    if (
+      validateHostVerifyRewrite(
+        rewrite,
+        env,
+        services,
+        publishedPorts,
+        canonicalDbPort,
+      )
+    ) {
+      out[rewrite.key] = rewrite.rewritten;
       notes.push(
-        `host-verify: ${key} compose hostname → localhost:${hostPort}`,
+        `host-verify: ${rewrite.key} ${rewrite.original} → ${rewrite.rewritten}`,
+      );
+    } else {
+      notes.push(
+        `host-verify: rejected rewrite for ${rewrite.key} (validation)`,
       );
     }
   }
