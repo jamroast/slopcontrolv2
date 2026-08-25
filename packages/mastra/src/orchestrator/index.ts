@@ -6412,7 +6412,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
 
     let researchAfter = research;
     if (targets === "research" || targets === "both") {
-      researchAfter = await this.reviseResearchDoc({
+      const researchRev = await this.reviseResearchDoc({
         project,
         phase,
         run,
@@ -6420,6 +6420,16 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         research,
         intentBlock,
       });
+      researchAfter = researchRev.doc;
+      if (!researchRev.harvested) {
+        log(
+          project,
+          run,
+          "--- RESEARCH revision harvest failed; blocking (retry won't help a structural failure) ---",
+        );
+        writePhaseStatus(project.rootPath, phase.id, "in_review");
+        return "in_review";
+      }
       let verdict = await verifyDocRevisionApplied({
         before: research,
         after: researchAfter,
@@ -6432,7 +6442,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           run,
           `--- RESEARCH revision rejected: ${verdict.reason}; retrying once ---`,
         );
-        researchAfter = await this.reviseResearchDoc({
+        const retryRev = await this.reviseResearchDoc({
           project,
           phase,
           run,
@@ -6440,6 +6450,16 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           research: researchAfter,
           intentBlock,
         });
+        researchAfter = retryRev.doc;
+        if (!retryRev.harvested) {
+          log(
+            project,
+            run,
+            "--- RESEARCH revision retry harvest failed; blocking ---",
+          );
+          writePhaseStatus(project.rootPath, phase.id, "in_review");
+          return "in_review";
+        }
         verdict = await verifyDocRevisionApplied({
           before: research,
           after: researchAfter,
@@ -6460,7 +6480,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     }
 
     if (targets === "phase" || targets === "both") {
-      const phaseAfter = await this.revisePhaseDoc({
+      const phaseRev = await this.revisePhaseDoc({
         project,
         phase,
         run,
@@ -6469,6 +6489,16 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         intentBlock,
         designRoutingNote,
       });
+      const phaseAfter = phaseRev.doc;
+      if (!phaseRev.harvested) {
+        log(
+          project,
+          run,
+          "--- PHASE revision harvest failed; blocking (retry won't help a structural failure) ---",
+        );
+        writePhaseStatus(project.rootPath, phase.id, "in_review");
+        return "in_review";
+      }
       let verdict = await verifyDocRevisionApplied({
         before: phaseDoc,
         after: phaseAfter,
@@ -6481,7 +6511,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           run,
           `--- PHASE revision rejected: ${verdict.reason}; retrying once ---`,
         );
-        const phaseRetry = await this.revisePhaseDoc({
+        const retryRev = await this.revisePhaseDoc({
           project,
           phase,
           run,
@@ -6490,9 +6520,18 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           intentBlock,
           designRoutingNote,
         });
+        if (!retryRev.harvested) {
+          log(
+            project,
+            run,
+            "--- PHASE revision retry harvest failed; blocking ---",
+          );
+          writePhaseStatus(project.rootPath, phase.id, "in_review");
+          return "in_review";
+        }
         verdict = await verifyDocRevisionApplied({
           before: phaseDoc,
-          after: phaseRetry,
+          after: retryRev.doc,
           feedback: feedback ?? "",
           judge,
         });
@@ -6563,7 +6602,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     feedback: string;
     research: string;
     intentBlock: string;
-  }): Promise<string> {
+  }): Promise<{ doc: string; harvested: boolean }> {
     const { project, phase, run, feedback, research, intentBlock } = input;
     const researchPath = `.slopcontrol/phases/${phase.id}/RESEARCH.md`;
     const prompt = `Revise RESEARCH.md based on this review feedback:\n${feedback ?? ""}
@@ -6602,14 +6641,14 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         `--- Harvested revised RESEARCH.md (source=${resolved.source}${resolved.path ? `, path=${resolved.path}` : ""}) ---`,
       );
       writeResearch(project.rootPath, phase.id, resolved.doc);
-      return resolved.doc;
+      return { doc: resolved.doc, harvested: true };
     }
     log(
       project,
       run,
       "--- RESEARCH revise harvest failed; keeping prior RESEARCH.md ---",
     );
-    return research;
+    return { doc: research, harvested: false };
   }
 
   /** Surgical edit of PHASE.md from review feedback (review agent). */
@@ -6621,7 +6660,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     research: string;
     intentBlock: string;
     designRoutingNote: string;
-  }): Promise<string> {
+  }): Promise<{ doc: string; harvested: boolean }> {
     const { project, phase, run, feedback, research, intentBlock, designRoutingNote } =
       input;
     const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
@@ -6667,7 +6706,7 @@ ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
         `--- Harvested revised PHASE.md (source=${resolved.source}${resolved.path ? `, path=${resolved.path}` : ""}) ---`,
       );
       writePhaseDoc(project.rootPath, phase.id, resolved.doc);
-      return resolved.doc;
+      return { doc: resolved.doc, harvested: true };
     }
     const issues = [
       ...resolved.gate.issues,
@@ -6678,7 +6717,7 @@ ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
       run,
       `--- PHASE harvest failed after review (source=${resolved.source}); keeping prior PHASE.md ---\n${issues.map((i) => `- ${i}`).join("\n") || "- no structure-valid candidate"}`,
     );
-    return readPhaseDoc(project.rootPath, phase.id);
+    return { doc: readPhaseDoc(project.rootPath, phase.id), harvested: false };
   }
 
   async startDesign(input: {
