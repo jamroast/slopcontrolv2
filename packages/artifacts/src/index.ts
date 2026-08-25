@@ -84,6 +84,7 @@ export * from "./test-services.js";
 export * from "./build-process-config.js";
 export * from "./verify-recovery-execute.js";
 export * from "./verify-recovery-evidence.js";
+export * from "./verify-doc-revision.js";
 export * from "./ci-workflows.js";
 export * from "./library-propagate.js";
 export * from "./workspace-package.js";

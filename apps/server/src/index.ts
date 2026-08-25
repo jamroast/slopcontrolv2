@@ -7752,7 +7752,8 @@ app.post("/runs", async (req, res) => {
           run,
           description: phase.description,
           listProjects: () => store.listProjects(),
-      onStage: (s) => touchRunStage(run.id, s),
+          onStage: (s) => touchRunStage(run.id, s),
+          force: true,
         });
         touchRunStage(run.id, stage);
         updatePhaseStatus(phase.id, stage === "in_review" ? "in_review" : "draft");

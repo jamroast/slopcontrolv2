@@ -382,6 +382,8 @@ export * from "./plan-turn-intent-llm.js";
 export * from "./design-turn-intent-llm.js";
 export * from "./intent-research-conflict-llm.js";
 export * from "./host-verify-env-llm.js";
+export * from "./revision-target-llm.js";
+export * from "./doc-revision-judge-llm.js";
 export * from "./dependency-intent-llm.js";
 export * from "./element-honor-llm.js";
 export * from "./build-process-config-llm.js";

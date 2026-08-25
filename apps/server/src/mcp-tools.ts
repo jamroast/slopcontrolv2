@@ -873,7 +873,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "rerun_research",
       description:
-        "Re-run research (and draft) for an existing failed/interrupted planning run. Skips the research agent when RESEARCH.md is already solid. Returns 202 with stage researching/drafting.",
+        "Re-run research (and draft) for an existing failed/interrupted planning run. Greenfield — always runs the research agent, bypassing the solid-RESEARCH skip. Returns 202 with stage researching/drafting.",
       inputSchema: {
         type: "object",
         properties: {

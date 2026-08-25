@@ -235,6 +235,7 @@ import {
   type PlanContinueIntent,
   type DependencyIntent,
   reconcileChangeIntentFromResearch,
+  verifyDocRevisionApplied,
 } from "@slopcontrol/artifacts";
 import {
   ensureGitInitialized,
@@ -272,6 +273,8 @@ import {
   classifyElementHonorViaLlm,
   classifyVerifyFailureViaLlm,
   classifyHostVerifyEnvViaLlm,
+  classifyRevisionTargetsViaLlm,
+  judgeDocRevisionViaLlm,
   classifyAskInvestigateEngineViaLlm,
   judgeClaimProofViaLlm,
   judgeNarrationOnlyViaLlm,
@@ -643,6 +646,8 @@ export interface StartResearchInput {
   /** Advance run stage (e.g. researching → drafting) without guessing wall-clock in the HTTP layer. */
   onStage?: (stage: RunStage) => void;
   listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+  /** When true, re-run the research agent even if RESEARCH.md looks solid. */
+  force?: boolean;
 }
 
 export interface ReviewInput {
@@ -5136,7 +5141,7 @@ ${message.trim()}`;
     log(project, run, `--- Starting research for phase ${phase.id} ---`);
 
     const existingResearch = readResearch(project.rootPath, phase.id);
-    if (researchLooksSolid(existingResearch)) {
+    if (!input.force && researchLooksSolid(existingResearch)) {
       log(
         project,
         run,
@@ -6328,8 +6333,8 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     }
 
     log(project, run, `--- Review feedback ---\n${feedback ?? ""}`);
-    const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
     const research = readResearch(project.rootPath, phase.id);
+    const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
     let intent = await ensureChangeIntentAsync(
       project.rootPath,
       phase.id,
@@ -6350,7 +6355,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       );
       intent = reconciled.intent;
     }
-    let intentBlock = formatChangeIntentPromptBlock(intent);
+    const intentBlock = formatChangeIntentPromptBlock(intent);
     const brandAsk = changeIntentIsBrandTheming(intent);
     const themeWiringOnly = changeIntentIsThemeWiringOnly(intent);
     const stockAdoptionAsk = intent.stockAdoption === true;
@@ -6396,6 +6401,230 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
 - If ## Brand / ## Assets appear, mark them Not applicable.
 `
             : "";
+
+    const targets = await this.classifyRevisionTargets(
+      feedback ?? "",
+      research,
+      phaseDoc,
+    );
+    log(project, run, `--- Revision targets: ${targets} ---`);
+    const judge = this.bindDocRevisionJudge();
+
+    let researchAfter = research;
+    if (targets === "research" || targets === "both") {
+      researchAfter = await this.reviseResearchDoc({
+        project,
+        phase,
+        run,
+        feedback: feedback ?? "",
+        research,
+        intentBlock,
+      });
+      let verdict = await verifyDocRevisionApplied({
+        before: research,
+        after: researchAfter,
+        feedback: feedback ?? "",
+        judge,
+      });
+      if (!verdict.ok) {
+        log(
+          project,
+          run,
+          `--- RESEARCH revision rejected: ${verdict.reason}; retrying once ---`,
+        );
+        researchAfter = await this.reviseResearchDoc({
+          project,
+          phase,
+          run,
+          feedback: `${feedback ?? ""}\n\nPrevious revision was rejected: ${verdict.reason}. Apply these edits verbatim.`,
+          research: researchAfter,
+          intentBlock,
+        });
+        verdict = await verifyDocRevisionApplied({
+          before: research,
+          after: researchAfter,
+          feedback: feedback ?? "",
+          judge,
+        });
+        if (!verdict.ok) {
+          log(
+            project,
+            run,
+            `--- RESEARCH revision still rejected after retry: ${verdict.reason} ---`,
+          );
+          writePhaseStatus(project.rootPath, phase.id, "in_review");
+          return "in_review";
+        }
+      }
+      log(project, run, `--- RESEARCH revision applied (${verdict.reason}) ---`);
+    }
+
+    if (targets === "phase" || targets === "both") {
+      const phaseAfter = await this.revisePhaseDoc({
+        project,
+        phase,
+        run,
+        feedback: feedback ?? "",
+        research: researchAfter,
+        intentBlock,
+        designRoutingNote,
+      });
+      let verdict = await verifyDocRevisionApplied({
+        before: phaseDoc,
+        after: phaseAfter,
+        feedback: feedback ?? "",
+        judge,
+      });
+      if (!verdict.ok) {
+        log(
+          project,
+          run,
+          `--- PHASE revision rejected: ${verdict.reason}; retrying once ---`,
+        );
+        const phaseRetry = await this.revisePhaseDoc({
+          project,
+          phase,
+          run,
+          feedback: `${feedback ?? ""}\n\nPrevious revision was rejected: ${verdict.reason}. Apply these edits verbatim.`,
+          research: researchAfter,
+          intentBlock,
+          designRoutingNote,
+        });
+        verdict = await verifyDocRevisionApplied({
+          before: phaseDoc,
+          after: phaseRetry,
+          feedback: feedback ?? "",
+          judge,
+        });
+        if (!verdict.ok) {
+          log(
+            project,
+            run,
+            `--- PHASE revision still rejected after retry: ${verdict.reason} ---`,
+          );
+          writePhaseStatus(project.rootPath, phase.id, "in_review");
+          return "in_review";
+        }
+      }
+      log(project, run, `--- PHASE revision applied (${verdict.reason}) ---`);
+    }
+
+    writePhaseStatus(project.rootPath, phase.id, "in_review");
+    return "in_review";
+  }
+
+  /** Classify which artifact(s) review feedback should revise. LLM on the
+   * classification role; falls back to "both" (safe) when unbound. */
+  private async classifyRevisionTargets(
+    feedback: string,
+    research: string,
+    phaseDoc: string,
+  ): Promise<"research" | "phase" | "both"> {
+    try {
+      const { endpoint, modelId } =
+        this.ctx.registry.resolveEndpointForRole("classification");
+      return await classifyRevisionTargetsViaLlm({
+        endpoint,
+        modelId,
+        feedback,
+        researchExcerpt: clipPromptSection("RESEARCH.md", research, 4_000),
+        phaseExcerpt: clipPromptSection("PHASE.md", phaseDoc, 4_000),
+        timeoutMs: 90_000,
+      });
+    } catch {
+      return "both";
+    }
+  }
+
+  /** Bind the doc-revision judge to the classification role (undefined when unbound). */
+  private bindDocRevisionJudge() {
+    try {
+      const { endpoint, modelId } =
+        this.ctx.registry.resolveEndpointForRole("classification");
+      return (input: { feedback: string; before: string; after: string }) =>
+        judgeDocRevisionViaLlm({
+          endpoint,
+          modelId,
+          feedback: input.feedback,
+          before: input.before,
+          after: input.after,
+          timeoutMs: 90_000,
+        });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Surgical edit of RESEARCH.md from review feedback (research agent, not review agent). */
+  private async reviseResearchDoc(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    feedback: string;
+    research: string;
+    intentBlock: string;
+  }): Promise<string> {
+    const { project, phase, run, feedback, research, intentBlock } = input;
+    const researchPath = `.slopcontrol/phases/${phase.id}/RESEARCH.md`;
+    const prompt = `Revise RESEARCH.md based on this review feedback:\n${feedback ?? ""}
+
+${intentBlock}
+Apply surgical edits to the full RESEARCH.md:
+- Do NOT return unchanged content.
+- Preserve all sections not mentioned in the feedback.
+- Keep codebase-evidence sections; only patch the deltas the feedback asks for.
+- End with RESEARCH_COMPLETE on its own line.
+If you use write_file, write ONLY to ${researchPath}.
+
+Current RESEARCH.md:
+${clipPromptSection("RESEARCH.md", research, 8_000)}`;
+
+    const watch = researchDocWatchPaths(project.rootPath, phase.id);
+    const beforeStats = snapshotFileStats(watch);
+    const output = await runAgent(
+      this.ctx.agents.researchAgent,
+      prompt,
+      project.id,
+      `${phase.id}-research-revise`,
+      { maxSteps: 16 },
+    );
+    log(project, run, output);
+    const resolved = resolveResearchFromAgentTurn({
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+      agentOutput: output,
+      beforeStats,
+    });
+    if (resolved.source !== "none" && !resolved.thin) {
+      log(
+        project,
+        run,
+        `--- Harvested revised RESEARCH.md (source=${resolved.source}${resolved.path ? `, path=${resolved.path}` : ""}) ---`,
+      );
+      writeResearch(project.rootPath, phase.id, resolved.doc);
+      return resolved.doc;
+    }
+    log(
+      project,
+      run,
+      "--- RESEARCH revise harvest failed; keeping prior RESEARCH.md ---",
+    );
+    return research;
+  }
+
+  /** Surgical edit of PHASE.md from review feedback (review agent). */
+  private async revisePhaseDoc(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    feedback: string;
+    research: string;
+    intentBlock: string;
+    designRoutingNote: string;
+  }): Promise<string> {
+    const { project, phase, run, feedback, research, intentBlock, designRoutingNote } =
+      input;
+    const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
     const prompt = `Revise PHASE.md based on this feedback:\n${feedback ?? ""}
 
 ${intentBlock}
@@ -6422,7 +6651,6 @@ ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
       `${phase.id}-review`,
       { maxSteps: 16 },
     );
-
     log(project, run, output);
     const resolved = resolvePhaseDocFromAgentTurn({
       projectRoot: project.rootPath,
@@ -6439,20 +6667,18 @@ ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
         `--- Harvested revised PHASE.md (source=${resolved.source}${resolved.path ? `, path=${resolved.path}` : ""}) ---`,
       );
       writePhaseDoc(project.rootPath, phase.id, resolved.doc);
-    } else {
-      const issues = [
-        ...resolved.gate.issues,
-        ...(resolved.alignIssues ?? []),
-      ];
-      log(
-        project,
-        run,
-        `--- PHASE harvest failed after review (source=${resolved.source}); keeping prior PHASE.md ---\n${issues.map((i) => `- ${i}`).join("\n") || "- no structure-valid candidate"}`,
-      );
-      // Never write raw agent output / truncated extract over a prior doc.
+      return resolved.doc;
     }
-    writePhaseStatus(project.rootPath, phase.id, "in_review");
-    return "in_review";
+    const issues = [
+      ...resolved.gate.issues,
+      ...(resolved.alignIssues ?? []),
+    ];
+    log(
+      project,
+      run,
+      `--- PHASE harvest failed after review (source=${resolved.source}); keeping prior PHASE.md ---\n${issues.map((i) => `- ${i}`).join("\n") || "- no structure-valid candidate"}`,
+    );
+    return readPhaseDoc(project.rootPath, phase.id);
   }
 
   async startDesign(input: {
