@@ -89,6 +89,7 @@ export * from "./verify-recovery-execute.js";
 export * from "./verify-recovery-evidence.js";
 export * from "./verify-doc-revision.js";
 export * from "./revision-outcome.js";
+export * from "./planning-gate.js";
 export * from "./ci-workflows.js";
 export * from "./library-propagate.js";
 export * from "./workspace-package.js";
@@ -672,6 +673,24 @@ export function writePhaseDoc(
     extractMarkdownDocument(content) || stripCompletionTokens(content),
     "utf-8",
   );
+}
+
+/** Undo agent tool writes when harvest rejects a candidate (disk must match last good doc). */
+export function restorePhaseDocSnapshot(
+  projectRoot: string,
+  phaseId: string,
+  priorDoc: string,
+): void {
+  writePhaseDoc(projectRoot, phaseId, priorDoc);
+}
+
+/** Undo agent tool writes when RESEARCH harvest rejects a candidate. */
+export function restoreResearchSnapshot(
+  projectRoot: string,
+  phaseId: string,
+  priorDoc: string,
+): void {
+  writeResearch(projectRoot, phaseId, priorDoc);
 }
 
 /**

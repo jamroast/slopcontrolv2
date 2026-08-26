@@ -28,6 +28,8 @@ import {
   detectResearchConstraintNote,
   readResearchConclusionForPhase,
   readRevisionOutcome,
+  composeReviewRevisionFeedback,
+  validatePhaseDocForDev,
   buildAskTaskDescription,
   writeAskArtifacts,
   isAskAgentTimeoutError,
@@ -1242,6 +1244,21 @@ function buildRunPayload(run: Run) {
       ? readResearchConclusionForPhase(project.rootPath, phase.id)
       : "";
   const revisionOutcome = readRevisionOutcome(project.rootPath, run.id);
+  const phaseValidation =
+    phase && phaseDoc && run.stage === "in_review"
+      ? validatePhaseDocForDev(phaseDoc, {
+          projectRoot: project.rootPath,
+          phaseId: phase.id,
+        })
+      : null;
+  const suggestedRevisionFeedback =
+    run.stage === "in_review"
+      ? composeReviewRevisionFeedback({
+          diagnosis,
+          revisionOutcome,
+          phaseValidationIssues: phaseValidation?.issues,
+        })
+      : null;
 
   return {
     id: run.id,
@@ -1302,6 +1319,10 @@ function buildRunPayload(run: Run) {
       : null,
     verify_ok: verifySteps ? verifySteps.ok : null,
     revision_outcome: revisionOutcome,
+    phase_validation_issues: phaseValidation?.issues?.length
+      ? phaseValidation.issues
+      : null,
+    suggested_revision_feedback: suggestedRevisionFeedback || null,
   };
 }
 
@@ -7341,12 +7362,28 @@ app.post("/runs", async (req, res) => {
       touchRunStage(run.id, "drafting");
       runInBackground(run.id, async () => {
         const { orchestrator } = getRuntime(project.rootPath);
+        const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+        const diagnosisRaw =
+          readDiagnosis(project.rootPath, run.id) ??
+          readLatestDiagnosisForPhase(project.rootPath, phase.id);
+        const diagnosis = diagnosisForRunStage(diagnosisRaw, run.stage);
+        const revisionOutcome = readRevisionOutcome(project.rootPath, run.id);
+        const validation = validatePhaseDocForDev(phaseDoc, {
+          projectRoot: project.rootPath,
+          phaseId: phase.id,
+        });
+        const feedback = composeReviewRevisionFeedback({
+          operatorHint: action.feedback,
+          diagnosis,
+          revisionOutcome,
+          phaseValidationIssues: validation.issues,
+        });
         const result = await orchestrator.submitReview({
           project,
           phase,
           run,
           decision: "request_changes",
-          feedback: action.feedback,
+          feedback,
         });
         touchRunStage(run.id, result.stage);
         updatePhaseStatus(phase.id, "in_review");

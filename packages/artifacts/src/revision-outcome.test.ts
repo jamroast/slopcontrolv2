@@ -7,6 +7,7 @@ import {
   buildPlanningRevisionFailureDiagnosis,
   buildReviewApprovalFailureDiagnosis,
   buildRevisionArtifactOutcome,
+  composeReviewRevisionFeedback,
   readRevisionOutcome,
   summarizeRevisionOutcome,
   writeRevisionOutcome,
@@ -98,5 +99,17 @@ describe("revision outcome", () => {
     assert.ok(d.tags?.includes("review-approval-blocked"));
     assert.match(d.operatorActions.join(" "), /request_changes/i);
     assert.match(d.operatorActions.join(" "), /Do NOT call retry_draft/i);
+  });
+
+  it("composeReviewRevisionFeedback merges operator hint and validation issues", () => {
+    const text = composeReviewRevisionFeedback({
+      operatorHint: "fix automated checks",
+      phaseValidationIssues: [
+        "Broken Automated Check starts a long-lived server (docker compose up)",
+      ],
+    });
+    assert.match(text, /fix automated checks/i);
+    assert.match(text, /long-lived server/i);
+    assert.match(text, /Automated Checks/i);
   });
 });

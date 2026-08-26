@@ -113,8 +113,14 @@ import {
   type PersistedDiagnosis,
   buildPlanningFailureDiagnosis,
   buildPlanningRevisionFailureDiagnosis,
+  buildPlanningGateBlockedDiagnosis,
   buildReviewApprovalFailureDiagnosis,
   buildRevisionArtifactOutcome,
+  buildPhaseDocRepairPrompt,
+  PLANNING_AUTOMATED_CHECKS_RULES,
+  type PlanningSnapshot,
+  restorePhaseDocSnapshot,
+  restoreResearchSnapshot,
   writeRevisionOutcome,
   summarizeRevisionOutcome,
   type RevisionOutcome,
@@ -6479,6 +6485,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     log(project, run, `--- Review feedback ---\n${feedback ?? ""}`);
     const research = readResearch(project.rootPath, phase.id);
     const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+    const planningSnapshot: PlanningSnapshot = { phaseDoc, research };
     let intent = await ensureChangeIntentAsync(
       project.rootPath,
       phase.id,
@@ -6558,10 +6565,11 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       research?: RevisionArtifactOutcome;
       phase?: RevisionArtifactOutcome;
     } = {};
-    const finish = (): SubmitReviewResult =>
+    const finish = async (): Promise<SubmitReviewResult> =>
       this.finalizeReviewRevision(project, phase, run, {
         targets,
         feedback: feedback ?? "",
+        planningSnapshot,
         research:
           revisionState.research ??
           buildRevisionArtifactOutcome({
@@ -6606,7 +6614,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
             skipReason: "research revision failed",
           });
         }
-        return finish();
+        return await finish();
       }
       let verdict = await verifyDocRevisionApplied({
         before: research,
@@ -6648,7 +6656,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
               skipReason: "research revision failed",
             });
           }
-          return finish();
+          return await finish();
         }
         verdict = await verifyDocRevisionApplied({
           before: research,
@@ -6677,7 +6685,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
               skipReason: "research revision failed",
             });
           }
-          return finish();
+          return await finish();
         }
       }
       log(project, run, `--- RESEARCH revision applied (${verdict.reason}) ---`);
@@ -6715,7 +6723,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           harvested: false,
           failReason: "harvest failed",
         });
-        return finish();
+        return await finish();
       }
       let verdict = await verifyDocRevisionApplied({
         before: phaseDoc,
@@ -6750,7 +6758,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
             harvested: false,
             failReason: "retry harvest failed",
           });
-          return finish();
+          return await finish();
         }
         phaseAfterDoc = retryRev.doc;
         verdict = await verifyDocRevisionApplied({
@@ -6773,7 +6781,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
             harvested: true,
             verdict,
           });
-          return finish();
+          return await finish();
         }
       }
       log(project, run, `--- PHASE revision applied (${verdict.reason}) ---`);
@@ -6787,23 +6795,257 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       });
     }
 
-    return finish();
+    return await finish();
   }
 
-  private finalizeReviewRevision(
+  private async validatePlanningArtifactsForReview(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    research: string;
+    intent: ChangeIntent;
+  }): Promise<{ ok: boolean; issues: string[] }> {
+    const { project, phase, run, research, intent } = input;
+    const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+    const gate = validatePhaseDocForDev(phaseDoc, {
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+    });
+    const claimRefined = await refineClaimProofGateIssues(
+      this.ctx.registry,
+      phaseDoc,
+      gate.issues,
+      { projectRoot: project.rootPath, phaseId: phase.id },
+    );
+    for (const warning of claimRefined.warnings) {
+      log(project, run, `claim-vs-proof: ${warning}`);
+    }
+    if (claimRefined.issues.length > 0) {
+      return { ok: false, issues: claimRefined.issues };
+    }
+    const align = phaseDocAlignsWithResearch(
+      phaseDoc,
+      research,
+      phase.description,
+    );
+    if (!align.ok) {
+      return { ok: false, issues: align.issues };
+    }
+    const antiAudit = phaseDocRejectsMissingThemeAudit({
+      description: phase.description,
+      phaseDoc,
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+      requestsMissingThemeControl: intent.requestsMissingThemeControl,
+    });
+    if (!antiAudit.ok) {
+      return { ok: false, issues: antiAudit.issues };
+    }
+    const intentAlign = await refineIntentAlignmentIssues(
+      this.ctx.registry,
+      phaseDoc,
+      intent,
+    );
+    for (const warning of intentAlign.warnings) {
+      log(project, run, `intent-alignment: ${warning}`);
+    }
+    if (intentAlign.issues.length > 0) {
+      return { ok: false, issues: intentAlign.issues };
+    }
+    return { ok: true, issues: [] };
+  }
+
+  private async repairPhaseDocForPlanning(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    research: string;
+    intentBlock: string;
+    issues: string[];
+    alignIssues?: string[];
+    intentIssues?: string[];
+    sessionSuffix: string;
+    preamble?: string;
+  }): Promise<{ ok: boolean; doc: string; issues: string[] }> {
+    const { project, phase, run, research, intentBlock } = input;
+    const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
+    const watch = phaseDocWatchPaths(project.rootPath, phase.id);
+    const priorDoc = readPhaseDoc(project.rootPath, phase.id);
+    const repairPrompt = buildPhaseDocRepairPrompt({
+      issues: input.issues,
+      alignIssues: input.alignIssues,
+      intentIssues: input.intentIssues,
+      intentBlock,
+      canonicalPath,
+      phaseDescription: clipPromptSection(
+        "change-request",
+        phase.description,
+        4_000,
+      ),
+      research: clipPromptSection("RESEARCH.md", research, 8_000),
+      preamble: input.preamble,
+    });
+    try {
+      const beforeStats = snapshotFileStats(watch);
+      const repaired = await runAgent(
+        this.ctx.agents.phasePlannerAgent,
+        repairPrompt,
+        project.id,
+        input.sessionSuffix,
+        { maxSteps: 16 },
+      );
+      log(project, run, repaired);
+      const resolved = resolvePhaseDocFromAgentTurn({
+        projectRoot: project.rootPath,
+        phaseId: phase.id,
+        agentOutput: repaired,
+        beforeStats,
+        description: phase.description,
+        research,
+      });
+      if (resolved.gate.ok && resolved.source !== "none") {
+        writePhaseDoc(project.rootPath, phase.id, resolved.doc);
+        return { ok: true, doc: resolved.doc, issues: [] };
+      }
+      restorePhaseDocSnapshot(project.rootPath, phase.id, priorDoc);
+      return {
+        ok: false,
+        doc: priorDoc,
+        issues: [
+          ...resolved.gate.issues,
+          ...(resolved.alignIssues ?? []),
+        ],
+      };
+    } catch (repairError) {
+      restorePhaseDocSnapshot(project.rootPath, phase.id, priorDoc);
+      return {
+        ok: false,
+        doc: priorDoc,
+        issues: [formatLlmErrorForLog(repairError)],
+      };
+    }
+  }
+
+  /** Same validation + repair path as draft finalize; never leave invalid PHASE on disk. */
+  private async settlePlanningArtifactsOnDisk(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    research: string;
+    intent: ChangeIntent;
+    intentBlock: string;
+    snapshot: PlanningSnapshot;
+  }): Promise<{
+    ok: boolean;
+    issues: string[];
+    restored: boolean;
+    repaired: boolean;
+  }> {
+    const { project, phase, run, research, intent, intentBlock, snapshot } =
+      input;
+
+    let validated = await this.validatePlanningArtifactsForReview({
+      project,
+      phase,
+      run,
+      research,
+      intent,
+    });
+    if (validated.ok) {
+      return { ok: true, issues: [], restored: false, repaired: false };
+    }
+
+    log(
+      project,
+      run,
+      `--- Planning gate failed after revision; repairing once ---\n${validated.issues.map((i) => `- ${i}`).join("\n")}`,
+    );
+    const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+    const align = phaseDocAlignsWithResearch(
+      phaseDoc,
+      research,
+      phase.description,
+    );
+    const repair = await this.repairPhaseDocForPlanning({
+      project,
+      phase,
+      run,
+      research,
+      intentBlock,
+      issues: validated.issues,
+      alignIssues: align.ok ? [] : align.issues,
+      sessionSuffix: `${run.id}-review-settle`,
+      preamble:
+        "PHASE.md failed the same validation gate used at draft and approve.",
+    });
+
+    validated = await this.validatePlanningArtifactsForReview({
+      project,
+      phase,
+      run,
+      research,
+      intent,
+    });
+    if (validated.ok) {
+      return { ok: true, issues: [], restored: false, repaired: repair.ok };
+    }
+
+    restorePhaseDocSnapshot(project.rootPath, phase.id, snapshot.phaseDoc);
+    log(
+      project,
+      run,
+      "--- Restored PHASE.md snapshot after failed planning settle ---",
+    );
+    validated = await this.validatePlanningArtifactsForReview({
+      project,
+      phase,
+      run,
+      research,
+      intent,
+    });
+    return {
+      ok: validated.ok,
+      issues: validated.issues,
+      restored: true,
+      repaired: repair.ok,
+    };
+  }
+
+  private async finalizeReviewRevision(
     project: Project,
     phase: Phase,
     run: Run,
     opts: {
       targets: RevisionTarget;
       feedback: string;
+      planningSnapshot: PlanningSnapshot;
       research: RevisionArtifactOutcome;
       phase: RevisionArtifactOutcome;
     },
-  ): SubmitReviewResult {
-    const ok =
+  ): Promise<SubmitReviewResult> {
+    const revisionOk =
       (!opts.research.attempted || opts.research.ok) &&
       (!opts.phase.attempted || opts.phase.ok);
+
+    const researchDoc = readResearch(project.rootPath, phase.id);
+    const intent = await ensureChangeIntentAsync(
+      project.rootPath,
+      phase.id,
+      phase.description,
+      { registry: this.ctx.registry },
+    );
+    const intentBlock = formatChangeIntentPromptBlock(intent);
+    const settle = await this.settlePlanningArtifactsOnDisk({
+      project,
+      phase,
+      run,
+      research: researchDoc,
+      intent,
+      intentBlock,
+      snapshot: opts.planningSnapshot,
+    });
+
+    const ok = revisionOk && settle.ok;
     const outcome: RevisionOutcome = {
       targets: opts.targets,
       ok,
@@ -6815,23 +7057,61 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     log(
       project,
       run,
-      `--- Revision outcome: ${summarizeRevisionOutcome(outcome)} ---`,
+      `--- Revision outcome: ${summarizeRevisionOutcome(outcome)}; planning gate ${settle.ok ? "ok" : "blocked"} ---`,
     );
+
     if (!ok) {
+      const diagnoses: PersistedDiagnosis[] = [];
+      if (!revisionOk) {
+        diagnoses.push(
+          buildPlanningRevisionFailureDiagnosis({
+            outcome,
+            feedback: opts.feedback,
+            phaseId: phase.id,
+            runId: run.id,
+          }),
+        );
+      }
+      if (!settle.ok) {
+        diagnoses.push(
+          buildPlanningGateBlockedDiagnosis({
+            issues: settle.issues,
+            phaseId: phase.id,
+            runId: run.id,
+            restoredSnapshot: settle.restored,
+          }),
+        );
+      }
       this.persistDiagnosis(
         project,
         run,
-        buildPlanningRevisionFailureDiagnosis({
-          outcome,
-          feedback: opts.feedback,
-          phaseId: phase.id,
-          runId: run.id,
-        }),
+        diagnoses.length === 1
+          ? diagnoses[0]!
+          : {
+              ...diagnoses[0]!,
+              title: "Review revision incomplete — feedback or validation blocked",
+              rootCause: diagnoses.map((d) => d.rootCause).join("\n\n"),
+              evidence: diagnoses.map((d) => d.evidence).join("\n\n"),
+              operatorActions: [
+                ...new Set(diagnoses.flatMap((d) => d.operatorActions)),
+              ],
+              tags: ["planning", "review-revision", "planning-gate-blocked"],
+            },
         phase.id,
       );
     } else {
       deleteRunDiagnosis(project.rootPath, run.id, phase.id);
     }
+
+    if (!settle.ok) {
+      writePhaseStatus(project.rootPath, phase.id, "in_review");
+      return {
+        stage: "in_review",
+        revision: outcome,
+        reason: settle.issues.join("; "),
+      };
+    }
+
     writePhaseStatus(project.rootPath, phase.id, "in_review");
     return { stage: "in_review", revision: outcome };
   }
@@ -6888,6 +7168,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     intentBlock: string;
   }): Promise<{ doc: string; harvested: boolean }> {
     const { project, phase, run, feedback, research, intentBlock } = input;
+    const priorResearch = research;
     const researchPath = `.slopcontrol/phases/${phase.id}/RESEARCH.md`;
     const prompt = `Revise RESEARCH.md based on this review feedback:\n${feedback ?? ""}
 
@@ -6930,9 +7211,10 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     log(
       project,
       run,
-      "--- RESEARCH revise harvest failed; keeping prior RESEARCH.md ---",
+      "--- RESEARCH revise harvest failed; restoring prior RESEARCH.md ---",
     );
-    return { doc: research, harvested: false };
+    restoreResearchSnapshot(project.rootPath, phase.id, priorResearch);
+    return { doc: priorResearch, harvested: false };
   }
 
   /** Surgical edit of PHASE.md from review feedback (review agent). */
@@ -6947,11 +7229,13 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
   }): Promise<{ doc: string; harvested: boolean }> {
     const { project, phase, run, feedback, research, intentBlock, designRoutingNote } =
       input;
+    const priorPhaseDoc = readPhaseDoc(project.rootPath, phase.id);
     const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
     const prompt = `Revise PHASE.md based on this feedback:\n${feedback ?? ""}
 
 ${intentBlock}
-${designRoutingNote}Return the full revised PHASE.md content starting with # (document only, no chat).
+${designRoutingNote}${PLANNING_AUTOMATED_CHECKS_RULES}
+Return the full revised PHASE.md content starting with # (document only, no chat).
 If you use write_file, write ONLY to ${canonicalPath}.
 Include "## Blueprint Deltas" for durable design changes.
 Keep ## Automated Checks with a \`\`\`bash fence.
@@ -6960,7 +7244,7 @@ Obey Change Intent uiMount / interaction — do not replace fillable mounts with
 When finished, include PHASE_COMPLETE on its own line.
 
 Current phase doc:
-${readPhaseDoc(project.rootPath, phase.id)}
+${priorPhaseDoc}
 
 Research:
 ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
@@ -6999,9 +7283,29 @@ ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
     log(
       project,
       run,
-      `--- PHASE harvest failed after review (source=${resolved.source}); keeping prior PHASE.md ---\n${issues.map((i) => `- ${i}`).join("\n") || "- no structure-valid candidate"}`,
+      `--- PHASE harvest failed after review (source=${resolved.source}); restoring prior PHASE.md ---\n${issues.map((i) => `- ${i}`).join("\n") || "- no structure-valid candidate"}`,
     );
-    return { doc: readPhaseDoc(project.rootPath, phase.id), harvested: false };
+    restorePhaseDocSnapshot(project.rootPath, phase.id, priorPhaseDoc);
+
+    if (issues.length > 0) {
+      const repair = await this.repairPhaseDocForPlanning({
+        project,
+        phase,
+        run,
+        research,
+        intentBlock,
+        issues: resolved.gate.issues,
+        alignIssues: resolved.alignIssues,
+        sessionSuffix: `${run.id}-phase-revise-repair`,
+        preamble: `Review revision wrote an invalid PHASE.md (tool write rejected) while applying this feedback:\n${feedback ?? ""}\n\nRepair PHASE.md to satisfy validation AND the feedback.`,
+      });
+      if (repair.ok) {
+        log(project, run, "--- PHASE revision self-healed via repair pass ---");
+        return { doc: repair.doc, harvested: true };
+      }
+    }
+
+    return { doc: priorPhaseDoc, harvested: false };
   }
 
   async startDesign(input: {

@@ -176,6 +176,7 @@ export function createReviewAgent(
     instructions: `You are the SlopControl review agent.
 Apply human feedback to improve PHASE.md while preserving alignment with BLUEPRINT.md and RESEARCH.md.
 Keep or add ## Automated Checks with runnable fenced cells (\`\`\`bash / \`\`\`typescript / \`lang cmd=…\`) — one fence = one process; manual-only verification is not enough.
+Runtime probes on dockerized apps must be finite: \`docker compose up -d <svc>\` plus \`trap 'docker compose down' EXIT\`, then curl/wget/node one-shot — never bare \`docker compose up\` or dev servers.
 Output ONLY the revised PHASE.md markdown (start with #). End with PHASE_COMPLETE.`,
     model: registry.resolve("planning"),
     memory,

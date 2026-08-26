@@ -88,6 +88,43 @@ export function summarizeRevisionOutcome(outcome: RevisionOutcome): string {
   return parts.join(" ");
 }
 
+/** Persisted when planning artifacts on disk fail validation after review revision. */
+export function buildPlanningGateBlockedDiagnosis(opts: {
+  issues: string[];
+  phaseId: string;
+  runId: string;
+  restoredSnapshot?: boolean;
+}): PersistedDiagnosis {
+  const detail = opts.issues.join("; ").slice(0, 2_000);
+  const fingerprint = createHash("sha256")
+    .update(`planning-gate-blocked:${detail.slice(0, 400)}`)
+    .digest("hex")
+    .slice(0, 16);
+  return {
+    audience: "operator",
+    operatorActions: [
+      "Park submit_review(request_changes) — feedback is optional; SlopControl composes it from get_run.suggested_revision_feedback / phase_validation_issues.",
+      "Do NOT call retry_draft at in_review.",
+      "SlopControl will repair PHASE.md automatically on the next request_changes cycle when possible.",
+    ],
+    class: "process",
+    confidence: "high",
+    title: opts.restoredSnapshot
+      ? "Review revision rolled back — PHASE.md restored to last on-disk snapshot"
+      : "Review revision blocked — PHASE.md failed validation",
+    rootCause: detail,
+    evidence: detail.slice(0, 4_000),
+    nextActions:
+      "submit_review(request_changes) to retry revision; approve only after phase_validation_issues is empty.",
+    fingerprint: `planning-gate-blocked-${fingerprint}`,
+    codingAgentShouldFix: false,
+    tags: ["planning", "planning-gate-blocked"],
+    phaseId: opts.phaseId,
+    runId: opts.runId,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 /** Persisted diagnosis when submit_review(request_changes) could not apply feedback. */
 export function buildPlanningRevisionFailureDiagnosis(opts: {
   outcome: RevisionOutcome;
@@ -163,10 +200,9 @@ export function buildReviewApprovalFailureDiagnosis(opts: {
   return {
     audience: "operator",
     operatorActions: [
-      "Use submit_review(request_changes) with bullet-point feedback quoting the validation issues below — revision will patch PHASE.md (and RESEARCH.md if classified).",
+      "Park submit_review(request_changes) — feedback is optional; SlopControl composes it from get_run.suggested_revision_feedback / phase_validation_issues.",
       "Do NOT call retry_draft — that only works when stage is failed or interrupted, not in_review.",
       "After PHASE.md passes validation, submit_review(approve) or advance_run to start development.",
-      "Read get_run.phase_doc ## Automated Checks before approving.",
     ],
     class: "process",
     confidence: "high",
@@ -182,6 +218,69 @@ export function buildReviewApprovalFailureDiagnosis(opts: {
     runId: opts.runId,
     updatedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * Compose submit_review(request_changes) feedback from live validation,
+ * persisted diagnosis, revision outcome, and optional operator words.
+ */
+export function composeReviewRevisionFeedback(opts: {
+  operatorHint?: string;
+  diagnosis?: PersistedDiagnosis | null;
+  revisionOutcome?: RevisionOutcome | null;
+  phaseValidationIssues?: string[];
+  maxChars?: number;
+}): string {
+  const maxChars = opts.maxChars ?? 8_000;
+  const hint = opts.operatorHint?.trim() ?? "";
+  const parts: string[] = [];
+
+  if (hint) {
+    parts.push(`Operator request: ${hint}`);
+  }
+
+  const issues = (opts.phaseValidationIssues ?? []).filter(Boolean);
+  if (issues.length > 0) {
+    parts.push(
+      "Fix PHASE.md so it passes development validation (Automated Checks must be finite and structurally valid):\n" +
+        issues.map((i) => `- ${i}`).join("\n"),
+    );
+  }
+
+  const d = opts.diagnosis;
+  if (d?.tags?.includes("review-approval-blocked")) {
+    parts.push(`Approval was refused:\n${d.rootCause}`);
+  } else if (d?.tags?.includes("review-revision")) {
+    parts.push(
+      `Prior review revision did not fully apply (${d.title}):\n${d.rootCause}`,
+    );
+    if (d.evidence?.trim() && d.evidence !== d.rootCause) {
+      parts.push(d.evidence.trim().slice(0, 2_000));
+    }
+  } else if (d?.rootCause?.trim()) {
+    parts.push(`${d.title}:\n${d.rootCause}`);
+  }
+
+  const ro = opts.revisionOutcome;
+  if (ro && !ro.ok) {
+    parts.push(`Revision outcome: ${summarizeRevisionOutcome(ro)}`);
+    if (ro.phase?.attempted && !ro.phase.ok) {
+      parts.push(`PHASE revision: ${ro.phase.reason}`);
+    }
+    if (ro.research?.attempted && !ro.research.ok) {
+      parts.push(`RESEARCH revision: ${ro.research.reason}`);
+    }
+  }
+
+  if (parts.length === 0) {
+    return hint;
+  }
+
+  parts.push(
+    "Revise the minimum sections needed (usually ## Automated Checks in PHASE.md). Do not rerun research unless RESEARCH.md is wrong.",
+  );
+
+  return parts.join("\n\n").slice(0, maxChars);
 }
 
 export function buildRevisionArtifactOutcome(opts: {
