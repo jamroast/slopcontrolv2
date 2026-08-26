@@ -3,7 +3,6 @@ import {
   finalizeChangeIntent,
   findPriorUiMountIntent,
   isChangeIntentWeak,
-  phaseDocAlignsWithChangeIntent,
   phaseDocAlignsWithChangeIntentAsync,
   readChangeIntent,
   writeChangeIntent,
@@ -163,9 +162,9 @@ export async function previewChangeIntentAsync(
 }
 
 /**
- * LLM-refined Change Intent alignment for read-only preview/audit paths.
+ * Pure-LLM Change Intent alignment for read-only preview/audit paths.
  * Binds the intent-alignment judge to the classification role; a missing
- * endpoint keeps the deterministic set (fail closed).
+ * endpoint or judge error fails closed (reject).
  */
 export async function previewIntentAlignmentAsync(
   phaseDoc: string,
@@ -173,17 +172,12 @@ export async function previewIntentAlignmentAsync(
   opts: { registry?: LlmRegistry | null },
 ): Promise<{ ok: boolean; issues: string[]; warnings: string[] }> {
   if (!opts.registry) {
-    const { issues } = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
-    if (
-      issues.length > 0 &&
-      intent.interaction &&
-      intent.interaction.mount !== "n/a"
-    ) {
-      log.warn("intent", "preview alignment: no registry; deterministic regex only", {
-        issueCount: issues.length,
-      });
-    }
-    return { ok: issues.length === 0, issues, warnings: [] };
+    log.warn("intent", "preview alignment: no registry; failing closed");
+    return {
+      ok: false,
+      issues: ["Change Intent alignment could not be verified (no registry)"],
+      warnings: [],
+    };
   }
   try {
     const { endpoint, modelId } =
@@ -194,7 +188,6 @@ export async function previewIntentAlignmentAsync(
           endpoint,
           modelId,
           intentBlock: input.intentBlock,
-          issue: input.issue,
           phaseDocExcerpt: input.phaseDocExcerpt,
           timeoutMs: 90_000,
         }),
@@ -205,7 +198,10 @@ export async function previewIntentAlignmentAsync(
       warnings: refined.warnings,
     };
   } catch {
-    const { issues } = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
-    return { ok: issues.length === 0, issues, warnings: [] };
+    return {
+      ok: false,
+      issues: ["Change Intent alignment could not be verified (judge failed)"],
+      warnings: [],
+    };
   }
 }

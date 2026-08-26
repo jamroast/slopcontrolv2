@@ -4,63 +4,55 @@ import { consolidateText } from "@slopcontrol/artifacts";
 import { chatJson } from "./json-chat.js";
 
 /**
- * LLM judge for Change Intent ↔ PHASE.md alignment. The deterministic
- * `phaseDocAlignsWithChangeIntent` in @slopcontrol/artifacts is the mechanical
- * half (does the PHASE doc contain the mount/proof keywords the intent
- * demands); this judge arbitrates the semantic half — is a flagged gap real,
- * or does the PHASE doc prove the intent in a form the keyword lists missed?
+ * LLM judge for Change Intent ↔ PHASE.md alignment. This is the SOLE
+ * authority for semantic alignment — there is no regex pre-filter. The judge
+ * reads the full PHASE doc excerpt + the authoritative Change Intent and
+ * returns a holistic verdict: is the doc aligned, and if not, what are the
+ * specific gaps and concrete fixes.
  *
- * This is the fix for the composer-centric keyword vocabulary: a bubble-mount
- * form that correctly uses FormBubble / sendFormAnswer / composerMode is
- * semantically aligned even though the deterministic regex only knows
- * composer-form / data-testid=composer-form.
+ * Structural checks (section presence, format) live separately in
+ * validatePhaseDocForDev and stay deterministic; this judge owns only the
+ * semantic question of whether the doc proves the intent's uiMount +
+ * interaction contract.
  */
 
 export const IntentAlignmentVerdictSchema = z.object({
-  /** true = the deterministic issue is a REAL gap and must block. */
-  genuineGap: z.boolean(),
-  reason: z.string(),
-  /** Quote of the PHASE text that already proves alignment (when genuineGap=false). */
-  existingProof: z.string().optional(),
-  /** Concrete Success Criteria / Automated Check line to add (when genuineGap=true). */
-  suggestedCheck: z.string().optional(),
+  /** true = the PHASE doc satisfies the intent's uiMount + interaction contract. */
+  aligned: z.boolean(),
+  /** Specific misalignments (empty when aligned). */
+  gaps: z.array(z.string()),
+  /** Concrete Success Criteria / Automated Check lines to add, parallel to gaps. */
+  suggestedLines: z.array(z.string()),
 });
 
 export type IntentAlignmentVerdict = z.infer<
   typeof IntentAlignmentVerdictSchema
 >;
 
-export const INTENT_ALIGNMENT_SYSTEM_PROMPT = `You are SlopControl's Change Intent alignment judge. A deterministic validator compared a PHASE.md draft against the phase's Change Intent (uiMount + interaction contract) and flagged a possible misalignment. Decide whether the gap is GENUINE. Respond with ONLY a single JSON object.
+export const INTENT_ALIGNMENT_SYSTEM_PROMPT = `You are SlopControl's Change Intent alignment judge. You decide whether a PHASE.md draft satisfies the phase's Change Intent (uiMount + interaction contract). Respond with ONLY a single JSON object.
 
-First, extract the relevant evidence from the PHASE doc excerpt — the concrete proof lines (grep/playwright/vitest commands), mount decisions (composer vs bubble vs page), and tool-part name-resolution proofs — then judge the flagged gap against that evidence. Do not rely on the keyword list; the deterministic validator only knows a fixed vocabulary and can miss valid proofs.
+First, extract the relevant evidence from the PHASE doc excerpt — the concrete proof lines (grep/playwright/vitest commands), mount decisions (composer vs bubble vs page), and tool-part name-resolution proofs — then judge the whole doc against the intent.
 
-The Change Intent is authoritative. The PHASE.md must prove it satisfies the intent's uiMount and interaction contract. Judge the SEMANTICS of the PHASE text, not the keyword list.
+The Change Intent is authoritative. The PHASE.md must prove it satisfies the intent's uiMount and interaction contract. Judge the SEMANTICS of the PHASE text, not any fixed keyword list.
 
-What counts as aligned (genuineGap=false):
-- The PHASE proves the interaction at the locked mount in a DIFFERENT vocabulary than the validator's keywords. For a bubble mount, FormBubble / sendFormAnswer / composerMode / typed forms / confirm round-trip are valid fill+submit proofs even though the validator only knows composer-form / data-testid=composer-form.
-- A fill/submit proof in any form: a Playwright/vitest render test, a Node one-shot, a grep for the mounted control + a submit action, an equivalent build/test command. Judge semantics, not keywords.
-- A live AI SDK static tool-part name resolution proof in any form (type: "tool-<name>", parseToolResult, extractActiveForm, deriving the tool name from the type field) — not only tool-invocation + toolName fixtures.
-- A click/navigate proof in any form (onClick, href, router.push, navigate, a click test).
-
-What does NOT count as aligned (genuineGap=true — apply strictly):
-- Chip/taxonomy-only work: summary chips, transcript classification, getFormPartState, superseded-chip fixes — these do NOT prove an actionable fillable mount.
-- A mount conflict: PHASE Blueprint Deltas / Scope that lock forms into the OPPOSITE mount from the intent (composer vs bubble). The excerpt includes Scope and Blueprint Deltas — use them for mount-conflict issues.
-- Prose/TODO/comments asserting the outcome without a runnable check.
-- A proof placed only in File Changes / Known limitations, not in Success Criteria / Automated Checks.
+Check ALL of the following and report every gap:
+1. Mount conflict: PHASE Blueprint Deltas / Scope must not lock forms into the OPPOSITE mount from the intent (composer vs bubble vs page).
+2. Actionable mount: the PHASE must prove an actionable fillable mount, not chip/taxonomy-only work (summary chips, transcript classification, getFormPartState, superseded-chip fixes).
+3. Fill/submit proof: when the interaction primaryAction is "submit form", Success Criteria / Automated Checks must prove fill+submit at the locked mount. A bubble-mount FormBubble / sendFormAnswer / composerMode proof counts even though it uses different words than composer-form / data-testid=composer-form.
+4. Live tool-part proof: for chat mounts (composer/bubble), the PHASE must prove live AI SDK static tool-part name resolution (type: "tool-<name>" / parseToolResult / extractActiveForm) — not only tool-invocation + toolName fixtures.
+5. Click/navigate proof: when primaryAction is click/navigate, prove click / onClick / href / router.push instead of fill+submit.
 
 Verdict rules:
-- genuineGap=true when the PHASE does not (in any form) prove the intent's mount + interaction. Include suggestedCheck: one concrete Success Criteria / Automated Check line the phase could add.
-- genuineGap=false when the PHASE already proves alignment — include existingProof quoting the exact PHASE text. When in doubt, prefer genuineGap=true (fail closed): a false rejection re-flags a phase that was correctly blocked; a false approval ships a misaligned phase.
-- reason: one sentence naming the intent requirement, the proof found or missing, and why.`;
+- aligned=true only when the PHASE proves the intent's mount + interaction (in any vocabulary). When in doubt, prefer aligned=false (fail closed): a false rejection re-flags a phase that was correctly blocked; a false approval ships a misaligned phase.
+- gaps: one string per misalignment, naming the intent requirement and what is missing.
+- suggestedLines: one concrete Success Criteria / Automated Check line per gap that the phase could add to fix it.`;
 
 export interface JudgeIntentAlignmentOptions {
   endpoint: LlmEndpoint;
   modelId?: string;
   /** formatChangeIntentPromptBlock(intent) — the authoritative intent. */
   intentBlock: string;
-  /** The deterministic issue string that was flagged. */
-  issue: string;
-  /** Success Criteria + Automated Checks excerpt (will be clipped). */
+  /** Scope / Success Criteria / Automated Checks / Blueprint Deltas excerpt. */
   phaseDocExcerpt: string;
   timeoutMs?: number;
 }
@@ -72,7 +64,7 @@ function clip(text: string, max: number): string {
   return consolidateText(text, max);
 }
 
-/** Coerce a possibly-messy LLM payload into the verdict schema. */
+/** Coerce a possibly-messy LLM payload into the verdict schema (fail closed). */
 export function parseIntentAlignmentVerdictPayload(
   parsed: unknown,
 ): IntentAlignmentVerdict {
@@ -80,21 +72,27 @@ export function parseIntentAlignmentVerdictPayload(
     string,
     unknown
   >;
+  const gaps = Array.isArray(asObj.gaps)
+    ? asObj.gaps.filter((g): g is string => typeof g === "string" && g.trim() !== "")
+    : [];
+  const suggestedLines = Array.isArray(asObj.suggestedLines)
+    ? asObj.suggestedLines.filter(
+        (s): s is string => typeof s === "string" && s.trim() !== "",
+      )
+    : [];
+  const alignedIsBool = typeof asObj.aligned === "boolean";
+  const aligned = alignedIsBool ? asObj.aligned : false;
   return IntentAlignmentVerdictSchema.parse({
-    // Fail closed: an unreadable verdict keeps the deterministic issue.
-    genuineGap: typeof asObj.genuineGap === "boolean" ? asObj.genuineGap : true,
-    reason:
-      typeof asObj.reason === "string" && asObj.reason.trim()
-        ? asObj.reason.trim()
-        : "LLM judge returned no reason — treating the deterministic gap as genuine.",
-    existingProof:
-      typeof asObj.existingProof === "string" && asObj.existingProof.trim()
-        ? asObj.existingProof.trim()
-        : undefined,
-    suggestedCheck:
-      typeof asObj.suggestedCheck === "string" && asObj.suggestedCheck.trim()
-        ? asObj.suggestedCheck.trim()
-        : undefined,
+    aligned,
+    gaps:
+      gaps.length > 0
+        ? gaps
+        : alignedIsBool
+          ? []
+          : [
+              "Change Intent alignment could not be verified (unreadable judge verdict)",
+            ],
+    suggestedLines,
   });
 }
 
@@ -110,9 +108,6 @@ export async function judgeIntentAlignmentViaLlm(
     user: [
       "Change Intent (authoritative):",
       opts.intentBlock,
-      "",
-      "Deterministic issue flagged:",
-      opts.issue,
       "",
       "PHASE doc excerpt (Scope / Success Criteria / Automated Checks / Blueprint Deltas):",
       clip(opts.phaseDocExcerpt ?? "", EXCERPT_TAIL_CHARS),

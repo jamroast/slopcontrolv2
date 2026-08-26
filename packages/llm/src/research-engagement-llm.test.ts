@@ -18,48 +18,48 @@ describe("research-engagement-llm", () => {
   it("system prompt judges semantics, not keywords, and fails closed", () => {
     assert.match(RESEARCH_ENGAGEMENT_SYSTEM_PROMPT, /SEMANTICS/);
     assert.match(RESEARCH_ENGAGEMENT_SYSTEM_PROMPT, /fail closed/i);
-    assert.match(RESEARCH_ENGAGEMENT_SYSTEM_PROMPT, /genuineGap=true/);
-    assert.match(RESEARCH_ENGAGEMENT_SYSTEM_PROMPT, /genuineGap=false/);
+    assert.match(RESEARCH_ENGAGEMENT_SYSTEM_PROMPT, /overclaims=true/);
+    assert.match(RESEARCH_ENGAGEMENT_SYSTEM_PROMPT, /overclaims=false/);
   });
 
-  it("parses a genuine overclaim verdict with a suggested residual-risk line", () => {
+  it("parses an overclaim verdict with a suggested residual-risk line", () => {
     const verdict = ResearchEngagementVerdictSchema.parse({
-      genuineGap: true,
-      reason: "Research claims ~90% already works with no residual risk.",
-      suggestedCheck:
+      overclaims: true,
+      gaps: ["Research claims ~90% already works with no residual risk."],
+      suggestedLines: [
         "Note the live AI SDK type: tool-<name> gap is unverified — parseToolResult never derives toolName.",
+      ],
     });
-    assert.equal(verdict.genuineGap, true);
-    assert.match(verdict.suggestedCheck ?? "", /parseToolResult/);
+    assert.equal(verdict.overclaims, true);
+    assert.match(verdict.suggestedLines[0] ?? "", /parseToolResult/);
   });
 
-  it("parses a rejected-overclaim verdict with existing proof", () => {
+  it("parses a not-overclaiming verdict", () => {
     const verdict = parseResearchEngagementVerdictPayload({
-      genuineGap: false,
-      reason: "Research names a blocking gap in different words.",
-      existingProof: "The form does not survive a reload; that is an open gap.",
+      overclaims: false,
+      gaps: [],
+      suggestedLines: [],
     });
-    assert.equal(verdict.genuineGap, false);
-    assert.match(verdict.existingProof ?? "", /does not survive/);
+    assert.equal(verdict.overclaims, false);
+    assert.deepEqual(verdict.gaps, []);
   });
 
   it("fails closed on a messy payload", () => {
     const verdict = parseResearchEngagementVerdictPayload("garbage");
-    assert.equal(verdict.genuineGap, true);
-    assert.match(verdict.reason, /no reason/i);
+    assert.equal(verdict.overclaims, true);
+    assert.match(verdict.gaps[0] ?? "", /could not be verified/i);
 
-    const missing = parseResearchEngagementVerdictPayload({ reason: "unsure" });
-    assert.equal(missing.genuineGap, true);
+    const missing = parseResearchEngagementVerdictPayload({ gaps: [] });
+    assert.equal(missing.overclaims, true);
   });
 
-  it("drops blank optional fields", () => {
+  it("drops blank gap/suggestion entries", () => {
     const verdict = parseResearchEngagementVerdictPayload({
-      genuineGap: true,
-      reason: "overclaim is real",
-      existingProof: "   ",
-      suggestedCheck: "",
+      overclaims: true,
+      gaps: ["real overclaim", "   ", ""],
+      suggestedLines: ["fix it", ""],
     });
-    assert.equal(verdict.existingProof, undefined);
-    assert.equal(verdict.suggestedCheck, undefined);
+    assert.deepEqual(verdict.gaps, ["real overclaim"]);
+    assert.deepEqual(verdict.suggestedLines, ["fix it"]);
   });
 });

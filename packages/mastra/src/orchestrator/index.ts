@@ -86,11 +86,9 @@ import {
   phaseHasUsableLogo,
   readChangeIntent,
   ensureTestServices,
-  phaseDocAlignsWithChangeIntent,
   phaseDocAlignsWithChangeIntentAsync,
   type IntentAlignmentJudgeFn,
   interactionProofKind,
-  researchEngagementQuality,
   researchEngagementQualityAsync,
   type ResearchEngagementJudgeFn,
   formatAntiAuditThemeDeliveryNote,
@@ -2228,7 +2226,6 @@ function tryBindIntentAlignmentJudge(
         endpoint,
         modelId,
         intentBlock: input.intentBlock,
-        issue: input.issue,
         phaseDocExcerpt: input.phaseDocExcerpt,
         timeoutMs: 90_000,
       });
@@ -2238,9 +2235,8 @@ function tryBindIntentAlignmentJudge(
 }
 
 /**
- * Refine Change Intent alignment issues with the LLM judge: the deterministic
- * validator flags, the judge arbitrates. A missing endpoint keeps the
- * deterministic set (fail closed).
+ * Pure-LLM Change Intent alignment: a single judge call returns a holistic
+ * verdict. A missing endpoint or judge error fails closed (reject).
  */
 async function refineIntentAlignmentIssues(
   registry: LlmRegistry,
@@ -2249,29 +2245,14 @@ async function refineIntentAlignmentIssues(
 ): Promise<{ issues: string[]; warnings: string[] }> {
   const judgeFn = tryBindIntentAlignmentJudge(registry);
   if (!judgeFn) {
-    const { issues } = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
-    if (
-      issues.length > 0 &&
-      intent.interaction &&
-      intent.interaction.mount !== "n/a"
-    ) {
-      slog.warn(
-        "planning",
-        "intent-alignment judge unbound (classification role missing); deterministic regex only",
-        { issueCount: issues.length },
-      );
-    }
-    return { issues, warnings: [] };
+    slog.warn(
+      "planning",
+      "intent-alignment judge unbound (classification role missing); failing closed",
+    );
   }
-  const refined = await phaseDocAlignsWithChangeIntentAsync(phaseDoc, intent, {
-    judgeFn,
+  return phaseDocAlignsWithChangeIntentAsync(phaseDoc, intent, {
+    judgeFn: judgeFn ?? undefined,
   });
-  if (refined.warnings.length > 0) {
-    slog.info("planning", "intent-alignment gap rejected by llm judge", {
-      warnings: refined.warnings,
-    });
-  }
-  return refined;
 }
 
 /** Bind the LLM research-engagement judge to the classification role; null when unbound. */
@@ -2286,7 +2267,6 @@ function tryBindResearchEngagementJudge(
         endpoint,
         modelId,
         intentBlock: input.intentBlock,
-        issue: input.issue,
         researchExcerpt: input.researchExcerpt,
         timeoutMs: 90_000,
       });
@@ -2296,9 +2276,8 @@ function tryBindResearchEngagementJudge(
 }
 
 /**
- * Refine engagement-research overclaim issues with the LLM judge: the
- * deterministic validator flags, the judge arbitrates. A missing endpoint
- * keeps the deterministic set (fail closed).
+ * Pure-LLM engagement-research overclaim check: a single judge call returns a
+ * holistic verdict. A missing endpoint or judge error fails closed (reject).
  */
 async function refineResearchEngagementIssues(
   registry: LlmRegistry,
@@ -2307,29 +2286,14 @@ async function refineResearchEngagementIssues(
 ): Promise<{ issues: string[]; warnings: string[] }> {
   const judgeFn = tryBindResearchEngagementJudge(registry);
   if (!judgeFn) {
-    const { issues } = researchEngagementQuality(doc, intent);
-    if (
-      issues.length > 0 &&
-      intent.interaction &&
-      intent.interaction.mount !== "n/a"
-    ) {
-      slog.warn(
-        "research",
-        "research-engagement judge unbound (classification role missing); deterministic regex only",
-        { issueCount: issues.length },
-      );
-    }
-    return { issues, warnings: [] };
+    slog.warn(
+      "research",
+      "research-engagement judge unbound (classification role missing); failing closed",
+    );
   }
-  const refined = await researchEngagementQualityAsync(doc, intent, {
-    judgeFn,
+  return researchEngagementQualityAsync(doc, intent, {
+    judgeFn: judgeFn ?? undefined,
   });
-  if (refined.warnings.length > 0) {
-    slog.info("research", "research overclaim rejected by llm judge", {
-      warnings: refined.warnings,
-    });
-  }
-  return refined;
 }
 
 /**

@@ -13,7 +13,6 @@ import { describe, it } from "node:test";
 import {
   clipBlueprintForPrompt,
   extractChangeIntent,
-  phaseDocAlignsWithChangeIntent,
   probeProjectForDecisions,
   reconcileBlueprintDecisions,
   reconcileProjectBlueprint,
@@ -50,27 +49,6 @@ describe("ui-gate fixture + grounded reconcile", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
-
-  it("engagement intent rejects chip-only PHASE", () => {
-    const intent = extractChangeIntent(
-      'Unable to submit — stuck at "Superseded by a newer form". Fix fill and submit.',
-    );
-    assert.equal(intent.uiMount, "composer");
-    assert.ok(intent.interaction);
-    const bad = `# Phase
-## Scope
-Collapse superseded to summary chips.
-## Success Criteria
-- getFormPartState classifies superseded
-## Automated Checks
-\`\`\`bash
-npm test -- chips.test.ts
-\`\`\`
-## Blueprint Deltas
-- **BD-TRANSCRIPT-SUPERSEDED-CHIP:** chip only
-`;
-    assert.equal(phaseDocAlignsWithChangeIntent(bad, intent).ok, false);
   });
 
   it("reconcile with probes verifies composer and strikes in-bubble", () => {

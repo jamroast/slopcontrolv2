@@ -6,13 +6,11 @@ import { afterEach, describe, it } from "node:test";
 import {
   buildPlanningFailureDiagnosis,
   isPlannerRefusalOutput,
-  phaseDocAlignsWithChangeIntent,
   readDiagnosis,
   readLatestDiagnosisForPhase,
   researchLooksSolid,
   writeDiagnosis,
 } from "./index.js";
-import { extractChangeIntent } from "./change-intent.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -96,150 +94,4 @@ describe("planning failure diagnosis", () => {
     assert.equal(raw.class, "process");
   });
 
-  it("engagement PHASE missing Success Criteria tool-part proof still fails Change Intent gate", () => {
-    const intent = extractChangeIntent(
-      "Please extend the chat with dynamic form fill and submit for gathering service data",
-    );
-    // Force engagement-like interaction if extract is soft
-    const withInteraction = {
-      ...intent,
-      uiMount: intent.uiMount === "n/a" ? ("page" as const) : intent.uiMount,
-      interaction: intent.interaction ?? {
-        mount: "page" as const,
-        primaryAction: "submit form",
-        proof: ["interactive control at locked mount", "primary action reachable"],
-        forbiddenSubstitutes: ["summary-chip-only"],
-      },
-    };
-    const bad = `# Phase
-
-## Scope
-Extend chat forms on the page mount.
-
-## Success Criteria
-- ThemeToggle visible
-- form-bubble data-testid submit buttons present
-
-## Automated Checks
-\`\`\`bash
-npm test
-\`\`\`
-
-## File Changes
-- active-form.ts parseToolResult (mentioned only here)
-
-## Blueprint Deltas
-- none
-`;
-    const align = phaseDocAlignsWithChangeIntent(bad, withInteraction);
-    assert.equal(align.ok, false);
-    assert.ok(
-      align.issues.some((i) => /live|tool-<|parseToolResult|extractActiveForm/i.test(i)),
-      align.issues.join("; "),
-    );
-  });
-
-  it("engagement PHASE with tool-part proof in Success Criteria / Checks passes", () => {
-    const intent = extractChangeIntent(
-      "Please extend the chat with dynamic form fill and submit for gathering service data",
-    );
-    const withInteraction = {
-      ...intent,
-      uiMount: intent.uiMount === "n/a" ? ("page" as const) : intent.uiMount,
-      interaction: intent.interaction ?? {
-        mount: "page" as const,
-        primaryAction: "submit form",
-        proof: ["interactive control at locked mount", "primary action reachable"],
-        forbiddenSubstitutes: ["summary-chip-only"],
-      },
-    };
-    const good = `# Phase
-
-## Scope
-Extend chat forms on the page mount with live AI SDK tool parts.
-
-## Success Criteria
-- composer-form / form bubbles have enabled input and submit
-- extractActiveForm / parseToolResult handle type: tool-<name> without toolName
-
-## Automated Checks
-\`\`\`bash
-npm test -- tests/active-form.test.ts
-\`\`\`
-Prove live static shape: type tool-start-workflow-draft, no toolName; parseToolResult derives name.
-
-## Blueprint Deltas
-- none
-`;
-    const align = phaseDocAlignsWithChangeIntent(good, withInteraction);
-    assert.equal(align.ok, true, align.issues.join("; "));
-  });
-
-  it("click-to-navigate PHASE.md passes when Intent has no form contract", () => {
-    const intent = extractChangeIntent(
-      'Investigate why the sign-in button (UserPill) on the landing page does nothing when clicked. Wire onClick to router.push("/sign-in").',
-    );
-    assert.equal(intent.interaction, undefined);
-    const doc = `# Phase
-
-## Scope
-Wire landing UserPill onClick to router.push("/sign-in").
-
-## Success Criteria
-- Clicking UserPill navigates to /sign-in
-
-## Automated Checks
-\`\`\`bash
-grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
-grep -q 'router.push("/sign-in")' src/components/layout/user-pill.tsx || exit 1
-\`\`\`
-
-## Blueprint Deltas
-- **BD-88-USERPILL-SIGNIN:** landing UserPill navigates to /sign-in
-`;
-    const align = phaseDocAlignsWithChangeIntent(doc, intent);
-    assert.equal(align.ok, true, align.issues.join("; "));
-  });
-
-  it("does not treat Build Order prose mentioning Automated Checks as the checks section", () => {
-    const intent = extractChangeIntent(
-      "Chat composer form with fill and submit for connection wizard",
-    );
-    const withInteraction = {
-      ...intent,
-      uiMount: "composer" as const,
-      interaction: intent.interaction ?? {
-        mount: "composer" as const,
-        primaryAction: "submit form" as const,
-        proof: ["interactive control at locked mount", "primary action reachable"],
-        forbiddenSubstitutes: ["summary-chip-only"],
-      },
-    };
-    const doc = `# Phase 96 — test
-
-## Scope
-Composer mount proof.
-
-## File Changes
-- src/lib/active-form.ts
-
-## Build Order
-1. Implement
-2. Tests (see Automated Checks)
-
-## Success Criteria
-- Fill+submit at composer-form
-
-## Automated Checks
-\`\`\`bash
-grep -q 'parseToolResult' src/lib/active-form.ts || exit 1
-grep -q 'extractActiveForm' src/lib/active-form.ts || exit 1
-\`\`\`
-
-## Blueprint Deltas
-- none
-`;
-    const align = phaseDocAlignsWithChangeIntent(doc, withInteraction);
-    assert.equal(align.ok, true, align.issues.join("; "));
-  });
 });

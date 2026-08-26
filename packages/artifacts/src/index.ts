@@ -1877,45 +1877,14 @@ export function isThinResearch(doc: string): boolean {
   return false;
 }
 
-const RESEARCH_OVERCLAIM_RE =
-  /(?:~?\s*90\s*%|already\s+(?:substantially\s+)?(?:exists|implemented|works)|already\s+implements\s+~?\s*\d+|~?\s*\d+\s*%\s+of\s+(?:this|it|the\s+request))/i;
-
-const RESEARCH_RESIDUAL_RISK_RE =
-  /\b(?:residual|blocking|release[- ]gate|does\s+not\s+survive|open\s+engagement|toolName|type\s*[:=]\s*["'`]?tool-|live\s+static|parseToolResult|not\s+proof|hypothesis|unverified|confirmed\s+(?:break|gap|risk))\b/i;
-
-/**
- * When Change Intent has an interaction contract, reject RESEARCH that
- * overclaims fill/submit already works without residual engagement risks.
- * Chrome-hide / backend Intents skip this detector (no fill/submit contract).
- */
-export function researchEngagementQuality(
-  doc: string,
-  intent: ChangeIntent | null | undefined,
-): { ok: boolean; issues: string[] } {
-  if (
-    !intent?.interaction ||
-    intent.interaction.mount === "n/a" ||
-    intent.changeKind === "chrome-hide" ||
-    intent.changeKind === "backend"
-  ) {
-    return { ok: true, issues: [] };
-  }
-  const body = extractMarkdownDocument(doc);
-  const issues: string[] = [];
-  if (RESEARCH_OVERCLAIM_RE.test(body) && !RESEARCH_RESIDUAL_RISK_RE.test(body)) {
-    issues.push(
-      "Engagement RESEARCH overclaims prior form work as already done without residual engagement risks (toolName / live tool-part / blocking / hypothesis)",
-    );
-  }
-  return { ok: issues.length === 0, issues };
-}
+// researchEngagementQuality (regex) removed — the overclaim question is now
+// owned entirely by the LLM judge (see researchEngagementQualityAsync).
 
 /** Structural verdict shape (mirrors @slopcontrol/llm research-engagement-llm). */
 export type ResearchEngagementJudgeVerdict = {
-  genuineGap?: boolean;
-  reason?: string;
-  existingProof?: string;
-  suggestedCheck?: string;
+  overclaims?: boolean;
+  gaps?: string[];
+  suggestedLines?: string[];
 };
 
 /**
@@ -1924,64 +1893,78 @@ export type ResearchEngagementJudgeVerdict = {
  */
 export type ResearchEngagementJudgeFn = (input: {
   intentBlock: string;
-  issue: string;
   researchExcerpt: string;
 }) => Promise<ResearchEngagementJudgeVerdict>;
 
 export type ResearchEngagementAsyncResult = {
-  /** Overclaims confirmed genuine by the judge (blockers). */
+  /** Overclaims reported by the judge (blockers). Empty when honest. */
   issues: string[];
-  /** Deterministic overclaims the judge rejected, kept for logging. */
+  /** Reserved for logging; always empty in the pure-LLM path. */
   warnings: string[];
 };
 
 /**
- * LLM-refined engagement-research overclaim check: the deterministic
- * validator runs first, then the judge arbitrates each flagged overclaim.
- * genuineGap=false drops the issue into `warnings`; a judge error keeps the
- * issue (fail closed).
+ * Pure-LLM engagement-research overclaim check: a single judge call reads the
+ * full RESEARCH.md + the authoritative intent and returns a holistic verdict
+ * (overclaims + gaps + suggested fixes). There is no regex pre-filter.
+ *
+ * Chrome-hide / backend Intents skip this check (no fill/submit contract).
+ * Fail-closed: a missing judge or a judge error returns a "could not verify"
+ * issue (reject), never a silent pass.
  */
 export async function researchEngagementQualityAsync(
   doc: string,
   intent: ChangeIntent | null | undefined,
   opts?: { judgeFn?: ResearchEngagementJudgeFn },
 ): Promise<ResearchEngagementAsyncResult> {
-  const { issues } = researchEngagementQuality(doc, intent);
-  if (!opts?.judgeFn || issues.length === 0) {
-    return { issues, warnings: [] };
+  if (
+    !intent?.interaction ||
+    intent.interaction.mount === "n/a" ||
+    intent.changeKind === "chrome-hide" ||
+    intent.changeKind === "backend"
+  ) {
+    return { issues: [], warnings: [] };
+  }
+  if (!opts?.judgeFn) {
+    return {
+      issues: [
+        "Engagement research overclaim could not be verified (no LLM judge bound)",
+      ],
+      warnings: [],
+    };
   }
 
   const researchExcerpt = extractMarkdownDocument(doc);
-  const intentBlock = formatChangeIntentPromptBlock(intent as ChangeIntent);
-  const kept: string[] = [];
-  const warnings: string[] = [];
-  for (const issue of issues) {
-    try {
-      const verdict = await opts.judgeFn({
-        intentBlock,
-        issue,
-        researchExcerpt,
-      });
-      if (verdict.genuineGap === false) {
-        warnings.push(
-          `deterministic overclaim rejected by LLM judge: ${issue}` +
-            (verdict.reason?.trim() ? ` — ${verdict.reason.trim()}` : "") +
-            (verdict.existingProof?.trim()
-              ? ` (existing proof: ${verdict.existingProof.trim()})`
-              : ""),
-        );
-      } else {
-        kept.push(
-          verdict.suggestedCheck?.trim()
-            ? `${issue}\n  Suggested residual-risk line (LLM judge): ${verdict.suggestedCheck.trim()}`
-            : issue,
-        );
-      }
-    } catch {
-      kept.push(issue);
+  const intentBlock = formatChangeIntentPromptBlock(intent);
+  try {
+    const verdict = await opts.judgeFn({
+      intentBlock,
+      researchExcerpt,
+    });
+    if (verdict.overclaims !== true) {
+      return { issues: [], warnings: [] };
     }
+    const gaps = verdict.gaps?.length
+      ? verdict.gaps
+      : [
+          "Engagement research overclaims without residual risks (no gaps reported)",
+        ];
+    const suggested = verdict.suggestedLines ?? [];
+    const issues = gaps.map((gap, i) => {
+      const line = suggested[i]?.trim();
+      return line
+        ? `${gap}\n  Suggested residual-risk line (LLM judge): ${line}`
+        : gap;
+    });
+    return { issues, warnings: [] };
+  } catch {
+    return {
+      issues: [
+        "Engagement research overclaim could not be verified (LLM judge failed)",
+      ],
+      warnings: [],
+    };
   }
-  return { issues: kept, warnings };
 }
 
 /**

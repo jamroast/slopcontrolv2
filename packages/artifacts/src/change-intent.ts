@@ -964,120 +964,9 @@ export function buildAdjacentPhaseContextPack(
   return blocks.join("\n");
 }
 
-/**
- * Fail when PHASE Blueprint Deltas reverse the Change Intent uiMount,
- * or when engagement intents only change chip taxonomy.
- */
-export function phaseDocAlignsWithChangeIntent(
-  phaseDoc: string,
-  intent: ChangeIntent,
-): { ok: boolean; issues: string[] } {
-  const issues: string[] = [];
-  const deltas =
-    extractSection(phaseDoc, "Blueprint Deltas")?.toLowerCase() ?? "";
-  const scope = extractSection(phaseDoc, "Scope")?.toLowerCase() ?? "";
-  const checks =
-    extractSection(phaseDoc, "Automated Checks")?.toLowerCase() ?? "";
-  const success =
-    extractSection(phaseDoc, "Success Criteria")?.toLowerCase() ?? "";
-  const body = `${deltas}\n${scope}`;
-
-  if (intent.uiMount === "composer") {
-    if (
-      /bd-in-bubble-forms|mounts?\s+\*\*inside the assistant|not in the composer|composer surface is always `?chatinput/i.test(
-        body,
-      ) &&
-      !/bd-composer-form-mode|composer-form|forms?\s+own\s+the\s+composer/i.test(
-        body,
-      )
-    ) {
-      issues.push(
-        "Change Intent uiMount=composer but PHASE Blueprint Deltas / Scope lock forms into the assistant bubble (BD-IN-BUBBLE-FORMS style)",
-      );
-    }
-    if (
-      /supersedes?\s+the\s+phase-?\d*\s*composer|supersedes?\s+.*composer-mount/i.test(
-        body,
-      )
-    ) {
-      issues.push(
-        "PHASE supersedes composer mount while Change Intent requires uiMount=composer",
-      );
-    }
-  }
-  if (intent.uiMount === "bubble") {
-    if (
-      /bd-composer-form-mode|composer-form|forms?\s+own\s+the\s+composer/i.test(
-        body,
-      ) &&
-      !/bd-in-bubble-forms|inside the assistant speech bubble/i.test(body)
-    ) {
-      issues.push(
-        "Change Intent uiMount=bubble but PHASE locks forms into the composer",
-      );
-    }
-  }
-
-  const proofKind = interactionProofKind(intent);
-  const contract = intent.interaction;
-  if (proofKind === "form-submit" && contract) {
-    const engagementBody = `${scope}\n${success}\n${checks}\n${deltas}`;
-    const chipOnly =
-      /summary\s*chip|transcript.*chip|classification|getformpartstate|superseded.*chip/i.test(
-        engagementBody,
-      ) &&
-      !/composer-form|actionable|fillable|submittable|data-testid=["']composer-form|enabled\s+input|submit/i.test(
-        engagementBody,
-      );
-    if (chipOnly) {
-      issues.push(
-        "Change Intent interaction contract requires an actionable mount proof; chip/taxonomy-only PHASE is not enough",
-      );
-    }
-    const hasProofHint =
-      /composer-form|data-testid|playwright|fill|submit|actionable|enabled/i.test(
-        `${checks}\n${success}`,
-      );
-    if (!hasProofHint) {
-      issues.push(
-        "Engagement Change Intent requires Automated Checks / Success Criteria that prove fill+submit at the locked mount",
-      );
-    }
-    // Live AI SDK static tool parts encode the name in type: "tool-<name>" —
-    // fixtures that only use tool-invocation + toolName miss the live break.
-    // This proof only applies to AI chat surfaces (composer/bubble mounts);
-    // page/modal engagements (e.g. a Clerk sign-in) have no tool parts.
-    const chatMount =
-      contract.mount === "composer" ||
-      contract.mount === "bubble" ||
-      intent.uiMount === "composer" ||
-      intent.uiMount === "bubble";
-    if (chatMount) {
-      const proofSurface = `${checks}\n${success}`;
-      const hasLiveShapeProof =
-        /tool-<|live\s+static|parseToolResult|extractActiveForm|no\s+toolName|without\s+toolName|derive.*(?:tool\s*)?name|toolName.*from\s+type|slice\(["']tool-/i.test(
-          proofSurface,
-        ) ||
-        (/type\s*[:=]\s*["'`]tool-(?!invocation)/i.test(proofSurface) &&
-          !/tool-invocation/i.test(proofSurface));
-      if (!hasLiveShapeProof) {
-        issues.push(
-          "Engagement Change Intent on a chat mount (composer/bubble) requires Automated Checks / Success Criteria that prove live AI SDK static tool-part name resolution (type: tool-<name> / parseToolResult / extractActiveForm) — not only tool-invocation + toolName fixtures",
-        );
-      }
-    }
-  } else if (proofKind === "click-navigate") {
-    const hasClickProof =
-      /onclick|href|router\.push|navigate|click/i.test(`${checks}\n${success}`);
-    if (!hasClickProof) {
-      issues.push(
-        "Click-to-navigate Change Intent requires Automated Checks / Success Criteria that prove click / onClick / href / router.push at the locked control",
-      );
-    }
-  }
-
-  return { ok: issues.length === 0, issues };
-}
+// phaseDocAlignsWithChangeIntent (regex) removed — semantic alignment is now
+// owned entirely by the LLM judge (see phaseDocAlignsWithChangeIntentAsync).
+// Structural checks (section presence, format) remain in validatePhaseDocForDev.
 
 /** Scope, Success Criteria, Automated Checks, and Blueprint Deltas for the LLM judge. */
 export function intentAlignmentExcerptFromPhaseDoc(phaseDoc: string): string {
@@ -1109,10 +998,9 @@ export function intentAlignmentExcerptFromPhaseDoc(phaseDoc: string): string {
 
 /** Structural verdict shape (mirrors @slopcontrol/llm intent-alignment-llm). */
 export type IntentAlignmentJudgeVerdict = {
-  genuineGap?: boolean;
-  reason?: string;
-  existingProof?: string;
-  suggestedCheck?: string;
+  aligned?: boolean;
+  gaps?: string[];
+  suggestedLines?: string[];
 };
 
 /**
@@ -1121,67 +1009,65 @@ export type IntentAlignmentJudgeVerdict = {
  */
 export type IntentAlignmentJudgeFn = (input: {
   intentBlock: string;
-  issue: string;
   phaseDocExcerpt: string;
 }) => Promise<IntentAlignmentJudgeVerdict>;
 
 export type IntentAlignmentAsyncResult = {
-  /** Gaps confirmed genuine by the judge (blockers). */
+  /** Misalignments reported by the judge (blockers). Empty when aligned. */
   issues: string[];
-  /** Deterministic gaps the judge rejected, kept for logging. */
+  /** Reserved for logging; always empty in the pure-LLM path. */
   warnings: string[];
 };
 
 /**
- * LLM-refined Change Intent alignment: the deterministic validator runs
- * first, then the judge arbitrates each flagged gap. genuineGap=false drops
- * the issue into `warnings`; a judge error keeps the issue (fail closed).
+ * Pure-LLM Change Intent alignment: a single judge call reads the full PHASE
+ * doc + the authoritative intent and returns a holistic verdict (aligned +
+ * gaps + suggested fixes). There is no regex pre-filter.
  *
- * This is the fix for the composer-centric keyword vocabulary: a bubble-mount
- * form using FormBubble / sendFormAnswer / composerMode is semantically
- * aligned even though the deterministic regex only knows composer-form.
+ * Fail-closed: a missing judge or a judge error returns a "could not verify"
+ * issue (reject), never a silent pass.
  */
 export async function phaseDocAlignsWithChangeIntentAsync(
   phaseDoc: string,
   intent: ChangeIntent,
   opts?: { judgeFn?: IntentAlignmentJudgeFn },
 ): Promise<IntentAlignmentAsyncResult> {
-  const { issues } = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
-  if (!opts?.judgeFn || issues.length === 0) {
-    return { issues, warnings: [] };
+  if (!opts?.judgeFn) {
+    return {
+      issues: [
+        "Change Intent alignment could not be verified (no LLM judge bound)",
+      ],
+      warnings: [],
+    };
   }
 
   const excerpt = intentAlignmentExcerptFromPhaseDoc(phaseDoc);
   const intentBlock = formatChangeIntentPromptBlock(intent);
-  const kept: string[] = [];
-  const warnings: string[] = [];
-  for (const issue of issues) {
-    try {
-      const verdict = await opts.judgeFn({
-        intentBlock,
-        issue,
-        phaseDocExcerpt: excerpt,
-      });
-      if (verdict.genuineGap === false) {
-        warnings.push(
-          `deterministic gap rejected by LLM judge: ${issue}` +
-            (verdict.reason?.trim() ? ` — ${verdict.reason.trim()}` : "") +
-            (verdict.existingProof?.trim()
-              ? ` (existing proof: ${verdict.existingProof.trim()})`
-              : ""),
-        );
-      } else {
-        kept.push(
-          verdict.suggestedCheck?.trim()
-            ? `${issue}\n  Suggested check (LLM judge): ${verdict.suggestedCheck.trim()}`
-            : issue,
-        );
-      }
-    } catch {
-      kept.push(issue);
+  try {
+    const verdict = await opts.judgeFn({
+      intentBlock,
+      phaseDocExcerpt: excerpt,
+    });
+    if (verdict.aligned === true) {
+      return { issues: [], warnings: [] };
     }
+    const gaps = verdict.gaps?.length
+      ? verdict.gaps
+      : ["Change Intent alignment failed (no gaps reported)"];
+    const suggested = verdict.suggestedLines ?? [];
+    const issues = gaps.map((gap, i) => {
+      const line = suggested[i]?.trim();
+      return line ? `${gap}\n  Suggested fix (LLM judge): ${line}` : gap;
+    });
+    return { issues, warnings: [] };
+  } catch {
+    return {
+      issues: [
+        "Change Intent alignment could not be verified (LLM judge failed)",
+      ],
+      warnings: [],
+    };
   }
-  return { issues: kept, warnings };
 }
 
 /**

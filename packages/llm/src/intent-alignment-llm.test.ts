@@ -7,7 +7,7 @@ import {
 } from "./intent-alignment-llm.js";
 
 describe("intent-alignment-llm", () => {
-  it("system prompt teaches the bubble-mount vocabulary the regex misses", () => {
+  it("system prompt teaches the bubble-mount vocabulary", () => {
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /FormBubble/);
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /sendFormAnswer/);
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /composerMode/);
@@ -17,55 +17,55 @@ describe("intent-alignment-llm", () => {
   it("system prompt judges semantics, not keywords, and fails closed", () => {
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /SEMANTICS/);
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /fail closed/i);
-    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /genuineGap=true/);
-    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /genuineGap=false/);
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /aligned=true/);
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /aligned=false/);
   });
 
   it("system prompt rejects chip/taxonomy-only and mount conflicts", () => {
-    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /Chip\/taxonomy-only/);
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /chip\/taxonomy-only/);
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /getFormPartState/);
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /OPPOSITE mount/);
-    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /Scope and Blueprint Deltas/);
   });
 
-  it("parses a genuine-gap verdict with a suggested check", () => {
+  it("parses an aligned verdict", () => {
     const verdict = IntentAlignmentVerdictSchema.parse({
-      genuineGap: true,
-      reason: "PHASE only greps the summary chip; no fillable mount proof.",
-      suggestedCheck:
-        "grep -q 'sendFormAnswer' src/FormBubble.tsx && grep -q 'data-testid=\"form-bubble\"' src/FormBubble.tsx",
+      aligned: true,
+      gaps: [],
+      suggestedLines: [],
     });
-    assert.equal(verdict.genuineGap, true);
-    assert.match(verdict.suggestedCheck ?? "", /sendFormAnswer/);
+    assert.equal(verdict.aligned, true);
+    assert.deepEqual(verdict.gaps, []);
   });
 
-  it("parses a rejected-gap verdict with existing proof", () => {
+  it("parses a not-aligned verdict with gaps and suggested lines", () => {
     const verdict = parseIntentAlignmentVerdictPayload({
-      genuineGap: false,
-      reason: "Playwright test fills and submits the FormBubble at the bubble mount.",
-      existingProof: "pnpm exec playwright test form-bubble.spec.ts",
+      aligned: false,
+      gaps: ["PHASE only greps the summary chip; no fillable mount proof."],
+      suggestedLines: [
+        "grep -q 'sendFormAnswer' src/FormBubble.tsx && grep -q 'data-testid=\"form-bubble\"' src/FormBubble.tsx",
+      ],
     });
-    assert.equal(verdict.genuineGap, false);
-    assert.match(verdict.existingProof ?? "", /playwright/);
+    assert.equal(verdict.aligned, false);
+    assert.match(verdict.gaps[0] ?? "", /summary chip/);
+    assert.match(verdict.suggestedLines[0] ?? "", /sendFormAnswer/);
   });
 
   it("fails closed on a messy payload", () => {
     const verdict = parseIntentAlignmentVerdictPayload("garbage");
-    assert.equal(verdict.genuineGap, true);
-    assert.match(verdict.reason, /no reason/i);
+    assert.equal(verdict.aligned, false);
+    assert.match(verdict.gaps[0] ?? "", /could not be verified/i);
 
-    const missing = parseIntentAlignmentVerdictPayload({ reason: "unsure" });
-    assert.equal(missing.genuineGap, true);
+    const missing = parseIntentAlignmentVerdictPayload({ gaps: [] });
+    assert.equal(missing.aligned, false);
   });
 
-  it("drops blank optional fields", () => {
+  it("drops blank gap/suggestion entries", () => {
     const verdict = parseIntentAlignmentVerdictPayload({
-      genuineGap: true,
-      reason: "gap is real",
-      existingProof: "   ",
-      suggestedCheck: "",
+      aligned: false,
+      gaps: ["real gap", "   ", ""],
+      suggestedLines: ["fix it", ""],
     });
-    assert.equal(verdict.existingProof, undefined);
-    assert.equal(verdict.suggestedCheck, undefined);
+    assert.deepEqual(verdict.gaps, ["real gap"]);
+    assert.deepEqual(verdict.suggestedLines, ["fix it"]);
   });
 });

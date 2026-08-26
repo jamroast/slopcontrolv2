@@ -22,12 +22,10 @@ import {
   isChangeIntentWeak,
   isWorktreeIsolationPort,
   loadCanonicalRuntimeEnv,
-  phaseDocAlignsWithChangeIntent,
   phaseDocAlignsWithChangeIntentAsync,
   intentAlignmentExcerptFromPhaseDoc,
   consolidateText,
   reconcileBlueprintDecisions,
-  researchEngagementQuality,
   researchEngagementQualityAsync,
   restoreCanonicalRuntimeEnv,
   sanitizeComposeProjectName,
@@ -220,170 +218,6 @@ describe("change intent", () => {
     assert.doesNotMatch(intent.goal, /Proposed approach/);
   });
 
-  it("rejects PHASE that supersedes composer when intent is composer", () => {
-    const intent = extractChangeIntent(
-      "Put the interactive form in the composer (chat prompt).",
-    );
-    const bad = `# Phase
-
-## Scope
-Restore in-bubble forms.
-
-## Blueprint Deltas
-
-- **BD-IN-BUBBLE-FORMS (supersedes the phase-49 composer-mount decision):** mounts inside the assistant speech bubble, not in the composer. The composer surface is always ChatInput.
-`;
-    const align = phaseDocAlignsWithChangeIntent(bad, intent);
-    assert.equal(align.ok, false);
-  });
-
-  it("rejects chip-only engagement PHASE", () => {
-    const intent = extractChangeIntent(
-      'Unable to submit the form — stuck at "Superseded by a newer form". Fix so I can fill and submit.',
-    );
-    assert.equal(intent.uiMount, "composer");
-    const bad = `# Phase
-
-## Scope
-Collapse superseded forms to summary chips in the transcript.
-
-## Success Criteria
-- getFormPartState classifies superseded correctly
-
-## Automated Checks
-\`\`\`bash
-npm test -- tests/chat-messages-form.test.ts
-\`\`\`
-
-## Blueprint Deltas
-- **BD-TRANSCRIPT-SUPERSEDED-CHIP:** superseded is a chip
-`;
-    const align = phaseDocAlignsWithChangeIntent(bad, intent);
-    assert.equal(align.ok, false);
-  });
-
-  it("rejects engagement PHASE that only uses legacy tool-invocation fixtures", () => {
-    const intent = extractChangeIntent(
-      'Unable to submit the form — stuck at "Superseded by a newer form". Fix so I can fill and submit.',
-    );
-    const bad = `# Phase
-
-## Scope
-Fix composer form engagement with fillable inputs.
-
-## Success Criteria
-- composer-form has enabled input and submit
-
-## Automated Checks
-\`\`\`bash
-npm test -- tests/active-form.test.ts
-\`\`\`
-Fixtures use type: "tool-invocation" with toolName set.
-
-## Blueprint Deltas
-- **BD-COMPOSER-FORM-ENGAGEMENT:** composer mount
-`;
-    const align = phaseDocAlignsWithChangeIntent(bad, intent);
-    assert.equal(align.ok, false);
-    assert.ok(align.issues.some((i) => /live|tool-<|parseToolResult/i.test(i)));
-  });
-
-  it("accepts page-mount engagement PHASE without AI SDK tool-part language", () => {
-    // JamPress phase 87 class: Clerk sign-in page — mount=page engagement
-    // must not be trapped by the composer-only live tool-part proof demand.
-    const intent = finalizeChangeIntent(
-      ChangeIntentLlmOutputSchema.parse({
-        title: "Fix JamPress login buttons",
-        goal: "Make the sign-in page render the Clerk SignIn component so users can submit the login form.",
-        uiMount: "page",
-        changeKind: "engagement",
-        needsInteraction: true,
-      }),
-      { description: "Login buttons do not work on the sign-in page" },
-    );
-    assert.equal(intent.interaction?.mount, "page");
-    const doc = `# Phase
-
-## Scope
-Add NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY to the Compose .env so the sign-in page mounts Clerk <SignIn> with an enabled submit action.
-
-## Success Criteria
-- Sign-in page mounts the Clerk <SignIn> component (not the fallback)
-- Primary action (submit form via OAuth button) is reachable and enabled
-
-## Automated Checks
-\`\`\`bash
-grep -q '^NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_' .env || exit 1
-grep -q '<SignIn' src/app/sign-in/page.tsx || exit 1
-\`\`\`
-
-## Blueprint Deltas
-- **BD-87-COMPOSE-DOTENV:** NEXT_PUBLIC_* vars live in Compose .env
-`;
-    const align = phaseDocAlignsWithChangeIntent(doc, intent);
-    assert.deepEqual(align.issues, []);
-    assert.equal(align.ok, true);
-  });
-
-  it("still rejects composer-mount engagement without live tool-part proof", () => {
-    const intent = finalizeChangeIntent(
-      ChangeIntentLlmOutputSchema.parse({
-        title: "Fix composer form submit",
-        goal: "Users must fill and submit skill params in the composer.",
-        uiMount: "composer",
-        changeKind: "engagement",
-        needsInteraction: true,
-      }),
-      { description: "Unable to submit form in composer" },
-    );
-    const doc = `# Phase
-
-## Scope
-Fix composer form engagement with fillable inputs and submit.
-
-## Success Criteria
-- composer-form has enabled input and submit
-
-## Automated Checks
-\`\`\`bash
-npm test -- tests/active-form.test.ts
-\`\`\`
-Fixtures use type: "tool-invocation" with toolName set.
-
-## Blueprint Deltas
-- **BD-COMPOSER-FORM-ENGAGEMENT:** composer mount
-`;
-    const align = phaseDocAlignsWithChangeIntent(doc, intent);
-    assert.equal(align.ok, false);
-    assert.ok(align.issues.some((i) => /chat mount|tool-<|parseToolResult/i.test(i)));
-  });
-
-  it("accepts engagement PHASE with live static tool-part proof", () => {
-    const intent = extractChangeIntent(
-      'Unable to submit the form — stuck at "Superseded by a newer form". Fix so I can fill and submit.',
-    );
-    const good = `# Phase
-
-## Scope
-Fix parseToolResult to derive toolName from type: tool-<name> at the composer mount.
-
-## Success Criteria
-- extractActiveForm works for live static parts without toolName
-- composer-form has enabled input and submit
-
-## Automated Checks
-\`\`\`bash
-npm test -- tests/active-form.test.ts
-\`\`\`
-Live static shape: type tool-start-workflow-draft, no toolName; parseToolResult derives name.
-
-## Blueprint Deltas
-- **BD-COMPOSER-FORM-ENGAGEMENT:** composer mount
-`;
-    const align = phaseDocAlignsWithChangeIntent(good, intent);
-    assert.equal(align.ok, true, align.issues.join("; "));
-  });
-
   it("ensureChangeIntent refreshes weak n/a engagement INTENT on disk", () => {
     const dir = mkdtempSync(join(tmpdir(), "slop-intent-refresh-"));
     try {
@@ -418,37 +252,12 @@ Live static shape: type tool-start-workflow-draft, no toolName; parseToolResult 
     }
   });
 
-  it("researchEngagementQuality rejects overclaim without residual risks", () => {
-    const intent = extractChangeIntent(
-      "Unable to submit the form in the composer.",
-    );
-    const bad = `# Research
-
-The codebase already implements ~90% of this request. Forms already work.
-
-## Notes
-Ship labels only.
-`;
-    const q = researchEngagementQuality(bad, intent);
-    assert.equal(q.ok, false);
-    const good = `# Research
-
-Prior phases are complete but that is a hypothesis, not proof.
-There is a blocking residual risk: parseToolResult never derives toolName from type: tool-<name>.
-
-## Notes
-Fix live static tool parts first.
-`;
-    assert.equal(researchEngagementQuality(good, intent).ok, true);
-  });
-
   it("researchEngagementQualityAsync drops a false-positive overclaim via the judge", async () => {
     const intent = extractChangeIntent(
       "Unable to submit the form in the composer.",
     );
-    // Deterministic regex flags "~90% already works" as overclaim, but the
-    // research actually documents a residual risk in a vocabulary the regex
-    // misses (no "residual"/"blocking"/"hypothesis"/"does not survive" keyword).
+    // The research overclaims "~90% already works" but also documents a
+    // residual risk in a vocabulary the old regex missed.
     const doc = `# Research
 
 The codebase already implements ~90% of this request. Forms already work.
@@ -456,19 +265,15 @@ The codebase already implements ~90% of this request. Forms already work.
 ## Notes
 The submit handler still needs to be wired to the backend before the form is usable.
 `;
-    const deterministic = researchEngagementQuality(doc, intent);
-    assert.equal(deterministic.ok, false);
-
     const refined = await researchEngagementQualityAsync(doc, intent, {
       judgeFn: async () => ({
-        genuineGap: false,
-        reason: "Research names a still-to-wire submit handler, which is a residual risk.",
-        existingProof: "The submit handler still needs to be wired to the backend.",
+        overclaims: false,
+        gaps: [],
+        suggestedLines: [],
       }),
     });
     assert.deepEqual(refined.issues, []);
-    assert.ok(refined.warnings.length >= 1);
-    assert.match(refined.warnings[0] ?? "", /rejected by LLM judge/);
+    assert.deepEqual(refined.warnings, []);
   });
 
   it("researchEngagementQualityAsync keeps a genuine overclaim and fails closed", async () => {
@@ -482,20 +287,24 @@ The codebase already implements ~90% of this request. Forms already work.
 ## Notes
 Ship labels only.
 `;
-    // Judge confirms the overclaim is genuine → issue kept.
+    // Judge reports an overclaim → issue kept.
     const confirmed = await researchEngagementQualityAsync(doc, intent, {
-      judgeFn: async () => ({ genuineGap: true, reason: "no residual risk named" }),
+      judgeFn: async () => ({
+        overclaims: true,
+        gaps: ["Research overclaims ~90% already works with no residual risk"],
+        suggestedLines: [],
+      }),
     });
     assert.ok(confirmed.issues.some((i) => /overclaim/i.test(i)));
     assert.deepEqual(confirmed.warnings, []);
 
-    // Judge throws → deterministic issue kept (fail closed).
+    // Judge throws → fail closed (reject with "could not verify").
     const failed = await researchEngagementQualityAsync(doc, intent, {
       judgeFn: async () => {
         throw new Error("judge down");
       },
     });
-    assert.ok(failed.issues.some((i) => /overclaim/i.test(i)));
+    assert.ok(failed.issues.some((i) => /could not be verified/i.test(i)));
     assert.deepEqual(failed.warnings, []);
   });
 
@@ -707,36 +516,6 @@ The dynamic forms for the chat are working. As I go through the process the chat
     assert.equal(strong, false);
   });
 
-  it("theme PHASE aligns when Intent has no interaction contract", () => {
-    const intent = extractChangeIntent(
-      "Audit light/dark theme toggle on the landing page; ThemeToggle must set data-theme.",
-    );
-    assert.equal(intent.interaction, undefined);
-    const phase = `# PHASE: 09-theme-toggle
-
-## Scope
-Wire ThemeToggle to html data-theme for landing components.
-
-## Success Criteria
-- ThemeToggle click switches data-theme between dark and light
-- Landing Hero responds to theme tokens
-
-## Automated Checks
-\`\`\`bash
-pnpm test
-\`\`\`
-
-\`\`\`bash
-cd playground && pnpm build || exit 1
-\`\`\`
-
-## Blueprint Deltas
-None.
-`;
-    const align = phaseDocAlignsWithChangeIntent(phase, intent);
-    assert.equal(align.ok, true, align.issues.join("; "));
-  });
-
   it("populate/submit without chrome-hide still gets interaction", () => {
     const intent = extractChangeIntent(
       "Please implement dynamic forms so the user can populate and submit skill params in the composer.",
@@ -790,112 +569,6 @@ None.
     assert.match(intent.interaction!.primaryAction, /submit form/i);
   });
 
-  it("click-to-navigate PHASE.md passes when Intent has no form contract", () => {
-    const intent = extractChangeIntent(phase88Ask);
-    const doc = `# Phase
-
-## Scope
-Wire landing UserPill loggedOut onClick to router.push("/sign-in").
-
-## Success Criteria
-- Clicking the landing UserPill navigates to /sign-in
-- UserPill loggedOut has onClick
-
-## Automated Checks
-\`\`\`bash
-grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
-grep -q 'router.push("/sign-in")' src/components/layout/user-pill.tsx || exit 1
-\`\`\`
-
-## Blueprint Deltas
-- **BD-88-USERPILL-SIGNIN:** landing UserPill navigates to /sign-in
-`;
-    const align = phaseDocAlignsWithChangeIntent(doc, intent);
-    assert.deepEqual(align.issues, []);
-    assert.equal(align.ok, true);
-  });
-
-  it("form-engagement PHASE without fill+submit still fails align", () => {
-    const intent = extractChangeIntent(
-      "Unable to submit the form in the composer. Fix so I can fill and submit.",
-    );
-    assert.equal(interactionProofKind(intent), "form-submit");
-    const doc = `# Phase
-
-## Scope
-Wire landing UserPill loggedOut onClick to router.push("/sign-in").
-
-## Success Criteria
-- Clicking the landing UserPill navigates to /sign-in
-
-## Automated Checks
-\`\`\`bash
-grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
-grep -q 'router.push("/sign-in")' src/components/layout/user-pill.tsx || exit 1
-\`\`\`
-
-## Blueprint Deltas
-- **BD-88-USERPILL-SIGNIN:** landing UserPill navigates to /sign-in
-`;
-    const align = phaseDocAlignsWithChangeIntent(doc, intent);
-    assert.equal(align.ok, false);
-    assert.ok(
-      align.issues.some((i) => /fill\+submit/i.test(i)),
-      align.issues.join("; "),
-    );
-  });
-
-  it("click-navigate interaction contract requires click proofs not fill+submit", () => {
-    const intent = {
-      ...extractChangeIntent(phase88Ask),
-      interaction: {
-        mount: "page" as const,
-        primaryAction: "click / navigate",
-        proof: ["onClick or Link at locked control"],
-        forbiddenSubstitutes: ["fill+submit form proofs"],
-      },
-    };
-    assert.equal(interactionProofKind(intent), "click-navigate");
-    const good = `# Phase
-
-## Scope
-Wire UserPill onClick.
-
-## Success Criteria
-- Click navigates to /sign-in
-
-## Automated Checks
-\`\`\`bash
-grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
-grep -q 'router.push("/sign-in")' src/components/layout/user-pill.tsx || exit 1
-\`\`\`
-
-## Blueprint Deltas
-- none
-`;
-    assert.equal(phaseDocAlignsWithChangeIntent(good, intent).ok, true);
-    const bad = `# Phase
-
-## Scope
-Wire UserPill.
-
-## Success Criteria
-- Control is present
-
-## Automated Checks
-\`\`\`bash
-npm test
-\`\`\`
-
-## Blueprint Deltas
-- none
-`;
-    const align = phaseDocAlignsWithChangeIntent(bad, intent);
-    assert.equal(align.ok, false);
-    assert.ok(align.issues.some((i) => /click \/ onClick/i.test(i)));
-    assert.ok(!align.issues.some((i) => /fill\+submit/i.test(i)));
-  });
-
   it("async align drops a bubble-mount false positive via the LLM judge", async () => {
     const intent = extractChangeIntent(
       "The form in the assistant speech bubble is broken. Fix so I can fill and submit it.",
@@ -903,9 +576,7 @@ npm test
     assert.equal(intent.uiMount, "bubble");
     assert.equal(interactionProofKind(intent), "form-submit");
 
-    // A semantically-correct bubble-mount form that uses FormBubble /
-    // sendFormAnswer / composerMode — the deterministic regex only knows
-    // composer-form / data-testid=composer-form, so it flags a false positive.
+    // A semantically-correct bubble-mount form using FormBubble / sendFormAnswer.
     const doc = `# Phase
 
 ## Scope
@@ -923,24 +594,16 @@ grep -q 'composerMode' src/FormBubble.tsx || exit 1
 ## Blueprint Deltas
 - **BD-IN-BUBBLE-FORMS:** forms own the assistant speech bubble
 `;
-    const deterministic = phaseDocAlignsWithChangeIntent(doc, intent);
-    assert.equal(deterministic.ok, false);
-    assert.ok(
-      deterministic.issues.some((i) => /fill\+submit/i.test(i)),
-      deterministic.issues.join("; "),
-    );
-
-    // Judge rejects the false positive → issue dropped to warnings.
+    // The judge reads the full doc and returns a holistic verdict: aligned.
     const refined = await phaseDocAlignsWithChangeIntentAsync(doc, intent, {
       judgeFn: async () => ({
-        genuineGap: false,
-        reason: "FormBubble + sendFormAnswer prove fill+submit at the bubble mount.",
-        existingProof: "grep -q 'sendFormAnswer' src/FormBubble.tsx",
+        aligned: true,
+        gaps: [],
+        suggestedLines: [],
       }),
     });
     assert.deepEqual(refined.issues, []);
-    assert.ok(refined.warnings.length >= 1);
-    assert.match(refined.warnings[0] ?? "", /rejected by LLM judge/);
+    assert.deepEqual(refined.warnings, []);
   });
 
   it("intentAlignmentExcerptFromPhaseDoc includes Scope and Blueprint Deltas", () => {
@@ -1054,27 +717,19 @@ grep -q "composerMode" web/src/components/chat/chat-session-provider.tsx || exit
 ## Blueprint Deltas
 - **BD-20-8:** FormBubble UI at page mount
 `;
-    const deterministic = phaseDocAlignsWithChangeIntent(doc, intent);
-    assert.equal(deterministic.ok, false);
-    assert.ok(
-      deterministic.issues.some((i) => /fill\+submit/i.test(i)),
-      deterministic.issues.join("; "),
-    );
-
     const refined = await phaseDocAlignsWithChangeIntentAsync(doc, intent, {
       judgeFn: async (input) => {
         assert.match(input.phaseDocExcerpt, /dashboard\/chat/);
         assert.match(input.phaseDocExcerpt, /BD-20-8/);
         return {
-          genuineGap: false,
-          reason:
-            "FormBubble + sendFormAnswer at the page mount prove fill+submit without composer-form keywords.",
-          existingProof: "grep -q 'sendFormAnswer' web/src/components/chat/chat-session-provider.tsx",
+          aligned: true,
+          gaps: [],
+          suggestedLines: [],
         };
       },
     });
     assert.deepEqual(refined.issues, []);
-    assert.ok(refined.warnings.length >= 1);
+    assert.deepEqual(refined.warnings, []);
   });
 
   it("async align keeps a mount-conflict gap when judge sees Scope/BD excerpt", async () => {
@@ -1098,26 +753,22 @@ grep -q 'fill' src/form.tsx && grep -q 'submit' src/form.tsx || exit 1
 ## Blueprint Deltas
 - **BD-IN-BUBBLE-FORMS:** mounts inside the assistant bubble
 `;
-    const deterministic = phaseDocAlignsWithChangeIntent(doc, intent);
-    assert.equal(deterministic.ok, false);
-    assert.ok(
-      deterministic.issues.some((i) => /uiMount=composer/i.test(i)),
-      deterministic.issues.join("; "),
-    );
-
     const refined = await phaseDocAlignsWithChangeIntentAsync(doc, intent, {
       judgeFn: async (input) => {
         assert.match(input.phaseDocExcerpt, /assistant speech bubble/i);
         return {
-          genuineGap: true,
-          reason: "Scope/BD lock forms in bubble while intent requires composer.",
-          suggestedCheck:
+          aligned: false,
+          gaps: [
+            "Change Intent uiMount=composer but PHASE locks forms into the bubble",
+          ],
+          suggestedLines: [
             "grep -q 'composer-form' src/chat && grep -q 'submit' src/chat",
+          ],
         };
       },
     });
     assert.ok(refined.issues.some((i) => /uiMount=composer/i.test(i)));
-    assert.match(refined.issues[0] ?? "", /Suggested check \(LLM judge\)/);
+    assert.match(refined.issues[0] ?? "", /Suggested fix \(LLM judge\)/);
     assert.deepEqual(refined.warnings, []);
   });
 
@@ -1141,24 +792,28 @@ grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
 ## Blueprint Deltas
 - **BD-88-USERPILL-SIGNIN:** landing UserPill navigates to /sign-in
 `;
-    // Judge confirms the gap is genuine → issue kept.
+    // Judge reports a gap → issue kept.
     const confirmed = await phaseDocAlignsWithChangeIntentAsync(doc, intent, {
-      judgeFn: async () => ({ genuineGap: true, reason: "no fill+submit proof" }),
+      judgeFn: async () => ({
+        aligned: false,
+        gaps: ["no fill+submit proof at the locked mount"],
+        suggestedLines: [],
+      }),
     });
     assert.ok(confirmed.issues.some((i) => /fill\+submit/i.test(i)));
     assert.deepEqual(confirmed.warnings, []);
 
-    // Judge throws → deterministic issue kept (fail closed).
+    // Judge throws → fail closed (reject with "could not verify").
     const failed = await phaseDocAlignsWithChangeIntentAsync(doc, intent, {
       judgeFn: async () => {
         throw new Error("judge down");
       },
     });
-    assert.ok(failed.issues.some((i) => /fill\+submit/i.test(i)));
+    assert.ok(failed.issues.some((i) => /could not be verified/i.test(i)));
     assert.deepEqual(failed.warnings, []);
   });
 
-  it("async align without a judge returns the deterministic issues", async () => {
+  it("async align without a judge fails closed", async () => {
     const intent = extractChangeIntent(
       "Unable to submit the form in the composer. Fix so I can fill and submit.",
     );
@@ -1179,7 +834,7 @@ grep -q 'onClick' src/components/layout/user-pill.tsx || exit 1
 - **BD-88-USERPILL-SIGNIN:** landing UserPill navigates to /sign-in
 `;
     const result = await phaseDocAlignsWithChangeIntentAsync(doc, intent);
-    assert.ok(result.issues.some((i) => /fill\+submit/i.test(i)));
+    assert.ok(result.issues.some((i) => /could not be verified/i.test(i)));
     assert.deepEqual(result.warnings, []);
   });
 
