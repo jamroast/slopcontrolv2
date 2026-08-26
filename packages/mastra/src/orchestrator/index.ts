@@ -87,8 +87,12 @@ import {
   readChangeIntent,
   ensureTestServices,
   phaseDocAlignsWithChangeIntent,
+  phaseDocAlignsWithChangeIntentAsync,
+  type IntentAlignmentJudgeFn,
   interactionProofKind,
   researchEngagementQuality,
+  researchEngagementQualityAsync,
+  type ResearchEngagementJudgeFn,
   formatAntiAuditThemeDeliveryNote,
   phaseDocRejectsMissingThemeAudit,
   clipBlueprintForPrompt,
@@ -284,6 +288,8 @@ import {
   judgeDocRevisionViaLlm,
   classifyAskInvestigateEngineViaLlm,
   judgeClaimProofViaLlm,
+  judgeIntentAlignmentViaLlm,
+  judgeResearchEngagementViaLlm,
   judgeNarrationOnlyViaLlm,
   buildElementHonorSnippets,
   tryMenubarEmbedSimilarity,
@@ -1507,6 +1513,7 @@ export type {
 export {
   ensureChangeIntentAsync,
   previewChangeIntentAsync,
+  previewIntentAlignmentAsync,
 } from "./change-intent-async.js";
 export type { EnsureChangeIntentAsyncOptions } from "./change-intent-async.js";
 
@@ -2207,6 +2214,122 @@ function tryBindNarrationJudge(registry: LlmRegistry): NarrationJudgeFn | null {
   } catch {
     return null;
   }
+}
+
+/** Bind the LLM intent-alignment judge to the classification role; null when unbound. */
+function tryBindIntentAlignmentJudge(
+  registry: LlmRegistry,
+): IntentAlignmentJudgeFn | null {
+  try {
+    const { endpoint, modelId } =
+      registry.resolveEndpointForRole("classification");
+    return (input) =>
+      judgeIntentAlignmentViaLlm({
+        endpoint,
+        modelId,
+        intentBlock: input.intentBlock,
+        issue: input.issue,
+        phaseDocExcerpt: input.phaseDocExcerpt,
+        timeoutMs: 90_000,
+      });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refine Change Intent alignment issues with the LLM judge: the deterministic
+ * validator flags, the judge arbitrates. A missing endpoint keeps the
+ * deterministic set (fail closed).
+ */
+async function refineIntentAlignmentIssues(
+  registry: LlmRegistry,
+  phaseDoc: string,
+  intent: ChangeIntent,
+): Promise<{ issues: string[]; warnings: string[] }> {
+  const judgeFn = tryBindIntentAlignmentJudge(registry);
+  if (!judgeFn) {
+    const { issues } = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
+    if (
+      issues.length > 0 &&
+      intent.interaction &&
+      intent.interaction.mount !== "n/a"
+    ) {
+      slog.warn(
+        "planning",
+        "intent-alignment judge unbound (classification role missing); deterministic regex only",
+        { issueCount: issues.length },
+      );
+    }
+    return { issues, warnings: [] };
+  }
+  const refined = await phaseDocAlignsWithChangeIntentAsync(phaseDoc, intent, {
+    judgeFn,
+  });
+  if (refined.warnings.length > 0) {
+    slog.info("planning", "intent-alignment gap rejected by llm judge", {
+      warnings: refined.warnings,
+    });
+  }
+  return refined;
+}
+
+/** Bind the LLM research-engagement judge to the classification role; null when unbound. */
+function tryBindResearchEngagementJudge(
+  registry: LlmRegistry,
+): ResearchEngagementJudgeFn | null {
+  try {
+    const { endpoint, modelId } =
+      registry.resolveEndpointForRole("classification");
+    return (input) =>
+      judgeResearchEngagementViaLlm({
+        endpoint,
+        modelId,
+        intentBlock: input.intentBlock,
+        issue: input.issue,
+        researchExcerpt: input.researchExcerpt,
+        timeoutMs: 90_000,
+      });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refine engagement-research overclaim issues with the LLM judge: the
+ * deterministic validator flags, the judge arbitrates. A missing endpoint
+ * keeps the deterministic set (fail closed).
+ */
+async function refineResearchEngagementIssues(
+  registry: LlmRegistry,
+  doc: string,
+  intent: ChangeIntent,
+): Promise<{ issues: string[]; warnings: string[] }> {
+  const judgeFn = tryBindResearchEngagementJudge(registry);
+  if (!judgeFn) {
+    const { issues } = researchEngagementQuality(doc, intent);
+    if (
+      issues.length > 0 &&
+      intent.interaction &&
+      intent.interaction.mount !== "n/a"
+    ) {
+      slog.warn(
+        "research",
+        "research-engagement judge unbound (classification role missing); deterministic regex only",
+        { issueCount: issues.length },
+      );
+    }
+    return { issues, warnings: [] };
+  }
+  const refined = await researchEngagementQualityAsync(doc, intent, {
+    judgeFn,
+  });
+  if (refined.warnings.length > 0) {
+    slog.info("research", "research overclaim rejected by llm judge", {
+      warnings: refined.warnings,
+    });
+  }
+  return refined;
 }
 
 /**
@@ -5405,8 +5528,15 @@ ${intentBlock}`;
       });
     }
 
-    const engagementQuality = researchEngagementQuality(resolved.doc, intent);
-    if (!resolved.thin && !engagementQuality.ok) {
+    const engagementQuality = await refineResearchEngagementIssues(
+      this.ctx.registry,
+      resolved.doc,
+      intent,
+    );
+    for (const warning of engagementQuality.warnings) {
+      log(project, run, `research-engagement: ${warning}`);
+    }
+    if (!resolved.thin && engagementQuality.issues.length > 0) {
       slog.warn("research", "engagement overclaim; retrying once", {
         projectId: project.id,
         phaseId: phase.id,
@@ -5446,8 +5576,15 @@ Phase id: ${phase.id}`;
         agentOutput: output,
         beforeStats,
       });
-      const again = researchEngagementQuality(resolved.doc, intent);
-      if (!again.ok) {
+      const again = await refineResearchEngagementIssues(
+        this.ctx.registry,
+        resolved.doc,
+        intent,
+      );
+      for (const warning of again.warnings) {
+        log(project, run, `research-engagement: ${warning}`);
+      }
+      if (again.issues.length > 0) {
         log(
           project,
           run,
@@ -5866,10 +6003,17 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
       return "failed";
     };
 
-    const intentIssuesForDoc = (doc: string): string[] => {
+    const intentIssuesForDoc = async (doc: string): Promise<string[]> => {
       if (!doc?.trim()) return [];
-      const align = phaseDocAlignsWithChangeIntent(doc, intent);
-      return align.ok ? [] : align.issues;
+      const refined = await refineIntentAlignmentIssues(
+        this.ctx.registry,
+        doc,
+        intent,
+      );
+      for (const warning of refined.warnings) {
+        log(project, run, `intent-alignment: ${warning}`);
+      }
+      return refined.issues;
     };
 
     const engagementIntent =
@@ -5959,7 +6103,7 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
 
       let intentIssues =
         resolved.source !== "none" && resolved.gate.ok
-          ? intentIssuesForDoc(resolved.doc)
+          ? await intentIssuesForDoc(resolved.doc)
           : [];
 
       const needsRepair =
@@ -5967,18 +6111,6 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         resolved.source === "none" ||
         (resolved.alignIssues?.length ?? 0) > 0 ||
         intentIssues.length > 0;
-
-      if (
-        resolved.gate.ok &&
-        resolved.source !== "none" &&
-        intentIssues.length > 0 &&
-        !(resolved.alignIssues?.length ?? 0)
-      ) {
-        return recoverableDraftFail(intentIssues.join("; "), {
-          title: "Draft rejected: Change Intent",
-          kind: "change-intent",
-        });
-      }
 
       if (needsRepair) {
         const alignBlock =
@@ -6038,7 +6170,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           });
           intentIssues =
             resolved.source !== "none" && resolved.gate.ok
-              ? intentIssuesForDoc(resolved.doc)
+              ? await intentIssuesForDoc(resolved.doc)
               : [];
         } catch (repairError) {
           repairThrew = true;
@@ -6225,8 +6357,15 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       );
       return "failed";
     }
-    const intentAlign = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
-    if (!intentAlign.ok) {
+    const intentAlign = await refineIntentAlignmentIssues(
+      this.ctx.registry,
+      phaseDoc,
+      intent,
+    );
+    for (const warning of intentAlign.warnings) {
+      log(project, run, `intent-alignment: ${warning}`);
+    }
+    if (intentAlign.issues.length > 0) {
       log(
         project,
         run,
@@ -6300,8 +6439,15 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         phase.description,
         { registry: this.ctx.registry },
       );
-      const intentAlign = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
-      if (!intentAlign.ok) {
+      const intentAlign = await refineIntentAlignmentIssues(
+        this.ctx.registry,
+        phaseDoc,
+        intent,
+      );
+      for (const warning of intentAlign.warnings) {
+        log(project, run, `intent-alignment: ${warning}`);
+      }
+      if (intentAlign.issues.length > 0) {
         log(
           project,
           run,

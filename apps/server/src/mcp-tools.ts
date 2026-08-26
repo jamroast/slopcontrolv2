@@ -2097,7 +2097,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "preview_change_intent",
       description:
-        "Dry-run Change Intent extraction (uiMount, engagement inheritance, interaction contract). Optionally align against a phase PHASE.md. Does not write files.",
+        "Dry-run Change Intent extraction (uiMount, engagement, interaction contract). With checkPhaseDoc:true, runs LLM-refined PHASE↔Intent alignment (judgeIntentAlignmentViaLlm on classification role; deterministic regex flags candidates, judge arbitrates). Response phaseAlign includes ok, issues (blockers), and warnings (deterministic gaps rejected by the judge). Does not write files.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2112,7 +2112,8 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           },
           checkPhaseDoc: {
             type: "boolean",
-            description: "When true, run phaseDocAlignsWithChangeIntent on PHASE.md",
+            description:
+              "When true, run phaseDocAlignsWithChangeIntentAsync on PHASE.md (LLM judge when classification role is bound)",
           },
         },
         required: ["projectId", "description"],

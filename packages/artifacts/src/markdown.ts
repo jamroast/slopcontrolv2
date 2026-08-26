@@ -127,3 +127,24 @@ export function extractSection(
   const body = lines.slice(start, end).join("\n").trim();
   return body || null;
 }
+
+/**
+ * Consolidate long text by keeping the head AND tail and dropping only the
+ * middle, rather than naive head-truncation (which loses the tail — e.g. a
+ * Blueprint Deltas section or a Risks section that a downstream judge needs).
+ *
+ * Splits the budget 50/50 between head and tail and inserts a marker showing
+ * how much was dropped, so the reader knows the excerpt is not complete.
+ */
+export function consolidateText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const marker = `\n…[truncated ${text.length - maxChars} chars]\n`;
+  const budget = maxChars - marker.length;
+  const headChars = Math.ceil(budget / 2);
+  const tailChars = budget - headChars;
+  return (
+    text.slice(0, headChars) +
+    marker +
+    text.slice(text.length - tailChars)
+  );
+}

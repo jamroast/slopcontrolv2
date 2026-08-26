@@ -31,6 +31,7 @@ import {
   changeIntentIsBrandTheming,
   changeIntentIsThemeWiringOnly,
   isNotApplicableDesignSection,
+  formatChangeIntentPromptBlock,
 } from "./change-intent.js";
 import type { ChangeIntent } from "./change-intent.js";
 import type { PersistedDiagnosis } from "./diagnosis.js";
@@ -1907,6 +1908,80 @@ export function researchEngagementQuality(
     );
   }
   return { ok: issues.length === 0, issues };
+}
+
+/** Structural verdict shape (mirrors @slopcontrol/llm research-engagement-llm). */
+export type ResearchEngagementJudgeVerdict = {
+  genuineGap?: boolean;
+  reason?: string;
+  existingProof?: string;
+  suggestedCheck?: string;
+};
+
+/**
+ * Injected LLM judge. artifacts does NOT depend on @slopcontrol/llm — the
+ * orchestrator binds judgeResearchEngagementViaLlm to endpoint/model.
+ */
+export type ResearchEngagementJudgeFn = (input: {
+  intentBlock: string;
+  issue: string;
+  researchExcerpt: string;
+}) => Promise<ResearchEngagementJudgeVerdict>;
+
+export type ResearchEngagementAsyncResult = {
+  /** Overclaims confirmed genuine by the judge (blockers). */
+  issues: string[];
+  /** Deterministic overclaims the judge rejected, kept for logging. */
+  warnings: string[];
+};
+
+/**
+ * LLM-refined engagement-research overclaim check: the deterministic
+ * validator runs first, then the judge arbitrates each flagged overclaim.
+ * genuineGap=false drops the issue into `warnings`; a judge error keeps the
+ * issue (fail closed).
+ */
+export async function researchEngagementQualityAsync(
+  doc: string,
+  intent: ChangeIntent | null | undefined,
+  opts?: { judgeFn?: ResearchEngagementJudgeFn },
+): Promise<ResearchEngagementAsyncResult> {
+  const { issues } = researchEngagementQuality(doc, intent);
+  if (!opts?.judgeFn || issues.length === 0) {
+    return { issues, warnings: [] };
+  }
+
+  const researchExcerpt = extractMarkdownDocument(doc);
+  const intentBlock = formatChangeIntentPromptBlock(intent as ChangeIntent);
+  const kept: string[] = [];
+  const warnings: string[] = [];
+  for (const issue of issues) {
+    try {
+      const verdict = await opts.judgeFn({
+        intentBlock,
+        issue,
+        researchExcerpt,
+      });
+      if (verdict.genuineGap === false) {
+        warnings.push(
+          `deterministic overclaim rejected by LLM judge: ${issue}` +
+            (verdict.reason?.trim() ? ` — ${verdict.reason.trim()}` : "") +
+            (verdict.existingProof?.trim()
+              ? ` (existing proof: ${verdict.existingProof.trim()})`
+              : ""),
+        );
+      } else {
+        kept.push(
+          verdict.suggestedCheck?.trim()
+            ? `${issue}\n  Suggested residual-risk line (LLM judge): ${verdict.suggestedCheck.trim()}`
+            : issue,
+        );
+      }
+    } catch {
+      kept.push(issue);
+    }
+  }
+  return { issues: kept, warnings };
 }
 
 /**

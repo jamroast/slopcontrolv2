@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { extractSection } from "./markdown.js";
+import { extractSection, consolidateText } from "./markdown.js";
 import {
   bdVerifiedByProbes,
   type ProjectDecisionProbes,
@@ -1077,6 +1077,111 @@ export function phaseDocAlignsWithChangeIntent(
   }
 
   return { ok: issues.length === 0, issues };
+}
+
+/** Scope, Success Criteria, Automated Checks, and Blueprint Deltas for the LLM judge. */
+export function intentAlignmentExcerptFromPhaseDoc(phaseDoc: string): string {
+  const sections = [
+    { title: "## Scope", body: extractSection(phaseDoc, "Scope") ?? "" },
+    {
+      title: "## Success Criteria",
+      body: extractSection(phaseDoc, "Success Criteria") ?? "",
+    },
+    {
+      title: "## Automated Checks",
+      body: extractSection(phaseDoc, "Automated Checks") ?? "",
+    },
+    {
+      title: "## Blueprint Deltas",
+      body: extractSection(phaseDoc, "Blueprint Deltas") ?? "",
+    },
+  ];
+  // Consolidate per-section (head+tail) so every section is represented and
+  // the tail (Blueprint Deltas) is never dropped by a whole-excerpt truncation.
+  // Generous budget: the judge's context window is far larger than this, and
+  // the judge itself extracts the relevant evidence (see intent-alignment-llm).
+  const perSection = 4_000;
+  return sections
+    .filter((s) => s.body.trim())
+    .map((s) => `${s.title}\n${consolidateText(s.body, perSection)}`)
+    .join("\n\n");
+}
+
+/** Structural verdict shape (mirrors @slopcontrol/llm intent-alignment-llm). */
+export type IntentAlignmentJudgeVerdict = {
+  genuineGap?: boolean;
+  reason?: string;
+  existingProof?: string;
+  suggestedCheck?: string;
+};
+
+/**
+ * Injected LLM judge. artifacts does NOT depend on @slopcontrol/llm — the
+ * orchestrator binds judgeIntentAlignmentViaLlm to endpoint/model.
+ */
+export type IntentAlignmentJudgeFn = (input: {
+  intentBlock: string;
+  issue: string;
+  phaseDocExcerpt: string;
+}) => Promise<IntentAlignmentJudgeVerdict>;
+
+export type IntentAlignmentAsyncResult = {
+  /** Gaps confirmed genuine by the judge (blockers). */
+  issues: string[];
+  /** Deterministic gaps the judge rejected, kept for logging. */
+  warnings: string[];
+};
+
+/**
+ * LLM-refined Change Intent alignment: the deterministic validator runs
+ * first, then the judge arbitrates each flagged gap. genuineGap=false drops
+ * the issue into `warnings`; a judge error keeps the issue (fail closed).
+ *
+ * This is the fix for the composer-centric keyword vocabulary: a bubble-mount
+ * form using FormBubble / sendFormAnswer / composerMode is semantically
+ * aligned even though the deterministic regex only knows composer-form.
+ */
+export async function phaseDocAlignsWithChangeIntentAsync(
+  phaseDoc: string,
+  intent: ChangeIntent,
+  opts?: { judgeFn?: IntentAlignmentJudgeFn },
+): Promise<IntentAlignmentAsyncResult> {
+  const { issues } = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
+  if (!opts?.judgeFn || issues.length === 0) {
+    return { issues, warnings: [] };
+  }
+
+  const excerpt = intentAlignmentExcerptFromPhaseDoc(phaseDoc);
+  const intentBlock = formatChangeIntentPromptBlock(intent);
+  const kept: string[] = [];
+  const warnings: string[] = [];
+  for (const issue of issues) {
+    try {
+      const verdict = await opts.judgeFn({
+        intentBlock,
+        issue,
+        phaseDocExcerpt: excerpt,
+      });
+      if (verdict.genuineGap === false) {
+        warnings.push(
+          `deterministic gap rejected by LLM judge: ${issue}` +
+            (verdict.reason?.trim() ? ` — ${verdict.reason.trim()}` : "") +
+            (verdict.existingProof?.trim()
+              ? ` (existing proof: ${verdict.existingProof.trim()})`
+              : ""),
+        );
+      } else {
+        kept.push(
+          verdict.suggestedCheck?.trim()
+            ? `${issue}\n  Suggested check (LLM judge): ${verdict.suggestedCheck.trim()}`
+            : issue,
+        );
+      }
+    } catch {
+      kept.push(issue);
+    }
+  }
+  return { issues: kept, warnings };
 }
 
 /**

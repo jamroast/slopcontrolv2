@@ -3,12 +3,15 @@ import {
   finalizeChangeIntent,
   findPriorUiMountIntent,
   isChangeIntentWeak,
+  phaseDocAlignsWithChangeIntent,
+  phaseDocAlignsWithChangeIntentAsync,
   readChangeIntent,
   writeChangeIntent,
   type ChangeIntent,
 } from "@slopcontrol/artifacts";
 import {
   extractChangeIntentViaLlm,
+  judgeIntentAlignmentViaLlm,
   type LlmRegistry,
 } from "@slopcontrol/llm";
 import { log } from "@slopcontrol/types";
@@ -157,4 +160,52 @@ export async function previewChangeIntentAsync(
     }),
     source: "heuristic",
   };
+}
+
+/**
+ * LLM-refined Change Intent alignment for read-only preview/audit paths.
+ * Binds the intent-alignment judge to the classification role; a missing
+ * endpoint keeps the deterministic set (fail closed).
+ */
+export async function previewIntentAlignmentAsync(
+  phaseDoc: string,
+  intent: ChangeIntent,
+  opts: { registry?: LlmRegistry | null },
+): Promise<{ ok: boolean; issues: string[]; warnings: string[] }> {
+  if (!opts.registry) {
+    const { issues } = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
+    if (
+      issues.length > 0 &&
+      intent.interaction &&
+      intent.interaction.mount !== "n/a"
+    ) {
+      log.warn("intent", "preview alignment: no registry; deterministic regex only", {
+        issueCount: issues.length,
+      });
+    }
+    return { ok: issues.length === 0, issues, warnings: [] };
+  }
+  try {
+    const { endpoint, modelId } =
+      opts.registry.resolveEndpointForRole("classification");
+    const refined = await phaseDocAlignsWithChangeIntentAsync(phaseDoc, intent, {
+      judgeFn: (input) =>
+        judgeIntentAlignmentViaLlm({
+          endpoint,
+          modelId,
+          intentBlock: input.intentBlock,
+          issue: input.issue,
+          phaseDocExcerpt: input.phaseDocExcerpt,
+          timeoutMs: 90_000,
+        }),
+    });
+    return {
+      ok: refined.issues.length === 0,
+      issues: refined.issues,
+      warnings: refined.warnings,
+    };
+  } catch {
+    const { issues } = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
+    return { ok: issues.length === 0, issues, warnings: [] };
+  }
 }

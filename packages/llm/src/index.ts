@@ -389,5 +389,7 @@ export * from "./element-honor-llm.js";
 export * from "./build-process-config-llm.js";
 export * from "./verify-failure-llm.js";
 export * from "./claim-proof-llm.js";
+export * from "./intent-alignment-llm.js";
+export * from "./research-engagement-llm.js";
 export * from "./ask-narration-llm.js";
 export * from "@slopcontrol/types";

@@ -33,7 +33,6 @@ import {
   ASK_TIMEOUT_RECOVERY_MESSAGE,
   writeAgentArtifacts,
   formatChangeIntentPromptBlock,
-  phaseDocAlignsWithChangeIntent,
   readChangeIntent,
   reconcileProjectBlueprint,
   clipBlueprintForPrompt,
@@ -174,7 +173,7 @@ import {
   mergeProviderUpdate,
   resolveEndpointSecrets,
 } from "@slopcontrol/llm";
-import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError, clearSlopcontrolRuntimeCache, waitForRun, formatWaitForRunResult, DEFAULT_WAIT_TIMEOUT_MS, DEFAULT_WAIT_INTERVAL_MS, HTTP_WAIT_MAX_MS, RunStageBroker } from "@slopcontrol/mastra";
+import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, previewIntentAlignmentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError, clearSlopcontrolRuntimeCache, waitForRun, formatWaitForRunResult, DEFAULT_WAIT_TIMEOUT_MS, DEFAULT_WAIT_INTERVAL_MS, HTTP_WAIT_MAX_MS, RunStageBroker } from "@slopcontrol/mastra";
 import {
   bindLiveTurn,
   wantsLiveStream,
@@ -7945,13 +7944,15 @@ app.post("/runs", async (req, res) => {
           heuristicOnly: action.heuristicOnly === true,
         },
       );
-      let phaseAlign: { ok: boolean; issues: string[] } | null = null;
+      let phaseAlign: { ok: boolean; issues: string[]; warnings?: string[] } | null = null;
       if (action.checkPhaseDoc && action.phaseId) {
         const phaseDoc = readPhaseDoc(project.rootPath, action.phaseId);
         if (phaseDoc.trim()) {
-          phaseAlign = phaseDocAlignsWithChangeIntent(phaseDoc, intent);
+          phaseAlign = await previewIntentAlignmentAsync(phaseDoc, intent, {
+            registry,
+          });
         } else {
-          phaseAlign = { ok: false, issues: ["PHASE.md missing or empty"] };
+          phaseAlign = { ok: false, issues: ["PHASE.md missing or empty"], warnings: [] };
         }
       }
       res.json({
@@ -8020,12 +8021,17 @@ app.post("/runs", async (req, res) => {
         });
         return;
       }
-      let phaseAlign: { ok: boolean; issues: string[] } | null = null;
+      let phaseAlign: { ok: boolean; issues: string[]; warnings?: string[] } | null = null;
       if (action.phaseId) {
         const phaseDoc = readPhaseDoc(project.rootPath, action.phaseId);
-        phaseAlign = phaseDoc.trim()
-          ? phaseDocAlignsWithChangeIntent(phaseDoc, preview)
-          : { ok: false, issues: ["PHASE.md missing or empty"] };
+        if (phaseDoc.trim()) {
+          const { registry } = getRuntime(project.rootPath);
+          phaseAlign = await previewIntentAlignmentAsync(phaseDoc, preview, {
+            registry,
+          });
+        } else {
+          phaseAlign = { ok: false, issues: ["PHASE.md missing or empty"], warnings: [] };
+        }
       }
       const dry = reconcileProjectBlueprint(project.rootPath, action.phaseId, {
         dryRun: true,
