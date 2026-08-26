@@ -188,6 +188,34 @@ describe("advanceRun", () => {
     assert.match(result.reason, /Stuck at in_review/);
     assert.equal(result.steps.length, 1);
   });
+
+  it("surfaces the submit_review rejection reason to the agent", async () => {
+    const result = await advanceRun({
+      runId: "run-1",
+      getStage: () => "in_review",
+      dispatch: async () => ({
+        text: '{"stage":"in_review","reason":"PHASE.md failed validation: long-lived server"}',
+      }),
+    });
+    assert.equal(result.kind, "stop");
+    assert.match(result.reason, /Stuck at in_review/);
+    assert.match(result.reason, /long-lived server/);
+  });
+
+  it("seeds rejection reason from the just-confirmed submit_review", async () => {
+    const result = await advanceRun({
+      runId: "run-1",
+      stageHint: "in_review",
+      seedDispatchText:
+        '{"stage":"in_review","reason":"PHASE.md failed validation: missing trap"}',
+      getStage: () => "in_review",
+      dispatch: async () => ({
+        text: '{"stage":"in_review","reason":"PHASE.md failed validation: missing trap"}',
+      }),
+    });
+    assert.equal(result.kind, "stop");
+    assert.match(result.reason, /missing trap/);
+  });
 });
 
 describe("parseAdvanceEvent review_required", () => {

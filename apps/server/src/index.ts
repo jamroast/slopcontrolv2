@@ -7324,8 +7324,15 @@ app.post("/runs", async (req, res) => {
           feedback: action.feedback,
         });
         touchRunStage(run.id, result.stage);
-        updatePhaseStatus(phase.id, "accepted");
-        res.json({ run: store.getRun(run.id), stage: result.stage });
+        updatePhaseStatus(
+          phase.id,
+          result.stage === "accepted" ? "accepted" : "in_review",
+        );
+        res.json({
+          run: store.getRun(run.id),
+          stage: result.stage,
+          ...(result.reason ? { reason: result.reason } : {}),
+        });
         return;
       }
 

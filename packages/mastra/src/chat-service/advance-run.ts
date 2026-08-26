@@ -81,6 +81,24 @@ export function stageFromDispatchText(text: string): string | undefined {
   return undefined;
 }
 
+/** Extract a rejection reason from a dispatch result (e.g. submit_review refuse). */
+export function reasonFromDispatchText(text: string): string | undefined {
+  const trimmed = text.replace(/^ERROR:\s*/i, "").trim();
+  const jsonStart = trimmed.indexOf("{");
+  if (jsonStart < 0) return undefined;
+  try {
+    const parsed = JSON.parse(trimmed.slice(jsonStart)) as {
+      reason?: unknown;
+    };
+    if (typeof parsed.reason === "string" && parsed.reason.trim()) {
+      return parsed.reason.trim();
+    }
+  } catch {
+    /* ignore */
+  }
+  return undefined;
+}
+
 async function resolveAdvanceStage(opts: {
   getStage: AdvanceGetStage;
   lastPayloadStage?: string;
@@ -139,11 +157,15 @@ export async function advanceRun(opts: {
   maxSteps?: number;
   /** Recover from the just-confirmed tool when it returned a known gate error. */
   seedError?: string;
+  /** Text from the just-confirmed tool (e.g. submit_review refuse with reason). */
+  seedDispatchText?: string;
 }): Promise<AdvanceRunResult> {
   const steps: AdvanceStep[] = [];
   const attempted = new Set<string>();
   const maxSteps = opts.maxSteps ?? 6;
   let lastPayloadStage = opts.stageHint?.trim() || undefined;
+  let lastReason =
+    reasonFromDispatchText(opts.seedDispatchText ?? "") ?? undefined;
   const scoped = (args: Record<string, unknown>) => ({
     ...args,
     runId: opts.runId,
@@ -202,7 +224,11 @@ export async function advanceRun(opts: {
 
     const key = `${stage}:${decision.tool}`;
     if (attempted.has(key)) {
-      return finish("stop", `Stuck at ${stage} after ${decision.tool}.`);
+      return finish(
+        "stop",
+        `Stuck at ${stage} after ${decision.tool}.` +
+          (lastReason ? ` ${lastReason}` : ""),
+      );
     }
     attempted.add(key);
 
@@ -252,6 +278,7 @@ export async function advanceRun(opts: {
 
     lastPayloadStage =
       stageFromDispatchText(dispatched.text) ?? lastPayloadStage;
+    lastReason = reasonFromDispatchText(dispatched.text) ?? lastReason;
   }
 
   const stage = await currentStage();

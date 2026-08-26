@@ -63,6 +63,7 @@ import {
 import {
   advanceRun,
   formatAdvanceRunResult,
+  reasonFromDispatchText,
   runIdFromLifecycle,
   shouldAdvanceAfterConfirm,
   stageFromDispatchText,
@@ -2668,7 +2669,12 @@ export class ChatService {
     }
     this.setProceedLatch(conversation, runId, args);
     let knownStage = stageFromDispatchText(resultText);
-    if (!knownStage && tool === "submit_review" && args.decision === "approve") {
+    if (
+      !knownStage &&
+      tool === "submit_review" &&
+      args.decision === "approve" &&
+      !reasonFromDispatchText(resultText)
+    ) {
       knownStage = "accepted";
     }
     const projectId =
@@ -2681,6 +2687,7 @@ export class ChatService {
       projectId,
       stageHint: knownStage,
       seedError: resultText.startsWith("ERROR:") ? resultText : undefined,
+      seedDispatchText: resultText,
       getStage: () => this.lookupRun(runId)?.stage ?? knownStage,
       dispatch: async (nextTool, nextArgs) => {
         const follow = await this.deps.dispatch(nextTool, nextArgs);

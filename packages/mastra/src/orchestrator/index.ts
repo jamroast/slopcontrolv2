@@ -673,6 +673,8 @@ export interface ReviewInput {
 export interface SubmitReviewResult {
   stage: RunStage;
   revision?: RevisionOutcome;
+  /** Human-readable rejection reason when approve is refused (surfaced to the agent). */
+  reason?: string;
 }
 
 export interface OpenProjectResult {
@@ -6396,7 +6398,10 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           `--- Cannot approve: PHASE.md failed validation ---\n${claimRefined.issues.map((i) => `- ${i}`).join("\n")}`,
         );
         writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return { stage: "in_review" };
+        return {
+          stage: "in_review",
+          reason: `PHASE.md failed validation: ${claimRefined.issues.join("; ")}`,
+        };
       }
       const intent = await ensureChangeIntentAsync(
         project.rootPath,
@@ -6419,7 +6424,10 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           `--- Cannot approve: PHASE.md misaligned with Change Intent ---\n${intentAlign.issues.map((i) => `- ${i}`).join("\n")}`,
         );
         writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return { stage: "in_review" };
+        return {
+          stage: "in_review",
+          reason: `PHASE.md misaligned with Change Intent: ${intentAlign.issues.join("; ")}`,
+        };
       }
       const antiAudit = phaseDocRejectsMissingThemeAudit({
         description: phase.description,
@@ -6435,7 +6443,10 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           `--- Cannot approve: review-only PHASE rejected for missing theme control ---\n${antiAudit.issues.map((i) => `- ${i}`).join("\n")}`,
         );
         writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return { stage: "in_review" };
+        return {
+          stage: "in_review",
+          reason: `PHASE.md rejected for missing theme control: ${antiAudit.issues.join("; ")}`,
+        };
       }
       writePhaseStatus(project.rootPath, phase.id, "accepted");
       mergePhaseIntoBlueprint(
