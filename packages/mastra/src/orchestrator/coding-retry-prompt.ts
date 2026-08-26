@@ -126,7 +126,7 @@ Then ensure verify passes. Before DEV_COMPLETE, append \`## Operator handoff\` t
       return `Fix the APPENDIX Failure diagnosis. This is a **process** failure (PHASE.md Automated Checks and/or incomplete Ollama OpenAI-compat routing).${next}
 If the diagnosis mentions Automated Checks shell/syntax: FIRST edit \`.slopcontrol/phases/${phaseId}/PHASE.md\` — rewrite the failing check into one complete statement.
 If the diagnosis mentions Stream started hang or api-routing-complete-gate: implement the promised routing files (model-resolver / OLLAMA_BASE_URL / chat route) — do NOT complete on catalogue-only diffs; do NOT force free-tier.
-If the diagnosis mentions post-merge root verify: fix files so project-root tests pass (gitignored artifacts must match the worktree); do not claim DEV_COMPLETE from worktree-only green.
+If the diagnosis mentions post-merge root confirmation: worktree tests already passed — fix root env/sync/gitignored artifact drift; use retry_root_verify after project_env_sync when harness is the issue.
 Then ensure build/tests pass. Before DEV_COMPLETE, append \`## Operator handoff\` to APPENDIX. Print DEV_COMPLETE when success criteria and Automated Checks pass.`;
     default:
       return `Fix the implementation using the latest APPENDIX Failure diagnosis.${next}

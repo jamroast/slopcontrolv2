@@ -12,6 +12,7 @@ import {
   bootstrapFromResearch,
   buildProjectInventory,
   synthesizeBlueprintFromInventory,
+  applyWorktreeGreenPostMergeContext,
   buildFailureDiagnosis,
   buildFailureDiagnosisAsync,
   type BuildFailureDiagnosisInput,
@@ -1637,7 +1638,7 @@ function isExit127CommandNotFoundFailure(
 /**
  * Gates for marking development complete.
  * - full: build + phase-doc validation + tests + automated checks + verify + DB
- * - build: build + phase-doc validation only (worktree gate when tests run on root)
+ * - build: build + phase-doc validation only (legacy / explicit callers)
  * - verify: tests + automated checks + verify + DB (project root after merge)
  */
 export async function runSuccessChecks(
@@ -1649,6 +1650,11 @@ export async function runSuccessChecks(
     runner?: CommandRunner;
     /** Skip PHASE.md Automated Checks presence validation (default false) */
     skipPhaseDocValidation?: boolean;
+    /**
+     * Worktree full gate already passed — root verify is confirmatory only
+     * (testCommand + env; skip duplicate PHASE automated checks / smoke).
+     */
+    confirmatory?: boolean;
     /**
      * Always run package-manager install before testCommand (e.g. post-merge
      * root verify — gitignored node_modules never arrives via merge).
@@ -1958,7 +1964,18 @@ export async function runSuccessChecks(
     steps.push(step);
   }
 
-  if (runTestStep) {
+  if (runTestStep && opts?.confirmatory) {
+    parts.push(
+      "Confirmatory root verify — worktree full gate already passed; running testCommand with root env overlay (skipping duplicate PHASE Automated Checks / verifyCommand / LLM smoke).",
+    );
+    steps.push({
+      name: "confirmatory-root-verify",
+      exitCode: 0,
+      output: parts[parts.length - 1] ?? "",
+    });
+  }
+
+  if (runTestStep && !opts?.confirmatory) {
     const cells = extractCheckCells(phaseDoc);
     const checkRegistry = createDefaultCheckRegistry(runner);
     const checkEnv = Object.keys(llmOverlay).length > 0
@@ -2086,7 +2103,16 @@ export async function runSuccessChecks(
     }
   }
 
-  if (isDatabasePhase(phaseDoc)) {
+  if (runTestStep && opts?.confirmatory && isDatabasePhase(phaseDoc)) {
+    parts.push(
+      "Confirmatory root verify: database-artifacts check skipped (worktree full gate already passed).",
+    );
+    steps.push({
+      name: "database-artifacts",
+      exitCode: 0,
+      output: parts[parts.length - 1] ?? "",
+    });
+  } else if (isDatabasePhase(phaseDoc)) {
     const db = verifyDatabaseArtifacts(cwd);
     parts.push(db.output);
     if (!db.ok) {
@@ -8015,6 +8041,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     let lastErrorCount = Number.POSITIVE_INFINITY;
     let lastAbortWasProductiveTimeout = false;
     let lastFailWasPostMergeRootVerify = false;
+    let worktreeFullGatePassed = false;
     let lastContinueWasJudgeExtension = false;
     let lastJudgeSteering: DevelopJudgeVerdict | null = null;
     let judgeExtensionCount = 0;
@@ -8361,10 +8388,10 @@ Honor UI-SPEC / tokens / design assets when present. Finish remaining work, run 
 Do NOT rewrite application code or invent bring-up scripts in the app repo.
 Append/update \`## Operator handoff\` in APPENDIX with what the operator must restore (services, env, verifyPreflightCommand).
 Do NOT print DEV_COMPLETE until project-root verify would pass (operator may use retry_root_verify after fixing the harness).`
-            : `POST-MERGE ROOT VERIFY failed — worktree build passed and the phase branch merged, but tests on the **project root** failed.
-Do NOT re-assert DEV_COMPLETE until project-root \`npm test\` / Automated Checks pass.
-Git merge only moves tracked files; gitignored outputs (e.g. \`drizzle/\`) are synced from the worktree by SlopControl before root verify — edit those artifacts in the worktree so the next sync lands the correct files on root.
-Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the failing assertion on root, append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only when root verify would pass.`;
+            : `POST-MERGE ROOT CONFIRMATION failed — worktree already passed build + testCommand + Automated Checks before merge.
+Root failure likely means env/sync/harness drift (gitignored artifacts, host-verify env, canonical DB ports), not a surprise product regression.
+Fix gitignored outputs in the worktree so the next sync lands on root, or restore operator harness — do not rewrite product code unless the root-only assertion differs from worktree.
+Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only when confirmatory root verify would pass (retry_root_verify after env sync is OK).`;
           systemOverride = [
             contextSystem || null,
             designContext.trim() ? designContext.slice(0, 4_000) : null,
@@ -8637,12 +8664,13 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         }
         phaseDoc = readPhaseDoc(project.rootPath, phase.id);
 
-        // When auto-merging: build-only in the worktree, then merge and run
-        // tests on the project root (where .env.docker / .env.local live).
+        // When auto-merging: full gate in the worktree (build + tests + Automated
+        // Checks), merge only when green, then confirmatory verify on project root.
         const autoMerge = config.autoMergeOnComplete !== false;
         let pushedEnv: string[] = [];
+        worktreeFullGatePassed = false;
         let checks = await runSuccessChecks(project, phaseDoc, worktree.path, {
-          mode: autoMerge ? "build" : "full",
+          mode: "full",
           phaseId: phase.id,
           registry: this.ctx.registry,
         });
@@ -8653,7 +8681,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
             "--- Auto deps-install after exit 127 (force reinstall + recheck) ---",
           );
           checks = await runSuccessChecks(project, phaseDoc, worktree.path, {
-            mode: autoMerge ? "build" : "full",
+            mode: "full",
             forceDepsInstall: true,
             phaseId: phase.id,
             registry: this.ctx.registry,
@@ -8721,10 +8749,11 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         }
 
         if (checks.ok && autoMerge) {
+          worktreeFullGatePassed = true;
           log(
             project,
             run,
-            `--- Worktree build OK; merging ${worktree.branch} into project root before tests ---`,
+            `--- Worktree full gate OK; merging ${worktree.branch} into project root before confirmatory root verify ---`,
           );
           try {
             const mergeResult = mergePhaseWorktree({
@@ -8965,7 +8994,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
               log(
                 project,
                 run,
-                `--- Running tests on project root (${project.rootPath}) ---`,
+                `--- Confirmatory root verify on project root (${project.rootPath}) ---`,
               );
               const rootChecks = await runSuccessChecks(
                 project,
@@ -8973,7 +9002,9 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                 project.rootPath,
                 {
                   mode: "verify",
+                  confirmatory: worktreeFullGatePassed,
                   forceDepsInstall: true,
+                  skipPhaseDocValidation: worktreeFullGatePassed,
                   phaseId: phase.id,
                   registry: this.ctx.registry,
                 },
@@ -8991,7 +9022,9 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                   project.rootPath,
                   {
                     mode: "verify",
+                    confirmatory: worktreeFullGatePassed,
                     forceDepsInstall: true,
+                    skipPhaseDocValidation: worktreeFullGatePassed,
                     phaseId: phase.id,
                     registry: this.ctx.registry,
                   },
@@ -9020,9 +9053,13 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
                   command: rootFail?.command,
                   exitCode: rootFail?.exitCode ?? 1,
                   output: [
-                    "POST-MERGE ROOT VERIFY FAILED — worktree build passed; phase branch merged.",
+                    worktreeFullGatePassed
+                      ? "POST-MERGE ROOT CONFIRMATION FAILED — worktree full gate (build + testCommand + Automated Checks) already passed before merge."
+                      : "POST-MERGE ROOT VERIFY FAILED — worktree gate passed; phase branch merged.",
                     "Git merge does not copy gitignored files; SlopControl syncs ignored worktree artifacts before this step.",
-                    "Do not claim DEV_COMPLETE from worktree-only green — fix so project-root tests pass.",
+                    worktreeFullGatePassed
+                      ? "Treat this as env/sync/harness drift on the project root — retry_root_verify after project_env_sync or fix gitignored artifact sync from the worktree."
+                      : "Do not claim DEV_COMPLETE from worktree-only green — fix so project-root tests pass.",
                     "",
                     rootFail?.output ?? rootVerify.output,
                   ].join("\n"),
@@ -9258,13 +9295,19 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
         );
 
         const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
-        const diagnosis = await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
+        let diagnosis = await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
           output: checks.summary || checks.output,
           firstFailure: checks.firstFailure,
           failingStepId: verifySteps?.firstFailure?.id,
           sourcePhaseId: phase.id,
           sourceRunId: run.id,
         });
+        if (
+          worktreeFullGatePassed &&
+          checks.firstFailure?.name?.startsWith("post-merge-root-verify")
+        ) {
+          diagnosis = applyWorktreeGreenPostMergeContext(diagnosis);
+        }
         this.persistDiagnosis(
           project,
             run,

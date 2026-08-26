@@ -1112,6 +1112,45 @@ function toFailureDiagnosis(
   };
 }
 
+/**
+ * When worktree full gates passed but confirmatory post-merge root verify
+ * failed, steer operators/coding toward env/sync/harness drift — not a fresh
+ * product regression.
+ */
+export function applyWorktreeGreenPostMergeContext(
+  diagnosis: FailureDiagnosis,
+): FailureDiagnosis {
+  const infraDrift =
+    diagnosis.class === "infra" ||
+    /econnrefused|enotfound|connection refused|could not connect|port .* refused/i.test(
+      `${diagnosis.rootCause}\n${diagnosis.evidence}`,
+    );
+  return {
+    ...diagnosis,
+    tags: [
+      ...new Set([
+        ...(diagnosis.tags ?? []),
+        "post-merge-drift",
+        "worktree-green",
+      ]),
+    ],
+    operatorActions: [
+      "Worktree already passed build + testCommand + Automated Checks — root failure is likely env/sync/harness drift (gitignored artifacts, host-verify env, canonical DB ports).",
+      "Try MCP retry_root_verify after project_env_sync or restoring postgres on canonical host ports.",
+      ...diagnosis.operatorActions,
+    ],
+    nextActions: infraDrift
+      ? "Restore runtime dependencies on the project root, then retry_root_verify — do not burn another full develop iteration on product code."
+      : "Fix gitignored artifact sync or root-only env drift in the worktree, then retry_development or retry_root_verify.",
+    harnessRecoverable:
+      diagnosis.harnessRecoverable === true || infraDrift,
+    codingAgentShouldFix: infraDrift
+      ? false
+      : diagnosis.codingAgentShouldFix,
+    audience: infraDrift ? "operator" : diagnosis.audience,
+  };
+}
+
 /** Markdown card for APPENDIX / prompts. Secrets are redacted from evidence. */
 export function formatDiagnosisCard(d: FailureDiagnosis): string {
   const evidence = redactSecrets(d.evidence).slice(0, 2000);

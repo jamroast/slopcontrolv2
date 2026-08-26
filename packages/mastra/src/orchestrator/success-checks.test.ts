@@ -586,6 +586,34 @@ awk '/x/,/y/' file.ts | grep -q 'a.*b.*c' || exit 1`);
     }
   });
 
+  it("confirmatory verify skips duplicate PHASE automated checks", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-confirmatory-"));
+    try {
+      mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+      writeConfig(root, {
+        buildCommand: "echo build-ok",
+        testCommand: "echo tests-ok",
+      });
+      const phaseDoc = validPhaseDoc("echo should-not-run");
+      const calls: string[] = [];
+      const result = await runSuccessChecks(fakeProject(root), phaseDoc, root, {
+        mode: "verify",
+        confirmatory: true,
+        skipPhaseDocValidation: true,
+        runner: async (command) => {
+          calls.push(command);
+          return { output: "ok\n", exitCode: 0 };
+        },
+      });
+      assert.equal(result.ok, true, result.output);
+      assert.deepEqual(calls, ["echo tests-ok"]);
+      assert.match(result.output, /Confirmatory root verify/i);
+      assert.doesNotMatch(result.output, /automatedCheck \(should-not-run\)/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("build mode runs build but skips testCommand and automated checks", async () => {
     const root = mkdtempSync(join(tmpdir(), "slop-build-gate-"));
     try {

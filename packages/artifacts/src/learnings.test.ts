@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
+  applyWorktreeGreenPostMergeContext,
   buildFailureDiagnosis,
   classifyVerifyFailure,
   coalesceShellCompounds,
@@ -427,6 +428,24 @@ Restore or drop the pre-merge stash (git stash pop / git stash drop), then conti
     assert.equal(c.audience, "operator");
     assert.ok(c.operatorActions.length > 0);
     assert.match(c.summary, /stash|unrestored/i);
+  });
+});
+
+describe("applyWorktreeGreenPostMergeContext", () => {
+  it("tags post-merge drift when worktree full gate passed", () => {
+    const base = buildFailureDiagnosis({
+      output: "FAIL",
+      firstFailure: {
+        name: "post-merge-root-verify:testCommand",
+        command: "npm test",
+        exitCode: 1,
+        output: "3 failed",
+      },
+    });
+    const d = applyWorktreeGreenPostMergeContext(base);
+    assert.ok(d.tags?.includes("worktree-green"));
+    assert.ok(d.tags?.includes("post-merge-drift"));
+    assert.match(d.operatorActions.join(" "), /Worktree already passed/i);
   });
 });
 
