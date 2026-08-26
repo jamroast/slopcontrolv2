@@ -12,6 +12,7 @@ import {
   appendRunLog,
   readDiagnosis,
   readLatestDiagnosisForPhase,
+  diagnosisForRunStage,
   readVerifyStepsReport,
   probeMastraDbFile,
   phaseNeedsDesign,
@@ -1226,9 +1227,10 @@ function buildRunPayload(run: Run) {
     phaseDoc = readPhaseDoc(project.rootPath, phase.id);
   }
 
-  const diagnosis =
+  const diagnosisRaw =
     readDiagnosis(project.rootPath, run.id) ??
     (phase ? readLatestDiagnosisForPhase(project.rootPath, phase.id) : null);
+  const diagnosis = diagnosisForRunStage(diagnosisRaw, run.stage);
   const handoff =
     readRunHandoff(project.rootPath, run.id) ??
     (phase ? readLatestHandoffForPhase(project.rootPath, phase.id) : null);

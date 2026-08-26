@@ -123,6 +123,7 @@ import {
   readLatestDiagnosisForPhase,
   clearPhaseDiagnosis,
   clearRunDiagnosis,
+  deleteRunDiagnosis,
   writeBlueprint,
   writeCheckReport,
   writeVerifyStepsReport,
@@ -6808,7 +6809,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         phase.id,
       );
     } else {
-      clearRunDiagnosis(project.rootPath, run.id, phase.id);
+      deleteRunDiagnosis(project.rootPath, run.id, phase.id);
     }
     writePhaseStatus(project.rootPath, phase.id, "in_review");
     return { stage: "in_review", revision: outcome };
@@ -9441,7 +9442,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
       );
     }
     log(project, run, "--- retry_draft: re-running PHASE.md draft (research intact) ---");
-    clearRunDiagnosis(project.rootPath, run.id);
+    deleteRunDiagnosis(project.rootPath, run.id);
     return this.draftPhase({
       project,
       phase,
@@ -9551,7 +9552,7 @@ Address the latest APPENDIX Failure diagnosis (post-merge root verify). Fix the 
     const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
 
     if (checks.ok) {
-      clearRunDiagnosis(project.rootPath, run.id, phase.id);
+      deleteRunDiagnosis(project.rootPath, run.id, phase.id);
       log(
         project,
         run,

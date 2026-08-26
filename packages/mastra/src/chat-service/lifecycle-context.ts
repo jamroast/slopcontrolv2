@@ -52,6 +52,22 @@ function runLine(run: Run): string {
   return `- run ${run.id.slice(0, 8)} phase=${run.phaseId} stage=${run.stage}`;
 }
 
+function globalRunLine(
+  projectName: string,
+  projectId: string,
+  run: Run,
+): string {
+  return `- ${projectName}: runId=${run.id} projectId=${projectId} phase=${run.phaseId} stage=${run.stage}`;
+}
+
+function isProceedableStage(stage: string): boolean {
+  return (
+    stage === "in_review" ||
+    stage === "accepted" ||
+    stage === "design_complete"
+  );
+}
+
 export type PendingPromptAction = {
   token: string;
   tool: string;
@@ -88,8 +104,8 @@ export function buildProjectChatPrompt(opts: {
   const runs = deps.listRuns(project.id).slice(0, 8);
   const activePhases = phases.filter((p) => p.status !== "complete");
   const inReview = runs.filter((r) => r.stage === "in_review");
-  const readyToCode = runs.filter(
-    (r) => r.stage === "accepted" || r.stage === "design_complete",
+  const readyToCode = runs.filter((r) =>
+    r.stage === "accepted" || r.stage === "design_complete",
   );
   const busy = runs.filter(
     (r) => !["complete", "failed", "interrupted", "blocked"].includes(r.stage),
@@ -130,6 +146,18 @@ ${blueprint || "(empty)"}
 ${roadmap || "(empty)"}${formatPendingConfirmPrompt(opts.pendingActions ?? [])}`;
 }
 
+function globalProceedableRunLines(deps: ChatContextDeps): string {
+  const lines: string[] = [];
+  for (const project of deps.listProjects()) {
+    for (const run of deps.listRuns(project.id)) {
+      if (isProceedableStage(run.stage)) {
+        lines.push(globalRunLine(project.name, project.id, run));
+      }
+    }
+  }
+  return lines.join("\n") || "- (none)";
+}
+
 export function buildGlobalChatPrompt(opts: {
   deps: ChatContextDeps;
   pendingActions?: PendingPromptAction[];
@@ -147,6 +175,8 @@ export function buildGlobalChatPrompt(opts: {
     const review = runs.filter((r) => r.stage === "in_review").length;
     return `- ${project.name} (projectId: ${project.id}) ${project.rootPath} — ${active} open phases, ${busy} active runs, ${review} awaiting review`;
   });
+
+  const proceedableRuns = globalProceedableRunLines(deps);
 
   // Publish-path rows are computed from the live registry, not hardcoded —
   // each registered project is classified by its own config.
@@ -221,6 +251,8 @@ ${flowExample}
 
 **Lifecycle hooks (always pass projectId explicitly in global chat):**
 - Ask latch is per-project — switching projects in global chat starts a new ask unless you pass an explicit askId for that project
+- Proceedable runs (park advance_run with runId + projectId; confirming walks approve → start_development until coding runs):
+${proceedableRuns}
 - Shaping: ask → promote_ask OR plan_loop_start/continue/accept/promote
 - Execution: start_change → wait_for_run → advance_run → start_development → wait_for_run
 - Design: design_loop_start when UI intent (skip for stockAdoption)

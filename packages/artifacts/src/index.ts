@@ -7,6 +7,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -1216,7 +1217,21 @@ export function clearPhaseDiagnosis(
   );
 }
 
-/** Clear a run's diagnosis.json so a prior blocked iteration does not linger. */
+/** Remove run/phase diagnosis files (planning revision, retry_draft, etc.). */
+export function deleteRunDiagnosis(
+  projectRoot: string,
+  runId: string,
+  phaseId?: string,
+): void {
+  const runPath = diagnosisPath(projectRoot, runId);
+  if (existsSync(runPath)) unlinkSync(runPath);
+  if (phaseId) {
+    const phasePath = phaseDiagnosisPath(projectRoot, phaseId);
+    if (existsSync(phasePath)) unlinkSync(phasePath);
+  }
+}
+
+/** Mark a successful develop completion on run + phase diagnosis. */
 export function clearRunDiagnosis(
   projectRoot: string,
   runId: string,
@@ -1232,6 +1247,18 @@ export function clearRunDiagnosis(
   if (phaseId) {
     clearPhaseDiagnosis(projectRoot, phaseId);
   }
+}
+
+/** Hide stale "Phase complete" stubs while a run is still at a gate stage. */
+export function diagnosisForRunStage(
+  diagnosis: PersistedDiagnosis | null | undefined,
+  stage: string,
+): PersistedDiagnosis | null {
+  if (!diagnosis) return null;
+  if (diagnosis.fingerprint === "complete" && stage !== "complete") {
+    return null;
+  }
+  return diagnosis;
 }
 
 function completeDiagnosisStub(

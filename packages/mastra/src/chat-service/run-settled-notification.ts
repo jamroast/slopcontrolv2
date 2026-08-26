@@ -3,6 +3,7 @@ import {
   readRunHandoff,
   readDiagnosis,
   readLatestDiagnosisForPhase,
+  diagnosisForRunStage,
   readResearchConclusionForPhase,
   readRevisionOutcome,
   summarizeRevisionOutcome,
@@ -43,17 +44,19 @@ export function buildRunSettledGuidance(
         : "";
     const revisionOutcome =
       rootPath != null ? readRevisionOutcome(rootPath, run.id) : null;
-    const diagnosis =
+    const diagnosisRaw =
       rootPath != null
         ? (readDiagnosis(rootPath, run.id) ??
           (run.phaseId
             ? readLatestDiagnosisForPhase(rootPath, run.phaseId)
             : null))
         : null;
+    const diagnosis = diagnosisForRunStage(diagnosisRaw, run.stage);
     const parts = [
       "Research is ready for operator review.",
       conclusion ? `Research conclusion: ${conclusion}` : null,
-      "Park advance_run (or start_development) when they want to proceed — do not send them to a dashboard Approve button.",
+      "When the operator wants to proceed (go ahead / start development / accept), park advance_run with runId and projectId — confirming it walks through approve → start_development until coding is running.",
+      "Do not trust failure_summary or diagnosis title alone — stage in_review means review is pending, not development complete.",
       "Use submit_review request_changes only to send the plan back.",
       "Call get_run for research_conclusion if the brief was truncated.",
     ].filter(Boolean);
@@ -63,7 +66,7 @@ export function buildRunSettledGuidance(
       );
     } else if (revisionOutcome?.ok) {
       parts.push(
-        `Review revision applied (${summarizeRevisionOutcome(revisionOutcome)}). Read both RESEARCH.md and PHASE.md before approving.`,
+        `Review revision applied (${summarizeRevisionOutcome(revisionOutcome)}). Read both RESEARCH.md and PHASE.md, then park advance_run(runId, projectId) when the operator wants coding to start — do not treat the phase as complete until stage=developing or complete.`,
       );
     } else if (diagnosis?.tags?.includes("review-revision")) {
       parts.push(

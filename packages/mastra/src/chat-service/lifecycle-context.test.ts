@@ -84,6 +84,7 @@ describe("chat lifecycle prompt", () => {
     assert.ok(prompt.includes("Cross-project orchestration"));
     assert.ok(prompt.includes("cross_project_wire_package"));
     assert.ok(prompt.includes("project_workspace_package_publish"));
+    assert.ok(prompt.includes("Proceedable runs"));
     assert.ok(!prompt.includes("chat_endpoint_model_update"));
   });
 });
