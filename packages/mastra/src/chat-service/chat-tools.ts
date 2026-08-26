@@ -459,7 +459,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   submit_review:
     "Approve or request changes on an in_review research/draft. Requires runId and decision (approve | request_changes). request_changes auto-routes feedback to RESEARCH.md and/or PHASE.md (LLM-classified), verifies edits, and writes revision_outcome on the run — call get_run to see which artifacts changed or why revision failed. Confirming approve then keeps advancing until work is running (same continuer as advance_run). Prefer advance_run when they want to proceed. Stay in this chat — do not send the operator to a dashboard Approve button.",
   retry_draft:
-    "Re-run PHASE.md draft only when RESEARCH.md is solid. Requires runId. Use when research succeeded but draft failed — not rerun_research.",
+    "Re-run PHASE.md draft when stage is failed or interrupted and RESEARCH.md is solid. Requires runId. NOT for in_review — use submit_review(request_changes) to fix PHASE.md validation or content, then approve.",
   rerun_research:
     "Re-run research for a failed planning run (greenfield — always runs the research agent, bypassing the solid-RESEARCH skip). Requires runId.",
   promote_ask:
@@ -895,6 +895,16 @@ export function humanizeChatToolError(raw: string, toolName?: string): string {
     return (
       "start_change failed: no task description was sent. The chat should include your full brief, or the agent must pass it in description." +
       (detail ? `\n(${detail})` : "")
+    );
+  }
+  if (
+    toolName === "retry_draft" &&
+    /retry_draft_not_allowed/i.test(trimmed) &&
+    /"stage"\s*:\s*"in_review"/i.test(trimmed)
+  ) {
+    return (
+      "retry_draft cannot run while the phase is in_review. " +
+      "Use submit_review(request_changes) with feedback to fix PHASE.md (e.g. ## Automated Checks), then submit_review(approve) or advance_run."
     );
   }
   return trimmed;

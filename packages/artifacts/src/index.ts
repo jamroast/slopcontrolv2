@@ -1520,7 +1520,8 @@ export function buildPlanningFailureDiagnosis(opts: {
   const defaultActions =
     opts.stage === "draft"
       ? [
-          "Call retry_draft (research intact) — do not rerun_research unless RESEARCH.md is missing or stale.",
+          "Call retry_draft only when the run stage is failed or interrupted (research intact) — not in_review.",
+          "At in_review use submit_review(request_changes) to fix PHASE.md validation or content, then approve.",
           "Retry draft after fixing PHASE.md Success Criteria / Automated Checks to match Change Intent (form contracts need fill+submit proof; click-to-navigate needs click / onClick / href / router.push; chat mounts (composer/bubble) with a form contract also need live AI SDK static tool parts: type: tool-<name> / parseToolResult / extractActiveForm — not only tool-invocation fixtures). Runtime proofs on dockerized apps must be finite: docker compose up -d <svc> + trap 'docker compose down' EXIT, then probe.",
           "Inspect get_run.dev_output / diagnosis.evidence for the exact gate issues.",
         ]

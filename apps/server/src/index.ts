@@ -1000,7 +1000,9 @@ async function executeRetryDraft(
       body: {
         error: "retry_draft_not_allowed",
         message:
-          "retry_draft is only allowed when the run stage is failed or interrupted.",
+          run.stage === "in_review"
+            ? "retry_draft is not allowed at in_review. Use submit_review(request_changes) to revise PHASE.md (e.g. fix ## Automated Checks), then submit_review(approve) or advance_run."
+            : "retry_draft is only allowed when the run stage is failed or interrupted.",
         stage: run.stage,
       },
     };

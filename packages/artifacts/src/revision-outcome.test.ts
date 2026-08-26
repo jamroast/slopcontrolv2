@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   buildPlanningRevisionFailureDiagnosis,
+  buildReviewApprovalFailureDiagnosis,
   buildRevisionArtifactOutcome,
   readRevisionOutcome,
   summarizeRevisionOutcome,
@@ -86,5 +87,16 @@ describe("revision outcome", () => {
     assert.equal(d.audience, "operator");
     assert.ok(d.tags?.includes("review-revision"));
     assert.equal(d.codingAgentShouldFix, false);
+  });
+
+  it("buildReviewApprovalFailureDiagnosis forbids retry_draft at in_review", () => {
+    const d = buildReviewApprovalFailureDiagnosis({
+      reason: "PHASE.md failed validation: long-lived server",
+      phaseId: "p1",
+      runId: "r1",
+    });
+    assert.ok(d.tags?.includes("review-approval-blocked"));
+    assert.match(d.operatorActions.join(" "), /request_changes/i);
+    assert.match(d.operatorActions.join(" "), /Do NOT call retry_draft/i);
   });
 });

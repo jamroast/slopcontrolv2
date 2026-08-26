@@ -72,6 +72,10 @@ export function buildRunSettledGuidance(
       parts.push(
         "A prior review revision left planning diagnosis on this run — call get_run for revision_outcome and operator_suggestions.",
       );
+    } else if (diagnosis?.tags?.includes("review-approval-blocked")) {
+      parts.push(
+        `Approval blocked: ${diagnosis.rootCause.slice(0, 400)}. Use submit_review(request_changes) to fix PHASE.md — do NOT retry_draft at in_review.`,
+      );
     }
     return parts.join(" ");
   }

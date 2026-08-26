@@ -113,6 +113,7 @@ import {
   type PersistedDiagnosis,
   buildPlanningFailureDiagnosis,
   buildPlanningRevisionFailureDiagnosis,
+  buildReviewApprovalFailureDiagnosis,
   buildRevisionArtifactOutcome,
   writeRevisionOutcome,
   summarizeRevisionOutcome,
@@ -6377,6 +6378,21 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     const { project, phase, run, decision, feedback } = input;
 
     if (decision === "approve") {
+      const refuseApprove = (reason: string): SubmitReviewResult => {
+        this.persistDiagnosis(
+          project,
+          run,
+          buildReviewApprovalFailureDiagnosis({
+            reason,
+            phaseId: phase.id,
+            runId: run.id,
+          }),
+          phase.id,
+        );
+        writePhaseStatus(project.rootPath, phase.id, "in_review");
+        return { stage: "in_review", reason };
+      };
+
       const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
       const gate = validatePhaseDocForDev(phaseDoc, {
         projectRoot: project.rootPath,
@@ -6397,11 +6413,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           run,
           `--- Cannot approve: PHASE.md failed validation ---\n${claimRefined.issues.map((i) => `- ${i}`).join("\n")}`,
         );
-        writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return {
-          stage: "in_review",
-          reason: `PHASE.md failed validation: ${claimRefined.issues.join("; ")}`,
-        };
+        return refuseApprove(
+          `PHASE.md failed validation: ${claimRefined.issues.join("; ")}`,
+        );
       }
       const intent = await ensureChangeIntentAsync(
         project.rootPath,
@@ -6423,11 +6437,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           run,
           `--- Cannot approve: PHASE.md misaligned with Change Intent ---\n${intentAlign.issues.map((i) => `- ${i}`).join("\n")}`,
         );
-        writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return {
-          stage: "in_review",
-          reason: `PHASE.md misaligned with Change Intent: ${intentAlign.issues.join("; ")}`,
-        };
+        return refuseApprove(
+          `PHASE.md misaligned with Change Intent: ${intentAlign.issues.join("; ")}`,
+        );
       }
       const antiAudit = phaseDocRejectsMissingThemeAudit({
         description: phase.description,
@@ -6442,11 +6454,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           run,
           `--- Cannot approve: review-only PHASE rejected for missing theme control ---\n${antiAudit.issues.map((i) => `- ${i}`).join("\n")}`,
         );
-        writePhaseStatus(project.rootPath, phase.id, "in_review");
-        return {
-          stage: "in_review",
-          reason: `PHASE.md rejected for missing theme control: ${antiAudit.issues.join("; ")}`,
-        };
+        return refuseApprove(
+          `PHASE.md rejected for missing theme control: ${antiAudit.issues.join("; ")}`,
+        );
       }
       writePhaseStatus(project.rootPath, phase.id, "accepted");
       mergePhaseIntoBlueprint(
