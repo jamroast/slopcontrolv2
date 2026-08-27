@@ -89,6 +89,8 @@ import {
   ensureTestServices,
   phaseDocAlignsWithChangeIntentAsync,
   type IntentAlignmentJudgeFn,
+  type IntentAlignmentAsyncResult,
+  type PlanningFaultLeg,
   interactionProofKind,
   researchEngagementQualityAsync,
   type ResearchEngagementJudgeFn,
@@ -297,6 +299,8 @@ import {
   judgeClaimProofViaLlm,
   judgeIntentAlignmentViaLlm,
   judgeResearchEngagementViaLlm,
+  judgeResearchQualityViaLlm,
+  judgePhaseDocQualityViaLlm,
   judgeNarrationOnlyViaLlm,
   buildElementHonorSnippets,
   tryMenubarEmbedSimilarity,
@@ -308,6 +312,19 @@ import {
   ensureChangeIntentAsync,
   previewChangeIntentAsync,
 } from "./change-intent-async.js";
+import {
+  formatJudgeFeedbackBlock,
+  isPlanningJudgeInfraIssue,
+  MAX_PLANNING_JUDGE_RETRIES,
+  MAX_PLANNING_LEG_RETRIES,
+  MAX_PLANNING_SELF_HEAL_ROUNDS,
+  mergeFaultLegs,
+  phaseQualityRetryPrompt,
+  researchQualityRetryPrompt,
+  callPlanningJudgeWithInfraRetry,
+  faultLegFromPhaseQualityVerdict,
+  shouldContinuePlanningSelfHeal,
+} from "./planning-pipeline.js";
 import {
   ASK_SYNTHESIS_PROMPT_PREFIX,
   askProgressFromStreamChunk,
@@ -2250,24 +2267,37 @@ function tryBindNarrationJudge(registry: LlmRegistry): NarrationJudgeFn | null {
   }
 }
 
-/** Bind the LLM intent-alignment judge to the classification role; null when unbound. */
+/** Prefer judge role for planning JSON judges; fall back to classification. */
+function resolvePlanningJudgeEndpoint(registry: LlmRegistry): {
+  endpoint: import("@slopcontrol/types").LlmEndpoint;
+  modelId?: string;
+} | null {
+  for (const role of ["judge", "classification"] as const) {
+    try {
+      return registry.resolveEndpointForRole(role);
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+/** Bind the LLM intent-alignment judge; null when unbound. */
 function tryBindIntentAlignmentJudge(
   registry: LlmRegistry,
 ): IntentAlignmentJudgeFn | null {
-  try {
-    const { endpoint, modelId } =
-      registry.resolveEndpointForRole("classification");
-    return (input) =>
-      judgeIntentAlignmentViaLlm({
-        endpoint,
-        modelId,
-        intentBlock: input.intentBlock,
-        phaseDocExcerpt: input.phaseDocExcerpt,
-        timeoutMs: 90_000,
-      });
-  } catch {
-    return null;
-  }
+  const resolved = resolvePlanningJudgeEndpoint(registry);
+  if (!resolved) return null;
+  const { endpoint, modelId } = resolved;
+  return (input) =>
+    judgeIntentAlignmentViaLlm({
+      endpoint,
+      modelId,
+      intentBlock: input.intentBlock,
+      phaseDocExcerpt: input.phaseDocExcerpt,
+      researchExcerpt: input.researchExcerpt,
+      timeoutMs: 90_000,
+    });
 }
 
 /**
@@ -2278,17 +2308,70 @@ async function refineIntentAlignmentIssues(
   registry: LlmRegistry,
   phaseDoc: string,
   intent: ChangeIntent,
-): Promise<{ issues: string[]; warnings: string[] }> {
+  opts?: { researchExcerpt?: string },
+): Promise<IntentAlignmentAsyncResult> {
   const judgeFn = tryBindIntentAlignmentJudge(registry);
   if (!judgeFn) {
     slog.warn(
       "planning",
-      "intent-alignment judge unbound (classification role missing); failing closed",
+      "intent-alignment judge unbound (judge/classification role missing); failing closed",
     );
   }
-  return phaseDocAlignsWithChangeIntentAsync(phaseDoc, intent, {
-    judgeFn: judgeFn ?? undefined,
-  });
+  const { result, judgeInfraFailed } = await callPlanningJudgeWithInfraRetry(
+    () =>
+      phaseDocAlignsWithChangeIntentAsync(phaseDoc, intent, {
+        judgeFn: judgeFn ?? undefined,
+        researchExcerpt: opts?.researchExcerpt,
+      }),
+    (r) => r.issues,
+  );
+  return judgeInfraFailed
+    ? { ...result, judgeInfraFailed: true }
+    : result;
+}
+
+function tryBindResearchQualityJudge(
+  registry: LlmRegistry,
+): ((input: {
+  intentBlock: string;
+  phaseDescription: string;
+  researchExcerpt: string;
+}) => ReturnType<typeof judgeResearchQualityViaLlm>) | null {
+  const resolved = resolvePlanningJudgeEndpoint(registry);
+  if (!resolved) return null;
+  const { endpoint, modelId } = resolved;
+  return (input) =>
+    judgeResearchQualityViaLlm({
+      endpoint,
+      modelId,
+      intentBlock: input.intentBlock,
+      phaseDescription: input.phaseDescription,
+      researchExcerpt: input.researchExcerpt,
+      timeoutMs: 90_000,
+    });
+}
+
+function tryBindPhaseDocQualityJudge(
+  registry: LlmRegistry,
+): ((input: {
+  intentBlock: string;
+  phaseDescription: string;
+  researchExcerpt: string;
+  phaseDocExcerpt: string;
+}) => ReturnType<typeof judgePhaseDocQualityViaLlm>) | null {
+  const resolved = resolvePlanningJudgeEndpoint(registry);
+  if (!resolved) return null;
+  const { endpoint, modelId } = resolved;
+  return (input) =>
+    judgePhaseDocQualityViaLlm({
+      endpoint,
+      modelId,
+      intentBlock: input.intentBlock,
+      phaseDescription: input.phaseDescription,
+      researchExcerpt: input.researchExcerpt,
+      phaseDocExcerpt: input.phaseDocExcerpt,
+      timeoutMs: 90_000,
+    });
 }
 
 /** Bind the LLM research-engagement judge to the classification role; null when unbound. */
@@ -2365,6 +2448,17 @@ async function refineClaimProofGateIssues(
 
 export class ChangeOrchestrator {
   constructor(private readonly ctx: OrchestratorContext) {}
+
+  /** Outcome of the last planning gate (self-heal fault routing). */
+  private planningGateOutcome: {
+    faultLeg: PlanningFaultLeg;
+    issues: string[];
+    judgeInfraFailed?: boolean;
+  } = { faultLeg: "none", issues: [] };
+
+  private resetPlanningGateOutcome(): void {
+    this.planningGateOutcome = { faultLeg: "none", issues: [] };
+  }
 
   /**
    * Persist a diagnosis to disk (authoritative) and append it to the
@@ -5200,6 +5294,316 @@ ${message.trim()}`;
     return { reply: reply.reply.trim() || "(empty reply)" };
   }
 
+  /**
+   * Research quality judge + optional research-agent leg retries.
+   * Returns false when research is still inadequate after bounded retries.
+   */
+  private async ensureResearchQualityGate(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    description: string;
+    intentBlock: string;
+    allowLegRetry?: boolean;
+    judgeFeedback?: string;
+  }): Promise<{ ok: boolean; judgeInfraFailed?: boolean; gaps?: string[] }> {
+    const { project, phase, run, description, intentBlock } = input;
+    const judge = tryBindResearchQualityJudge(this.ctx.registry);
+    if (!judge) {
+      slog.warn(
+        "planning",
+        "research-quality judge unbound; failing closed",
+      );
+      return {
+        ok: false,
+        judgeInfraFailed: true,
+        gaps: ["Research quality could not be verified (no LLM judge bound)"],
+      };
+    }
+
+    const researchPath = `.slopcontrol/phases/${phase.id}/RESEARCH.md`;
+    const researchDate = new Date().toISOString().slice(0, 10);
+    let legRetries = 0;
+
+    while (true) {
+      let researchDoc = readResearch(project.rootPath, phase.id);
+      const { result: verdict, judgeInfraFailed } =
+        await callPlanningJudgeWithInfraRetry(
+          () =>
+            judge({
+              intentBlock,
+              phaseDescription: description,
+              researchExcerpt: clipPromptSection(
+                "RESEARCH.md",
+                researchDoc,
+                16_000,
+              ),
+            }),
+          (v) => v.gaps,
+        );
+
+      if (judgeInfraFailed) {
+        return { ok: false, judgeInfraFailed: true, gaps: verdict.gaps };
+      }
+      if (verdict.ok) return { ok: true };
+
+      if (
+        !input.allowLegRetry ||
+        legRetries >= MAX_PLANNING_LEG_RETRIES
+      ) {
+        return { ok: false, gaps: verdict.gaps };
+      }
+
+      legRetries++;
+      const feedback =
+        input.judgeFeedback ??
+        formatJudgeFeedbackBlock({
+          title: "Research quality judge rejected RESEARCH.md",
+          gaps: verdict.gaps,
+          suggestedFixes: verdict.suggestedFixes,
+        });
+      log(
+        project,
+        run,
+        `--- Research quality judge failed (leg retry ${legRetries}/${MAX_PLANNING_LEG_RETRIES}) ---\n${verdict.gaps.map((g) => `- ${g}`).join("\n")}`,
+      );
+      const retryPrompt = researchQualityRetryPrompt({
+        intentBlock,
+        description: clipPromptSection("change-request", description, 4_000),
+        researchPath,
+        researchDate,
+        judgeFeedback: feedback,
+      });
+      const researchWatch = researchDocWatchPaths(project.rootPath, phase.id);
+      const beforeStats = snapshotFileStats(researchWatch);
+      const output = await runAgent(
+        this.ctx.agents.researchAgent,
+        retryPrompt,
+        project.id,
+        `${phase.id}-research-quality-retry-${legRetries}`,
+        { maxSteps: 16 },
+      );
+      log(project, run, output);
+      const resolved = resolveResearchFromAgentTurn({
+        projectRoot: project.rootPath,
+        phaseId: phase.id,
+        agentOutput: output,
+        beforeStats,
+      });
+      if (resolved.source !== "none" && resolved.doc.trim()) {
+        writeResearch(project.rootPath, phase.id, resolved.doc);
+      }
+      input = { ...input, judgeFeedback: undefined };
+    }
+  }
+
+  /** Re-run research leg during planning self-heal (after intent/phase fault). */
+  private async rerunResearchLegForSelfHeal(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    description: string;
+    feedback: string;
+  }): Promise<boolean> {
+    const intent = await ensureChangeIntentAsync(
+      input.project.rootPath,
+      input.phase.id,
+      input.description,
+      { registry: this.ctx.registry },
+    );
+    const intentBlock = formatChangeIntentPromptBlock(intent);
+    const researchPath = `.slopcontrol/phases/${input.phase.id}/RESEARCH.md`;
+    const researchDate = new Date().toISOString().slice(0, 10);
+    const retryPrompt = researchQualityRetryPrompt({
+      intentBlock,
+      description: clipPromptSection(
+        "change-request",
+        input.description,
+        4_000,
+      ),
+      researchPath,
+      researchDate,
+      judgeFeedback: input.feedback,
+    });
+    log(
+      input.project,
+      input.run,
+      "--- Self-heal: re-running research agent ---",
+    );
+    const researchWatch = researchDocWatchPaths(
+      input.project.rootPath,
+      input.phase.id,
+    );
+    const beforeStats = snapshotFileStats(researchWatch);
+    const output = await runAgent(
+      this.ctx.agents.researchAgent,
+      retryPrompt,
+      input.project.id,
+      `${input.phase.id}-research-self-heal`,
+      { maxSteps: 16 },
+    );
+    log(input.project, input.run, output);
+    const resolved = resolveResearchFromAgentTurn({
+      projectRoot: input.project.rootPath,
+      phaseId: input.phase.id,
+      agentOutput: output,
+      beforeStats,
+    });
+    if (resolved.source !== "none" && resolved.doc.trim()) {
+      writeResearch(input.project.rootPath, input.phase.id, resolved.doc);
+    }
+    const gate = await this.ensureResearchQualityGate({
+      project: input.project,
+      phase: input.phase,
+      run: input.run,
+      description: input.description,
+      intentBlock,
+      allowLegRetry: true,
+    });
+    if (!gate.ok) {
+      this.persistDiagnosis(
+        input.project,
+        input.run,
+        buildPlanningFailureDiagnosis({
+          stage: "research",
+          title: gate.judgeInfraFailed
+            ? "Research failed: quality judge infra"
+            : "Research failed: quality judge",
+          detail: (gate.gaps ?? []).join("; "),
+          phaseId: input.phase.id,
+          runId: input.run.id,
+          kind: gate.judgeInfraFailed
+            ? "research-judge-infra"
+            : "research-quality",
+          faultLeg: "research",
+        }),
+        input.phase.id,
+      );
+    }
+    return gate.ok;
+  }
+
+  /**
+   * Outer planning self-heal: draft → intent gates; on fault route back to
+   * research and/or draft legs (bounded).
+   */
+  private async runPlanningSelfHealLoop(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    description: string;
+    onStage?: (stage: RunStage) => void;
+    listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+  }): Promise<RunStage> {
+    const { project, phase, run, onStage, listProjects } = input;
+    let faultLeg: PlanningFaultLeg = "none";
+
+    for (let round = 0; round < MAX_PLANNING_SELF_HEAL_ROUNDS; round++) {
+      if (round > 0) {
+        log(
+          project,
+          run,
+          `--- Planning self-heal round ${round + 1}/${MAX_PLANNING_SELF_HEAL_ROUNDS} (faultLeg=${faultLeg}) ---`,
+        );
+        deleteRunDiagnosis(project.rootPath, run.id, phase.id);
+
+        if (faultLeg === "research" || faultLeg === "both") {
+          onStage?.("researching");
+          const feedback = formatJudgeFeedbackBlock({
+            title: "Planning self-heal — re-run research",
+            gaps: this.planningGateOutcome.issues,
+          });
+          const researchOk = await this.rerunResearchLegForSelfHeal({
+            project,
+            phase,
+            run,
+            description: input.description,
+            feedback,
+          });
+          if (!researchOk) return "failed";
+          const researchDoc = readResearch(project.rootPath, phase.id);
+          const intentForReconcile = await ensureChangeIntentAsync(
+            project.rootPath,
+            phase.id,
+            phase.description,
+            { registry: this.ctx.registry },
+          );
+          const reconciled = reconcileChangeIntentFromResearch(
+            project.rootPath,
+            phase.id,
+            intentForReconcile,
+            await this.detectIntentResearchConflict(
+              intentForReconcile,
+              researchDoc,
+            ),
+          );
+          if (reconciled.updated) {
+            log(
+              project,
+              run,
+              `--- Reconciled Change Intent after self-heal research ---\n${reconciled.patches.map((p) => `- ${p}`).join("\n")}`,
+            );
+          }
+        }
+      }
+
+      this.resetPlanningGateOutcome();
+      onStage?.("drafting");
+      const stage = await this.draftPhase({
+        project,
+        phase,
+        run,
+        onStage,
+        listProjects,
+        deferFailureDiagnosis: round < MAX_PLANNING_SELF_HEAL_ROUNDS - 1,
+        selfHealRound: round,
+      });
+
+      if (stage === "in_review") return "in_review";
+
+      const outcome = this.planningGateOutcome;
+      if (
+        shouldContinuePlanningSelfHeal({
+          stage,
+          faultLeg: outcome.faultLeg,
+          judgeInfraFailed: outcome.judgeInfraFailed,
+          round,
+          maxRounds: MAX_PLANNING_SELF_HEAL_ROUNDS,
+        })
+      ) {
+        faultLeg = outcome.faultLeg;
+        continue;
+      }
+
+      if (stage === "failed" && !readDiagnosis(project.rootPath, run.id)) {
+        this.persistDiagnosis(
+          project,
+          run,
+          buildPlanningFailureDiagnosis({
+            stage: "draft",
+            title: outcome.judgeInfraFailed
+              ? "Draft rejected: judge infra"
+              : "Draft rejected: planning gates",
+            detail: outcome.issues.join("; ") || "Planning gates failed",
+            phaseId: phase.id,
+            runId: run.id,
+            kind: outcome.judgeInfraFailed
+              ? "planning-judge-infra"
+              : outcome.faultLeg === "research"
+                ? "research-quality"
+                : "change-intent",
+            faultLeg:
+              outcome.faultLeg === "none" ? undefined : outcome.faultLeg,
+          }),
+          phase.id,
+        );
+      }
+      return stage;
+    }
+
+    return "failed";
+  }
+
   async startResearch(input: StartResearchInput): Promise<RunStage> {
     const { project, phase, run, description, onStage } = input;
     ensureSlopcontrolDir(project.rootPath);
@@ -5282,11 +5686,46 @@ ${message.trim()}`;
         run,
         "--- Solid RESEARCH.md present; skipping research agent ---",
       );
-      onStage?.("drafting");
-      return this.draftPhase({
+      const intentForGate = await ensureChangeIntentAsync(
+        project.rootPath,
+        phase.id,
+        description,
+        { registry: this.ctx.registry },
+      );
+      const gate = await this.ensureResearchQualityGate({
         project,
         phase,
         run,
+        description,
+        intentBlock: formatChangeIntentPromptBlock(intentForGate),
+        allowLegRetry: true,
+      });
+      if (!gate.ok) {
+        this.persistDiagnosis(
+          project,
+          run,
+          buildPlanningFailureDiagnosis({
+            stage: "research",
+            title: gate.judgeInfraFailed
+              ? "Research failed: quality judge infra"
+              : "Research failed: quality judge",
+            detail: (gate.gaps ?? []).join("; "),
+            phaseId: phase.id,
+            runId: run.id,
+            kind: gate.judgeInfraFailed
+              ? "research-judge-infra"
+              : "research-quality",
+            faultLeg: "research",
+          }),
+          phase.id,
+        );
+        return "failed";
+      }
+      return this.runPlanningSelfHealLoop({
+        project,
+        phase,
+        run,
+        description,
         onStage,
         listProjects: input.listProjects,
       });
@@ -5666,11 +6105,41 @@ Phase id: ${phase.id}`;
       );
     }
 
-    onStage?.("drafting");
-    return this.draftPhase({
+    const gate = await this.ensureResearchQualityGate({
       project,
       phase,
       run,
+      description,
+      intentBlock: formatChangeIntentPromptBlock(intentForReconcile),
+      allowLegRetry: true,
+    });
+    if (!gate.ok) {
+      this.persistDiagnosis(
+        project,
+        run,
+        buildPlanningFailureDiagnosis({
+          stage: "research",
+          title: gate.judgeInfraFailed
+            ? "Research failed: quality judge infra"
+            : "Research failed: quality judge",
+          detail: (gate.gaps ?? []).join("; "),
+          phaseId: phase.id,
+          runId: run.id,
+          kind: gate.judgeInfraFailed
+            ? "research-judge-infra"
+            : "research-quality",
+          faultLeg: "research",
+        }),
+        phase.id,
+      );
+      return "failed";
+    }
+
+    return this.runPlanningSelfHealLoop({
+      project,
+      phase,
+      run,
+      description,
       onStage,
       listProjects: input.listProjects,
     });
@@ -5682,12 +6151,16 @@ Phase id: ${phase.id}`;
     run: Run;
     onStage?: (stage: RunStage) => void;
     listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+    /** When true, gate failures set planningGateOutcome without persisting diagnosis. */
+    deferFailureDiagnosis?: boolean;
+    selfHealRound?: number;
   }): Promise<RunStage> {
-    const { project, phase, run, onStage } = input;
+    const { project, phase, run, onStage, deferFailureDiagnosis } = input;
     onStage?.("drafting");
     log(project, run, "--- Drafting PHASE.md ---");
 
     const research = readResearch(project.rootPath, phase.id);
+    const researchExcerpt = clipPromptSection("RESEARCH.md", research, 8_000);
     const blueprint = readBlueprint(project.rootPath);
     const config = readProjectConfig(project.rootPath);
     const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
@@ -5972,7 +6445,12 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
 
     const recoverableDraftFail = (
       detail: string,
-      opts?: { title?: string; kind?: string },
+      opts?: {
+        title?: string;
+        kind?: string;
+        faultLeg?: PlanningFaultLeg;
+        judgeInfraFailed?: boolean;
+      },
     ): RunStage => {
       log(
         project,
@@ -5982,21 +6460,45 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
       writePhaseStatus(project.rootPath, phase.id, "draft");
       const kind =
         opts?.kind ??
-        (/change intent|tool-<|parseToolResult|extractActiveForm|uiMount/i.test(
-          detail,
-        )
-          ? "change-intent"
-          : "draft-failed");
+        (opts?.judgeInfraFailed
+          ? "planning-judge-infra"
+          : /change intent|tool-<|parseToolResult|extractActiveForm|uiMount/i.test(
+                detail,
+              )
+            ? "change-intent"
+            : "draft-failed");
+      const rawFaultLeg: PlanningFaultLeg = opts?.judgeInfraFailed
+        ? "none"
+        : (opts?.faultLeg ?? "draft");
+      const outcomeFaultLeg: PlanningFaultLeg = opts?.judgeInfraFailed
+        ? "none"
+        : rawFaultLeg === "none"
+          ? "draft"
+          : rawFaultLeg;
+      if (deferFailureDiagnosis) {
+        this.planningGateOutcome = {
+          faultLeg: outcomeFaultLeg,
+          issues: detail.split("; ").filter(Boolean),
+          judgeInfraFailed: opts?.judgeInfraFailed,
+        };
+        return "failed";
+      }
       this.persistDiagnosis(
         project,
-          run,
+        run,
         buildPlanningFailureDiagnosis({
           stage: "draft",
-          title: opts?.title ?? "Draft rejected",
+          title:
+            opts?.title ??
+            (opts?.judgeInfraFailed
+              ? "Draft rejected: judge infra"
+              : "Draft rejected"),
           detail,
           phaseId: phase.id,
           runId: run.id,
           kind,
+          faultLeg:
+            outcomeFaultLeg === "none" ? undefined : outcomeFaultLeg,
         }),
         phase.id,
       );
@@ -6009,6 +6511,7 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         this.ctx.registry,
         doc,
         intent,
+        { researchExcerpt },
       );
       for (const warning of refined.warnings) {
         log(project, run, `intent-alignment: ${warning}`);
@@ -6339,6 +6842,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         return recoverableDraftFail(antiAudit.issues.join("; "), {
           title: "Draft rejected: theme audit",
           kind: "theme-audit",
+          faultLeg: "draft",
         });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
@@ -6357,10 +6861,129 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       );
       return "failed";
     }
+
+    const phaseQualityJudge = tryBindPhaseDocQualityJudge(this.ctx.registry);
+    if (!phaseQualityJudge) {
+      slog.warn(
+        "planning",
+        "phase-doc-quality judge unbound; failing closed",
+      );
+      return recoverableDraftFail(
+        "PHASE quality could not be verified (no LLM judge bound)",
+        {
+          title: "Draft rejected: phase quality judge",
+          kind: "phase-quality",
+          faultLeg: "draft",
+          judgeInfraFailed: true,
+        },
+      );
+    }
+
+    let phaseDocForQuality = phaseDoc;
+    let phaseQualityLegRetries = 0;
+    while (true) {
+      const { result: phaseQuality, judgeInfraFailed: phaseJudgeInfra } =
+        await callPlanningJudgeWithInfraRetry(
+          () =>
+            phaseQualityJudge({
+              intentBlock,
+              phaseDescription: phase.description,
+              researchExcerpt: clipPromptSection("RESEARCH.md", research, 16_000),
+              phaseDocExcerpt: clipPromptSection(
+                "PHASE.md",
+                phaseDocForQuality,
+                16_000,
+              ),
+            }),
+          (v) => v.gaps,
+        );
+      if (phaseJudgeInfra) {
+        return recoverableDraftFail(
+          phaseQuality.gaps.join("; ") ||
+            "PHASE quality could not be verified (LLM judge failed)",
+          {
+            title: "Draft rejected: phase quality judge infra",
+            kind: "phase-quality-infra",
+            faultLeg: "draft",
+            judgeInfraFailed: true,
+          },
+        );
+      }
+      if (phaseQuality.ok) break;
+
+      const qualityFaultLeg = faultLegFromPhaseQualityVerdict(phaseQuality);
+      if (
+        qualityFaultLeg === "research" ||
+        qualityFaultLeg === "both" ||
+        phaseQualityLegRetries >= MAX_PLANNING_LEG_RETRIES
+      ) {
+        log(
+          project,
+          run,
+          `PHASE.md failed quality judge (faultLeg=${qualityFaultLeg}):\n${phaseQuality.gaps.join("\n")}`,
+        );
+        return recoverableDraftFail(phaseQuality.gaps.join("; "), {
+          title: "Draft rejected: phase quality judge",
+          kind: "phase-quality",
+          faultLeg: qualityFaultLeg,
+        });
+      }
+
+      phaseQualityLegRetries++;
+      log(
+        project,
+        run,
+        `--- Phase quality judge failed (draft leg retry ${phaseQualityLegRetries}/${MAX_PLANNING_LEG_RETRIES}) ---`,
+      );
+      const feedback = formatJudgeFeedbackBlock({
+        title: "Phase quality judge rejected PHASE.md",
+        gaps: phaseQuality.gaps,
+        suggestedFixes: phaseQuality.suggestedFixes,
+      });
+      const retryPrompt = phaseQualityRetryPrompt({
+        canonicalPath,
+        intentBlock,
+        description: clipPromptSection("change-request", phase.description, 4_000),
+        research: clipPromptSection("RESEARCH.md", research, 8_000),
+        judgeFeedback: feedback,
+      });
+      try {
+        beforeStats = snapshotFileStats(watch);
+        const retried = await runAgent(
+          this.ctx.agents.phasePlannerAgent,
+          retryPrompt,
+          project.id,
+          `${run.id}-phase-quality-retry-${phaseQualityLegRetries}`,
+          { maxSteps: 16 },
+        );
+        log(project, run, retried);
+        const resolved = resolvePhaseDocFromAgentTurn({
+          projectRoot: project.rootPath,
+          phaseId: phase.id,
+          agentOutput: retried,
+          beforeStats,
+          description: phase.description,
+          research,
+        });
+        if (resolved.source !== "none" && resolved.gate.ok) {
+          writePhaseDoc(project.rootPath, phase.id, resolved.doc);
+          phaseDocForQuality = resolved.doc;
+        }
+      } catch (retryError) {
+        const retryDetail = formatLlmErrorForLog(retryError);
+        return recoverableDraftFail(retryDetail, {
+          title: "Draft rejected: phase quality retry failed",
+          kind: "phase-quality",
+          faultLeg: qualityFaultLeg,
+        });
+      }
+    }
+
     const intentAlign = await refineIntentAlignmentIssues(
       this.ctx.registry,
-      phaseDoc,
+      phaseDocForQuality,
       intent,
+      { researchExcerpt },
     );
     for (const warning of intentAlign.warnings) {
       log(project, run, `intent-alignment: ${warning}`);
@@ -6371,10 +6994,16 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         run,
         `PHASE.md misaligned with Change Intent uiMount=${intent.uiMount}:\n${intentAlign.issues.join("\n")}`,
       );
+      const intentFaultLeg =
+        intentAlign.faultLeg && intentAlign.faultLeg !== "none"
+          ? intentAlign.faultLeg
+          : "draft";
       if (researchLooksSolid(research)) {
         return recoverableDraftFail(intentAlign.issues.join("; "), {
           title: "Draft rejected: Change Intent",
           kind: "change-intent",
+          faultLeg: intentFaultLeg,
+          judgeInfraFailed: intentAlign.judgeInfraFailed,
         });
       }
       writePhaseStatus(project.rootPath, phase.id, "blocked");
@@ -6426,6 +7055,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       };
 
       const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+      const researchForIntent = readResearch(project.rootPath, phase.id);
       const gate = validatePhaseDocForDev(phaseDoc, {
         projectRoot: project.rootPath,
         phaseId: phase.id,
@@ -6459,6 +7089,13 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         this.ctx.registry,
         phaseDoc,
         intent,
+        {
+          researchExcerpt: clipPromptSection(
+            "RESEARCH.md",
+            researchForIntent,
+            8_000,
+          ),
+        },
       );
       for (const warning of intentAlign.warnings) {
         log(project, run, `intent-alignment: ${warning}`);
@@ -6871,6 +7508,9 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       this.ctx.registry,
       phaseDoc,
       intent,
+      {
+        researchExcerpt: clipPromptSection("RESEARCH.md", research, 8_000),
+      },
     );
     for (const warning of intentAlign.warnings) {
       log(project, run, `intent-alignment: ${warning}`);
@@ -7165,23 +7805,20 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     }
   }
 
-  /** Bind the doc-revision judge to the classification role (undefined when unbound). */
+  /** Bind the doc-revision judge; prefers judge role, falls back to classification. */
   private bindDocRevisionJudge() {
-    try {
-      const { endpoint, modelId } =
-        this.ctx.registry.resolveEndpointForRole("classification");
-      return (input: { feedback: string; before: string; after: string }) =>
-        judgeDocRevisionViaLlm({
-          endpoint,
-          modelId,
-          feedback: input.feedback,
-          before: input.before,
-          after: input.after,
-          timeoutMs: 90_000,
-        });
-    } catch {
-      return undefined;
-    }
+    const resolved = resolvePlanningJudgeEndpoint(this.ctx.registry);
+    if (!resolved) return undefined;
+    const { endpoint, modelId } = resolved;
+    return (input: { feedback: string; before: string; after: string }) =>
+      judgeDocRevisionViaLlm({
+        endpoint,
+        modelId,
+        feedback: input.feedback,
+        before: input.before,
+        after: input.after,
+        timeoutMs: 90_000,
+      });
   }
 
   /** Surgical edit of RESEARCH.md from review feedback (research agent, not review agent). */

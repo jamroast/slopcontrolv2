@@ -1001,6 +1001,7 @@ export type IntentAlignmentJudgeVerdict = {
   aligned?: boolean;
   gaps?: string[];
   suggestedLines?: string[];
+  faultLeg?: "none" | "research" | "draft" | "both";
 };
 
 /**
@@ -1010,13 +1011,20 @@ export type IntentAlignmentJudgeVerdict = {
 export type IntentAlignmentJudgeFn = (input: {
   intentBlock: string;
   phaseDocExcerpt: string;
+  researchExcerpt?: string;
 }) => Promise<IntentAlignmentJudgeVerdict>;
+
+export type PlanningFaultLeg = "none" | "research" | "draft" | "both";
 
 export type IntentAlignmentAsyncResult = {
   /** Misalignments reported by the judge (blockers). Empty when aligned. */
   issues: string[];
   /** Reserved for logging; always empty in the pure-LLM path. */
   warnings: string[];
+  /** Which leg should re-run when misaligned. */
+  faultLeg?: PlanningFaultLeg;
+  /** True when the judge call failed (JSON/timeout), not a content verdict. */
+  judgeInfraFailed?: boolean;
 };
 
 /**
@@ -1030,7 +1038,10 @@ export type IntentAlignmentAsyncResult = {
 export async function phaseDocAlignsWithChangeIntentAsync(
   phaseDoc: string,
   intent: ChangeIntent,
-  opts?: { judgeFn?: IntentAlignmentJudgeFn },
+  opts?: {
+    judgeFn?: IntentAlignmentJudgeFn;
+    researchExcerpt?: string;
+  },
 ): Promise<IntentAlignmentAsyncResult> {
   if (!opts?.judgeFn) {
     return {
@@ -1038,6 +1049,7 @@ export async function phaseDocAlignsWithChangeIntentAsync(
         "Change Intent alignment could not be verified (no LLM judge bound)",
       ],
       warnings: [],
+      judgeInfraFailed: true,
     };
   }
 
@@ -1047,9 +1059,10 @@ export async function phaseDocAlignsWithChangeIntentAsync(
     const verdict = await opts.judgeFn({
       intentBlock,
       phaseDocExcerpt: excerpt,
+      researchExcerpt: opts.researchExcerpt,
     });
     if (verdict.aligned === true) {
-      return { issues: [], warnings: [] };
+      return { issues: [], warnings: [], faultLeg: "none" };
     }
     const gaps = verdict.gaps?.length
       ? verdict.gaps
@@ -1059,13 +1072,18 @@ export async function phaseDocAlignsWithChangeIntentAsync(
       const line = suggested[i]?.trim();
       return line ? `${gap}\n  Suggested fix (LLM judge): ${line}` : gap;
     });
-    return { issues, warnings: [] };
+    const faultLeg =
+      verdict.faultLeg && verdict.faultLeg !== "none"
+        ? verdict.faultLeg
+        : "draft";
+    return { issues, warnings: [], faultLeg };
   } catch {
     return {
       issues: [
         "Change Intent alignment could not be verified (LLM judge failed)",
       ],
       warnings: [],
+      judgeInfraFailed: true,
     };
   }
 }

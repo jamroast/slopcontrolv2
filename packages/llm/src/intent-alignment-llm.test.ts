@@ -7,11 +7,10 @@ import {
 } from "./intent-alignment-llm.js";
 
 describe("intent-alignment-llm", () => {
-  it("system prompt teaches the bubble-mount vocabulary", () => {
-    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /FormBubble/);
-    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /sendFormAnswer/);
-    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /composerMode/);
-    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /composer-form/);
+  it("system prompt teaches mount and interaction vocabulary", () => {
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /composer vs bubble vs page/);
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /faultLeg/);
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /NO interaction block/);
   });
 
   it("system prompt judges semantics, not keywords, and fails closed", () => {
@@ -57,6 +56,25 @@ describe("intent-alignment-llm", () => {
 
     const missing = parseIntentAlignmentVerdictPayload({ gaps: [] });
     assert.equal(missing.aligned, false);
+  });
+
+  it("parses faultLeg on misaligned verdict", () => {
+    const verdict = parseIntentAlignmentVerdictPayload({
+      aligned: false,
+      gaps: ["PHASE lacks mount proof"],
+      suggestedLines: ["grep SignIn"],
+      faultLeg: "research",
+    });
+    assert.equal(verdict.faultLeg, "research");
+  });
+
+  it("defaults faultLeg to draft when misaligned without leg", () => {
+    const verdict = parseIntentAlignmentVerdictPayload({
+      aligned: false,
+      gaps: ["PHASE lacks mount proof"],
+      suggestedLines: [],
+    });
+    assert.equal(verdict.faultLeg, "draft");
   });
 
   it("drops blank gap/suggestion entries", () => {

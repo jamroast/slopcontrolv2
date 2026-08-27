@@ -1526,6 +1526,8 @@ export function buildPlanningFailureDiagnosis(opts: {
   runId: string;
   /** Stable class tag for fingerprint (e.g. change-intent, empty-research). */
   kind?: string;
+  /** Planning self-heal: which leg to re-run (research | draft | both). */
+  faultLeg?: "research" | "draft" | "both";
   operatorActions?: string[];
 }): PersistedDiagnosis {
   const detail = (opts.detail ?? "").trim() || "(no detail)";
@@ -1564,7 +1566,12 @@ export function buildPlanningFailureDiagnosis(opts: {
         : "Retry research or fix bootstrap intent.",
     fingerprint: `planning-${kind}-${fingerprint}`,
     codingAgentShouldFix: true,
-    tags: ["planning", opts.stage, kind],
+    tags: [
+      "planning",
+      opts.stage,
+      kind,
+      ...(opts.faultLeg ? [`fault-leg-${opts.faultLeg}`] : []),
+    ],
     phaseId: opts.phaseId,
     runId: opts.runId,
     updatedAt: new Date().toISOString(),
