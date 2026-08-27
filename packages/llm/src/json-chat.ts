@@ -1,8 +1,15 @@
 import type { LlmEndpoint, ProvidersConfig } from "@slopcontrol/types";
 import { resolveEndpointSecrets } from "./secrets.js";
 
-/** Default wall-clock for classification-style JSON chat (cloud models need headroom). */
-export const CHAT_JSON_DEFAULT_TIMEOUT_MS = 90_000;
+/** Default wall-clock for JSON chat when caller and endpoint omit timeoutMs. */
+export const CHAT_JSON_DEFAULT_TIMEOUT_MS = 300_000;
+
+/** Default completion budget when caller and endpoint omit maxTokens. */
+export const CHAT_JSON_DEFAULT_MAX_TOKENS = 4096;
+
+/** Planning quality / intent judges — large excerpts + reasoning headroom. */
+export const CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS = 300_000;
+export const CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS = 8192;
 
 export interface ChatJsonOptions {
   endpoint: LlmEndpoint;
@@ -38,11 +45,18 @@ const JSON_ONLY_NUDGE =
 export function stripJsonFence(text: string): string {
   const trimmed = text.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)```$/i);
-  if (fenced?.[1]) return fenced[1].trim();
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start >= 0 && end > start) return trimmed.slice(start, end + 1);
-  return trimmed;
+  if (fenced?.[1]) return extractJsonObject(fenced[1].trim());
+  // Opening fence without closing fence (common on truncated cloud judge output).
+  const openFence = trimmed.match(/^```(?:json)?\s*([\s\S]*)$/i);
+  if (openFence?.[1]) return extractJsonObject(openFence[1].trim());
+  return extractJsonObject(trimmed);
+}
+
+function extractJsonObject(text: string): string {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) return text.slice(start, end + 1);
+  return text;
 }
 
 type ChatMessage = {
@@ -138,7 +152,10 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
         { role: "user", content: userContent },
       ],
       temperature: opts.temperature ?? 0,
-      max_tokens: opts.maxTokens ?? endpoint.defaultParams?.maxTokens ?? 1024,
+      max_tokens:
+        opts.maxTokens ??
+        endpoint.defaultParams?.maxTokens ??
+        CHAT_JSON_DEFAULT_MAX_TOKENS,
     };
     // Keep json_object while retrying parse/prose failures. Drop it only on the
     // final attempt (some models return empty when response_format is forced).

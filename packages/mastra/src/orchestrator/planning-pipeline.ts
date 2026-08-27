@@ -13,8 +13,35 @@ export const MAX_PLANNING_LEG_RETRIES = 2;
 /** Max JSON judge retries on infra/parse failure before fail-closed. */
 export const MAX_PLANNING_JUDGE_RETRIES = 3;
 
+/** Wall-clock for research / phase-planner agent turns (cloud models can run 5+ min). */
+export const PLANNING_AGENT_TIMEOUT_MS = 600_000;
+
+export function planningAgentRunOpts(maxSteps: number): {
+  maxSteps: number;
+  timeoutMs: number;
+} {
+  return { maxSteps, timeoutMs: PLANNING_AGENT_TIMEOUT_MS };
+}
+
 const INFRA_ISSUE_RE =
   /could not be verified|unreadable judge|LLM judge failed|judge failed/i;
+
+/** Thrown when a planning judge call errors on every retry without a verdict. */
+export class PlanningJudgeInfraError extends Error {
+  constructor(readonly rootCause: unknown) {
+    const detail =
+      rootCause instanceof Error
+        ? rootCause.message
+        : String(rootCause ?? "unknown");
+    super(`Planning judge failed with no verdict: ${detail}`);
+    this.name = "PlanningJudgeInfraError";
+  }
+}
+
+/** Human-readable detail from an unknown judge error (for logs/diagnoses). */
+export function planningJudgeErrorDetail(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export function isPlanningJudgeInfraIssue(issue: string): boolean {
   return INFRA_ISSUE_RE.test(issue);
@@ -100,6 +127,7 @@ export async function callPlanningJudgeWithInfraRetry<T>(
   maxRetries: number = MAX_PLANNING_JUDGE_RETRIES,
 ): Promise<{ result: T; judgeInfraFailed: boolean }> {
   let last: T | undefined;
+  let lastError: unknown;
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
       last = await call();
@@ -108,13 +136,16 @@ export async function callPlanningJudgeWithInfraRetry<T>(
       if (!infra) return { result: last, judgeInfraFailed: false };
       if (attempt < maxRetries - 1) continue;
       return { result: last, judgeInfraFailed: true };
-    } catch {
+    } catch (err) {
+      lastError = err;
       if (attempt < maxRetries - 1) continue;
       if (last) return { result: last, judgeInfraFailed: true };
-      throw new Error("Planning judge failed with no verdict");
+      throw new PlanningJudgeInfraError(lastError);
     }
   }
-  throw new Error("Planning judge retry loop exhausted");
+  throw new PlanningJudgeInfraError(
+    lastError ?? new Error("retry loop exhausted"),
+  );
 }
 
 export function faultLegFromPhaseQualityVerdict(opts: {

@@ -1,7 +1,11 @@
 import { z } from "zod";
 import type { LlmEndpoint } from "@slopcontrol/types";
 import { consolidateText } from "@slopcontrol/artifacts";
-import { chatJson } from "./json-chat.js";
+import {
+  chatJson,
+  CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
+  CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+} from "./json-chat.js";
 
 /**
  * PHASE.md quality judge — validates the draft execution contract before
@@ -107,7 +111,8 @@ export async function judgePhaseDocQualityViaLlm(
     endpoint: opts.endpoint,
     modelId: opts.modelId,
     temperature: 0,
-    timeoutMs: opts.timeoutMs ?? 90_000,
+    timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+    maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
     system: PHASE_DOC_QUALITY_SYSTEM_PROMPT,
     user: [
       "Change Intent (authoritative):",

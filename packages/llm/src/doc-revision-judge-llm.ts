@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { LlmEndpoint } from "@slopcontrol/types";
-import { chatJson } from "./json-chat.js";
+import {
+  chatJson,
+  CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
+  CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+} from "./json-chat.js";
 
 export const DocRevisionJudgeSchema = z.object({
   applied: z.array(z.string()),
@@ -52,7 +56,8 @@ export async function judgeDocRevisionViaLlm(
     modelId: opts.modelId,
     system: DOC_REVISION_JUDGE_SYSTEM_PROMPT,
     user,
-    timeoutMs: opts.timeoutMs ?? 90_000,
+    timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+    maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
     temperature: 0,
   });
 

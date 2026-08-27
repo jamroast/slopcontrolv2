@@ -301,6 +301,7 @@ import {
   judgeResearchEngagementViaLlm,
   judgeResearchQualityViaLlm,
   judgePhaseDocQualityViaLlm,
+  type PhaseDocQualityVerdict,
   judgeNarrationOnlyViaLlm,
   buildElementHonorSnippets,
   tryMenubarEmbedSimilarity,
@@ -320,8 +321,10 @@ import {
   MAX_PLANNING_SELF_HEAL_ROUNDS,
   mergeFaultLegs,
   phaseQualityRetryPrompt,
+  planningAgentRunOpts,
   researchQualityRetryPrompt,
   callPlanningJudgeWithInfraRetry,
+  planningJudgeErrorDetail,
   faultLegFromPhaseQualityVerdict,
   shouldContinuePlanningSelfHeal,
 } from "./planning-pipeline.js";
@@ -2296,7 +2299,6 @@ function tryBindIntentAlignmentJudge(
       intentBlock: input.intentBlock,
       phaseDocExcerpt: input.phaseDocExcerpt,
       researchExcerpt: input.researchExcerpt,
-      timeoutMs: 90_000,
     });
 }
 
@@ -2317,17 +2319,33 @@ async function refineIntentAlignmentIssues(
       "intent-alignment judge unbound (judge/classification role missing); failing closed",
     );
   }
-  const { result, judgeInfraFailed } = await callPlanningJudgeWithInfraRetry(
-    () =>
-      phaseDocAlignsWithChangeIntentAsync(phaseDoc, intent, {
-        judgeFn: judgeFn ?? undefined,
-        researchExcerpt: opts?.researchExcerpt,
-      }),
-    (r) => r.issues,
-  );
+  let aligned: IntentAlignmentAsyncResult;
+  let judgeInfraFailed: boolean;
+  try {
+    ({ result: aligned, judgeInfraFailed } = await callPlanningJudgeWithInfraRetry(
+      () =>
+        phaseDocAlignsWithChangeIntentAsync(phaseDoc, intent, {
+          judgeFn: judgeFn ?? undefined,
+          researchExcerpt: opts?.researchExcerpt,
+        }),
+      (r) => r.issues,
+    ));
+  } catch (err) {
+    slog.warn(
+      "planning",
+      `intent-alignment judge errored on every retry: ${planningJudgeErrorDetail(err)}`,
+    );
+    return {
+      issues: [
+        `Change Intent alignment could not be verified (${planningJudgeErrorDetail(err)})`,
+      ],
+      warnings: [],
+      judgeInfraFailed: true,
+    };
+  }
   return judgeInfraFailed
-    ? { ...result, judgeInfraFailed: true }
-    : result;
+    ? { ...aligned, judgeInfraFailed: true }
+    : aligned;
 }
 
 function tryBindResearchQualityJudge(
@@ -2347,7 +2365,6 @@ function tryBindResearchQualityJudge(
       intentBlock: input.intentBlock,
       phaseDescription: input.phaseDescription,
       researchExcerpt: input.researchExcerpt,
-      timeoutMs: 90_000,
     });
 }
 
@@ -2370,7 +2387,6 @@ function tryBindPhaseDocQualityJudge(
       phaseDescription: input.phaseDescription,
       researchExcerpt: input.researchExcerpt,
       phaseDocExcerpt: input.phaseDocExcerpt,
-      timeoutMs: 90_000,
     });
 }
 
@@ -5326,21 +5342,31 @@ ${message.trim()}`;
     let legRetries = 0;
 
     while (true) {
-      let researchDoc = readResearch(project.rootPath, phase.id);
-      const { result: verdict, judgeInfraFailed } =
-        await callPlanningJudgeWithInfraRetry(
-          () =>
-            judge({
-              intentBlock,
-              phaseDescription: description,
-              researchExcerpt: clipPromptSection(
-                "RESEARCH.md",
-                researchDoc,
-                16_000,
-              ),
-            }),
-          (v) => v.gaps,
-        );
+      const researchDoc = readResearch(project.rootPath, phase.id);
+      let verdict: Awaited<ReturnType<typeof judge>>;
+      let judgeInfraFailed: boolean;
+      try {
+        ({ result: verdict, judgeInfraFailed } =
+          await callPlanningJudgeWithInfraRetry(
+            () =>
+              judge({
+                intentBlock,
+                phaseDescription: description,
+                researchExcerpt: clipPromptSection(
+                  "RESEARCH.md",
+                  researchDoc,
+                  16_000,
+                ),
+              }),
+            (v) => v.gaps,
+          ));
+      } catch (err) {
+        return {
+          ok: false,
+          judgeInfraFailed: true,
+          gaps: [planningJudgeErrorDetail(err)],
+        };
+      }
 
       if (judgeInfraFailed) {
         return { ok: false, judgeInfraFailed: true, gaps: verdict.gaps };
@@ -5381,7 +5407,7 @@ ${message.trim()}`;
         retryPrompt,
         project.id,
         `${phase.id}-research-quality-retry-${legRetries}`,
-        { maxSteps: 16 },
+        planningAgentRunOpts(16),
       );
       log(project, run, output);
       const resolved = resolveResearchFromAgentTurn({
@@ -5440,7 +5466,7 @@ ${message.trim()}`;
       retryPrompt,
       input.project.id,
       `${input.phase.id}-research-self-heal`,
-      { maxSteps: 16 },
+      planningAgentRunOpts(16),
     );
     log(input.project, input.run, output);
     const resolved = resolveResearchFromAgentTurn({
@@ -5917,7 +5943,7 @@ Obey prior learnings (especially infra blockers): do not propose coding-agent wo
       prompt,
       project.id,
       `${phase.id}-research`,
-      { maxSteps: 20 },
+      planningAgentRunOpts(20),
     );
 
     log(project, run, output);
@@ -5956,7 +5982,7 @@ ${intentBlock}`;
         retryPrompt,
         project.id,
         `${phase.id}-research-retry`,
-        { maxSteps: 12 },
+        planningAgentRunOpts(12),
       );
       log(project, run, output);
       resolved = resolveResearchFromAgentTurn({
@@ -6006,7 +6032,7 @@ Phase id: ${phase.id}`;
         honestyRetry,
         project.id,
         `${phase.id}-research-honesty-retry`,
-        { maxSteps: 12 },
+        planningAgentRunOpts(12),
       );
       log(project, run, output);
       resolved = resolveResearchFromAgentTurn({
@@ -6545,7 +6571,7 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         buildDraftPrompt(false),
         project.id,
         `${run.id}-draft`,
-        { maxSteps: 20 },
+        planningAgentRunOpts(20),
       );
     } catch (error) {
       const detail = formatLlmErrorForLog(error);
@@ -6563,7 +6589,7 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
             buildDraftPrompt(true),
             project.id,
             `${run.id}-draft-slim`,
-            { maxSteps: 16 },
+            planningAgentRunOpts(16),
           );
         } catch (retryError) {
           const retryDetail = formatLlmErrorForLog(retryError);
@@ -6658,7 +6684,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
             repairPrompt,
             project.id,
             `${run.id}-draft-repair`,
-            { maxSteps: 16 },
+            planningAgentRunOpts(16),
           );
           log(project, run, repaired);
           const repairRefusal = refuseIfPlannerChat(repaired, "draft repair");
@@ -6882,21 +6908,35 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     let phaseDocForQuality = phaseDoc;
     let phaseQualityLegRetries = 0;
     while (true) {
-      const { result: phaseQuality, judgeInfraFailed: phaseJudgeInfra } =
-        await callPlanningJudgeWithInfraRetry(
-          () =>
-            phaseQualityJudge({
-              intentBlock,
-              phaseDescription: phase.description,
-              researchExcerpt: clipPromptSection("RESEARCH.md", research, 16_000),
-              phaseDocExcerpt: clipPromptSection(
-                "PHASE.md",
-                phaseDocForQuality,
-                16_000,
-              ),
-            }),
-          (v) => v.gaps,
+      let phaseQuality: PhaseDocQualityVerdict;
+      let phaseJudgeInfra: boolean;
+      try {
+        ({ result: phaseQuality, judgeInfraFailed: phaseJudgeInfra } =
+          await callPlanningJudgeWithInfraRetry(
+            () =>
+              phaseQualityJudge({
+                intentBlock,
+                phaseDescription: phase.description,
+                researchExcerpt: clipPromptSection("RESEARCH.md", research, 16_000),
+                phaseDocExcerpt: clipPromptSection(
+                  "PHASE.md",
+                  phaseDocForQuality,
+                  16_000,
+                ),
+              }),
+            (v) => v.gaps,
+          ));
+      } catch (err) {
+        return recoverableDraftFail(
+          `PHASE quality could not be verified (${planningJudgeErrorDetail(err)})`,
+          {
+            title: "Draft rejected: phase quality judge infra",
+            kind: "phase-quality-infra",
+            faultLeg: "draft",
+            judgeInfraFailed: true,
+          },
         );
+      }
       if (phaseJudgeInfra) {
         return recoverableDraftFail(
           phaseQuality.gaps.join("; ") ||
@@ -6954,7 +6994,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           retryPrompt,
           project.id,
           `${run.id}-phase-quality-retry-${phaseQualityLegRetries}`,
-          { maxSteps: 16 },
+          planningAgentRunOpts(16),
         );
         log(project, run, retried);
         const resolved = resolvePhaseDocFromAgentTurn({
@@ -7558,7 +7598,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         repairPrompt,
         project.id,
         input.sessionSuffix,
-        { maxSteps: 16 },
+        planningAgentRunOpts(16),
       );
       log(project, run, repaired);
       const resolved = resolvePhaseDocFromAgentTurn({
@@ -7817,7 +7857,6 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         feedback: input.feedback,
         before: input.before,
         after: input.after,
-        timeoutMs: 90_000,
       });
   }
 
@@ -7853,7 +7892,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       prompt,
       project.id,
       `${phase.id}-research-revise`,
-      { maxSteps: 16 },
+      planningAgentRunOpts(16),
     );
     log(project, run, output);
     const resolved = resolveResearchFromAgentTurn({

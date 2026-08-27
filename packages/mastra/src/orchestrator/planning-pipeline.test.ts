@@ -6,6 +6,8 @@ import {
   mergeFaultLegs,
   shouldContinuePlanningSelfHeal,
   MAX_PLANNING_SELF_HEAL_ROUNDS,
+  callPlanningJudgeWithInfraRetry,
+  PlanningJudgeInfraError,
 } from "./planning-pipeline.js";
 
 describe("planning-pipeline", () => {
@@ -93,5 +95,36 @@ describe("planning-pipeline", () => {
       false,
       "last round must not continue",
     );
+  });
+
+  it("callPlanningJudgeWithInfraRetry surfaces the underlying cause on total failure", async () => {
+    await assert.rejects(
+      () =>
+        callPlanningJudgeWithInfraRetry(
+          async () => {
+            throw new Error("JSON chat parse failed at position 1");
+          },
+          () => [],
+          2,
+        ),
+      (err: unknown) => {
+        assert.ok(err instanceof PlanningJudgeInfraError);
+        assert.ok(
+          (err as Error).message.includes("JSON chat parse failed at position 1"),
+          `message must carry the cause, got: ${(err as Error).message}`,
+        );
+        return true;
+      },
+    );
+  });
+
+  it("callPlanningJudgeWithInfraRetry returns judgeInfraFailed on verdict-shaped infra issues", async () => {
+    const { result, judgeInfraFailed } = await callPlanningJudgeWithInfraRetry(
+      async () => ({ gaps: ["LLM judge failed"] }),
+      (r: { gaps: string[] }) => r.gaps,
+      2,
+    );
+    assert.equal(judgeInfraFailed, true);
+    assert.deepEqual(result.gaps, ["LLM judge failed"]);
   });
 });

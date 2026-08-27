@@ -17,6 +17,10 @@ describe("json-chat helpers", () => {
       '{"a":1}',
     );
     assert.equal(stripJsonFence('noise {"a":1} trailing'), '{"a":1}');
+    assert.equal(
+      stripJsonFence('```json\n{"ok":true,"gaps":[]}\n'),
+      '{"ok":true,"gaps":[]}',
+    );
   });
 
   it("extractChatMessageText reads content string, parts, and reasoning fallbacks", () => {
@@ -40,8 +44,8 @@ describe("json-chat helpers", () => {
     assert.equal(extractChatMessageText({ content: "   " }), "");
   });
 
-  it("default classification timeout is 90s", () => {
-    assert.equal(CHAT_JSON_DEFAULT_TIMEOUT_MS, 90_000);
+  it("default JSON chat timeout is 5 minutes", () => {
+    assert.equal(CHAT_JSON_DEFAULT_TIMEOUT_MS, 300_000);
   });
 
   it("isChatJsonTimeoutError / isRetryableChatJsonError cover abort", () => {

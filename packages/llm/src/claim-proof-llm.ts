@@ -1,6 +1,10 @@
 import { z } from "zod";
 import type { LlmEndpoint } from "@slopcontrol/types";
-import { chatJson } from "./json-chat.js";
+import {
+  chatJson,
+  CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
+  CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+} from "./json-chat.js";
 
 /**
  * LLM judge for claim-vs-proof gaps. The deterministic validators in
@@ -90,7 +94,8 @@ export async function judgeClaimProofViaLlm(
     endpoint: opts.endpoint,
     modelId: opts.modelId,
     temperature: 0,
-    timeoutMs: opts.timeoutMs,
+    timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+    maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
     system: CLAIM_PROOF_SYSTEM_PROMPT,
     user: [
       `Claim: ${opts.claim}`,
