@@ -18,6 +18,8 @@ import {
   hasBrittleSameLineGrepChain,
   hasVitestGrepQuietAntipattern,
   unwrapGrepQuietPipe,
+  stripRedundantTestServicesBringUp,
+  SLOPCONTROL_TEST_SERVICES_READY_ENV,
 } from "./index.js";
 
 function phaseWithCheck(body: string): string {
@@ -446,5 +448,50 @@ wait $VITE_PID 2>/dev/null`;
     assert.match(result.output, /Tests 3 passed/);
     assert.match(result.output, /treating check as pass/i);
     assert.ok(calls.length >= 2);
+  });
+
+  it("stripRedundantTestServicesBringUp removes docker up and trap when services ready", () => {
+    const raw =
+      "docker compose up -d postgres && trap 'docker compose down' EXIT; pg_isready -h localhost -p 5430 || exit 1";
+    const stripped = stripRedundantTestServicesBringUp(raw, {
+      [SLOPCONTROL_TEST_SERVICES_READY_ENV]: "1",
+    });
+    assert.doesNotMatch(stripped, /docker compose up/i);
+    assert.doesNotMatch(stripped, /trap/i);
+    assert.match(stripped, /pg_isready/);
+  });
+
+  it("stripRedundantTestServicesBringUp is a no-op without ready env", () => {
+    const raw = "docker compose up -d postgres && pg_isready";
+    assert.equal(stripRedundantTestServicesBringUp(raw, {}), raw);
+  });
+
+  it("runs migrate/vitest when test-services env strips legacy docker bring-up", async () => {
+    const calls: string[] = [];
+    const runner = async (cmd: string) => {
+      calls.push(cmd);
+      const file =
+        cmd.startsWith("bash '") && cmd.endsWith("'")
+          ? cmd.slice(6, -1).replace(/'\\''/g, "'")
+          : "";
+      const body = file ? readFileSync(file, "utf8") : "";
+      assert.doesNotMatch(body, /docker compose up/i);
+      assert.match(body, /vitest run/);
+      return { exitCode: 0, output: "ok" };
+    };
+    const registry = createDefaultCheckRegistry(runner);
+    const result = await registry.run(
+      {
+        language: "bash",
+        body: "docker compose up -d db && trap 'docker compose down' EXIT; npx vitest run tests/a.test.ts || exit 1",
+        source: "fence",
+      },
+      {
+        cwd: "/tmp",
+        env: { [SLOPCONTROL_TEST_SERVICES_READY_ENV]: "1" },
+      },
+    );
+    assert.equal(result.exitCode, 0);
+    assert.equal(calls.length, 1);
   });
 });

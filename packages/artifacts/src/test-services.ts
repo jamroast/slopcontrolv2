@@ -20,6 +20,11 @@ const COMPOSE_FILE_CANDIDATES = [
 const INFRA_SERVICE_RE =
   /^(?:db|database|postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|redis|valkey|minio|localstack)$|(?:^|-)(?:postgres(?:ql)?|mysql|mariadb|mongo(?:db)?|redis|valkey|db|database)$/i;
 
+/** Set on verify env when ensureTestServices brought up (or reused) infra. */
+export const SLOPCONTROL_TEST_SERVICES_READY_ENV = "SLOPCONTROL_TEST_SERVICES_READY";
+/** Comma-separated infra service names started by test-services. */
+export const SLOPCONTROL_TEST_SERVICES_ENV = "SLOPCONTROL_TEST_SERVICES";
+
 export interface TestServicesResult {
   /** Whether any bring-up was attempted. */
   attempted: boolean;
@@ -38,6 +43,55 @@ export function findComposeFile(projectRoot: string): string | null {
 
 export function isInfraServiceName(name: string): boolean {
   return INFRA_SERVICE_RE.test(name.trim());
+}
+
+/**
+ * True when ALL target services are already running. Checks the compose
+ * project first, then falls back to docker ps by name to catch fixed
+ * `container_name` entries started from another project/worktree.
+ */
+export async function servicesRunning(
+  projectRoot: string,
+  services: string[],
+  runner: typeof runToolchainCommand,
+): Promise<boolean> {
+  const ps = await runner({
+    cmd: ["docker", "compose", "ps", "--status", "running", "--format", "{{.Service}}"],
+    cwd: projectRoot,
+    timeoutMs: 30_000,
+  });
+  if (ps.code === 0) {
+    const up = new Set(
+      ps.stdout
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
+    if (services.every((s) => up.has(s))) return true;
+  }
+  // Fixed container_name fallback: `docker ps --filter name=<svc>` catches
+  // containers owned by another compose project (e.g. main tree).
+  const dockerPs = await runner({
+    cmd: [
+      "docker",
+      "ps",
+      "--format",
+      "{{.Names}}",
+      ...services.flatMap((s) => ["--filter", `name=${s}`]),
+    ],
+    cwd: projectRoot,
+    timeoutMs: 30_000,
+  });
+  if (dockerPs.code !== 0) return false;
+  const names = new Set(
+    dockerPs.stdout
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  return services.every(
+    (s) => names.has(s) || [...names].some((n) => n.endsWith(`-${s}-1`) || n.endsWith(`_${s}_1`)),
+  );
 }
 
 /**
@@ -88,8 +142,23 @@ export async function ensureTestServices(opts: {
     return none("no infra services in compose file");
   }
 
+  // Reuse already-running services: a fixed container_name or a shared main-tree
+  // stack can already satisfy the dependency — a second `up` then fails with a
+  // container-name conflict (and PHASE checks hang on trap teardown → CHECK_TIMEOUT).
+  // Check both the compose project view and, for fixed container_names, docker ps.
+  const running = await servicesRunning(opts.projectRoot, services, runner);
+  if (running) {
+    return {
+      attempted: true,
+      ok: true,
+      composeFile,
+      services,
+      detail: `test services already running (${services.join(", ")}) — reusing, skipped bring-up`,
+    };
+  }
+
   const up = await runner({
-    cmd: ["docker", "compose", "up", "-d", "--wait", ...services],
+    cmd: ["docker", "compose", "up", "-d", "--no-recreate", "--wait", ...services],
     cwd: opts.projectRoot,
     timeoutMs,
   });

@@ -211,6 +211,31 @@ export function matchDeterministicFailureFastPath(
     );
   }
 
+  // Duplicate infra bring-up: check re-started a service SlopControl test-services
+  // already started (fixed container_name collides, then the trap/teardown or
+  // pg_isready loop hangs until CHECK_TIMEOUT). Classify BEFORE the generic
+  // CHECK_TIMEOUT branch so the coding agent gets the real cause, not
+  // "long-lived server".
+  if (
+    /container name .*(is )?already in use|Conflict\.? The container name/i.test(
+      stepCtx,
+    )
+  ) {
+    return build(
+      "process",
+      "high",
+      "Duplicate infra bring-up (container name conflict)",
+      ["automated-checks", "duplicate-infra", "container-conflict"],
+      {
+        codingAgentShouldFix: true,
+        lesson:
+          "An Automated Check re-started an infra service that SlopControl test-services already started, and docker rejected the duplicate. Edit PHASE.md ## Automated Checks: remove `docker compose up` and `trap 'docker compose down' EXIT` for infra services (Postgres/Redis/…), and keep only migrate/seed/targeted `npx vitest run <file>` or grep/build asserts against the already-running services.",
+        evidence: stepCtx.slice(-600),
+        opts,
+      },
+    );
+  }
+
   // Per-check wall-clock budget exceeded (long-lived server / hung wait)
   if (/CHECK_TIMEOUT\b/i.test(stepCtx)) {
     return build(
@@ -1195,6 +1220,13 @@ function nextActionsFor(
 ): string {
   if (classified.class === "infra") {
     return "Operator: restore the named dependency (or fix verifyPreflightCommand), then retry_root_verify — retry_development re-runs the same failing command. Coding agent: do not invent bring-up scripts.";
+  }
+  if (
+    classified.class === "process" &&
+    (classified.tags.includes("duplicate-infra") ||
+      classified.tags.includes("container-conflict"))
+  ) {
+    return "Edit PHASE.md ## Automated Checks: remove `docker compose up` / `trap 'docker compose down' EXIT` for infra services — SlopControl test-services already starts them. Keep migrate/seed/targeted `npx vitest run <file>` or grep/build asserts, then retry_development.";
   }
   if (
     classified.class === "process" &&

@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { findComposeFile } from "./test-services.js";
 import {
   PhaseStatusSchema,
   ProjectConfigSchema,
@@ -90,6 +91,7 @@ export * from "./verify-recovery-evidence.js";
 export * from "./verify-doc-revision.js";
 export * from "./revision-outcome.js";
 export * from "./planning-gate.js";
+export * from "./develop-fault-routing.js";
 export * from "./ci-workflows.js";
 export * from "./library-propagate.js";
 export * from "./workspace-package.js";
@@ -1799,6 +1801,23 @@ export function validatePhaseDocForDev(
       issues.push(
         "## Automated Checks must include at least one runnable command (prefer a ```bash fence)",
       );
+    }
+    // Duplicate-infra guard: verify's test-services owns infra bring-up, so
+    // PHASE checks that `docker compose up` a dockerized project's services
+    // collide with the already-running containers (fixed container_name →
+    // Conflict → trap teardown hang → CHECK_TIMEOUT). Reject at draft time.
+    if (opts?.projectRoot && findComposeFile(opts.projectRoot)) {
+      for (const cell of cells) {
+        if (/docker\s+compose\s+up\b/i.test(cell.body)) {
+          issues.push(
+            `Broken Automated Check restarts infra with \`docker compose up\` — verify already brings up test-services (Postgres/Redis/…). Assume services are up: use migrate/seed/targeted \`npx vitest run <file>\` or grep/build asserts instead: ${cell.body.replace(/\s+/g, " ").trim().slice(0, 120)}`,
+          );
+        } else if (/trap\s+['"]docker compose down/i.test(cell.body)) {
+          issues.push(
+            `Broken Automated Check tears down infra (\`trap 'docker compose down' EXIT\`) — teardown belongs to the verify lifecycle, not an individual check cell. Remove it: ${cell.body.replace(/\s+/g, " ").trim().slice(0, 120)}`,
+          );
+        }
+      }
     }
     // Validation-only registry (run is unused)
     const registry = createDefaultCheckRegistry(async () => ({

@@ -51,8 +51,11 @@ describe("planning gate helpers", () => {
       phaseDescription: "desc",
       research: "research",
     });
-    assert.ok(prompt.includes("trap 'docker compose down' EXIT"));
-    assert.ok(prompt.includes("docker compose up -d"));
+    assert.ok(prompt.includes("test-services"));
+    assert.ok(
+      !prompt.includes("MUST use:"),
+      "contract no longer mandates docker bring-up",
+    );
   });
 
   it("buildPlanningGateBlockedDiagnosis tags planning gate blocked", () => {

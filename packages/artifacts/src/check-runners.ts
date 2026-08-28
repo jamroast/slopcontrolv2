@@ -3,6 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractSection } from "./markdown.js";
 import {
+  SLOPCONTROL_TEST_SERVICES_READY_ENV,
+} from "./test-services.js";
+import {
   isIncompleteShellCompound,
   hasTrailingShellContinuation,
   joinShellContinuations,
@@ -211,6 +214,33 @@ export function hasLongLivedServerInCheck(body: string): boolean {
   return false;
 }
 
+/**
+ * When verify already started test-services, strip redundant `docker compose up`
+ * and compose teardown traps from legacy PHASE checks before execution.
+ */
+export function stripRedundantTestServicesBringUp(
+  body: string,
+  env?: NodeJS.ProcessEnv,
+): string {
+  if (env?.[SLOPCONTROL_TEST_SERVICES_READY_ENV] !== "1") {
+    return body;
+  }
+  let out = normalizeShellCheckBody(body);
+  out = out.replace(
+    /(?:^|[\n;&|])\s*trap\s+['"][^'"\n]*\bdocker\s+compose\s+(?:down|stop)\b[^'"\n]*['"]\s+EXIT\s*;?\s*/gim,
+    "\n",
+  );
+  out = out.replace(/\bdocker\s+compose\s+up\b[^;&|\n]*/gim, "");
+  out = out
+    .replace(/^\s*&&\s*/gm, "")
+    .replace(/\s*;\s*;/g, ";")
+    .replace(/\s*&&\s*&&+/g, " && ")
+    .replace(/^\s*;\s*/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return out;
+}
+
 /** Background `&` plus `wait` — classic hang when children outlive kill. */
 export function hasBackgroundWaitHangAntipattern(body: string): boolean {
   const hasBg = /&\s*(?:#.*)?$/m.test(body) || /&\s*\n/.test(body);
@@ -298,7 +328,7 @@ function shellValidate(cell: CheckCell): string[] {
   }
   if (hasLongLivedServerInCheck(normalized)) {
     issues.push(
-      `Broken Automated Check starts a long-lived server (pnpm/npm/yarn/bun dev|start|serve, vite, next dev, docker compose up). Automated Checks must be finite — use structural asserts (grep alias/config), a short Node one-shot, or a finite compose probe: \`docker compose up -d app\` plus \`trap 'docker compose down' EXIT\` then probe: ${normalized.slice(0, 120)}`,
+      `Broken Automated Check starts infra or a long-lived server (pnpm/npm/yarn/bun dev|start|serve, vite, next dev, docker compose up). SlopControl verify already brings up test-services (Postgres/Redis/…) — checks must assume services are up and use finite asserts (grep/build/one-shot vitest), never a second bring-up or trap teardown: ${normalized.slice(0, 120)}`,
     );
   }
   if (hasBackgroundWaitHangAntipattern(normalized)) {
@@ -327,9 +357,9 @@ export function createShellFamilyRunner(runner: CheckCommandRunner): CheckRunner
     async run(cell, ctx) {
       const lang = normalizeCheckLanguage(cell.language);
       const bin = lang === "zsh" ? "zsh" : "bash";
-      const body = stripRedundantCwdCd(
-        normalizeShellCheckBody(cell.body),
-        ctx.cwd,
+      const body = stripRedundantTestServicesBringUp(
+        stripRedundantCwdCd(normalizeShellCheckBody(cell.body), ctx.cwd),
+        ctx.env,
       );
       let result = await runViaTempFile(
         runner,

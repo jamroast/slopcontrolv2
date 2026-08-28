@@ -50,6 +50,7 @@ export type HandoffDiagnosisSnippet = {
   fingerprint?: string;
   title?: string;
   class?: string;
+  rootCause?: string;
   operatorActions?: string[];
   /** Latest diagnosis nextActions for coding retry routing. */
   nextActions?: string;

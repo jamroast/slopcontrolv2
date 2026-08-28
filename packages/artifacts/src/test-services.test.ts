@@ -66,13 +66,57 @@ describe("test-services", () => {
       if (opts.cmd.includes("--services")) {
         return { code: 0, stdout: "db\nweb\nredis\napi\n", stderr: "", durationMs: 1, timedOut: false };
       }
+      if (opts.cmd.includes("ps")) {
+        return { code: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false };
+      }
       return { code: 0, stdout: "started", stderr: "", durationMs: 1, timedOut: false };
     };
     const res = await ensureTestServices({ projectRoot: root, runner });
     assert.equal(res.attempted, true);
     assert.equal(res.ok, true);
     assert.deepEqual(res.services, ["db", "redis"]);
-    assert.deepEqual(calls[1], ["docker", "compose", "up", "-d", "--wait", "db", "redis"]);
+    const upCall = calls.find((c) => c.includes("up"));
+    assert.deepEqual(upCall, ["docker", "compose", "up", "-d", "--no-recreate", "--wait", "db", "redis"]);
+  });
+
+  it("reuses already-running services instead of a second bring-up", async () => {
+    const root = tmp();
+    writeFileSync(join(root, "docker-compose.yml"), "services: {}");
+    const calls: string[][] = [];
+    const runner = async (opts: { cmd: string[] }): Promise<RunCommandResult> => {
+      calls.push(opts.cmd);
+      if (opts.cmd.includes("--services")) {
+        return { code: 0, stdout: "db\n", stderr: "", durationMs: 1, timedOut: false };
+      }
+      if (opts.cmd.includes("ps") && opts.cmd.includes("compose")) {
+        return { code: 0, stdout: "db\n", stderr: "", durationMs: 1, timedOut: false };
+      }
+      return { code: 0, stdout: "should-not-be-called", stderr: "", durationMs: 1, timedOut: false };
+    };
+    const res = await ensureTestServices({ projectRoot: root, runner });
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, true);
+    assert.match(res.detail, /already running/);
+    assert.ok(!calls.some((c) => c.includes("up")), "must not re-up running services");
+  });
+
+  it("reuses services via docker ps fallback with fixed container_name", async () => {
+    const root = tmp();
+    writeFileSync(join(root, "docker-compose.yml"), "services: {}");
+    const runner = async (opts: { cmd: string[] }): Promise<RunCommandResult> => {
+      if (opts.cmd.includes("--services")) {
+        return { code: 0, stdout: "db\n", stderr: "", durationMs: 1, timedOut: false };
+      }
+      if (opts.cmd.includes("ps") && opts.cmd.includes("compose")) {
+        // compose project view: container owned by another project (main tree)
+        return { code: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false };
+      }
+      return { code: 0, stdout: "db\n", stderr: "", durationMs: 1, timedOut: false };
+    };
+    const res = await ensureTestServices({ projectRoot: root, runner });
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, true);
+    assert.match(res.detail, /already running/);
   });
 
   it("configured services win over auto-detect", async () => {
@@ -89,7 +133,7 @@ describe("test-services", () => {
       runner,
     });
     assert.deepEqual(res.services, ["cache", "db"]);
-    assert.equal(calls.length, 1); // no --services probe
+    assert.ok(!calls.some((c) => c.includes("--services")), "no --services probe");
   });
 
   it("reports failure when bring-up exits non-zero", async () => {
@@ -106,5 +150,7 @@ describe("test-services", () => {
     assert.equal(res.attempted, true);
     assert.equal(res.ok, false);
     assert.match(res.detail, /FAILED/);
+    // bring-up failure surfaced, no reuse shortcut taken
+    assert.match(res.detail, /docker daemon not running/);
   });
 });

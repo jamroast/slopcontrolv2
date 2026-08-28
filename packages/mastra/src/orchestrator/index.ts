@@ -256,7 +256,12 @@ import {
   type DependencyIntent,
   reconcileChangeIntentFromResearch,
   verifyDocRevisionApplied,
+  developPhaseChecksSelfHealEligible,
+  MAX_DEVELOP_PHASE_CHECKS_SELF_HEAL,
+  SLOPCONTROL_TEST_SERVICES_READY_ENV,
+  SLOPCONTROL_TEST_SERVICES_ENV,
 } from "@slopcontrol/artifacts";
+import { attemptDevelopPhaseChecksSelfHeal } from "./develop-phase-self-heal.js";
 import {
   ensureGitInitialized,
   ensurePhaseWorktree,
@@ -1934,6 +1939,7 @@ export async function runSuccessChecks(
   }
 
   // Verify-only (no build): still install before test/checks.
+  let testServicesEnv: Record<string, string> = {};
   if (runTestStep) {
     const installFail = await tryDepsInstall();
     if (installFail) return installFail;
@@ -1957,6 +1963,12 @@ export async function runSuccessChecks(
         if (!svc.ok) {
           return failResult(parts.slice(0, -1), steps.slice(0, -1), step);
         }
+        // Expose to PHASE Automated Checks: infra is already up — do not
+        // `docker compose up` these services again inside check cells.
+        testServicesEnv = {
+          [SLOPCONTROL_TEST_SERVICES_READY_ENV]: "1",
+          [SLOPCONTROL_TEST_SERVICES_ENV]: svc.services.join(","),
+        };
       }
     }
   }
@@ -1998,9 +2010,12 @@ export async function runSuccessChecks(
   if (runTestStep && !opts?.confirmatory) {
     const cells = extractCheckCells(phaseDoc);
     const checkRegistry = createDefaultCheckRegistry(runner);
-    const checkEnv = Object.keys(llmOverlay).length > 0
-      ? mergeEnvOverlay(process.env, llmOverlay)
-      : process.env;
+    const checkEnv = {
+      ...(Object.keys(llmOverlay).length > 0
+        ? mergeEnvOverlay(process.env, llmOverlay)
+        : process.env),
+      ...testServicesEnv,
+    } as NodeJS.ProcessEnv;
     for (const cell of cells) {
       const label = checkCellLabel(cell);
       const result = await checkRegistry.run(cell, {
@@ -8727,6 +8742,14 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     const allChangedFiles = new Set<string>();
     const MAX_DIAGNOSIS_STREAK = 3;
     const MAX_STALL_STRIKES = 3;
+    let phaseChecksSelfHealCount = 0;
+    let pendingFailureDiagnosis: FailureDiagnosis | null = null;
+    const developDesignRoutingNote =
+      intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
+        ? changeIntentIsBrandTheming(intent)
+          ? "\nPreserve `Requires design pass: yes` and any ## Brand / ## Assets sections.\n"
+          : "\nPreserve `Requires design pass: no`; do not add design sections unless the diagnosis requires it.\n"
+        : "";
     const memory = readRunMemory(project.rootPath, run.id);
     let needsFreshSession = false;
     let terminalStage: RunStage | null = null;
@@ -8765,11 +8788,48 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
             fingerprint: priorRefreshed.fingerprint,
             title: priorRefreshed.title,
             class: priorRefreshed.class,
+            rootCause: priorRefreshed.rootCause,
             operatorActions: priorRefreshed.operatorActions,
             nextActions: priorRefreshed.nextActions,
             tags: priorRefreshed.tags,
           }
         : undefined;
+
+    const recordVerifyFailureDiagnosis = (diagnosis: FailureDiagnosis): void => {
+      this.persistDiagnosis(
+        project,
+        run,
+        {
+          audience: diagnosis.audience,
+          operatorActions: diagnosis.operatorActions,
+          class: diagnosis.class,
+          confidence: diagnosis.confidence,
+          title: diagnosis.title,
+          rootCause: diagnosis.rootCause,
+          evidence: diagnosis.evidence,
+          nextActions: diagnosis.nextActions,
+          fingerprint: diagnosis.fingerprint,
+          codingAgentShouldFix: diagnosis.codingAgentShouldFix,
+          harnessRecoverable: diagnosis.harnessRecoverable,
+          tags: diagnosis.tags,
+          failingStep: diagnosis.failingStep,
+          phaseId: phase.id,
+          runId: run.id,
+          updatedAt: new Date().toISOString(),
+        },
+        phase.id,
+      );
+      lastHandoffDiagnosis = {
+        fingerprint: diagnosis.fingerprint,
+        title: diagnosis.title,
+        class: diagnosis.class,
+        rootCause: diagnosis.rootCause,
+        operatorActions: diagnosis.operatorActions,
+        nextActions: diagnosis.nextActions,
+        tags: diagnosis.tags,
+      };
+      lastDiagnosisCard = formatDiagnosisCard(diagnosis);
+    };
 
     const persistHandoff = (
       outcome: "complete" | "blocked" | "interrupted",
@@ -8893,27 +8953,50 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
           diagnosisStreak >= MAX_DIAGNOSIS_STREAK - 1 &&
           lastDiagnosisFingerprint
         ) {
-          log(
-            project,
-            run,
-            `--- Same diagnosis would repeat (${diagnosisStreak}×, fp=${lastDiagnosisFingerprint}); blocking before another coding turn ---`,
-          );
-          appendAppendix(
-            project.rootPath,
-            phase.id,
-            [
-              lastDiagnosisCard || `Repeated diagnosis fp=${lastDiagnosisFingerprint}`,
-              "",
-              `DEV_BLOCKED — same failure diagnosis repeated ${diagnosisStreak} times without progress.`,
-              "Operator/coding must change approach before retry_development.",
-            ].join("\n"),
-          );
-          log(project, run, COMPLETION_TOKENS.DEV_BLOCKED);
-          writePhaseStatus(project.rootPath, phase.id, "blocked");
-          return finishDevelop("blocked", {
-            worktreePath: worktree.path,
-            worktreeBranch: worktree.branch,
-          });
+          const deferBlockForPhaseChecksSelfHeal =
+            lastHandoffDiagnosis &&
+            developPhaseChecksSelfHealEligible(
+              {
+                class: lastHandoffDiagnosis.class ?? "process",
+                audience: "coding",
+                title: lastHandoffDiagnosis.title ?? "",
+                rootCause: lastHandoffDiagnosis.rootCause ?? "",
+                nextActions: lastHandoffDiagnosis.nextActions ?? "",
+                tags: lastHandoffDiagnosis.tags,
+                codingAgentShouldFix: true,
+              },
+              { attemptsUsed: phaseChecksSelfHealCount },
+            );
+          if (deferBlockForPhaseChecksSelfHeal) {
+            log(
+              project,
+              run,
+              `--- Same diagnosis ${diagnosisStreak}× (fp=${lastDiagnosisFingerprint}); deferring block — phase-checks self-heal may run after verify ---`,
+            );
+          } else {
+            log(
+              project,
+              run,
+              `--- Same diagnosis would repeat (${diagnosisStreak}×, fp=${lastDiagnosisFingerprint}); blocking before another coding turn ---`,
+            );
+            appendAppendix(
+              project.rootPath,
+              phase.id,
+              [
+                lastDiagnosisCard ||
+                  `Repeated diagnosis fp=${lastDiagnosisFingerprint}`,
+                "",
+                `DEV_BLOCKED — same failure diagnosis repeated ${diagnosisStreak} times without progress.`,
+                "Operator/coding must change approach before retry_development.",
+              ].join("\n"),
+            );
+            log(project, run, COMPLETION_TOKENS.DEV_BLOCKED);
+            writePhaseStatus(project.rootPath, phase.id, "blocked");
+            return finishDevelop("blocked", {
+              worktreePath: worktree.path,
+              worktreeBranch: worktree.branch,
+            });
+          }
         }
 
         if (
@@ -9370,6 +9453,118 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
             );
           }
         }
+
+        pendingFailureDiagnosis = null;
+        if (!checks.ok && checks.firstFailure) {
+          const fastDiagnosis = buildFailureDiagnosis({
+            output: checks.summary || checks.output,
+            firstFailure: checks.firstFailure,
+            sourcePhaseId: phase.id,
+            sourceRunId: run.id,
+          });
+          if (
+            developPhaseChecksSelfHealEligible(fastDiagnosis, {
+              failingStepName: checks.firstFailure.name,
+              attemptsUsed: phaseChecksSelfHealCount,
+            })
+          ) {
+            const earlyDiagnosis =
+              fastDiagnosis.confidence === "high"
+                ? fastDiagnosis
+                : await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
+                    output: checks.summary || checks.output,
+                    firstFailure: checks.firstFailure,
+                    failingStepId: readVerifyStepsReport(project.rootPath, run.id)
+                      ?.firstFailure?.id,
+                    sourcePhaseId: phase.id,
+                    sourceRunId: run.id,
+                  });
+            pendingFailureDiagnosis = earlyDiagnosis;
+            const selfHeal = await attemptDevelopPhaseChecksSelfHeal({
+              project,
+              phase,
+              run,
+              worktreePath: worktree.path,
+              phaseDoc,
+              diagnosis: earlyDiagnosis,
+              intentBlock,
+              designRoutingNote: developDesignRoutingNote,
+              attemptsUsed: phaseChecksSelfHealCount,
+              failingStepName: checks.firstFailure.name,
+              registry: this.ctx.registry,
+              deps: {
+                revisePhaseDoc: (input) => this.revisePhaseDoc(input),
+                runSuccessChecks,
+              },
+              log,
+            });
+            if (selfHeal.kind !== "not_applicable") {
+              phaseChecksSelfHealCount += 1;
+              appendAppendix(
+                project.rootPath,
+                phase.id,
+                [
+                  `## Develop self-heal (faultLeg=phase-checks) — attempt ${phaseChecksSelfHealCount}/${MAX_DEVELOP_PHASE_CHECKS_SELF_HEAL}`,
+                  "",
+                  selfHeal.kind === "verify_passed"
+                    ? "PHASE.md revised by review agent; worktree verify passed — proceeding to merge."
+                    : selfHeal.kind === "phase_revised"
+                      ? "PHASE.md revised; verify still failing — next iteration may coding-retry with updated checks."
+                      : "PHASE revision did not land — fall through to coding retry.",
+                ].join("\n"),
+              );
+            }
+            if (
+              selfHeal.kind === "verify_passed" ||
+              selfHeal.kind === "phase_revised"
+            ) {
+              phaseDoc = selfHeal.phaseDoc;
+              checks = selfHeal.checks as SuccessCheckResult;
+            }
+            if (selfHeal.kind === "phase_revised" && !checks.ok) {
+              const postReviseFast = buildFailureDiagnosis({
+                output: checks.summary || checks.output,
+                firstFailure: checks.firstFailure,
+                sourcePhaseId: phase.id,
+                sourceRunId: run.id,
+              });
+              const postReviseDiagnosis =
+                postReviseFast.confidence === "high"
+                  ? postReviseFast
+                  : await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
+                      output: checks.summary || checks.output,
+                      firstFailure: checks.firstFailure,
+                      failingStepId: readVerifyStepsReport(
+                        project.rootPath,
+                        run.id,
+                      )?.firstFailure?.id,
+                      sourcePhaseId: phase.id,
+                      sourceRunId: run.id,
+                    });
+              recordVerifyFailureDiagnosis(postReviseDiagnosis);
+              pendingFailureDiagnosis = postReviseDiagnosis;
+              log(
+                project,
+                run,
+                `--- Failure diagnosis (post phase-checks self-heal): ${postReviseDiagnosis.class} (${postReviseDiagnosis.confidence}) — ${postReviseDiagnosis.title} [fp=${postReviseDiagnosis.fingerprint}] ---`,
+              );
+              appendAppendix(
+                project.rootPath,
+                phase.id,
+                `## Iteration ${iteration} — after phase-checks self-heal\n\n${formatDiagnosisCard(postReviseDiagnosis)}`,
+              );
+              diagnosisStreak = 0;
+              lastDiagnosisFingerprint = "";
+              log(
+                project,
+                run,
+                `[timing] iteration ${iteration} elapsed ${formatDurationMs(Date.now() - iterationStarted)} (phase-checks self-heal — skip merge)`,
+              );
+              continue;
+            }
+          }
+        }
+
         log(
           project,
           run,
@@ -9971,51 +10166,23 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
         );
 
         const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
-        let diagnosis = await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
-          output: checks.summary || checks.output,
-          firstFailure: checks.firstFailure,
-          failingStepId: verifySteps?.firstFailure?.id,
-          sourcePhaseId: phase.id,
-          sourceRunId: run.id,
-        });
+        let diagnosis =
+          pendingFailureDiagnosis ??
+          (await diagnoseVerifyFailureLlmFirst(this.ctx.registry, {
+            output: checks.summary || checks.output,
+            firstFailure: checks.firstFailure,
+            failingStepId: verifySteps?.firstFailure?.id,
+            sourcePhaseId: phase.id,
+            sourceRunId: run.id,
+          }));
+        pendingFailureDiagnosis = null;
         if (
           worktreeFullGatePassed &&
           checks.firstFailure?.name?.startsWith("post-merge-root-verify")
         ) {
           diagnosis = applyWorktreeGreenPostMergeContext(diagnosis);
         }
-        this.persistDiagnosis(
-          project,
-            run,
-          {
-            audience: diagnosis.audience,
-            operatorActions: diagnosis.operatorActions,
-            class: diagnosis.class,
-            confidence: diagnosis.confidence,
-            title: diagnosis.title,
-            rootCause: diagnosis.rootCause,
-            evidence: diagnosis.evidence,
-            nextActions: diagnosis.nextActions,
-            fingerprint: diagnosis.fingerprint,
-            codingAgentShouldFix: diagnosis.codingAgentShouldFix,
-            harnessRecoverable: diagnosis.harnessRecoverable,
-            tags: diagnosis.tags,
-            failingStep: diagnosis.failingStep,
-            phaseId: phase.id,
-            runId: run.id,
-            updatedAt: new Date().toISOString(),
-          },
-          phase.id,
-        );
-        lastHandoffDiagnosis = {
-          fingerprint: diagnosis.fingerprint,
-          title: diagnosis.title,
-          class: diagnosis.class,
-          operatorActions: diagnosis.operatorActions,
-          nextActions: diagnosis.nextActions,
-          tags: diagnosis.tags,
-        };
-        lastDiagnosisCard = formatDiagnosisCard(diagnosis);
+        recordVerifyFailureDiagnosis(diagnosis);
         log(
           project,
           run,

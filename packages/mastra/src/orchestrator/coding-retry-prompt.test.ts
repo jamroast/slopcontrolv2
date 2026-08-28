@@ -101,3 +101,23 @@ describe("prior failure history in retry prompts", () => {
     assert.doesNotMatch(prompt, /Prior failure history/);
   });
 });
+
+describe("duplicate-infra retry routing", () => {
+  it("container-conflict tags route to duplicate-infra, not long-lived", () => {
+    assert.equal(
+      resolveDevelopCodingRetryKind({
+        phaseId: "x",
+        title: "Duplicate infra bring-up (container name conflict)",
+        tags: ["automated-checks", "duplicate-infra", "container-conflict"],
+      }),
+      "duplicate-infra",
+    );
+    const prompt = buildDevelopCodingRetryPrompt({
+      phaseId: "24-x",
+      title: "Duplicate infra bring-up (container name conflict)",
+      tags: ["duplicate-infra"],
+    });
+    assert.match(prompt, /duplicate infra bring-up/);
+    assert.match(prompt, /test-services already started/);
+  });
+});

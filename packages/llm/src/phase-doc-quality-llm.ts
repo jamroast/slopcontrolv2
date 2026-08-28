@@ -43,7 +43,7 @@ Check ALL of:
 1. Required sections present and substantive: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence), ## Blueprint Deltas — not placeholder/scaffold text.
 2. RESEARCH translation — file paths, routes, checks, and design decisions from RESEARCH appear in PHASE (especially Automated Checks).
 3. uiMount — when intent uiMount is set, PHASE Scope/File Changes name the concrete mount (route/page/component), not abstract "wire auth".
-4. Automated Checks — finite structural proofs (grep/build/vitest one-shot); no bare dev servers or npm test without path.
+4. Automated Checks — finite structural proofs (grep/build/vitest one-shot); no bare dev servers or npm test without path. Checks must NOT restart infra with docker compose up or trap teardown — SlopControl test-services already brings up Postgres/Redis/etc.; DB-dependent checks assume services are up (migrate/seed/targeted vitest). Redundant infra bring-up is a draft fault.
 5. Blueprint Deltas — durable decisions recorded when PHASE introduces new routes/surfaces/contracts.
 
 Interaction contract rules:

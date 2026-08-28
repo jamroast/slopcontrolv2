@@ -35,7 +35,7 @@ Judge against the Change Intent + phase description. Check ALL of:
 2. Scope coverage — every success criterion / affected area from the intent is researched, not hand-waved.
 3. uiMount honour — when uiMount is page/composer/bubble/modal, research names the concrete mount/route/surface (not abstract "add sign-in flow").
 4. Proposed implementation — specific files to touch, build order, risks.
-5. Proposed Automated Checks — at least structural/grep/build checks research recommends for PHASE (finite; no long-lived dev servers).
+5. Proposed Automated Checks — at least structural/grep/build checks research recommends for PHASE (finite; no long-lived dev servers; no duplicate infra bring-up — verify starts test-services, so checks must not re-up Postgres/Redis/etc. with docker compose).
 6. Open risks / verification gaps — hypotheses stated as hypotheses, not "already works" without evidence.
 
 Verdict rules:

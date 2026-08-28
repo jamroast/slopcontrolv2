@@ -222,3 +222,21 @@ describe("platform learnings seed", () => {
     }
   });
 });
+
+describe("duplicate infra bring-up classification", () => {
+  it("classifies container name conflict as duplicate-infra, not long-lived", () => {
+    const c = classifyVerifyFailure(
+      [
+        `Error response from daemon: Conflict. The container name "/jamauth-postgres" is already in use by container "e60fdc2".`,
+        "CHECK_TIMEOUT after 60000ms",
+      ].join("\n"),
+      { stepName: "automatedCheck", exitCode: 124 },
+    );
+    assert.equal(c.class, "process");
+    assert.equal(c.codingAgentShouldFix, true);
+    assert.ok(c.tags.includes("duplicate-infra"));
+    assert.ok(!c.tags.includes("check-timeout"), "must not mislabel as long-lived");
+    assert.match(c.summary, /[Dd]uplicate infra/);
+    assert.match(c.learning?.lesson ?? "", /test-services already started/i);
+  });
+});

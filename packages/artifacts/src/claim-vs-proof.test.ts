@@ -766,3 +766,63 @@ describe("validateRuntimeClaimProofsAsync", () => {
     assert.ok(claims.includes("theme-shell-mount"));
   });
 });
+
+describe("duplicate infra bring-up draft gate", () => {
+  it("validatePhaseDocForDev rejects docker compose up when project has compose file", () => {
+    const root = mkdtempSync(join(tmpdir(), "phasedoc-compose-"));
+    try {
+      writeFileSync(join(root, "docker-compose.yml"), "services: { postgres: {} }");
+      const doc = phaseDoc({
+        successCriteria: "- [x] runtime probe passes",
+        checks: [
+          "docker compose up -d postgres && trap 'docker compose down' EXIT; pg_isready -h localhost -p 5430 || exit 1",
+        ],
+      });
+      const gate = validatePhaseDocForDev(doc, { projectRoot: root });
+      assert.equal(gate.ok, false);
+      assert.ok(
+        gate.issues.some((i) => /test-services|restarts infra|tears down infra/i.test(i)),
+        gate.issues.join("; "),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("validatePhaseDocForDev allows db checks without bring-up in compose projects", () => {
+    const root = mkdtempSync(join(tmpdir(), "phasedoc-compose-"));
+    try {
+      writeFileSync(join(root, "docker-compose.yml"), "services: { postgres: {} }");
+      const doc = phaseDoc({
+        successCriteria: "- [x] integration suite passes",
+        checks: [
+          "pnpm db:migrate && pnpm seed && npx vitest run tests/integration/oidc.test.ts",
+        ],
+      });
+      const gate = validatePhaseDocForDev(doc, { projectRoot: root });
+      assert.ok(
+        !gate.issues.some((i) => /restarts infra|tears down infra/i.test(i)),
+        gate.issues.join("; "),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("validatePhaseDocForDev ignores docker compose up when no compose file", () => {
+    const root = mkdtempSync(join(tmpdir(), "phasedoc-nocompose-"));
+    try {
+      const doc = phaseDoc({
+        successCriteria: "- [x] probe",
+        checks: ["docker compose up -d app; sleep 5; curl -sf localhost:3001 || exit 1"],
+      });
+      const gate = validatePhaseDocForDev(doc, { projectRoot: root });
+      assert.ok(
+        !gate.issues.some((i) => /restarts infra|tears down infra/i.test(i)),
+        "no compose file → duplicate-infra guard not applicable",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

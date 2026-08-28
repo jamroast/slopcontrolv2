@@ -7,6 +7,7 @@ export type DevelopCodingRetryKind =
   | "deps"
   | "host-utility"
   | "long-lived"
+  | "duplicate-infra"
   | "process-shell"
   | "generic";
 
@@ -59,6 +60,14 @@ export function resolveDevelopCodingRetryKind(
       return "long-lived";
     }
     return "host-utility";
+  }
+
+  if (
+    input.tags?.includes("duplicate-infra") ||
+    input.tags?.includes("container-conflict") ||
+    /duplicate infra bring-up|container name .*already in use/i.test(hay)
+  ) {
+    return "duplicate-infra";
   }
 
   if (
@@ -118,6 +127,10 @@ Then re-run build in that same cwd. Before DEV_COMPLETE, append \`## Operator ha
       return `Fix the APPENDIX Failure diagnosis: **missing host utility** (e.g. GNU \`timeout\` on macOS) in an Automated Check.
 Do NOT run pnpm/npm install for this fingerprint. Edit \`.slopcontrol/phases/${phaseId}/PHASE.md\` ## Automated Checks: replace \`timeout\`/\`gtimeout\` with **finite structural asserts** (grep/config) — do NOT start long-lived servers (\`pnpm dev\` / vite) and do NOT background servers with sleep/kill/wait.${next}
 Then ensure root verify passes. Before DEV_COMPLETE, append \`## Operator handoff\` to APPENDIX.`;
+    case "duplicate-infra":
+      return `Fix the APPENDIX Failure diagnosis: **duplicate infra bring-up** — an Automated Check re-started a service (Postgres/Redis/…) that SlopControl test-services already started, and docker rejected the duplicate.
+Do NOT run pnpm/npm install for this fingerprint. Edit \`.slopcontrol/phases/${phaseId}/PHASE.md\` ## Automated Checks: remove \`docker compose up\` and any \`trap 'docker compose down' EXIT\` for infra services; keep only migrate/seed/targeted \`npx vitest run <file>\` or grep/build asserts against the already-running services.${next}
+Then ensure verify passes. Before DEV_COMPLETE, append \`## Operator handoff\` to APPENDIX.`;
     case "long-lived":
       return `Fix the APPENDIX Failure diagnosis: **Broken Automated Check (long-lived / hang)** — PHASE validation or wall-clock CHECK_TIMEOUT.
 Do NOT run pnpm/npm install for this fingerprint. Edit \`.slopcontrol/phases/${phaseId}/PHASE.md\` ## Automated Checks: remove long-lived servers (\`pnpm/npm/yarn/bun dev|start|serve\`, vite, next dev, docker compose up) and background \`&\`+\`wait\` patterns. Use finite structural asserts (grep alias/config) or a short Node one-shot. Manual browser smoke may stay in Success Criteria — not in Automated Checks.${next}
