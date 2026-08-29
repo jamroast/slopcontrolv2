@@ -380,7 +380,7 @@ None.
     }
   });
 
-  it("mergePhaseWorktree never commits a node_modules symlink", () => {
+  it("mergePhaseWorktree never commits a dependency install root symlink", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-wt-nm-root-"));
     const dataDir = mkdtempSync(join(tmpdir(), "slop-wt-nm-data-"));
     const real = mkdtempSync(join(tmpdir(), "slop-wt-nm-real-"));
@@ -401,7 +401,6 @@ None.
         dataDir,
       });
 
-      // Coding agent symlinks the main tree's node_modules into the worktree.
       mkdirSync(join(real, "node_modules"), { recursive: true });
       symlinkSync(join(real, "node_modules"), join(wt.path, "node_modules"));
       writeFileSync(join(wt.path, "app.ts"), "export const n = 1;\n");
@@ -417,9 +416,8 @@ None.
       assert.equal(merged.ok, true, merged.message);
       assert.ok(existsSync(join(root, "app.ts")));
 
-      // The symlink must not be tracked on main.
       const tracked = git(root, ["ls-files", "--", "node_modules"]);
-      assert.equal(tracked, "", "node_modules symlink must not be committed");
+      assert.equal(tracked, "", "install-root symlink must not be committed");
     } finally {
       rmSync(root, { recursive: true, force: true });
       rmSync(dataDir, { recursive: true, force: true });

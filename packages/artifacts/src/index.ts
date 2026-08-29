@@ -50,6 +50,7 @@ export * from "./project-empty.js";
 export * from "./blueprint-contract.js";
 export * from "./project-inventory.js";
 export * from "./blueprint-fallback.js";
+export * from "./dependency-install-root.js";
 export * from "./learnings.js";
 export * from "./failure-classify.js";
 export * from "./compose-teardown.js";

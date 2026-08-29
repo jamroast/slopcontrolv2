@@ -149,6 +149,9 @@ importers:
       '@opencode-ai/sdk':
         specifier: ^1.18.15
         version: 1.18.15
+      '@slopcontrol/artifacts':
+        specifier: workspace:*
+        version: link:../artifacts
       '@slopcontrol/llm':
         specifier: workspace:*
         version: link:../llm

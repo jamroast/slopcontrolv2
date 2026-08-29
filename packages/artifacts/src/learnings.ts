@@ -432,4 +432,24 @@ export function ensurePlatformLearnings(projectRoot: string): void {
       "**Mounted ≠ visible:** Tailwind only emits utilities from scanned sources. Prove style emission via `@source` covering the component tree, or `vite build` / `pnpm build` / `next build` + grep built CSS / globals / package tokens for ThemeToggle utilities, or a non-utility `var(--text-secondary)` color/size fallback. Import-order-only (`@import \"tailwindcss\"` first) is not a visibility proof.",
     ].join(" "),
   });
+
+  promoteLearning(projectRoot, {
+    kind: "process",
+    severity: "blocker",
+    tags: [
+      "deps-install",
+      "symlink",
+      "worktree",
+      "merge",
+      "node_modules",
+      "vendor",
+      ".venv",
+    ],
+    title: "Never symlink dependency install roots into a phase worktree",
+    lesson: [
+      "Do NOT `ln -s` the main tree's dependency install directory (e.g. `node_modules`, `.venv`, `vendor`) into a phase worktree.",
+      "A symlink file bypasses `.gitignore`'s directory rules, gets committed on merge, and can become a self-referential loop on main — breaking path resolution (ELOOP).",
+      "Run the project's normal dependency install in the worktree instead (SlopControl verify runs deps-install when an install root is missing or symlinked).",
+    ].join(" "),
+  });
 }

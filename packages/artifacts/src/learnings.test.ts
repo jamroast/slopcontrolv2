@@ -20,6 +20,7 @@ import {
   runVerifyPreflight,
   selectLearningsForContext,
   validatePhaseDocForDev,
+  loadLearningsPromptBlock,
 } from "./index.js";
 
 describe("classifyVerifyFailure", () => {
@@ -780,5 +781,19 @@ describe("runVerifyPreflight", () => {
     assert.equal(r.ok, false);
     assert.match(r.output, /infrastructure/i);
     assert.match(r.output, /verifyPreflightCommand FAILED/);
+  });
+});
+
+describe("platform learnings", () => {
+  it("seeds the no-symlink install-root rule into agent context", () => {
+    const root = mkdtempSync(join(tmpdir(), "sc-learnings-symlink-"));
+    try {
+      const block = loadLearningsPromptBlock(root, {});
+      assert.match(block, /Never symlink dependency install roots/);
+      assert.match(block, /ln -s/);
+      assert.match(block, /deps-install/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

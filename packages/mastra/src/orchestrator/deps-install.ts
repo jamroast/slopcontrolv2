@@ -1,4 +1,5 @@
-import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { dependencyInstallRootIsSymlink } from "@slopcontrol/artifacts";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 export type PackageManager = "pnpm" | "yarn" | "npm";
@@ -33,7 +34,7 @@ export function depsInstallCommand(cwd: string): string {
       ? "pnpm install --frozen-lockfile"
       : "pnpm install";
     // CI=1 suppresses pnpm's interactive "remove and reinstall?" prompt when
-    // node_modules is a broken symlink or otherwise inconsistent.
+    // the install root is a broken symlink or otherwise inconsistent.
     return `CI=1 ${cmd}`;
   }
   if (manager === "yarn") {
@@ -60,20 +61,6 @@ function manifestPaths(cwd: string): string[] {
 }
 
 /**
- * True when `node_modules` is a symlink rather than a real install directory.
- * Coding agents sometimes `ln -s` the main tree's node_modules into a worktree;
- * that symlink becomes a self-referential loop after merge and must be treated
- * as missing so deps-install recreates a real install.
- */
-export function nodeModulesIsSymlink(cwd: string): boolean {
-  try {
-    return lstatSync(join(cwd, "node_modules")).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
-/**
  * True when deps should be (re)installed before verify:
  * missing node_modules, forced, or package.json/lockfile newer than node_modules.
  */
@@ -85,8 +72,8 @@ export function needsDepsInstall(
   if (opts?.force) return true;
   const nm = join(cwd, "node_modules");
   if (!existsSync(nm)) return true;
-  // A symlinked node_modules is not a real install — treat as missing.
-  if (nodeModulesIsSymlink(cwd)) return true;
+  // Symlinked install roots are not real installs — treat as missing.
+  if (dependencyInstallRootIsSymlink(cwd)) return true;
   let nmMtime: number;
   try {
     nmMtime = statSync(nm).mtimeMs;

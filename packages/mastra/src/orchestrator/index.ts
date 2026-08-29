@@ -8727,7 +8727,6 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         : null,
       learningsBlock.trim() ? learningsBlock : null,
       "Infra failures (ECONNREFUSED / unreachable runtime services) are NOT app bugs — do not invent bring-up scripts; stop and report.",
-      "Do NOT symlink node_modules (or any dependency directory) into the worktree — run the project's package-manager install (e.g. pnpm install) in the worktree instead. A symlinked node_modules becomes a self-referential loop after merge.",
       "Obey Change Intent uiMount: do not move interactive forms away from the locked mount; do not replace fillable UI with chips only.",
     ]
       .filter(Boolean)

@@ -14,6 +14,10 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
+import {
+  isDependencyInstallRoot,
+  normalizeRelativePath,
+} from "@slopcontrol/artifacts";
 
 export interface WorktreeResult {
   path: string;
@@ -909,16 +913,11 @@ function isSlopcontrolPath(p: string): boolean {
   return n === ".slopcontrol" || n.startsWith(".slopcontrol/");
 }
 
-/**
- * True when a worktree path must never be auto-committed by mergePhaseWorktree.
- * Covers `node_modules` (a coding agent may `ln -s` the main tree's install into
- * a worktree; that symlink becomes a self-referential loop after merge) and any
- * symlink (git tracks it as a blob and it can likewise dangle/loop post-merge).
- */
+/** Paths agents must never land in a phase merge commit (symlinks bypass gitignore). */
 function isUncommittablePath(cwd: string, rel: string): boolean {
-  const n = normalizeStatusPath(rel);
+  const n = normalizeRelativePath(rel);
   if (!n) return true;
-  if (n === "node_modules" || n.startsWith("node_modules/")) return true;
+  if (isDependencyInstallRoot(n)) return true;
   try {
     if (lstatSync(join(cwd, n)).isSymbolicLink()) return true;
   } catch {
