@@ -58,6 +58,18 @@ describe("planning gate helpers", () => {
     );
   });
 
+  it("buildPhaseDocRepairPrompt instructs a `# Phase …` title (matches validatePhaseDocForDev)", () => {
+    const prompt = buildPhaseDocRepairPrompt({
+      issues: ["missing section"],
+      intentBlock: "intent",
+      canonicalPath: ".slopcontrol/phases/x/PHASE.md",
+      phaseDescription: "desc",
+      research: "research",
+    });
+    assert.match(prompt, /starting with `# Phase …`/);
+    assert.doesNotMatch(prompt, /starting with # Title/);
+  });
+
   it("buildPlanningGateBlockedDiagnosis tags planning gate blocked", () => {
     const d = buildPlanningGateBlockedDiagnosis({
       issues: ["Automated Checks: long-lived server"],

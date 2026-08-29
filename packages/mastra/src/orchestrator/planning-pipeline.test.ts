@@ -8,6 +8,7 @@ import {
   MAX_PLANNING_SELF_HEAL_ROUNDS,
   callPlanningJudgeWithInfraRetry,
   PlanningJudgeInfraError,
+  phaseQualityRetryPrompt,
 } from "./planning-pipeline.js";
 
 describe("planning-pipeline", () => {
@@ -95,6 +96,18 @@ describe("planning-pipeline", () => {
       false,
       "last round must not continue",
     );
+  });
+
+  it("phaseQualityRetryPrompt instructs a `# Phase …` title (matches validatePhaseDocForDev)", () => {
+    const prompt = phaseQualityRetryPrompt({
+      canonicalPath: ".slopcontrol/phases/25-x/PHASE.md",
+      intentBlock: "intent",
+      description: "desc",
+      research: "research",
+      judgeFeedback: "feedback",
+    });
+    assert.match(prompt, /starting with `# Phase …`/);
+    assert.doesNotMatch(prompt, /starting with # Title/);
   });
 
   it("callPlanningJudgeWithInfraRetry surfaces the underlying cause on total failure", async () => {

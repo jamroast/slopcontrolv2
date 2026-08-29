@@ -106,7 +106,7 @@ export function phaseQualityRetryPrompt(opts: {
   return `Your previous PHASE.md failed the quality judge.
 ${opts.judgeFeedback}
 
-Rewrite the FULL PHASE.md starting with # Title — output ONLY the markdown document.
+Rewrite the FULL PHASE.md starting with \`# Phase …\` — output ONLY the markdown document.
 If you use write_file, path must be exactly: ${opts.canonicalPath}
 Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence), ## Blueprint Deltas.
 Base Scope/File Changes ONLY on the RESEARCH below.

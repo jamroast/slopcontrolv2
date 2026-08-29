@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -909,6 +910,24 @@ function isSlopcontrolPath(p: string): boolean {
 }
 
 /**
+ * True when a worktree path must never be auto-committed by mergePhaseWorktree.
+ * Covers `node_modules` (a coding agent may `ln -s` the main tree's install into
+ * a worktree; that symlink becomes a self-referential loop after merge) and any
+ * symlink (git tracks it as a blob and it can likewise dangle/loop post-merge).
+ */
+function isUncommittablePath(cwd: string, rel: string): boolean {
+  const n = normalizeStatusPath(rel);
+  if (!n) return true;
+  if (n === "node_modules" || n.startsWith("node_modules/")) return true;
+  try {
+    if (lstatSync(join(cwd, n)).isSymbolicLink()) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+/**
  * Split dirty paths so `.slopcontrol/**` is never stashed before merge/checkout.
  * Untracked orchestration artifacts do not block git merge, and stashing them
  * causes "already exists" pop failures when the orchestrator rewrites them.
@@ -1517,8 +1536,11 @@ export function mergePhaseWorktree(opts: {
     `slopcontrol: merge phase ${opts.phaseId}`;
 
   const dirty = listUncommitted(worktreePath);
-  if (dirty.length > 0) {
-    runGit(worktreePath, ["add", "-A"]);
+  const committable = dirty.filter(
+    (p) => !isUncommittablePath(worktreePath, p),
+  );
+  if (committable.length > 0) {
+    runGit(worktreePath, ["add", "-A", "--", ...committable]);
     runGit(worktreePath, [
       "-c",
       "user.email=slopcontrol@local",

@@ -6679,7 +6679,7 @@ Issues:
 ${resolved.gate.issues.map((i) => `- ${i}`).join("\n")}
 ${alignBlock}${intentBlockRepair}
 ${formatChangeIntentPromptBlock(intent)}
-Rewrite the FULL PHASE.md starting with # Title — output ONLY the markdown document (no "here is what changed").
+Rewrite the FULL PHASE.md starting with \`# Phase …\` — output ONLY the markdown document (no "here is what changed").
 If you use write_file, path must be exactly: ${canonicalPath}
 Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence, no curl with API keys; one \`grep -q\` per token joined by \`&&\` — never same-line \`.*\` chains), ## Blueprint Deltas.
 Base Scope/File Changes ONLY on the RESEARCH below — do not copy a prior phase's host-routing plan.
@@ -7023,6 +7023,17 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         if (resolved.source !== "none" && resolved.gate.ok) {
           writePhaseDoc(project.rootPath, phase.id, resolved.doc);
           phaseDocForQuality = resolved.doc;
+        } else {
+          slog.warn(
+            "planning",
+            "phase-quality retry output rejected by structural gate; re-judging prior draft",
+            {
+              projectId: project.id,
+              phaseId: phase.id,
+              source: resolved.source,
+              issues: resolved.gate.issues,
+            },
+          );
         }
       } catch (retryError) {
         const retryDetail = formatLlmErrorForLog(retryError);
@@ -8716,6 +8727,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         : null,
       learningsBlock.trim() ? learningsBlock : null,
       "Infra failures (ECONNREFUSED / unreachable runtime services) are NOT app bugs — do not invent bring-up scripts; stop and report.",
+      "Do NOT symlink node_modules (or any dependency directory) into the worktree — run the project's package-manager install (e.g. pnpm install) in the worktree instead. A symlinked node_modules becomes a self-referential loop after merge.",
       "Obey Change Intent uiMount: do not move interactive forms away from the locked mount; do not replace fillable UI with chips only.",
     ]
       .filter(Boolean)
@@ -9978,11 +9990,25 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
           } catch (error) {
             const message =
               error instanceof Error ? error.message : String(error);
+            // If the merge already landed (lastMergeInfo.autoMerged), a
+            // post-merge step (stash restore / file sync / env overlay) threw.
+            // Don't report the merge as failed — keep autoMerged so
+            // retry_root_verify can proceed, and label the step post-merge.
+            const mergeSucceeded = lastMergeInfo.autoMerged;
             const mergeThrow: SuccessCheckStep = {
-              name: "auto-merge",
+              name: mergeSucceeded ? "post-merge" : "auto-merge",
               exitCode: 1,
-              output: `Auto-merge threw: ${message}`,
+              output: mergeSucceeded
+                ? `Post-merge step threw after a successful merge (${(lastMergeInfo.commit ?? "").slice(0, 8)}): ${message}`
+                : `Auto-merge threw: ${message}`,
             };
+            if (mergeSucceeded) {
+              log(
+                project,
+                run,
+                `--- Merge succeeded but a post-merge step threw: ${message} ---`,
+              );
+            }
             checks = {
               ok: false,
               output: `${checks.output}\n\n${mergeThrow.output}`,

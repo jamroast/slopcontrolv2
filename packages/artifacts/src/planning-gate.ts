@@ -44,7 +44,7 @@ ${opts.issues.map((i) => `- ${i}`).join("\n")}
 ${alignBlock}${intentBlockRepair}
 ${opts.intentBlock}
 ${PLANNING_AUTOMATED_CHECKS_RULES}
-Rewrite the FULL PHASE.md starting with # Title — output ONLY the markdown document (no "here is what changed").
+Rewrite the FULL PHASE.md starting with \`# Phase …\` — output ONLY the markdown document (no "here is what changed").
 If you use write_file, path must be exactly: ${opts.canonicalPath}
 Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence), ## Blueprint Deltas.
 Base Scope/File Changes ONLY on the RESEARCH below — do not copy a prior phase's plan.

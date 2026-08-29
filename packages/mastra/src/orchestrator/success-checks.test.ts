@@ -323,10 +323,10 @@ describe("runSuccessChecks", () => {
       );
       assert.equal(result.ok, true, result.output);
       assert.ok(
-        calls.includes("pnpm install --frozen-lockfile"),
+        calls.includes("CI=1 pnpm install --frozen-lockfile"),
         `expected pnpm install before build, got: ${calls.join(" | ")}`,
       );
-      const installIdx = calls.indexOf("pnpm install --frozen-lockfile");
+      const installIdx = calls.indexOf("CI=1 pnpm install --frozen-lockfile");
       const buildIdx = calls.indexOf("npm run build");
       assert.ok(
         installIdx >= 0 && buildIdx > installIdx,
@@ -372,7 +372,7 @@ describe("runSuccessChecks", () => {
       );
       assert.equal(result.ok, true, result.output);
       assert.ok(
-        calls.includes("pnpm install --frozen-lockfile"),
+        calls.includes("CI=1 pnpm install --frozen-lockfile"),
         `expected pnpm install, got: ${calls.join(" | ")}`,
       );
     } finally {
