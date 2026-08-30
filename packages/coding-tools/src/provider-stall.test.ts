@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  isCodingSessionTurnFault,
+  isEmptyCodingTurnOutput,
   isProductiveTurnTimeout,
+  isSessionExpirySignal,
   isStallAbortReason,
   shouldRecreateCodingSession,
   TURN_BUDGET_YIELD,
@@ -44,6 +47,56 @@ describe("sticky coding session / soft budget", () => {
     assert.equal(
       shouldRecreateCodingSession("probe abuse: curl cloud", []),
       true,
+    );
+  });
+
+  it("detects session-expiry signals in coding turn output", () => {
+    assert.equal(
+      isSessionExpirySignal("404: Session not found (unknown)"),
+      true,
+    );
+    assert.equal(
+      isSessionExpirySignal(
+        "The session has expired. Please start a new session to continue.",
+      ),
+      true,
+    );
+    assert.equal(isSessionExpirySignal("session expired"), true);
+    assert.equal(
+      isSessionExpirySignal("Implemented globalSetup in vitest.config.ts"),
+      false,
+    );
+    assert.equal(isSessionExpirySignal(""), false);
+    assert.equal(isSessionExpirySignal(null), false);
+  });
+
+  it("detects empty coding turn output", () => {
+    assert.equal(isEmptyCodingTurnOutput(""), true);
+    assert.equal(isEmptyCodingTurnOutput("   \n"), true);
+    assert.equal(isEmptyCodingTurnOutput(null), true);
+    assert.equal(isEmptyCodingTurnOutput("created tests/global-setup.ts"), false);
+  });
+
+  it("classifies coding session turn faults", () => {
+    assert.equal(
+      isCodingSessionTurnFault("404: Session not found (unknown)", {
+        touchedPlannedPath: true,
+      }),
+      true,
+    );
+    assert.equal(
+      isCodingSessionTurnFault("", { touchedPlannedPath: false }),
+      true,
+    );
+    assert.equal(
+      isCodingSessionTurnFault("", { touchedPlannedPath: true }),
+      false,
+    );
+    assert.equal(
+      isCodingSessionTurnFault("implemented global-setup.ts", {
+        touchedPlannedPath: false,
+      }),
+      false,
     );
   });
 });

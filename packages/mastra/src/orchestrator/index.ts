@@ -271,6 +271,8 @@ import {
   formatInvestigateDirtyTree,
   isLogoAssetBrief,
   isStallAbortReason,
+  isCodingSessionTurnFault,
+  isSessionExpirySignal,
   listWorktreeChangedFiles,
   mergePhaseWorktree,
   removePhaseWorktree,
@@ -8738,6 +8740,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     let stallStrikeCount = 0;
     let infraStrikeCount = 0;
     let diagnosisStreak = 0;
+    let codingSessionFaultRetryCount = 0;
     let lastDiagnosisFingerprint = "";
     let lastErrorHash = "";
     let lastErrorCount = Number.POSITIVE_INFINITY;
@@ -8745,6 +8748,8 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     let lastFailWasPostMergeRootVerify = false;
     let worktreeFullGatePassed = false;
     let lastContinueWasJudgeExtension = false;
+    let lastContinueWasSessionFaultRetry = false;
+    let lastIterationZeroPlanProgress = false;
     let lastJudgeSteering: DevelopJudgeVerdict | null = null;
     let judgeExtensionCount = 0;
     // Bounded judge authority: the pre-merge judge may force at most one
@@ -8753,6 +8758,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     const allChangedFiles = new Set<string>();
     const MAX_DIAGNOSIS_STREAK = 3;
     const MAX_STALL_STRIKES = 3;
+    const MAX_CODING_SESSION_FAULT_RETRIES = 3;
     let phaseChecksSelfHealCount = 0;
     let pendingFailureDiagnosis: FailureDiagnosis | null = null;
     const developDesignRoutingNote =
@@ -9015,6 +9021,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
           !lastAbortWasProductiveTimeout &&
           !lastFailWasPostMergeRootVerify &&
           !lastContinueWasJudgeExtension &&
+          !lastContinueWasSessionFaultRetry &&
           !lastIterationHadFileChanges &&
           lastErrorHash
         ) {
@@ -9038,6 +9045,10 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
             });
           }
           continue;
+        }
+
+        if (lastContinueWasSessionFaultRetry) {
+          lastContinueWasSessionFaultRetry = false;
         }
 
         // Re-sync gitignored env into worktree each iteration (keys live on root).
@@ -9092,7 +9103,11 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         );
 
         if (needsFreshSession) {
-          log(project, run, `--- Recreating ${sessionOwner.id} session after abort/fetch failure ---`);
+          log(
+            project,
+            run,
+            `--- Recreating ${sessionOwner.id} coding session (session-fault retry / prior abort) ---`,
+          );
           await sessionOwner.abort(session).catch(() => undefined);
           const fresh = await createCodingSessionWithRetry();
           if (!fresh) {
@@ -9249,6 +9264,50 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
 
         log(project, run, codingResult.output);
 
+        const earlyGitChanged = listWorktreeChangedFiles(worktree.path);
+        const earlySessionChanged = await sessionOwner.getChangedFiles(session);
+        const earlyChanged = [
+          ...new Set([...earlySessionChanged, ...earlyGitChanged].filter(Boolean)),
+        ];
+        const earlyPlanProgress = evaluatePlanProgress(phaseDoc, earlyChanged);
+        const touchedPlannedPath = earlyPlanProgress.covered.length > 0;
+
+        // Expired coding-agent session or empty turn with no planned-path
+        // edits — orchestrator/session fault, not a product failure. Recreate
+        // session, retry without verify, and do not advance diagnosis streak.
+        if (
+          isCodingSessionTurnFault(codingResult.output, { touchedPlannedPath })
+        ) {
+          codingSessionFaultRetryCount += 1;
+          const faultKind = isSessionExpirySignal(codingResult.output)
+            ? "session expired"
+            : "empty turn (no planned-path edits)";
+          log(
+            project,
+            run,
+            `--- Coding session fault: ${faultKind} (${codingSessionFaultRetryCount}/${MAX_CODING_SESSION_FAULT_RETRIES}); recreating and retrying ---`,
+          );
+          if (codingSessionFaultRetryCount >= MAX_CODING_SESSION_FAULT_RETRIES) {
+            appendAppendix(
+              project.rootPath,
+              phase.id,
+              `## Iteration ${iteration} — coding session fault repeatedly\n\n` +
+                `The coding agent hit ${codingSessionFaultRetryCount} consecutive session faults (${faultKind}). ` +
+                `The coding session is not surviving across turns. Check the coding provider / model endpoint, then retry_development.`,
+            );
+            log(project, run, COMPLETION_TOKENS.DEV_BLOCKED);
+            writePhaseStatus(project.rootPath, phase.id, "blocked");
+            return finishDevelop("blocked", {
+              worktreePath: worktree.path,
+              worktreeBranch: worktree.branch,
+            });
+          }
+          needsFreshSession = true;
+          lastContinueWasSessionFaultRetry = true;
+          lastIterationHadFileChanges = false;
+          continue;
+        }
+
         const probe = codingResult.abortReason || null;
         if (codingResult.aborted || probe) {
           const reason = probe || codingResult.abortReason || "coding turn aborted";
@@ -9367,12 +9426,11 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
         }
 
         stallStrikeCount = 0;
+        codingSessionFaultRetryCount = 0;
 
-        const sessionChanged = await sessionOwner.getChangedFiles(session);
-        const gitChanged = listWorktreeChangedFiles(worktree.path);
-        const changed = [
-          ...new Set([...sessionChanged, ...gitChanged].filter(Boolean)),
-        ];
+        const sessionChanged = earlySessionChanged;
+        const gitChanged = earlyGitChanged;
+        const changed = earlyChanged;
         lastIterationHadFileChanges = changed.length > 0;
         if (changed.length > 0) {
           log(project, run, `Changed files: ${changed.join(", ")}`);
@@ -9402,7 +9460,9 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
           }
         }
 
-        const planProgress = evaluatePlanProgress(phaseDoc, changed);
+        const planProgress = earlyPlanProgress;
+        lastIterationZeroPlanProgress =
+          planProgress.plannedPaths.length > 0 && planProgress.covered.length === 0;
         if (planProgress.plannedPaths.length > 0) {
           writeCheckReport(
             project.rootPath,
@@ -10429,26 +10489,34 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
           }
         }
 
-        if (diagnosis.fingerprint === lastDiagnosisFingerprint) {
+        if (lastIterationZeroPlanProgress) {
+          log(
+            project,
+            run,
+            "--- Verify failed with 0 planned paths touched — not advancing product diagnosis streak ---",
+          );
+        } else if (diagnosis.fingerprint === lastDiagnosisFingerprint) {
           diagnosisStreak += 1;
         } else {
           diagnosisStreak = 1;
           lastDiagnosisFingerprint = diagnosis.fingerprint;
         }
 
-        // Informational: how often has this fingerprint appeared across runs?
-        // Does not change block behavior — the streak guard above owns that.
-        {
-          const history = await this.diagnosisHistory(project.id);
-          const seenBefore = history.filter((line) =>
-            line.includes(`[${diagnosis.fingerprint}]`),
-          ).length;
-          if (seenBefore > 0) {
-            log(
-              project,
-              run,
-              `--- Diagnosis fp=${diagnosis.fingerprint} seen ${seenBefore} time(s) before across runs ---`,
-            );
+        if (!lastIterationZeroPlanProgress) {
+          // Informational: how often has this fingerprint appeared across runs?
+          // Does not change block behavior — the streak guard above owns that.
+          {
+            const history = await this.diagnosisHistory(project.id);
+            const seenBefore = history.filter((line) =>
+              line.includes(`[${diagnosis.fingerprint}]`),
+            ).length;
+            if (seenBefore > 0) {
+              log(
+                project,
+                run,
+                `--- Diagnosis fp=${diagnosis.fingerprint} seen ${seenBefore} time(s) before across runs ---`,
+              );
+            }
           }
         }
 

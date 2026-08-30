@@ -52,6 +52,40 @@ export const STALL_ABORT_REASONS = new Set([
 /** Soft wall-clock yield — session stays sticky; not a stall strike. */
 export const TURN_BUDGET_YIELD = "turn_budget_yield";
 
+const SESSION_EXPIRY_RE =
+  /session\s+(?:not\s+found|has\s+expired|expired)|404[\s:]+session\s+not\s+found/i;
+
+/**
+ * True when a coding turn's output is a session-expiry signal (e.g. pi /
+ * OpenCode `404: Session not found` / "session has expired") rather than real work.
+ */
+export function isSessionExpirySignal(
+  text: string | null | undefined,
+): boolean {
+  if (!text) return false;
+  return SESSION_EXPIRY_RE.test(text);
+}
+
+/** True when the model returned no usable assistant text for the turn. */
+export function isEmptyCodingTurnOutput(
+  text: string | null | undefined,
+): boolean {
+  return !text?.trim();
+}
+
+/**
+ * Coding-session fault on a develop turn — expired agent session or empty output
+ * with no planned-path edits. Not the project's test/verify harness; caller
+ * passes whether any ## File Changes path was touched.
+ */
+export function isCodingSessionTurnFault(
+  output: string | null | undefined,
+  opts: { touchedPlannedPath: boolean },
+): boolean {
+  if (isSessionExpirySignal(output)) return true;
+  return isEmptyCodingTurnOutput(output) && !opts.touchedPlannedPath;
+}
+
 export function isStallAbortReason(reason: string | null | undefined): boolean {
   if (!reason) return false;
   if (reason === TURN_BUDGET_YIELD) return false;
