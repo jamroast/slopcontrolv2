@@ -9,8 +9,11 @@ import {
   recallDiagnosisHistory,
 } from "./diagnosis-memory.js";
 import {
+  appendGlobalKnowledge,
   appendProjectKnowledge,
+  globalKnowledgeThreadId,
   projectKnowledgeThreadId,
+  recallGlobalKnowledge,
   recallProjectKnowledge,
 } from "./project-knowledge.js";
 
@@ -168,5 +171,40 @@ describe("project knowledge memory", () => {
       await recallProjectKnowledge({ memory: undefined, projectId: "p1" }),
       "",
     );
+  });
+});
+
+describe("global knowledge memory", () => {
+  it("appendGlobalKnowledge writes to the global thread/resource", async () => {
+    const saved: Array<{ threadId: string; resourceId: string; content: { parts: Array<{ text: string }> } }> = [];
+    const memory = fakeMemory({ saved: saved as never[] });
+    await appendGlobalKnowledge({
+      memory,
+      items: ["Use glm-5.2 for research", "Adopt estate→org tenancy"],
+    });
+    assert.equal(saved.length, 2);
+    assert.equal(saved[0]?.threadId, globalKnowledgeThreadId());
+    assert.equal(saved[0]?.resourceId, "global");
+    assert.match(saved[1]?.content.parts[0]?.text ?? "", /estate→org/);
+  });
+
+  it("recallGlobalKnowledge dedupes and returns most recent first", async () => {
+    const memory = fakeMemory({
+      recallMessages: [
+        { role: "assistant", content: { parts: [{ type: "text", text: "decision-a" }] } },
+        { role: "assistant", content: { parts: [{ type: "text", text: "decision-b" }] } },
+        { role: "assistant", content: { parts: [{ type: "text", text: "decision-a" }] } },
+      ],
+    });
+    const block = await recallGlobalKnowledge({ memory });
+    assert.equal(block, "- decision-a\n- decision-b");
+  });
+
+  it("recallGlobalKnowledge returns empty on failure or no memory", async () => {
+    assert.equal(
+      await recallGlobalKnowledge({ memory: fakeMemory({ throwOnRecall: true }) }),
+      "",
+    );
+    assert.equal(await recallGlobalKnowledge({ memory: undefined }), "");
   });
 });

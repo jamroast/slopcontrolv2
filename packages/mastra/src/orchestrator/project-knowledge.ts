@@ -6,6 +6,11 @@ export function projectKnowledgeThreadId(projectId: string): string {
   return `project-knowledge-${projectId}`;
 }
 
+/** Global (cross-project) knowledge thread — durable design decisions from global chat. */
+export function globalKnowledgeThreadId(): string {
+  return "global-knowledge";
+}
+
 function toMemoryMessage(opts: {
   role: "user" | "assistant";
   text: string;
@@ -63,6 +68,34 @@ export async function appendProjectKnowledge(opts: {
 }
 
 /**
+ * Append durable design decisions / notes to the global knowledge thread.
+ * Fire-and-forget — survives the global chat's finite message window.
+ */
+export async function appendGlobalKnowledge(opts: {
+  memory: Memory | undefined;
+  items: string[];
+}): Promise<void> {
+  if (!opts.memory || opts.items.length === 0) return;
+  try {
+    await opts.memory.saveMessages({
+      messages: opts.items
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((text) =>
+          toMemoryMessage({
+            role: "assistant",
+            text: text.slice(0, 500),
+            threadId: globalKnowledgeThreadId(),
+            resourceId: "global",
+          }),
+        ),
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
  * Recall accumulated project knowledge as a prompt block. Prefers the OM
  * summary when available; falls back to the most recent items. Returns ""
  * on any failure — the block is additive, never load-bearing.
@@ -89,6 +122,44 @@ export async function recallProjectKnowledge(opts: {
     }
     if (lines.length === 0) return "";
     // Dedupe while preserving order, most recent first
+    const seen = new Set<string>();
+    const unique: string[] = [];
+    for (const line of lines.reverse()) {
+      if (seen.has(line)) continue;
+      seen.add(line);
+      unique.push(line);
+      if (unique.length >= limit) break;
+    }
+    return unique.map((line) => `- ${line}`).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Recall accumulated global (cross-project) knowledge as a prompt block.
+ * Prefers the OM summary when available; falls back to recent items.
+ */
+export async function recallGlobalKnowledge(opts: {
+  memory: Memory | undefined;
+  limit?: number;
+}): Promise<string> {
+  if (!opts.memory) return "";
+  const limit = opts.limit ?? 20;
+  try {
+    const recalled = await opts.memory.recall({
+      threadId: globalKnowledgeThreadId(),
+      resourceId: "global",
+      perPage: false,
+    });
+    const lines: string[] = [];
+    for (const row of recalled.messages ?? []) {
+      const msg = row as { role?: string; content?: unknown };
+      if (msg.role !== "assistant") continue;
+      const text = extractText(msg.content);
+      if (text) lines.push(text);
+    }
+    if (lines.length === 0) return "";
     const seen = new Set<string>();
     const unique: string[] = [];
     for (const line of lines.reverse()) {

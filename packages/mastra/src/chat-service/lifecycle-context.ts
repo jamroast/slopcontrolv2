@@ -90,6 +90,12 @@ ${lines.join("\n")}
 The operator's next message is classified as confirm or deny of a parked action (or as unrelated). If they authorized it, the action may already have been dispatched before this turn. Never tell them to approve in a dashboard or other SlopControl UI.`;
 }
 
+export const CHAT_INTERNET_RESEARCH_PROMPT = `## Internet research
+You have web_search and fetch_url for current vendor docs, model catalogs, and API differences. Prefer repo and lifecycle tools first; use web_search/fetch_url when validating stack/vendor claims against current docs. Cite returned URLs.`;
+
+export const CHAT_GLOBAL_DECISIONS_PROMPT = `## Durable decisions
+When the operator settles a design choice, model binding, or cross-project convention, call archive_decision with a one-line note so it survives this chat's finite history. Do not archive every message — only decisions worth keeping for later phases.`;
+
 export function buildProjectChatPrompt(opts: {
   project: Project;
   deps: ChatContextDeps;
@@ -122,6 +128,8 @@ ${LIFECYCLE_CONTRACT}
 
 ## Your role
 Help the operator manage THIS project: answer questions, draft high-quality asks and task definitions, review run/phase state, and drive the lifecycle with the curated tools. Prefer reading state (list_phases, get_run, get_operator_suggestions, ask) before proposing actions. For "why is this broken" / inspect-the-code questions, call ask — not gated agent. When the operator describes work, draft the ask text for them — precise, scoped, with success criteria — then offer to submit it.
+
+${CHAT_INTERNET_RESEARCH_PROMPT}
 
 ## Live project state
 Open phases (${activePhases.length}):
@@ -266,6 +274,10 @@ ${crossProjectPlaybook}
 
 ## Your role (global scope)
 Cross-project oversight: check health, inspect any project's phases/runs (pass its projectId explicitly), draft asks, run design loops, publish libraries, and drive work on whichever project needs it — all from this chat. Do not tell the operator to open a different chat or switch scope unless they explicitly ask for a fresh conversation thread. Drive publish→consume→develop pipelines with the tools above — do not tell the operator to run manual npm publish unless a tool failed. You also manage model configuration: chat_models_list shows each function (research, coding, classification, ask, agent, judge, …), its current model, and the models providers advertise. Use chat_function_bind to map a function to a model (creates the endpoint mapping if it is missing). chat_model_set only overrides this conversation.
+
+${CHAT_INTERNET_RESEARCH_PROMPT}
+
+${CHAT_GLOBAL_DECISIONS_PROMPT}
 
 ## Projects (${projects.length})
 ${lines.join("\n") || "- (none registered)"}${formatPendingConfirmPrompt(opts.pendingActions ?? [])}`;

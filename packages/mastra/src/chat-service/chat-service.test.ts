@@ -216,6 +216,9 @@ describe("chat tool allowlist", () => {
   it("classifies free, gated, and excluded tools", () => {
     assert.equal(chatToolTier("wait_for_run"), "free");
     assert.equal(chatToolTier("ask"), "free");
+    assert.equal(chatToolTier("web_search"), "free");
+    assert.equal(chatToolTier("fetch_url"), "free");
+    assert.equal(chatToolTier("archive_decision"), "free");
     assert.equal(chatToolTier("promote_ask"), "gated");
     assert.equal(chatToolTier("start_development"), "gated");
     assert.equal(chatToolTier("submit_review"), "gated");
@@ -245,6 +248,74 @@ describe("chat tool allowlist", () => {
         "Do not use this to read source",
       ),
     );
+  });
+
+  it("archive_decision appends to global knowledge via the callback", async () => {
+    const appended: string[] = [];
+    const tools = buildChatTools({
+      dispatch: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      conversationId: "c1",
+      projectId: null,
+      requestConfirmation: () => ({ token: "t" }),
+      appendGlobalKnowledge: async (items) => {
+        appended.push(...items);
+      },
+    });
+    const result = await tools.archive_decision!.execute!(
+      { note: "Use glm-5.2 for research" },
+      undefined as never,
+    );
+    assert.deepEqual(appended, ["Use glm-5.2 for research"]);
+    assert.match(String(result), /Recorded decision/);
+  });
+
+  it("archive_decision fails without appendGlobalKnowledge callback", async () => {
+    const tools = buildChatTools({
+      dispatch: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      conversationId: "c1",
+      projectId: null,
+      requestConfirmation: () => ({ token: "t" }),
+    });
+    const result = await tools.archive_decision!.execute!(
+      { note: "Should not persist" },
+      undefined as never,
+    );
+    assert.match(String(result), /unavailable/);
+  });
+
+  it("project-scope chat exposes web_search but not archive_decision", async () => {
+    const tools = buildChatTools({
+      dispatch: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      conversationId: "c1",
+      projectId: "p1",
+      requestConfirmation: () => ({ token: "t" }),
+      appendGlobalKnowledge: async () => {},
+    });
+    assert.ok(tools.web_search);
+    assert.equal(tools.archive_decision, undefined);
+  });
+
+  it("web_search executes via web-tools and surfaces provider errors", async () => {
+    const prevOllama = process.env.OLLAMA_API_KEY;
+    const prevExa = process.env.EXA_API_KEY;
+    delete process.env.OLLAMA_API_KEY;
+    delete process.env.EXA_API_KEY;
+    try {
+      const tools = buildChatTools({
+        dispatch: async () => ({ content: [{ type: "text", text: "ok" }] }),
+        conversationId: "c1",
+        projectId: null,
+        requestConfirmation: () => ({ token: "t" }),
+      });
+      const result = await tools.web_search!.execute!(
+        { query: "vitest globalSetup" },
+        undefined as never,
+      );
+      assert.match(String(result), /ERROR: web_search failed/);
+    } finally {
+      if (prevOllama !== undefined) process.env.OLLAMA_API_KEY = prevOllama;
+      if (prevExa !== undefined) process.env.EXA_API_KEY = prevExa;
+    }
   });
 
   it("pins projectId for project-scope conversations", async () => {

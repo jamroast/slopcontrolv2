@@ -37,7 +37,11 @@ import {
   askProgressFromStreamChunk,
   decideNarrationSynthesis,
 } from "../orchestrator/ask-stream.js";
-import { recallProjectKnowledge } from "../orchestrator/project-knowledge.js";
+import {
+  appendGlobalKnowledge,
+  recallGlobalKnowledge,
+  recallProjectKnowledge,
+} from "../orchestrator/project-knowledge.js";
 import { isPromptTooLongError } from "../supervisor-enrich.js";
 import {
   buildChatTools,
@@ -3086,6 +3090,9 @@ export class ChatService {
           projectId: conversation.projectId,
         })
       : "";
+    const globalKnowledge = conversation.projectId
+      ? ""
+      : await recallGlobalKnowledge({ memory: this.deps.getMemory() });
     const planLatch = this.resolvePlanLatch(
       conversation.id,
       conversation.projectId,
@@ -3115,7 +3122,13 @@ export class ChatService {
             deps: this.deps.context,
             pendingActions,
           })
-    ).concat(planLatchBlock, designLatchBlock);
+    ).concat(
+      globalKnowledge
+        ? `\n\n## Global knowledge (durable decisions from prior global chats)\n${globalKnowledge}`
+        : "",
+      planLatchBlock,
+      designLatchBlock,
+    );
 
     const tools = buildChatTools({
       dispatch: (name, args) => {
@@ -3145,6 +3158,11 @@ export class ChatService {
         if (isError || name !== "wait_for_run") return;
         this.maybeWatchFromWaitForRun(conversation, rawText);
       },
+      appendGlobalKnowledge: (items) =>
+        appendGlobalKnowledge({
+          memory: this.deps.getMemory(),
+          items,
+        }),
     });
 
     const agent = new Agent({

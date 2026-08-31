@@ -2,6 +2,12 @@ import { createTool } from "@mastra/core/tools";
 import { isBusyRunStage } from "@slopcontrol/types";
 import { z } from "zod";
 import type { ChatToolDispatch, ChatToolResult } from "./types.js";
+import {
+  fetchUrlContent,
+  webSearch,
+  type FetchUrlResult,
+  type WebSearchResult,
+} from "../tools/web-tools.js";
 
 /**
  * Curated chat-tool surface over the SlopControl tool dispatch.
@@ -58,6 +64,14 @@ export const CHAT_FREE_TOOLS: ReadonlySet<string> = new Set([
   // conversational
   "ask",
   "ask_sub_research",
+  // internet research (read-only, direct execution)
+  "web_search",
+  "fetch_url",
+]);
+
+/** Free tools registered only for global-scope conversations (projectId null). */
+export const CHAT_GLOBAL_ONLY_FREE_TOOLS: ReadonlySet<string> = new Set([
+  "archive_decision",
 ]);
 
 export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
@@ -129,15 +143,31 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
 export type ChatToolTier = "free" | "gated" | "excluded";
 
 export function chatToolTier(name: string): ChatToolTier {
-  if (CHAT_FREE_TOOLS.has(name)) return "free";
+  if (CHAT_FREE_TOOLS.has(name) || CHAT_GLOBAL_ONLY_FREE_TOOLS.has(name)) {
+    return "free";
+  }
   if (CHAT_GATED_TOOLS.has(name)) return "gated";
   return "excluded";
 }
 
-export function listChatToolNames(): { free: string[]; gated: string[] } {
+/** Free tool names exposed for a conversation scope. */
+export function chatFreeToolsForScope(projectId: string | null): string[] {
+  const names = [...CHAT_FREE_TOOLS];
+  if (projectId === null) {
+    for (const name of CHAT_GLOBAL_ONLY_FREE_TOOLS) names.push(name);
+  }
+  return names;
+}
+
+export function listChatToolNames(): {
+  free: string[];
+  gated: string[];
+  globalOnly: string[];
+} {
   return {
     free: [...CHAT_FREE_TOOLS].sort(),
     gated: [...CHAT_GATED_TOOLS].sort(),
+    globalOnly: [...CHAT_GLOBAL_ONLY_FREE_TOOLS].sort(),
   };
 }
 
@@ -204,6 +234,16 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     askId: z.string().min(1).optional(),
     topics: z.array(z.string().min(1)).min(1),
     projectId: optionalProject,
+  }),
+  web_search: z.object({
+    query: z.string().min(1),
+    numResults: z.number().int().min(1).max(10).default(5),
+  }),
+  fetch_url: z.object({
+    url: z.string().url(),
+  }),
+  archive_decision: z.object({
+    note: z.string().min(1),
   }),
   promote_ask: z.object({
     askId: z.string().min(1).optional(),
@@ -476,6 +516,12 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Raw npm publish only (no build). Pass packageDir OR projectId+packagePath. Prefer project_workspace_package_publish for nested packages.",
   stop_session:
     "Interrupt a live ask/agent/design_loop/plan_loop turn. Requires kind and id.",
+  web_search:
+    "Search the public web (Ollama Cloud when OLLAMA_API_KEY is set, else Exa when EXA_API_KEY is set). Use for current vendor docs, model catalogs, API differences. Prefer repo tools first; cite returned URLs.",
+  fetch_url:
+    "Fetch a public https:// URL and return truncated text (HTML stripped). Use for vendor docs, GitHub raw, API references. No Authorization headers; blocked for localhost/private IPs.",
+  archive_decision:
+    "Record a durable design decision / architectural note from this global chat into the global knowledge store (survives the finite chat history). Use when the operator settles a design choice, model binding, or cross-project convention worth keeping.",
 };
 
 function toolInputSchema(name: string): z.ZodType {
@@ -926,6 +972,23 @@ export function formatChatDispatchResult(
   return clipChatToolText(prefixed, max);
 }
 
+function formatWebSearchResult(result: WebSearchResult): string {
+  if (!result.ok) {
+    return `ERROR: web_search failed: ${result.error ?? "unknown error"}`;
+  }
+  const hits = (result.results ?? [])
+    .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
+    .join("\n");
+  return hits || "No results.";
+}
+
+function formatFetchUrlResult(result: FetchUrlResult): string {
+  if (!result.ok) {
+    return `ERROR: fetch_url failed: ${result.error ?? "unknown error"}`;
+  }
+  return result.text ?? "(empty response)";
+}
+
 /**
  * Build the Mastra tool set for one conversation. Project-scope
  * conversations get projectId pinned (agent cannot cross projects);
@@ -950,6 +1013,8 @@ export function buildChatTools(opts: {
     rawText: string,
     isError: boolean,
   ) => void;
+  /** Persist a durable global-chat decision (archive_decision tool). */
+  appendGlobalKnowledge?: (items: string[]) => Promise<void>;
 }) {
   const { dispatch, projectId } = opts;
   const tools: Record<string, ReturnType<typeof createTool>> = {};
@@ -957,7 +1022,7 @@ export function buildChatTools(opts: {
   const withPinnedProject = (args: Record<string, unknown>) =>
     projectId ? { ...args, projectId } : args;
 
-  for (const name of CHAT_FREE_TOOLS) {
+  for (const name of chatFreeToolsForScope(projectId)) {
     tools[name] = createTool({
       id: name,
       description: toolDescription(name, false),
@@ -966,6 +1031,33 @@ export function buildChatTools(opts: {
         const args = withPinnedProject(
           (input ?? {}) as Record<string, unknown>,
         );
+        // Internet research tools execute directly (not via MCP dispatch).
+        if (name === "web_search") {
+          const result = await webSearch(String(args.query ?? ""), {
+            numResults: Number(args.numResults ?? 5),
+          });
+          return clipChatToolText(formatWebSearchResult(result));
+        }
+        if (name === "fetch_url") {
+          const result = await fetchUrlContent(String(args.url ?? ""));
+          return clipChatToolText(formatFetchUrlResult(result));
+        }
+        if (name === "archive_decision") {
+          const note = String(args.note ?? "").trim();
+          if (!note) return "ERROR: archive_decision requires note";
+          if (projectId !== null) {
+            return "ERROR: archive_decision is only available in global chat";
+          }
+          if (!opts.appendGlobalKnowledge) {
+            return "ERROR: archive_decision is unavailable (global knowledge store not configured)";
+          }
+          try {
+            await opts.appendGlobalKnowledge([note]);
+            return "Recorded decision in global knowledge.";
+          } catch (error) {
+            return `ERROR: archive_decision failed: ${error instanceof Error ? error.message : String(error)}`;
+          }
+        }
         // reconcile_blueprint is only free as a dry-run preview.
         if (name === "reconcile_blueprint") args.dryRun = true;
         const result = await dispatch(name, args);

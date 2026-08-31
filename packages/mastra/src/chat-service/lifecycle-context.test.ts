@@ -86,6 +86,8 @@ describe("chat lifecycle prompt", () => {
     assert.ok(prompt.includes("project_workspace_package_publish"));
     assert.ok(prompt.includes("Proceedable runs"));
     assert.ok(!prompt.includes("chat_endpoint_model_update"));
+    assert.ok(prompt.includes("web_search"));
+    assert.ok(prompt.includes("archive_decision"));
   });
 });
 
@@ -120,6 +122,13 @@ describe("project knowledge in chat prompt", () => {
     assert.ok(!blank.includes("## Project knowledge"));
     const missing = buildProjectChatPrompt({ project, deps: emptyDeps });
     assert.ok(!missing.includes("## Project knowledge"));
+  });
+
+  it("includes internet research guidance in project chat prompt", () => {
+    const prompt = buildProjectChatPrompt({ project, deps: emptyDeps });
+    assert.ok(prompt.includes("web_search"));
+    assert.ok(prompt.includes("fetch_url"));
+    assert.ok(!prompt.includes("archive_decision"));
   });
 
   it("builds the publish-path playbook from the registered projects, not hardcoded names", () => {
