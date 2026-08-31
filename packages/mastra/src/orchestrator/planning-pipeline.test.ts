@@ -3,8 +3,11 @@ import { describe, it } from "node:test";
 import {
   faultLegFromPhaseQualityVerdict,
   isPlanningJudgeInfraIssue,
+  isIntentEngagementContradiction,
   mergeFaultLegs,
+  planningGateIssueFingerprint,
   shouldContinuePlanningSelfHeal,
+  shouldReclassifyIntentForPlanningSelfHeal,
   MAX_PLANNING_SELF_HEAL_ROUNDS,
   callPlanningJudgeWithInfraRetry,
   PlanningJudgeInfraError,
@@ -139,5 +142,59 @@ describe("planning-pipeline", () => {
     );
     assert.equal(judgeInfraFailed, true);
     assert.deepEqual(result.gaps, ["LLM judge failed"]);
+  });
+
+  it("planningGateIssueFingerprint is stable for equivalent issue sets", () => {
+    const a = planningGateIssueFingerprint([
+      "No fill+submit proof at page mount",
+      "Spec-only phase",
+    ]);
+    const b = planningGateIssueFingerprint([
+      "  Spec-only phase  ",
+      "No fill+submit proof at page mount",
+    ]);
+    assert.equal(a, b);
+    assert.notEqual(a, "");
+  });
+
+  it("isIntentEngagementContradiction detects spec description vs fill+submit gate", () => {
+    assert.equal(
+      isIntentEngagementContradiction({
+        gateIssues: ["No fill+submit proof at the page mount"],
+        description: "Specify the foundation end-user authentication layer",
+      }),
+      true,
+    );
+    assert.equal(
+      isIntentEngagementContradiction({
+        gateIssues: ["Missing ## Scope section"],
+        description: "Specify the auth layer",
+      }),
+      false,
+    );
+  });
+
+  it("shouldReclassifyIntentForPlanningSelfHeal after repeated engagement faults", () => {
+    const issues = ["No fill+submit proof at the page mount"];
+    const fp = planningGateIssueFingerprint(issues);
+    assert.equal(
+      shouldReclassifyIntentForPlanningSelfHeal({
+        gateIssues: issues,
+        description: "Build the sign-up form",
+        priorGateFingerprints: [fp],
+        round: 1,
+      }),
+      true,
+    );
+    assert.equal(
+      shouldReclassifyIntentForPlanningSelfHeal({
+        gateIssues: issues,
+        description: "Build the sign-up form",
+        priorGateFingerprints: [],
+        round: 0,
+      }),
+      false,
+      "first round should not reclassify on repetition alone",
+    );
   });
 });

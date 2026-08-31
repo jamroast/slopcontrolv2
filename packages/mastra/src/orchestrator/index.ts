@@ -334,6 +334,8 @@ import {
   planningJudgeErrorDetail,
   faultLegFromPhaseQualityVerdict,
   shouldContinuePlanningSelfHeal,
+  planningGateIssueFingerprint,
+  shouldReclassifyIntentForPlanningSelfHeal,
 } from "./planning-pipeline.js";
 import {
   ASK_SYNTHESIS_PROMPT_PREFIX,
@@ -5540,6 +5542,8 @@ ${message.trim()}`;
   }): Promise<RunStage> {
     const { project, phase, run, onStage, listProjects } = input;
     let faultLeg: PlanningFaultLeg = "none";
+    let priorGateFingerprints: string[] = [];
+    let intentReclassified = false;
 
     for (let round = 0; round < MAX_PLANNING_SELF_HEAL_ROUNDS; round++) {
       if (round > 0) {
@@ -5605,6 +5609,40 @@ ${message.trim()}`;
       if (stage === "in_review") return "in_review";
 
       const outcome = this.planningGateOutcome;
+      const gateFp = planningGateIssueFingerprint(outcome.issues);
+      const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+
+      if (
+        !intentReclassified &&
+        shouldReclassifyIntentForPlanningSelfHeal({
+          gateIssues: outcome.issues,
+          phaseDocExcerpt: phaseDoc,
+          description: phase.description,
+          priorGateFingerprints,
+          round,
+        })
+      ) {
+        log(
+          project,
+          run,
+          "--- Planning self-heal: re-classifying Change Intent (engagement/spec contradiction or repeated fill+submit fault) ---",
+        );
+        await ensureChangeIntentAsync(
+          project.rootPath,
+          phase.id,
+          phase.description,
+          { registry: this.ctx.registry, force: true },
+        );
+        intentReclassified = true;
+        priorGateFingerprints = [];
+        deleteRunDiagnosis(project.rootPath, run.id, phase.id);
+        faultLeg = "draft";
+        round--;
+        continue;
+      }
+
+      if (gateFp) priorGateFingerprints.push(gateFp);
+
       if (
         shouldContinuePlanningSelfHeal({
           stage,
@@ -6244,7 +6282,9 @@ Phase id: ${phase.id}`;
     const stockAdoptionAsk = intent.stockAdoption === true;
     const assetSwapAsk = intent.assetSwap === true;
     const designRoutingNote =
-      intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
+      intent.changeKind === "chrome-hide" ||
+      intent.changeKind === "backend" ||
+      intent.changeKind === "specification"
         ? brandDesignAsk
           ? `
 Design routing (brand/theming ask — override backend mislabel):
@@ -6397,7 +6437,16 @@ ${draftPlanNote}${draftThemeNote}${draftElementsNote}${draftCrossDepPack ? `\n${
         ? `\n${draftPlanNote}${draftThemeNote}${draftElementsNote}${[draftCrossDepPack, draftPackBlock, draftBoundMock].filter(Boolean).join("\n\n")}\n`
         : draftCrossDepPack
           ? `\n${draftCrossDepPack}\n`
-          : "";
+            : "";
+
+    const specRoutingNote =
+      intent.changeKind === "specification"
+        ? `
+Specification phase (changeKind=specification):
+- Deliver RESEARCH-backed decisions, Blueprint Deltas, and follow-on roadmap — not source implementation unless the operator explicitly asked to build this phase.
+- ## Automated Checks may be doc/grep/structural only — do NOT invent fill+submit, Playwright, or runtime engagement proofs for work deferred to later phases.
+`
+        : "";
 
     const buildDraftPrompt = (slim: boolean) => {
       const pack = slim ? "" : adjacentPack ? `${adjacentPack}\n` : "";
@@ -6409,7 +6458,7 @@ Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 
 ${intentBlock}
-${draftAcceptanceNote}${designRoutingNote}${infraSmokeNote}${draftAntiAuditThemeNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
+${draftAcceptanceNote}${designRoutingNote}${specRoutingNote}${infraSmokeNote}${draftAntiAuditThemeNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
 Do NOT reuse or retitle a prior phase plan (e.g. host.docker.internal / extra_hosts)
 unless RESEARCH explicitly asks for that work. If RESEARCH is about model naming /
 :cloud passthrough / model-resolver, the PHASE must plan that — not networking.
@@ -6548,8 +6597,12 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
       return "failed";
     };
 
-    const intentIssuesForDoc = async (doc: string): Promise<string[]> => {
-      if (!doc?.trim()) return [];
+    const intentAlignForDoc = async (
+      doc: string,
+    ): Promise<IntentAlignmentAsyncResult> => {
+      if (!doc?.trim()) {
+        return { issues: [], warnings: [], faultLeg: "none" };
+      }
       const refined = await refineIntentAlignmentIssues(
         this.ctx.registry,
         doc,
@@ -6559,7 +6612,7 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
       for (const warning of refined.warnings) {
         log(project, run, `intent-alignment: ${warning}`);
       }
-      return refined.issues;
+      return refined;
     };
 
     const engagementIntent =
@@ -6647,10 +6700,15 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         research,
       });
 
-      let intentIssues =
-        resolved.source !== "none" && resolved.gate.ok
-          ? await intentIssuesForDoc(resolved.doc)
-          : [];
+      let intentAlign: IntentAlignmentAsyncResult = {
+        issues: [],
+        warnings: [],
+        faultLeg: "none",
+      };
+      if (resolved.source !== "none" && resolved.gate.ok) {
+        intentAlign = await intentAlignForDoc(resolved.doc);
+      }
+      let intentIssues = intentAlign.issues;
 
       const needsRepair =
         !resolved.gate.ok ||
@@ -6714,10 +6772,12 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
             description: phase.description,
             research,
           });
-          intentIssues =
-            resolved.source !== "none" && resolved.gate.ok
-              ? await intentIssuesForDoc(resolved.doc)
-              : [];
+          if (resolved.source !== "none" && resolved.gate.ok) {
+            intentAlign = await intentAlignForDoc(resolved.doc);
+          } else {
+            intentAlign = { issues: [], warnings: [], faultLeg: "none" };
+          }
+          intentIssues = intentAlign.issues;
         } catch (repairError) {
           repairThrew = true;
           const repairDetail = formatLlmErrorForLog(repairError);
@@ -6743,6 +6803,10 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           if (stillBad) {
             if (intentIssues.length > 0 && researchLooksSolid(research)) {
               // Prefer fail-closed with diagnosis over Intent-breaking scaffold.
+              const intentFaultLeg =
+                intentAlign.faultLeg && intentAlign.faultLeg !== "none"
+                  ? intentAlign.faultLeg
+                  : "draft";
               return recoverableDraftFail(
                 [
                   ...resolved.gate.issues,
@@ -6752,6 +6816,8 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
                 {
                   title: "Draft rejected: Change Intent",
                   kind: "change-intent",
+                  faultLeg: intentFaultLeg,
+                  judgeInfraFailed: intentAlign.judgeInfraFailed,
                 },
               );
             }
@@ -7243,7 +7309,9 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
     const stockAdoptionAsk = intent.stockAdoption === true;
     const assetSwapAsk = intent.assetSwap === true;
     const designRoutingNote =
-      intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
+      intent.changeKind === "chrome-hide" ||
+      intent.changeKind === "backend" ||
+      intent.changeKind === "specification"
         ? brandAsk
           ? `
 Design routing (brand/theming ask — override backend mislabel):
@@ -8762,7 +8830,9 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     let phaseChecksSelfHealCount = 0;
     let pendingFailureDiagnosis: FailureDiagnosis | null = null;
     const developDesignRoutingNote =
-      intent.changeKind === "chrome-hide" || intent.changeKind === "backend"
+      intent.changeKind === "chrome-hide" ||
+      intent.changeKind === "backend" ||
+      intent.changeKind === "specification"
         ? changeIntentIsBrandTheming(intent)
           ? "\nPreserve `Requires design pass: yes` and any ## Brand / ## Assets sections.\n"
           : "\nPreserve `Requires design pass: no`; do not add design sections unless the diagnosis requires it.\n"

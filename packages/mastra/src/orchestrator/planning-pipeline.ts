@@ -2,6 +2,9 @@
  * Planning pipeline self-heal: fault routing and judge retry helpers.
  */
 
+import { createHash } from "node:crypto";
+import { isSpecificationAsk } from "@slopcontrol/artifacts";
+
 export type PlanningFaultLeg = "none" | "research" | "draft" | "both";
 
 /** Max outer self-heal rounds (research → draft → intent gate). */
@@ -177,4 +180,69 @@ export function shouldContinuePlanningSelfHeal(opts: {
     opts.faultLeg !== "none" &&
     opts.round < opts.maxRounds - 1
   );
+}
+
+const FILL_SUBMIT_GATE_RE =
+  /fill\+submit|fill\/submit|submit form|primary action.*submit|interactive control at locked mount|actionable mount|fillable mount/i;
+
+const SPEC_ONLY_PHASE_RE =
+  /specification\s+phase|specification-only|no source(?:\s|-)?code edits|no source edits this phase|implementation is deferred|records decisions|deferred to phases? \d+/i;
+
+/** Stable fingerprint for planning gate issue lists (self-heal oscillation detection). */
+export function planningGateIssueFingerprint(issues: string[]): string {
+  const normalized = issues
+    .map((issue) => issue.replace(/\s+/g, " ").trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join("|");
+  if (!normalized) return "";
+  return createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+}
+
+export function isEngagementFillSubmitGateIssue(issue: string): boolean {
+  return FILL_SUBMIT_GATE_RE.test(issue);
+}
+
+export function isSpecOnlyPhaseDocExcerpt(doc: string): boolean {
+  return SPEC_ONLY_PHASE_RE.test(doc);
+}
+
+/**
+ * True when engagement fill/submit gate failures contradict a spec-only phase
+ * (description or drafted PHASE scope).
+ */
+export function isIntentEngagementContradiction(opts: {
+  gateIssues: string[];
+  phaseDocExcerpt?: string;
+  description?: string;
+}): boolean {
+  const engagementIssues = opts.gateIssues.filter(isEngagementFillSubmitGateIssue);
+  if (engagementIssues.length === 0) return false;
+  if (opts.description && isSpecificationAsk(opts.description)) return true;
+  if (opts.phaseDocExcerpt && isSpecOnlyPhaseDocExcerpt(opts.phaseDocExcerpt)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * After the first failed self-heal round, re-classify Change Intent when the
+ * judge keeps demanding engagement proofs against a spec-only phase or repeats
+ * the same fill/submit fault (draft cannot converge without intent fix).
+ */
+export function shouldReclassifyIntentForPlanningSelfHeal(opts: {
+  gateIssues: string[];
+  phaseDocExcerpt?: string;
+  description?: string;
+  priorGateFingerprints: string[];
+  round: number;
+}): boolean {
+  if (opts.round < 1 || opts.gateIssues.length === 0) return false;
+  const fp = planningGateIssueFingerprint(opts.gateIssues);
+  const repeatedEngagementFault =
+    fp.length > 0 &&
+    opts.priorGateFingerprints.includes(fp) &&
+    opts.gateIssues.some(isEngagementFillSubmitGateIssue);
+  if (repeatedEngagementFault) return true;
+  return isIntentEngagementContradiction(opts);
 }

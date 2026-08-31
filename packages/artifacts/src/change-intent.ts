@@ -9,7 +9,12 @@ import {
 
 export type UiMount = "composer" | "bubble" | "modal" | "page" | "n/a";
 
-export type ChangeKind = "engagement" | "chrome-hide" | "backend" | "other";
+export type ChangeKind =
+  | "engagement"
+  | "chrome-hide"
+  | "backend"
+  | "specification"
+  | "other";
 
 export type ChangeIntent = {
   title: string;
@@ -57,7 +62,13 @@ export const ChangeIntentLlmOutputSchema = z.object({
   title: z.string().min(1),
   goal: z.string().min(1),
   uiMount: z.enum(["composer", "bubble", "modal", "page", "n/a"]),
-  changeKind: z.enum(["engagement", "chrome-hide", "backend", "other"]),
+  changeKind: z.enum([
+    "engagement",
+    "chrome-hide",
+    "backend",
+    "specification",
+    "other",
+  ]),
   needsInteraction: z.boolean(),
   brandTheming: z.boolean().optional(),
   themeWiringOnly: z.boolean().optional(),
@@ -335,6 +346,19 @@ export function isFormFillAsk(description: string): boolean {
 }
 
 /**
+ * True when the ask is to SPECIFY / design / document a feature (records
+ * decisions, Blueprint Deltas, roadmap) WITHOUT building or proving it this
+ * phase. A pure "specify X" ask is a specification, not engagement — even when
+ * X involves forms (sign-up, login, reset, MFA).
+ */
+export function isSpecificationAsk(description: string): boolean {
+  const text = (description ?? "").trim();
+  return /\b(?:specify|spec\s+out|write\s+(?:a\s+)?spec|specification\s+for|design\s+document)\b/i.test(
+    text,
+  );
+}
+
+/**
  * Click-to-navigate chrome (UserPill / Sign In / onClick / router.push) that
  * is not a form fill+submit ask. Destination Clerk/`<SignIn>` pages do not
  * make the landing click a form engagement.
@@ -377,6 +401,7 @@ export function interactionProofKind(
 /** True when the ask needs a fill/submit interaction contract. */
 export function needsInteractionContract(description: string): boolean {
   const text = description ?? "";
+  if (isSpecificationAsk(text)) return false;
   if (isClickNavigateAsk(text)) return false;
   if (ENGAGEMENT_FAILURE_RE.test(text) || INERT_FORM_RE.test(text)) return true;
   // Hide-empty-form / tab-strip UX: composer mount yes, fill/submit contract no
@@ -510,6 +535,11 @@ export function finalizeChangeIntent(
   const operatorBody = operatorRequestBody(description) || description;
   let changeKind = raw.changeKind;
   let needsInteraction = Boolean(raw.needsInteraction);
+  if (isSpecificationAsk(operatorBody)) {
+    changeKind = "specification";
+    needsInteraction = false;
+    uiMount = "n/a";
+  }
   if (isClickNavigateAsk(operatorBody) && changeKind !== "chrome-hide") {
     changeKind = "other";
     needsInteraction = false;
@@ -519,6 +549,7 @@ export function finalizeChangeIntent(
   const allowInteraction =
     changeKind !== "chrome-hide" &&
     changeKind !== "backend" &&
+    changeKind !== "specification" &&
     (changeKind === "engagement" || needsInteraction);
 
   const resolvePriorMount = (): void => {
@@ -837,6 +868,10 @@ export function isChangeIntentWeak(
     Boolean(existing.interaction) &&
     !needsIx &&
     existing.changeKind !== "engagement";
+  const specMisclassed =
+    isSpecificationAsk(op) &&
+    (existing.changeKind === "engagement" ||
+      (existing.changeKind === "other" && Boolean(existing.interaction)));
   return (
     !existing.changeKind ||
     (existing.uiMount === "n/a" && (needsIx || chromeOnly)) ||
@@ -847,6 +882,7 @@ export function isChangeIntentWeak(
     stockAdoptMisclassed ||
     assetSwapMisclassed ||
     spuriousInteraction ||
+    specMisclassed ||
     weakMustNot ||
     weakTitle
   );

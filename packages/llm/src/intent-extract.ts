@@ -12,7 +12,7 @@ Return ONLY a JSON object with these fields:
 - title (string): short product-facing title — strip promote/status meta ("I want a task to promote…", "What phases are complete?")
 - goal (string): 1–3 sentences describing the product work
 - uiMount: "composer" | "bubble" | "modal" | "page" | "n/a"
-- changeKind: "engagement" | "chrome-hide" | "backend" | "other"
+- changeKind: "engagement" | "chrome-hide" | "backend" | "specification" | "other"
 - needsInteraction (boolean): true only when fill/submit (or equivalent) must be proven
 - brandTheming (boolean): true when the ask is brand identity, palette, logo, wordmark, visual identity, or applying sibling theming/design that needs a design pass
 - themeWiringOnly (boolean): true when the ask is only wiring a theme toggle / data-theme / light-dark switch with no new brand identity (coding only — not a design pass). Mutually exclusive with brandTheming.
@@ -26,6 +26,7 @@ Classification rules:
 - chrome-hide: hide empty form / tab strip / chrome when nothing to gather — no fill/submit contract. Set needsInteraction false. Prefer uiMount "composer".
 - engagement: broken or missing fill/submit / populate / validate on forms at a mount. Set needsInteraction true.
 - backend: non-UI / infrastructure / API-only (DB, migrations, env, servers). needsInteraction false; uiMount usually "n/a". Never brand/theming/logo.
+- specification: the ask is to SPECIFY / design / document a feature (records decisions, Blueprint Deltas, roadmap) WITHOUT building or proving it this phase. Set needsInteraction false; uiMount "n/a". Even when the feature being specified involves forms (sign-up, login, reset, MFA), a pure "specify X" ask is specification, not engagement — do not invent a fill/submit contract for a spec-only phase.
 - other: UI or product change that is neither chrome-hide nor engagement — INCLUDING brand, theming, logo, palette, design-system, look-and-feel, theme toggle / light-dark switch, landing-page chrome. Never classify brand/theming/logo as backend. Set needsInteraction false unless fill/submit is required.
 - brandTheming=true for new logos, palettes, sibling theme adoption, visual identity. themeWiringOnly=true only for toggle/data-theme wiring without new identity (then brandTheming=false). stockAdoption=true for strip-and-adopt-stock-library-component asks (then brandTheming=false); asset derivation like an alpha icon pack from the existing logo is a coding task, not a design pass. assetSwap=true for pointing the UI at an existing named asset file (then brandTheming=false); existing tests asserting the superseded asset path are updated as part of the swap.
 - Multilingual OK (Afrikaans, English, mixed).

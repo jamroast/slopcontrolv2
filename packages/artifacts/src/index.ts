@@ -1995,7 +1995,8 @@ export async function researchEngagementQualityAsync(
     !intent?.interaction ||
     intent.interaction.mount === "n/a" ||
     intent.changeKind === "chrome-hide" ||
-    intent.changeKind === "backend"
+    intent.changeKind === "backend" ||
+    intent.changeKind === "specification"
   ) {
     return { issues: [], warnings: [] };
   }

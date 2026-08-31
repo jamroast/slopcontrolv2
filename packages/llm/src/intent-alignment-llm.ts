@@ -58,6 +58,7 @@ When Change Intent has NO interaction block:
 - Judge uiMount only (page route, href, concrete file paths, grep proofs).
 - Do NOT require Playwright fill/submit, form engagement, or tool-part proofs.
 - Auth wiring (POST token, localStorage writer) is NOT a chat-form engagement contract.
+- When changeKind is specification: judge Scope/Success Criteria coverage only; doc/grep/structural checks are sufficient — do NOT require fill+submit or runtime engagement proofs for work deferred to later phases.
 
 When Change Intent HAS an interaction block, check ALL of:
 1. Mount conflict: PHASE Blueprint Deltas / Scope must not lock forms into the OPPOSITE mount from the intent (composer vs bubble vs page).

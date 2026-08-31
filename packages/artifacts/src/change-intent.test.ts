@@ -17,6 +17,7 @@ import {
   ChangeIntentLlmOutputSchema,
   interactionProofKind,
   isClickNavigateAsk,
+  isSpecificationAsk,
   needsInteractionContract,
   garbageCollectSupersededMountBds,
   isChangeIntentWeak,
@@ -432,6 +433,61 @@ The dynamic forms for the chat are working. As I go through the process the chat
     assert.equal(backend.interaction, undefined);
   });
 
+  it("finalizeChangeIntent coerces a 'Specify X' ask off the engagement contract", () => {
+    const spec = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "End-user authentication layer",
+        goal: "Specify the foundation end-user authentication layer.",
+        uiMount: "page",
+        changeKind: "engagement",
+        needsInteraction: true,
+      }),
+      {
+        description:
+          "Specify the foundation end-user authentication layer for jamauth — self-service sign-up, password reset, email verification, session management, and TOTP MFA.",
+      },
+    );
+    assert.equal(spec.changeKind, "specification");
+    assert.equal(spec.uiMount, "n/a");
+    assert.equal(spec.interaction, undefined);
+  });
+
+  it("finalizeChangeIntent coerces other+needsInteraction when the ask is Specify X", () => {
+    const spec = finalizeChangeIntent(
+      ChangeIntentLlmOutputSchema.parse({
+        title: "End-user authentication layer",
+        goal: "Specify the foundation end-user authentication layer.",
+        uiMount: "page",
+        changeKind: "other",
+        needsInteraction: true,
+      }),
+      {
+        description:
+          "Specify the foundation end-user authentication layer — sign-up, password reset, email verification.",
+      },
+    );
+    assert.equal(spec.changeKind, "specification");
+    assert.equal(spec.interaction, undefined);
+  });
+
+  it("isSpecificationAsk detects spec-only asks", () => {
+    assert.equal(
+      isSpecificationAsk("Specify the foundation end-user authentication layer"),
+      true,
+    );
+    assert.equal(isSpecificationAsk("Write a spec for the auth flows"), true);
+    assert.equal(isSpecificationAsk("Build the sign-up form"), false);
+  });
+
+  it("extractChangeIntent classifies a 'Specify X' ask as specification with no interaction", () => {
+    const intent = extractChangeIntent(
+      "Specify the foundation end-user authentication layer — self-service sign-up, password reset, email verification, session management, and TOTP MFA.",
+    );
+    assert.equal(intent.changeKind, "specification");
+    assert.equal(intent.uiMount, "n/a");
+    assert.equal(intent.interaction, undefined);
+  });
+
   it("finalizeChangeIntent: other trusts LLM needsInteraction (no description regex veto)", () => {
     const themeDesc =
       "Audit the existing light/dark theme toggle on the landing page and fix ThemeToggle / data-theme wiring.";
@@ -514,6 +570,56 @@ The dynamic forms for the chat are working. As I go through the process the chat
       desc,
     );
     assert.equal(strong, false);
+  });
+
+  it("isChangeIntentWeak flags a 'Specify X' ask stored as engagement", () => {
+    const desc =
+      "Specify the foundation end-user authentication layer — sign-up, password reset, email verification, session management, and TOTP MFA.";
+    const weak = isChangeIntentWeak(
+      {
+        title: "End-user authentication layer",
+        goal: "Specify the foundation end-user authentication layer.",
+        uiMount: "page",
+        changeKind: "engagement",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: desc,
+        interaction: {
+          mount: "page",
+          primaryAction: "submit form",
+          proof: ["interactive control at locked mount"],
+          forbiddenSubstitutes: ["summary-chip-only"],
+        },
+      },
+      desc,
+    );
+    assert.equal(weak, true);
+  });
+
+  it("isChangeIntentWeak flags a 'Specify X' ask stored as other with interaction", () => {
+    const desc =
+      "Specify the foundation end-user authentication layer — sign-up, password reset, email verification.";
+    const weak = isChangeIntentWeak(
+      {
+        title: "End-user authentication layer",
+        goal: "Specify the foundation end-user authentication layer.",
+        uiMount: "page",
+        changeKind: "other",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: desc,
+        interaction: {
+          mount: "page",
+          primaryAction: "submit form",
+          proof: ["interactive control at locked mount"],
+          forbiddenSubstitutes: ["summary-chip-only"],
+        },
+      },
+      desc,
+    );
+    assert.equal(weak, true);
   });
 
   it("populate/submit without chrome-hide still gets interaction", () => {
