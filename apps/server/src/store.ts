@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { allocatePhaseId, descriptionContentLine, ensurePhaseDir } from "@slopcontrol/artifacts";
+import { allocatePhaseId, descriptionContentLine, ensurePhaseDir, renumberPhaseTitle, stripPhaseNumberPrefix } from "@slopcontrol/artifacts";
 import type {
   AgentMessage,
   AgentSession,
@@ -52,7 +52,10 @@ export function phaseTitleFromDescription(
   description: string | undefined,
   maxLen = 120,
 ): string {
-  return descriptionContentLine(description).slice(0, maxLen);
+  return stripPhaseNumberPrefix(descriptionContentLine(description)).slice(
+    0,
+    maxLen,
+  );
 }
 
 export interface SlopStoreData {
@@ -168,14 +171,20 @@ export class SlopStore {
     const allocated = allocatePhaseId(input.rootPath, input.description);
     ensurePhaseDir(input.rootPath, allocated.id);
     const dependsOn = [...new Set((input.dependsOn ?? []).filter(Boolean))];
+    // Renumber a stale "Phase N" title to the allocated slot so the planner's
+    // H1 matches the phase id (avoids "37-phase-36-…" vs "# Phase 36" drift).
+    const description = renumberPhaseTitle(
+      input.description,
+      allocated.ordinal,
+    );
     const phase: Phase = {
       id: allocated.id,
       projectId: input.projectId,
-      description: input.description,
+      description,
       status: "draft",
       ordinal: allocated.ordinal,
       slug: allocated.slug,
-      title: phaseTitleFromDescription(input.description),
+      title: phaseTitleFromDescription(description),
       dependsOn,
       createdAt: now,
       updatedAt: now,

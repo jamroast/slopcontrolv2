@@ -311,6 +311,46 @@ export class LlmRegistry {
     return toMastraModelConfig(endpoint, binding.modelId, this.providers);
   }
 
+  /**
+   * Resolve a fallback model for a role — a DIFFERENT model than the primary
+   * binding, used when the primary model returns broken output (empty or
+   * chat-preamble). Prefers the supervisor's model (a different family), then
+   * any other distinct model bound to a role. Returns null when no distinct
+   * fallback exists (e.g. every role is bound to the same model).
+   */
+  resolveFallback(role: AgentRole): MastraModelConfig | null {
+    const primary = bindingForRole(this.roles, role);
+    const primaryEndpoint = this.getEndpoint(primary.endpointId);
+    const primaryModelId = primary.modelId ?? primaryEndpoint.modelId;
+
+    // Prefer the supervisor's model when it is a different model.
+    const supervisor = this.roles.supervisor;
+    if (supervisor) {
+      const supervisorEndpoint = this.getEndpoint(supervisor.endpointId);
+      const supervisorModelId =
+        supervisor.modelId ?? supervisorEndpoint.modelId;
+      if (supervisorModelId !== primaryModelId) {
+        return toMastraModelConfig(
+          supervisorEndpoint,
+          supervisorModelId,
+          this.providers,
+        );
+      }
+    }
+
+    // Otherwise, the first distinct model bound to any role.
+    const seen = new Set<string>();
+    for (const binding of Object.values(this.roles)) {
+      if (!binding) continue;
+      const endpoint = this.getEndpoint(binding.endpointId);
+      const modelId = binding.modelId ?? endpoint.modelId;
+      if (modelId === primaryModelId || seen.has(modelId)) continue;
+      seen.add(modelId);
+      return toMastraModelConfig(endpoint, modelId, this.providers);
+    }
+    return null;
+  }
+
   resolveEndpointForRole(
     role: AgentRole,
     roleOverrides?: Partial<RoleModelBindings>,

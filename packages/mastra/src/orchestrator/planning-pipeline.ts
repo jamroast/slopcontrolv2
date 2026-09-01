@@ -7,6 +7,24 @@ import { isSpecificationAsk } from "@slopcontrol/artifacts";
 
 export type PlanningFaultLeg = "none" | "research" | "draft" | "both";
 
+/**
+ * Detect broken agent output (empty or chat-preamble with no extractable
+ * markdown document). Returns a human-readable reason, or null when the
+ * output contains a usable markdown document (a `# ` heading or a fenced
+ * ```markdown / ```md block).
+ */
+export function brokenOutputReason(text: string | null): string | null {
+  if (text == null) return "empty output";
+  const trimmed = text.trim();
+  if (!trimmed) return "empty output";
+  const hasHeading = /^#\s+/m.test(trimmed);
+  const hasFence = /```(?:markdown|md)\s*\n[\s\S]*?```/i.test(trimmed);
+  if (!hasHeading && !hasFence) {
+    return "no markdown document (chat preamble only)";
+  }
+  return null;
+}
+
 /** Max outer self-heal rounds (research → draft → intent gate). */
 export const MAX_PLANNING_SELF_HEAL_ROUNDS = 3;
 

@@ -336,6 +336,7 @@ import {
   shouldContinuePlanningSelfHeal,
   planningGateIssueFingerprint,
   shouldReclassifyIntentForPlanningSelfHeal,
+  brokenOutputReason,
 } from "./planning-pipeline.js";
 import {
   ASK_SYNTHESIS_PROMPT_PREFIX,
@@ -903,6 +904,8 @@ async function runAgent(
     timeoutMs?: number;
     /** Pass false to skip Mastra thread replay (supervisor enrich). */
     memory?: false | { resource: string; thread: string };
+    /** Override the agent's model for this turn (fallback-model retry). */
+    model?: MastraModelConfig;
   },
 ): Promise<string> {
   const name =
@@ -911,6 +914,7 @@ async function runAgent(
     "agent";
   const maxSteps = opts?.maxSteps ?? 30;
   const timeoutMs = opts?.timeoutMs;
+  const modelOverride = opts?.model;
   const memoryOpt = resolveAgentMemoryOption(
     resourceId,
     threadId,
@@ -924,12 +928,14 @@ async function runAgent(
     maxSteps,
     timeoutMs,
     memory: memoryOpt ? "thread" : "none",
+    modelOverride: modelOverride ? modelOverride.id : undefined,
   });
   try {
     const generate = () =>
       agent.generate(prompt, {
         maxSteps,
         ...(memoryOpt ? { memory: memoryOpt } : {}),
+        ...(modelOverride ? { model: modelOverride } : {}),
       });
     const result =
       timeoutMs && timeoutMs > 0
@@ -6633,6 +6639,38 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
       );
     };
 
+    // Fallback model for broken (empty / chat-preamble) draft output.
+    const fallbackModel = this.ctx.registry.resolveFallback("planning");
+
+    const retryDraftWithFallback = async (
+      prompt: string,
+      threadSuffix: string,
+      maxSteps: number,
+    ): Promise<string | null> => {
+      if (!fallbackModel) return null;
+      log(
+        project,
+        run,
+        `--- Retrying draft with fallback model ${fallbackModel.id} ---`,
+      );
+      try {
+        return await runAgent(
+          this.ctx.agents.phasePlannerAgent,
+          prompt,
+          project.id,
+          `${run.id}-${threadSuffix}`,
+          { ...planningAgentRunOpts(maxSteps), model: fallbackModel },
+        );
+      } catch (error) {
+        log(
+          project,
+          run,
+          `ERROR: fallback draft failed — ${formatLlmErrorForLog(error)}`,
+        );
+        return null;
+      }
+    };
+
     let output: string | null = null;
     let phaseDocWritten = false;
     try {
@@ -6700,6 +6738,36 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         research,
       });
 
+      // Broken (empty / chat-preamble) output with no harvested doc: retry once
+      // with a fallback model before falling through to repair/scaffold. Harvest
+      // first so a tool-written PHASE.md (write_file) is not treated as broken.
+      const brokenReason = brokenOutputReason(output);
+      if (resolved.source === "none" && brokenReason) {
+        log(
+          project,
+          run,
+          `--- Draft returned broken output (${brokenReason}) ---`,
+        );
+        beforeStats = snapshotFileStats(watch);
+        const fallbackOutput = await retryDraftWithFallback(
+          buildDraftPrompt(false),
+          "draft-fallback",
+          20,
+        );
+        if (fallbackOutput != null && !brokenOutputReason(fallbackOutput)) {
+          output = fallbackOutput;
+          log(project, run, fallbackOutput);
+          resolved = resolvePhaseDocFromAgentTurn({
+            projectRoot: project.rootPath,
+            phaseId: phase.id,
+            agentOutput: output,
+            beforeStats,
+            description: phase.description,
+            research,
+          });
+        }
+      }
+
       let intentAlign: IntentAlignmentAsyncResult = {
         issues: [],
         warnings: [],
@@ -6752,9 +6820,10 @@ ${clipPromptSection("change-request", phase.description, 4_000)}
 Research:
 ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         let repairThrew = false;
+        let finalBrokenReason: string | null = null;
         try {
           beforeStats = snapshotFileStats(watch);
-          const repaired = await runAgent(
+          let repaired = await runAgent(
             this.ctx.agents.phasePlannerAgent,
             repairPrompt,
             project.id,
@@ -6764,6 +6833,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           log(project, run, repaired);
           const repairRefusal = refuseIfPlannerChat(repaired, "draft repair");
           if (repairRefusal) return repairRefusal;
+
           resolved = resolvePhaseDocFromAgentTurn({
             projectRoot: project.rootPath,
             phaseId: phase.id,
@@ -6772,6 +6842,42 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
             description: phase.description,
             research,
           });
+
+          // Broken repair output with no harvested doc: retry once with a
+          // fallback model. Harvest first so a tool-written PHASE.md is not
+          // treated as broken.
+          const repairBrokenReason = brokenOutputReason(repaired);
+          if (resolved.source === "none" && repairBrokenReason) {
+            log(
+              project,
+              run,
+              `--- Draft repair returned broken output (${repairBrokenReason}) ---`,
+            );
+            beforeStats = snapshotFileStats(watch);
+            const fallbackRepair = await retryDraftWithFallback(
+              repairPrompt,
+              "draft-repair-fallback",
+              16,
+            );
+            if (
+              fallbackRepair != null &&
+              !brokenOutputReason(fallbackRepair)
+            ) {
+              repaired = fallbackRepair;
+              log(project, run, fallbackRepair);
+              resolved = resolvePhaseDocFromAgentTurn({
+                projectRoot: project.rootPath,
+                phaseId: phase.id,
+                agentOutput: repaired,
+                beforeStats,
+                description: phase.description,
+                research,
+              });
+            }
+          }
+          finalBrokenReason =
+            resolved.source === "none" ? brokenOutputReason(repaired) : null;
+
           if (resolved.source !== "none" && resolved.gate.ok) {
             intentAlign = await intentAlignForDoc(resolved.doc);
           } else {
@@ -6818,6 +6924,18 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
                   kind: "change-intent",
                   faultLeg: intentFaultLeg,
                   judgeInfraFailed: intentAlign.judgeInfraFailed,
+                },
+              );
+            }
+            // Broken output (empty / chat-preamble) after primary + fallback:
+            // fail closed instead of writing a placeholder scaffold that the
+            // phase-quality judge will always reject.
+            if (finalBrokenReason && researchLooksSolid(research)) {
+              return recoverableDraftFail(
+                `Draft returned broken output (${finalBrokenReason}) after primary and fallback models.`,
+                {
+                  title: "Draft rejected: broken model output",
+                  kind: "draft-broken-output",
                 },
               );
             }

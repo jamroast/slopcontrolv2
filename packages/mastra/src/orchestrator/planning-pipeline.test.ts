@@ -12,6 +12,7 @@ import {
   callPlanningJudgeWithInfraRetry,
   PlanningJudgeInfraError,
   phaseQualityRetryPrompt,
+  brokenOutputReason,
 } from "./planning-pipeline.js";
 
 describe("planning-pipeline", () => {
@@ -23,6 +24,34 @@ describe("planning-pipeline", () => {
     assert.equal(
       isPlanningJudgeInfraIssue("Missing /sign-in route"),
       false,
+    );
+  });
+
+  it("brokenOutputReason flags empty and chat-preamble output", () => {
+    assert.equal(brokenOutputReason(null), "empty output");
+    assert.equal(brokenOutputReason(""), "empty output");
+    assert.equal(brokenOutputReason("   \n  "), "empty output");
+    assert.equal(
+      brokenOutputReason("Here's the PHASE.md for this phase:"),
+      "no markdown document (chat preamble only)",
+    );
+    assert.equal(
+      brokenOutputReason("Let me draft that for you."),
+      "no markdown document (chat preamble only)",
+    );
+  });
+
+  it("brokenOutputReason accepts a real markdown document", () => {
+    assert.equal(
+      brokenOutputReason("# Phase 36 — Account-scoped sessions\n\n## Scope\n\nBackend-only."),
+      null,
+    );
+    // A chat preamble followed by a real document is still usable.
+    assert.equal(
+      brokenOutputReason(
+        "Here's the draft:\n\n# Phase 36 — Account-scoped sessions\n\n## Scope\n\nBackend-only.",
+      ),
+      null,
     );
   });
 

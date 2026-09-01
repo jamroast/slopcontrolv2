@@ -386,4 +386,57 @@ describe("@slopcontrol/llm", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("resolveFallback prefers the supervisor's model when it is a different endpoint", () => {
+    const registry = new LlmRegistry({
+      endpoints: [
+        {
+          id: "deepseek",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "deepseek-v4-pro",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+        {
+          id: "glm",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "glm-5.2",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+      ],
+      roles: {
+        research: { endpointId: "deepseek" },
+        planning: { endpointId: "deepseek" },
+        supervisor: { endpointId: "glm" },
+        coding: { endpointId: "deepseek" },
+      },
+    });
+
+    const fallback = registry.resolveFallback("planning");
+    assert.ok(fallback, "expected a fallback model");
+    assert.equal(fallback.id, "openai/glm-5.2");
+  });
+
+  it("resolveFallback returns null when every role shares one endpoint", () => {
+    const registry = new LlmRegistry({
+      endpoints: [
+        {
+          id: "glm",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "glm-5.2",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+      ],
+      roles: {
+        research: { endpointId: "glm" },
+        planning: { endpointId: "glm" },
+        supervisor: { endpointId: "glm" },
+        coding: { endpointId: "glm" },
+      },
+    });
+
+    assert.equal(registry.resolveFallback("planning"), null);
+  });
 });

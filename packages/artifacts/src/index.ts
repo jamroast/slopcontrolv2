@@ -240,13 +240,37 @@ export function descriptionContentLine(
   return (line ?? description ?? "").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Strip a leading "Phase N —" / "Phase N:" title prefix so slugs and titles
+ * reflect the actual ask, not a stale phase number that can drift from the
+ * slot ordinal (e.g. "37-phase-36-…" when the operator titled the ask "Phase 36").
+ */
+export function stripPhaseNumberPrefix(line: string): string {
+  return line.replace(/^phase\s+\d+\b\s*[-–—:]*\s*/i, "").trim();
+}
+
+/**
+ * Renumber a leading "Phase N" title prefix to the given slot ordinal so the
+ * H1 the planner emits matches the phase id (e.g. "Phase 36 — …" → "Phase 37 — …").
+ * Only the first line-start "Phase N" is touched; later phase references are left alone.
+ */
+export function renumberPhaseTitle(
+  description: string,
+  ordinal: number,
+): string {
+  const target = `Phase ${String(ordinal).padStart(2, "0")}`;
+  return description.replace(/^phase\s+\d+\b/im, target);
+}
+
 export function allocatePhaseId(
   projectRoot: string,
   description: string,
 ): { id: string; ordinal: number; slug: string } {
   ensureSlopcontrolDir(projectRoot);
   const ordinal = nextPhaseOrdinal(projectRoot);
-  const slug = slugify(descriptionContentLine(description));
+  const slug = slugify(
+    stripPhaseNumberPrefix(descriptionContentLine(description)),
+  );
   return { id: formatPhaseId(ordinal, slug), ordinal, slug };
 }
 
@@ -2195,7 +2219,18 @@ export function phaseDocMatchesPhase(
   const h1Num =
     /^(\d+)/.exec(h1PhaseToken ?? "")?.[1] ??
     /\bPhase\s+(\d+)\b/i.exec(h1)?.[1];
-  if (targetNum && h1Num && h1Num !== targetNum) {
+  // A phase id like "37-phase-36-…" carries a stale "phase-N" token in its
+  // slug (the title number), distinct from the leading slot number. Accept an
+  // H1 that matches either the slot number or the slug's phase token.
+  const slugPhaseNum = /^phase-(\d+)/i.exec(
+    phaseId.replace(/^\d+-/, ""),
+  )?.[1];
+  if (
+    targetNum &&
+    h1Num &&
+    h1Num !== targetNum &&
+    h1Num !== slugPhaseNum
+  ) {
     return false;
   }
 

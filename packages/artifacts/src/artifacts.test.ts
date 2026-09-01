@@ -12,6 +12,8 @@ import {
   ensureSlopcontrolDir,
   extractMarkdownDocument,
   mergePhaseIntoBlueprint,
+  renumberPhaseTitle,
+  stripPhaseNumberPrefix,
   readBlueprint,
   readPhaseDoc,
   readResearch,
@@ -37,6 +39,7 @@ import {
   extractChangeIntent,
   phaseDocWatchPaths,
   resolvePhaseDocFromAgentTurn,
+  phaseDocMatchesPhase,
   scaffoldPhaseDoc,
   snapshotFileStats,
   isSoftFailEchoCheck,
@@ -83,6 +86,57 @@ describe("@slopcontrol/artifacts", () => {
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }
+  });
+
+  it("allocatePhaseId strips a stale Phase N prefix from the slug", () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "slop-slug-phase-"));
+    try {
+      const first = allocatePhaseId(
+        projectRoot,
+        "Phase 36 — Account-scoped session list/revoke over oidc_model_state",
+      );
+      assert.equal(first.id, "01-account-scoped-session-list-revoke-over");
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("stripPhaseNumberPrefix removes Phase N and its separator", () => {
+    assert.equal(
+      stripPhaseNumberPrefix("Phase 36 — Account-scoped sessions"),
+      "Account-scoped sessions",
+    );
+    assert.equal(
+      stripPhaseNumberPrefix("Phase 36: Account-scoped sessions"),
+      "Account-scoped sessions",
+    );
+    assert.equal(
+      stripPhaseNumberPrefix("Phase 36 Account-scoped sessions"),
+      "Account-scoped sessions",
+    );
+    // Not a phase-number prefix — left untouched.
+    assert.equal(
+      stripPhaseNumberPrefix("Phase 2FA support"),
+      "Phase 2FA support",
+    );
+  });
+
+  it("renumberPhaseTitle renumbers only the leading Phase N", () => {
+    assert.equal(
+      renumberPhaseTitle(
+        "Phase 36 — Account-scoped session list/revoke\n\nGoal: …",
+        37,
+      ),
+      "Phase 37 — Account-scoped session list/revoke\n\nGoal: …",
+    );
+    // Later phase references are left alone.
+    assert.equal(
+      renumberPhaseTitle(
+        "Phase 36 — Account-scoped sessions\n\nNo TOTP (phase 37).",
+        37,
+      ),
+      "Phase 37 — Account-scoped sessions\n\nNo TOTP (phase 37).",
+    );
   });
 
   it("strips agent preamble when writing research/phase", () => {
@@ -502,6 +556,51 @@ None.
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
     }
+  });
+
+  it("phaseDocMatchesPhase accepts a slug phase-N token that differs from the slot number", () => {
+    // jamauth phase 37: id "37-phase-36-…" but H1 "# Phase 36 …".
+    const doc = "# Phase 36 — Account-scoped session list/revoke\n\n## Scope\n\nBackend-only.";
+    assert.equal(
+      phaseDocMatchesPhase(
+        doc,
+        "37-phase-36-account-scoped-session-list-rev",
+        "Account-scoped session list/revoke",
+      ),
+      true,
+    );
+  });
+
+  it("phaseDocMatchesPhase still rejects a genuinely stale H1 number", () => {
+    const doc = "# Phase 30 — Some unrelated prior phase\n\n## Scope\n\nUnrelated.";
+    assert.equal(
+      phaseDocMatchesPhase(
+        doc,
+        "37-phase-36-account-scoped-session-list-rev",
+        "Account-scoped session list/revoke",
+      ),
+      false,
+    );
+  });
+
+  it("phaseDocMatchesPhase keeps normal slot-number matching", () => {
+    const doc = "# Phase 31-there-is-a-miss-mapping\n\n## Scope\n\nEnv model names.";
+    assert.equal(
+      phaseDocMatchesPhase(
+        doc,
+        "31-there-is-a-miss-mapping-in-the-env-docke",
+        "There is a miss mapping in the env docker model names",
+      ),
+      true,
+    );
+    assert.equal(
+      phaseDocMatchesPhase(
+        "# Phase 30-host-docker-internal\n\n## Scope\n\nRouting.",
+        "31-there-is-a-miss-mapping-in-the-env-docke",
+        "There is a miss mapping in the env docker model names",
+      ),
+      false,
+    );
   });
 
   it("prefers canonical phase PHASE.md over wrong-phase root leftover", () => {

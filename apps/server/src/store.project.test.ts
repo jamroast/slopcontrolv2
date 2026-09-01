@@ -42,6 +42,30 @@ describe("phaseTitleFromDescription", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("createPhase renumbers a stale Phase N title and strips it from slug/title", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-phase-renum-"));
+    try {
+      const store = new SlopStore(join(dir, "store.json"));
+      const projectRoot = join(dir, "proj");
+      mkdirSync(projectRoot, { recursive: true });
+      const project = store.createProject({ name: "p", rootPath: projectRoot });
+      const phase = store.createPhase({
+        projectId: project.id,
+        description: "Phase 36 — Account-scoped session list/revoke",
+        rootPath: projectRoot,
+      });
+      assert.equal(
+        phase.description,
+        "Phase 01 — Account-scoped session list/revoke",
+      );
+      assert.equal(phase.title, "Account-scoped session list/revoke");
+      assert.equal(phase.slug, "account-scoped-session-list-revoke");
+      assert.ok(!phase.id.includes("phase-36"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("SlopStore project rename", () => {
