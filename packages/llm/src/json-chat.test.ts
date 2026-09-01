@@ -23,6 +23,28 @@ describe("json-chat helpers", () => {
     );
   });
 
+  it("stripJsonFence drops trailing prose even when it contains a brace", () => {
+    // The glm-5.2 host-verify-env failure: valid JSON followed by prose with a `}`.
+    assert.equal(
+      stripJsonFence('{"rewrites":[{"key":"DATABASE_URL","original":"postgresql://x","rewritten":"localhost:5432"}]} trailing } note'),
+      '{"rewrites":[{"key":"DATABASE_URL","original":"postgresql://x","rewritten":"localhost:5432"}]}',
+    );
+  });
+
+  it("stripJsonFence keeps braces inside string values", () => {
+    assert.equal(
+      stripJsonFence('{"a":"{not a brace}","b":{"c":"}"}} trailing'),
+      '{"a":"{not a brace}","b":{"c":"}"}}',
+    );
+  });
+
+  it("stripJsonFence handles escaped quotes in string values", () => {
+    assert.equal(
+      stripJsonFence('{"a":"escaped \\" quote"} trailing'),
+      '{"a":"escaped \\" quote"}',
+    );
+  });
+
   it("extractChatMessageText reads content string, parts, and reasoning fallbacks", () => {
     assert.equal(
       extractChatMessageText({ content: '  {"ok":true}  ' }),

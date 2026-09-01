@@ -54,9 +54,38 @@ export function stripJsonFence(text: string): string {
 
 function extractJsonObject(text: string): string {
   const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start >= 0 && end > start) return text.slice(start, end + 1);
-  return text;
+  if (start < 0) return text;
+  // Walk from the first `{` tracking brace depth, skipping string contents so
+  // `{`/`}` inside string values (and trailing prose that happens to contain a
+  // `}`) do not confuse the match. Returns the balanced object, not the last `}`.
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+  // Unbalanced — return the rest of the text (best effort).
+  return text.slice(start);
 }
 
 type ChatMessage = {
