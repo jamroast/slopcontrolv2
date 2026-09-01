@@ -29,6 +29,10 @@ export type DevelopCodingRetryInput = {
    * coding agent cites prior resolutions instead of re-discovering them.
    */
   priorDiagnoses?: string[];
+  /** Read-only Pi investigation appended after a no-progress product verify failure. */
+  investigationFindings?: string;
+  /** Planned PHASE.md paths not yet edited — steer the implementer. */
+  missingPlannedPaths?: string[];
 };
 
 export function resolveDevelopCodingRetryKind(
@@ -116,6 +120,14 @@ export function buildDevelopCodingRetryPrompt(
           .map((line) => `- ${line}`)
           .join("\n")}\n\n`
       : "";
+  const investigation =
+    input.investigationFindings?.trim()
+      ? `Investigation findings (read-only probes — authoritative for this retry):\n${input.investigationFindings.trim()}\n\n`
+      : "";
+  const missingPlanned =
+    input.missingPlannedPaths && input.missingPlannedPaths.length > 0
+      ? `Planned paths from PHASE.md not yet edited — implement these first:\n${input.missingPlannedPaths.map((p) => `- ${p}`).join("\n")}\n\n`
+      : "";
 
   const body = ((): string => {
     switch (kind) {
@@ -150,5 +162,5 @@ Do NOT chase infra bring-up (missing local services) inside the app repo — fol
 Before DEV_COMPLETE, append \`## Operator handoff\` (Operator requirements / Knowledge / Follow-ups) to APPENDIX. Print DEV_COMPLETE when build, tests, and phase success criteria pass.`;
   }
   })();
-  return `${history}${body}`;
+  return `${history}${investigation}${missingPlanned}${body}`;
 }

@@ -386,6 +386,10 @@ import {
 } from "./deps-install.js";
 import { attemptVerifyRecovery } from "./verify-recovery.js";
 import {
+  runDevelopProductFailureInvestigation,
+  shouldRunDevelopProductInvestigation,
+} from "./develop-failure-investigate.js";
+import {
   appendDiagnosisToMemory,
   recallDiagnosisHistory,
 } from "./diagnosis-memory.js";
@@ -9035,6 +9039,10 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         : "";
     const memory = readRunMemory(project.rootPath, run.id);
     let needsFreshSession = false;
+    const investigatedFingerprints = new Set<string>();
+    let investigationPendingRetry = false;
+    let lastInvestigationFindings = "";
+    let lastMissingPlannedPaths: string[] = [];
     let terminalStage: RunStage | null = null;
     let lastDiagnosisCard = "";
     let lastChecksOk: boolean | undefined;
@@ -9288,6 +9296,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
           !lastFailWasPostMergeRootVerify &&
           !lastContinueWasJudgeExtension &&
           !lastContinueWasSessionFaultRetry &&
+          !investigationPendingRetry &&
           !lastIterationHadFileChanges &&
           lastErrorHash
         ) {
@@ -9472,6 +9481,13 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
             tags: lastHandoffDiagnosis?.tags,
             appendixFallback: appendix,
             priorDiagnoses: await this.diagnosisHistory(project.id),
+            investigationFindings: investigationPendingRetry
+              ? lastInvestigationFindings
+              : undefined,
+            missingPlannedPaths:
+              investigationPendingRetry && lastMissingPlannedPaths.length > 0
+                ? lastMissingPlannedPaths
+                : undefined,
           });
           if (appendix.trim()) {
             systemOverride = [
@@ -9698,6 +9714,9 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
         const gitChanged = earlyGitChanged;
         const changed = earlyChanged;
         lastIterationHadFileChanges = changed.length > 0;
+        if (investigationPendingRetry) {
+          investigationPendingRetry = false;
+        }
         if (changed.length > 0) {
           log(project, run, `Changed files: ${changed.join(", ")}`);
           for (const f of changed) allChangedFiles.add(f);
@@ -10827,6 +10846,81 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
         } else {
           noProgressCount = 0;
           stallStrikeCount = 0;
+        }
+
+        const verifyExcerptForInvestigation = (
+          checks.summary ||
+          checks.output ||
+          ""
+        ).slice(-12_000);
+
+        if (
+          shouldRunDevelopProductInvestigation({
+            diagnosis,
+            lastIterationHadFileChanges,
+            lastIterationZeroPlanProgress,
+            alreadyInvestigated: investigatedFingerprints.has(
+              diagnosis.fingerprint,
+            ),
+          })
+        ) {
+          investigatedFingerprints.add(diagnosis.fingerprint);
+          const missingPlanned = planProgress.plannedPaths.filter(
+            (p) => !planProgress.covered.includes(p),
+          );
+          try {
+            const { endpoint, modelId } =
+              this.ctx.registry.resolveEndpointForRole("coding");
+            log(
+              project,
+              run,
+              `--- Product verify failure with no coding progress — running Pi investigate (fp=${diagnosis.fingerprint}) ---`,
+            );
+            const inv = await runDevelopProductFailureInvestigation({
+              worktreePath: worktree.path,
+              phaseId: phase.id,
+              diagnosis,
+              verifyExcerpt: verifyExcerptForInvestigation,
+              missingPlannedPaths:
+                missingPlanned.length > 0 ? missingPlanned : undefined,
+              endpoint,
+              modelId,
+            });
+            if (inv.dirtyWarning) {
+              log(
+                project,
+                run,
+                `--- Develop investigate dirtied tree: ${inv.dirtyWarning} ---`,
+              );
+              appendAppendix(
+                project.rootPath,
+                phase.id,
+                `## Iteration ${iteration} — investigate dirty tree\n\n${inv.dirtyWarning}`,
+              );
+            } else {
+              log(
+                project,
+                run,
+                `--- Develop product investigation (${inv.findings.length} chars) — retry with findings ---`,
+              );
+              appendAppendix(
+                project.rootPath,
+                phase.id,
+                `## Iteration ${iteration} — investigation findings\n\n${inv.findings}`,
+              );
+              lastInvestigationFindings = inv.findings;
+              lastMissingPlannedPaths = missingPlanned;
+              investigationPendingRetry = true;
+              needsFreshSession = true;
+              noProgressCount = 0;
+            }
+          } catch (err) {
+            log(
+              project,
+              run,
+              `--- Develop product investigation failed: ${planningJudgeErrorDetail(err)} ---`,
+            );
+          }
         }
 
         if (noProgressCount >= MAX_NO_PROGRESS) {

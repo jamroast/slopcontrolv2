@@ -100,6 +100,21 @@ describe("prior failure history in retry prompts", () => {
     });
     assert.doesNotMatch(prompt, /Prior failure history/);
   });
+
+  it("includes investigation findings and missing planned paths", () => {
+    const prompt = buildDevelopCodingRetryPrompt({
+      phaseId: "39-x",
+      title: "DPoP token exchange returns 400",
+      class: "product",
+      investigationFindings:
+        "**Root cause:** missing `src/provider.ts` handler\n**Evidence:** 400 with invalid_dpop_proof",
+      missingPlannedPaths: ["src/provider.ts"],
+    });
+    assert.match(prompt, /Investigation findings \(read-only probes/);
+    assert.match(prompt, /invalid_dpop_proof/);
+    assert.match(prompt, /Planned paths from PHASE.md not yet edited/);
+    assert.match(prompt, /src\/provider\.ts/);
+  });
 });
 
 describe("duplicate-infra retry routing", () => {
