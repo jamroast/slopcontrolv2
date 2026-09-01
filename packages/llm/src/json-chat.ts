@@ -45,19 +45,45 @@ const JSON_ONLY_NUDGE =
 export function stripJsonFence(text: string): string {
   const trimmed = text.trim();
   const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)```$/i);
-  if (fenced?.[1]) return extractJsonObject(fenced[1].trim());
+  if (fenced?.[1]) return extractJsonValue(fenced[1].trim());
   // Opening fence without closing fence (common on truncated cloud judge output).
   const openFence = trimmed.match(/^```(?:json)?\s*([\s\S]*)$/i);
-  if (openFence?.[1]) return extractJsonObject(openFence[1].trim());
-  return extractJsonObject(trimmed);
+  if (openFence?.[1]) return extractJsonValue(openFence[1].trim());
+  return extractJsonValue(trimmed);
 }
 
-function extractJsonObject(text: string): string {
-  const start = text.indexOf("{");
-  if (start < 0) return text;
-  // Walk from the first `{` tracking brace depth, skipping string contents so
-  // `{`/`}` inside string values (and trailing prose that happens to contain a
-  // `}`) do not confuse the match. Returns the balanced object, not the last `}`.
+function extractJsonValue(text: string): string {
+  // Model-agnostic extraction: try each `{`/`[` as a candidate JSON value and
+  // return the first one that parses. Tolerates leading prose, trailing prose,
+  // markdown fences, and prose braces that are not JSON — so any model that
+  // emits a JSON object/array anywhere in its reply is handled.
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch !== "{" && ch !== "[") continue;
+    const candidate = extractBalanced(text, i, ch);
+    if (candidate == null) continue;
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      // Not valid JSON — try the next candidate.
+    }
+  }
+  // No parseable JSON value found — return the raw text (best effort).
+  return text;
+}
+
+/**
+ * Return the balanced `{…}`/`[…]` span starting at `start`, skipping string
+ * contents (including escaped quotes) so braces inside strings do not confuse
+ * the match. Returns null when unbalanced.
+ */
+function extractBalanced(
+  text: string,
+  start: number,
+  open: string,
+): string | null {
+  const close = open === "{" ? "}" : "]";
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -75,17 +101,16 @@ function extractJsonObject(text: string): string {
     }
     if (ch === '"') {
       inString = true;
-    } else if (ch === "{") {
+    } else if (ch === open) {
       depth++;
-    } else if (ch === "}") {
+    } else if (ch === close) {
       depth--;
       if (depth === 0) {
         return text.slice(start, i + 1);
       }
     }
   }
-  // Unbalanced — return the rest of the text (best effort).
-  return text.slice(start);
+  return null;
 }
 
 type ChatMessage = {

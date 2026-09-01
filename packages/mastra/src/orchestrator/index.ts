@@ -2299,10 +2299,12 @@ function tryBindNarrationJudge(registry: LlmRegistry): NarrationJudgeFn | null {
 function resolvePlanningJudgeEndpoint(registry: LlmRegistry): {
   endpoint: import("@slopcontrol/types").LlmEndpoint;
   modelId?: string;
+  role: "judge" | "classification";
 } | null {
   for (const role of ["judge", "classification"] as const) {
     try {
-      return registry.resolveEndpointForRole(role);
+      const { endpoint, modelId } = registry.resolveEndpointForRole(role);
+      return { endpoint, modelId, role };
     } catch {
       /* try next */
     }
@@ -2310,17 +2312,27 @@ function resolvePlanningJudgeEndpoint(registry: LlmRegistry): {
   return null;
 }
 
+/** Fallback endpoint for planning JSON judges when the primary returns prose/parse failures. */
+function resolvePlanningJudgeFallback(registry: LlmRegistry): {
+  endpoint: import("@slopcontrol/types").LlmEndpoint;
+  modelId: string;
+} | null {
+  const primary = resolvePlanningJudgeEndpoint(registry);
+  if (!primary) return null;
+  return registry.resolveFallbackEndpointForRole(primary.role);
+}
+
 /** Bind the LLM intent-alignment judge; null when unbound. */
 function tryBindIntentAlignmentJudge(
   registry: LlmRegistry,
+  resolved?: { endpoint: import("@slopcontrol/types").LlmEndpoint; modelId?: string },
 ): IntentAlignmentJudgeFn | null {
-  const resolved = resolvePlanningJudgeEndpoint(registry);
-  if (!resolved) return null;
-  const { endpoint, modelId } = resolved;
+  const ep = resolved ?? resolvePlanningJudgeEndpoint(registry);
+  if (!ep) return null;
   return (input) =>
     judgeIntentAlignmentViaLlm({
-      endpoint,
-      modelId,
+      endpoint: ep.endpoint,
+      modelId: ep.modelId,
       intentBlock: input.intentBlock,
       phaseDocExcerpt: input.phaseDocExcerpt,
       researchExcerpt: input.researchExcerpt,
@@ -2337,13 +2349,21 @@ async function refineIntentAlignmentIssues(
   intent: ChangeIntent,
   opts?: { researchExcerpt?: string },
 ): Promise<IntentAlignmentAsyncResult> {
-  const judgeFn = tryBindIntentAlignmentJudge(registry);
+  const primaryResolved = resolvePlanningJudgeEndpoint(registry);
+  const judgeFn = tryBindIntentAlignmentJudge(
+    registry,
+    primaryResolved ?? undefined,
+  );
   if (!judgeFn) {
     slog.warn(
       "planning",
       "intent-alignment judge unbound (judge/classification role missing); failing closed",
     );
   }
+  const fallbackResolved = resolvePlanningJudgeFallback(registry);
+  const fallbackJudgeFn = fallbackResolved
+    ? tryBindIntentAlignmentJudge(registry, fallbackResolved)
+    : null;
   let aligned: IntentAlignmentAsyncResult;
   let judgeInfraFailed: boolean;
   try {
@@ -2354,6 +2374,16 @@ async function refineIntentAlignmentIssues(
           researchExcerpt: opts?.researchExcerpt,
         }),
       (r) => r.issues,
+      undefined,
+      {
+        fallbackCall: fallbackJudgeFn
+          ? () =>
+              phaseDocAlignsWithChangeIntentAsync(phaseDoc, intent, {
+                judgeFn: fallbackJudgeFn,
+                researchExcerpt: opts?.researchExcerpt,
+              })
+          : undefined,
+      },
     ));
   } catch (err) {
     slog.warn(
@@ -2375,18 +2405,18 @@ async function refineIntentAlignmentIssues(
 
 function tryBindResearchQualityJudge(
   registry: LlmRegistry,
+  resolved?: { endpoint: import("@slopcontrol/types").LlmEndpoint; modelId?: string },
 ): ((input: {
   intentBlock: string;
   phaseDescription: string;
   researchExcerpt: string;
 }) => ReturnType<typeof judgeResearchQualityViaLlm>) | null {
-  const resolved = resolvePlanningJudgeEndpoint(registry);
-  if (!resolved) return null;
-  const { endpoint, modelId } = resolved;
+  const ep = resolved ?? resolvePlanningJudgeEndpoint(registry);
+  if (!ep) return null;
   return (input) =>
     judgeResearchQualityViaLlm({
-      endpoint,
-      modelId,
+      endpoint: ep.endpoint,
+      modelId: ep.modelId,
       intentBlock: input.intentBlock,
       phaseDescription: input.phaseDescription,
       researchExcerpt: input.researchExcerpt,
@@ -2395,19 +2425,19 @@ function tryBindResearchQualityJudge(
 
 function tryBindPhaseDocQualityJudge(
   registry: LlmRegistry,
+  resolved?: { endpoint: import("@slopcontrol/types").LlmEndpoint; modelId?: string },
 ): ((input: {
   intentBlock: string;
   phaseDescription: string;
   researchExcerpt: string;
   phaseDocExcerpt: string;
 }) => ReturnType<typeof judgePhaseDocQualityViaLlm>) | null {
-  const resolved = resolvePlanningJudgeEndpoint(registry);
-  if (!resolved) return null;
-  const { endpoint, modelId } = resolved;
+  const ep = resolved ?? resolvePlanningJudgeEndpoint(registry);
+  if (!ep) return null;
   return (input) =>
     judgePhaseDocQualityViaLlm({
-      endpoint,
-      modelId,
+      endpoint: ep.endpoint,
+      modelId: ep.modelId,
       intentBlock: input.intentBlock,
       phaseDescription: input.phaseDescription,
       researchExcerpt: input.researchExcerpt,
@@ -5349,7 +5379,8 @@ ${message.trim()}`;
     judgeFeedback?: string;
   }): Promise<{ ok: boolean; judgeInfraFailed?: boolean; gaps?: string[] }> {
     const { project, phase, run, description, intentBlock } = input;
-    const judge = tryBindResearchQualityJudge(this.ctx.registry);
+    const primaryResolved = resolvePlanningJudgeEndpoint(this.ctx.registry);
+    const judge = tryBindResearchQualityJudge(this.ctx.registry, primaryResolved ?? undefined);
     if (!judge) {
       slog.warn(
         "planning",
@@ -5361,6 +5392,10 @@ ${message.trim()}`;
         gaps: ["Research quality could not be verified (no LLM judge bound)"],
       };
     }
+    const fallbackResolved = resolvePlanningJudgeFallback(this.ctx.registry);
+    const fallbackJudge = fallbackResolved
+      ? tryBindResearchQualityJudge(this.ctx.registry, fallbackResolved)
+      : null;
 
     const researchPath = `.slopcontrol/phases/${phase.id}/RESEARCH.md`;
     const researchDate = new Date().toISOString().slice(0, 10);
@@ -5384,6 +5419,21 @@ ${message.trim()}`;
                 ),
               }),
             (v) => v.gaps,
+            undefined,
+            {
+              fallbackCall: fallbackJudge
+                ? () =>
+                    fallbackJudge({
+                      intentBlock,
+                      phaseDescription: description,
+                      researchExcerpt: clipPromptSection(
+                        "RESEARCH.md",
+                        researchDoc,
+                        16_000,
+                      ),
+                    })
+                : undefined,
+            },
           ));
       } catch (err) {
         return {
@@ -7089,7 +7139,11 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       return "failed";
     }
 
-    const phaseQualityJudge = tryBindPhaseDocQualityJudge(this.ctx.registry);
+    const primaryResolved = resolvePlanningJudgeEndpoint(this.ctx.registry);
+    const phaseQualityJudge = tryBindPhaseDocQualityJudge(
+      this.ctx.registry,
+      primaryResolved ?? undefined,
+    );
     if (!phaseQualityJudge) {
       slog.warn(
         "planning",
@@ -7105,6 +7159,10 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         },
       );
     }
+    const fallbackResolved = resolvePlanningJudgeFallback(this.ctx.registry);
+    const fallbackPhaseQualityJudge = fallbackResolved
+      ? tryBindPhaseDocQualityJudge(this.ctx.registry, fallbackResolved)
+      : null;
 
     let phaseDocForQuality = phaseDoc;
     let phaseQualityLegRetries = 0;
@@ -7126,6 +7184,26 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
                 ),
               }),
             (v) => v.gaps,
+            undefined,
+            {
+              fallbackCall: fallbackPhaseQualityJudge
+                ? () =>
+                    fallbackPhaseQualityJudge({
+                      intentBlock,
+                      phaseDescription: phase.description,
+                      researchExcerpt: clipPromptSection(
+                        "RESEARCH.md",
+                        research,
+                        16_000,
+                      ),
+                      phaseDocExcerpt: clipPromptSection(
+                        "PHASE.md",
+                        phaseDocForQuality,
+                        16_000,
+                      ),
+                    })
+                : undefined,
+            },
           ));
       } catch (err) {
         return recoverableDraftFail(

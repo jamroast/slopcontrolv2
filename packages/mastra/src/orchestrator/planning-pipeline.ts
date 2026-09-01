@@ -141,32 +141,70 @@ Research:
 ${opts.research}`;
 }
 
+const JUDGE_PARSE_OR_EMPTY_RE =
+  /parse failed|empty content|timed out|no verdict/i;
+
+/** True when a thrown judge error looks like JSON/empty/timeout infra, not content. */
+export function isPlanningJudgeParseFailure(err: unknown): boolean {
+  const detail =
+    err instanceof PlanningJudgeInfraError
+      ? planningJudgeErrorDetail(err.rootCause)
+      : err instanceof Error
+        ? err.message
+        : String(err ?? "");
+  return JUDGE_PARSE_OR_EMPTY_RE.test(detail);
+}
+
 /** Run a planning JSON judge with infra/parse retries (does not burn leg-repair passes). */
 export async function callPlanningJudgeWithInfraRetry<T>(
   call: () => Promise<T>,
   extractGaps: (result: T) => string[],
   maxRetries: number = MAX_PLANNING_JUDGE_RETRIES,
-): Promise<{ result: T; judgeInfraFailed: boolean }> {
-  let last: T | undefined;
-  let lastError: unknown;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      last = await call();
-      const gaps = extractGaps(last);
-      const infra = gaps.some(isPlanningJudgeInfraIssue);
-      if (!infra) return { result: last, judgeInfraFailed: false };
-      if (attempt < maxRetries - 1) continue;
-      return { result: last, judgeInfraFailed: true };
-    } catch (err) {
-      lastError = err;
-      if (attempt < maxRetries - 1) continue;
-      if (last) return { result: last, judgeInfraFailed: true };
-      throw new PlanningJudgeInfraError(lastError);
+  opts?: { fallbackCall?: () => Promise<T> },
+): Promise<{ result: T; judgeInfraFailed: boolean; usedFallback?: boolean }> {
+  const runLeg = async (
+    legCall: () => Promise<T>,
+  ): Promise<{ result: T; judgeInfraFailed: boolean }> => {
+    let last: T | undefined;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        last = await legCall();
+        const gaps = extractGaps(last);
+        const infra = gaps.some(isPlanningJudgeInfraIssue);
+        if (!infra) return { result: last, judgeInfraFailed: false };
+        if (attempt < maxRetries - 1) continue;
+        return { result: last, judgeInfraFailed: true };
+      } catch (err) {
+        lastError = err;
+        if (attempt < maxRetries - 1) continue;
+        if (last) return { result: last, judgeInfraFailed: true };
+        throw new PlanningJudgeInfraError(lastError);
+      }
     }
+    throw new PlanningJudgeInfraError(
+      lastError ?? new Error("retry loop exhausted"),
+    );
+  };
+
+  try {
+    const primary = await runLeg(call);
+    if (
+      !primary.judgeInfraFailed ||
+      !opts?.fallbackCall ||
+      !extractGaps(primary.result).some(isPlanningJudgeInfraIssue)
+    ) {
+      return primary;
+    }
+    const fallback = await runLeg(opts.fallbackCall);
+    return { ...fallback, usedFallback: true };
+  } catch (err) {
+    if (!opts?.fallbackCall || !isPlanningJudgeParseFailure(err)) {
+      throw err;
+    }
+    const fallback = await runLeg(opts.fallbackCall);
+    return { ...fallback, usedFallback: true };
   }
-  throw new PlanningJudgeInfraError(
-    lastError ?? new Error("retry loop exhausted"),
-  );
 }
 
 export function faultLegFromPhaseQualityVerdict(opts: {

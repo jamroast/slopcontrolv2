@@ -11,6 +11,7 @@ import {
   MAX_PLANNING_SELF_HEAL_ROUNDS,
   callPlanningJudgeWithInfraRetry,
   PlanningJudgeInfraError,
+  isPlanningJudgeParseFailure,
   phaseQualityRetryPrompt,
   brokenOutputReason,
 } from "./planning-pipeline.js";
@@ -171,6 +172,48 @@ describe("planning-pipeline", () => {
     );
     assert.equal(judgeInfraFailed, true);
     assert.deepEqual(result.gaps, ["LLM judge failed"]);
+  });
+
+  it("isPlanningJudgeParseFailure detects JSON parse and empty-content errors", () => {
+    assert.equal(
+      isPlanningJudgeParseFailure(
+        new PlanningJudgeInfraError(new Error("JSON chat parse failed at position 4")),
+      ),
+      true,
+    );
+    assert.equal(
+      isPlanningJudgeParseFailure(new Error("JSON chat returned empty content")),
+      true,
+    );
+    assert.equal(
+      isPlanningJudgeParseFailure(new Error("Missing /sign-in route")),
+      false,
+    );
+  });
+
+  it("callPlanningJudgeWithInfraRetry falls back after primary parse failures", async () => {
+    let primaryCalls = 0;
+    let fallbackCalls = 0;
+    const { result, judgeInfraFailed, usedFallback } =
+      await callPlanningJudgeWithInfraRetry(
+        async () => {
+          primaryCalls += 1;
+          throw new Error("JSON chat parse failed at position 4");
+        },
+        (r: { ok: boolean }) => (r.ok ? [] : ["LLM judge failed"]),
+        1,
+        {
+          fallbackCall: async () => {
+            fallbackCalls += 1;
+            return { ok: true };
+          },
+        },
+      );
+    assert.equal(primaryCalls, 1);
+    assert.equal(fallbackCalls, 1);
+    assert.equal(usedFallback, true);
+    assert.equal(judgeInfraFailed, false);
+    assert.equal(result.ok, true);
   });
 
   it("planningGateIssueFingerprint is stable for equivalent issue sets", () => {

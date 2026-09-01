@@ -45,6 +45,40 @@ describe("json-chat helpers", () => {
     );
   });
 
+  it("stripJsonFence finds JSON after a prose preamble (glm-5.3 shape)", () => {
+    assert.equal(
+      stripJsonFence(
+        'Let me analyze this PHASE.md draft against the RESEARCH.md and Change Intent.\n\nThe draft is good.\n\n{"ok":true,"gaps":[]}',
+      ),
+      '{"ok":true,"gaps":[]}',
+    );
+  });
+
+  it("stripJsonFence skips a non-JSON brace in prose and finds the real object", () => {
+    assert.equal(
+      stripJsonFence(
+        'The draft has {some issue} and the verdict is {"ok":true,"gaps":[]}',
+      ),
+      '{"ok":true,"gaps":[]}',
+    );
+  });
+
+  it("stripJsonFence skips nested unbalanced prose braces before real JSON", () => {
+    assert.equal(
+      stripJsonFence(
+        'Note {nested {broken} span before {"ok":true,"gaps":[]}',
+      ),
+      '{"ok":true,"gaps":[]}',
+    );
+  });
+
+  it("stripJsonFence extracts a JSON array", () => {
+    assert.equal(
+      stripJsonFence('Here are the results: [1, 2, 3]'),
+      '[1, 2, 3]',
+    );
+  });
+
   it("extractChatMessageText reads content string, parts, and reasoning fallbacks", () => {
     assert.equal(
       extractChatMessageText({ content: '  {"ok":true}  ' }),

@@ -439,4 +439,38 @@ describe("@slopcontrol/llm", () => {
 
     assert.equal(registry.resolveFallback("planning"), null);
   });
+
+  it("resolveFallbackEndpointForRole mirrors resolveFallback with endpoint + modelId", () => {
+    const registry = new LlmRegistry({
+      endpoints: [
+        {
+          id: "deepseek",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "deepseek-v4-pro",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+        {
+          id: "glm",
+          baseUrl: "http://localhost:11434/v1",
+          apiType: "openai-chat",
+          modelId: "glm-5.2",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+      ],
+      roles: {
+        research: { endpointId: "deepseek" },
+        planning: { endpointId: "deepseek" },
+        classification: { endpointId: "deepseek" },
+        supervisor: { endpointId: "glm" },
+        coding: { endpointId: "deepseek" },
+      },
+    });
+
+    const fallback = registry.resolveFallbackEndpointForRole("classification");
+    assert.ok(fallback);
+    assert.equal(fallback.modelId, "glm-5.2");
+    assert.equal(fallback.endpoint.modelId, "glm-5.2");
+    assert.equal(registry.resolveFallback("classification")?.id, "openai/glm-5.2");
+  });
 });

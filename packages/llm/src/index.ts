@@ -319,22 +319,35 @@ export class LlmRegistry {
    * fallback exists (e.g. every role is bound to the same model).
    */
   resolveFallback(role: AgentRole): MastraModelConfig | null {
-    const primary = bindingForRole(this.roles, role);
+    const fallback = this.resolveFallbackEndpointForRole(role);
+    return fallback
+      ? toMastraModelConfig(fallback.endpoint, fallback.modelId, this.providers)
+      : null;
+  }
+
+  /**
+   * Endpoint + modelId for {@link resolveFallback}, for JSON chat callers that
+   * need a full LlmEndpoint (not just a Mastra agent model config).
+   */
+  resolveFallbackEndpointForRole(
+    role: AgentRole,
+    roleOverrides?: Partial<RoleModelBindings>,
+  ): { endpoint: LlmEndpoint; modelId: string } | null {
+    const primary = bindingForRole(this.roles, role, roleOverrides);
     const primaryEndpoint = this.getEndpoint(primary.endpointId);
     const primaryModelId = primary.modelId ?? primaryEndpoint.modelId;
 
     // Prefer the supervisor's model when it is a different model.
     const supervisor = this.roles.supervisor;
     if (supervisor) {
-      const supervisorEndpoint = this.getEndpoint(supervisor.endpointId);
+      const supervisorEndpoint = resolveEndpointSecrets(
+        this.getEndpoint(supervisor.endpointId),
+        this.providers,
+      );
       const supervisorModelId =
         supervisor.modelId ?? supervisorEndpoint.modelId;
       if (supervisorModelId !== primaryModelId) {
-        return toMastraModelConfig(
-          supervisorEndpoint,
-          supervisorModelId,
-          this.providers,
-        );
+        return { endpoint: supervisorEndpoint, modelId: supervisorModelId };
       }
     }
 
@@ -342,11 +355,14 @@ export class LlmRegistry {
     const seen = new Set<string>();
     for (const binding of Object.values(this.roles)) {
       if (!binding) continue;
-      const endpoint = this.getEndpoint(binding.endpointId);
+      const endpoint = resolveEndpointSecrets(
+        this.getEndpoint(binding.endpointId),
+        this.providers,
+      );
       const modelId = binding.modelId ?? endpoint.modelId;
       if (modelId === primaryModelId || seen.has(modelId)) continue;
       seen.add(modelId);
-      return toMastraModelConfig(endpoint, modelId, this.providers);
+      return { endpoint, modelId };
     }
     return null;
   }
