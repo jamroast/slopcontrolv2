@@ -1612,7 +1612,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "list_extractable_design_elements",
       description:
-        "List extractable shared-element candidates from a design-loop mock (data-element markers + known chrome: menubar, theme-toggle, user-pill, …). Use returned id/label with design_element_extract.",
+        "List extractable shared-element candidates from a design-loop mock (data-element markers + known chrome: menubar, theme-toggle, user-pill, …). Use returned id/label with design_element_extract. When the operator names a specific version (e.g. 'extract v9'), pass that version.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1620,7 +1620,8 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           loopId: { type: "string" },
           version: {
             type: "number",
-            description: "Mock version (default: current)",
+            description:
+              "Mock version to list from (default: current). Pass the version the operator named, e.g. 9 for 'extract v9'.",
           },
         },
         required: ["projectId", "loopId"],
@@ -1629,7 +1630,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_element_extract",
       description:
-        "Extract a shared element from a design-loop mock and publish to the project library. Prefer list_extractable_design_elements first, then pass the listed elementId (and optional label). Without elementId, defaults to theme-toggle when present. Optional publishToRegistry.",
+        "Extract a shared element from a design-loop mock and publish to the project library. Prefer list_extractable_design_elements first, then pass the listed elementId (and optional label). Without elementId, defaults to theme-toggle when present. Optional publishToRegistry. When the operator names a specific version (e.g. 'extract v9' / 'from the accepted v9'), pass that version — do NOT default to the current tip.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1640,7 +1641,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             description:
               "Id from list_extractable_design_elements (e.g. menubar, theme-toggle)",
           },
-          version: { type: "number" },
+          version: {
+            type: "number",
+            description:
+              "Mock version to extract from (default: current tip). Pass the version the operator named, e.g. 9 for 'extract v9'.",
+          },
           label: { type: "string" },
           kind: { type: "string" },
           publish: {
