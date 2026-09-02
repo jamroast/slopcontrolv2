@@ -693,9 +693,19 @@ export function normalizeContinueIntentStructured(
   const replaceDesignFacets = [...facetSet];
   const adoptTheme = !reuseProjectDesign && intent.adoptTheme;
   const adoptChrome = Boolean(intent.adoptChrome);
+  // Narrow to shell/menubar ONLY when the request is narrowly about chrome
+  // layout — not when the operator is asking for a broader page/screen surface
+  // (dashboard, landing, settings, …). "Build the full dashboard" names
+  // shell+layout among many targets and must NOT latch the scope to menubar.
+  const broadSurface = intent.targets.some((t) =>
+    ["dashboard", "landing", "settings", "chat", "tasting-room", "lockups"].includes(
+      t,
+    ),
+  );
   const menubarLayout =
-    (intent.targets.includes("shell") && intent.targets.includes("layout")) ||
-    adoptChrome;
+    ((intent.targets.includes("shell") && intent.targets.includes("layout")) ||
+      adoptChrome) &&
+    !broadSurface;
 
   let scope = intent.scope;
   if (wantsAssetEdit && !inventLogo) {

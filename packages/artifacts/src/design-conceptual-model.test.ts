@@ -26,12 +26,13 @@ import {
   fallbackFeaturesForScope,
   formatConceptualModelPromptBlock,
   summarizeConceptualModel,
+  applyContinueIntentToScope,
 } from "./design-conceptual-model.js";
 import {
   compileDesignPackFromAccept,
   formatDesignPackPromptBlock,
 } from "./design-pack.js";
-import { fallbackContinueIntentFromText } from "./continue-intent.js";
+import { fallbackContinueIntentFromText, ContinueIntentSchema } from "./continue-intent.js";
 
 const DUAL_THEME_HTML = `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
@@ -279,5 +280,38 @@ describe("design-conceptual-model", () => {
     assert.equal(summary.focus, "theme");
     assert.deepEqual(summary.inScope, ["theme_modes"]);
     assert.ok(summary.theme?.modes.includes("light"));
+  });
+
+  it("applyContinueIntentToScope does not narrow to shell when dashboard is requested", () => {
+    const prior = {
+      kind: "screen" as const,
+      focus: "account-dashboard",
+      focusPaths: [],
+      preserve: ["logo", "palette", "content"],
+      source: "start" as const,
+    };
+    const intent = ContinueIntentSchema.parse({
+      scope: "sections",
+      targets: ["shell", "dashboard"],
+    });
+    const scope = applyContinueIntentToScope(prior, intent, "build the full dashboard");
+    assert.equal(scope.kind, "screen");
+    assert.equal(scope.focus, "account-dashboard");
+  });
+
+  it("applyContinueIntentToScope narrows to shell for a narrow shell request", () => {
+    const prior = {
+      kind: "screen" as const,
+      focus: "account-dashboard",
+      focusPaths: [],
+      preserve: ["logo", "palette", "content"],
+      source: "start" as const,
+    };
+    const intent = ContinueIntentSchema.parse({
+      scope: "sections",
+      targets: ["shell"],
+    });
+    const scope = applyContinueIntentToScope(prior, intent, "just the shell");
+    assert.equal(scope.kind, "shell");
   });
 });

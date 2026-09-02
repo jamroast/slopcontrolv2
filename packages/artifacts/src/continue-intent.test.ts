@@ -260,6 +260,42 @@ describe("fallbackContinueIntentFromText", () => {
     assert.equal(intent.inventLogo, false);
   });
 
+  it("does not latch scope to shell/menubar when the operator asks for the full dashboard", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "sections",
+        targets: ["shell", "layout", "dashboard", "settings"],
+        notes: "Build out the full dashboard body",
+      }),
+    );
+    // Broad surface (dashboard/settings) must NOT narrow to shell/menubar.
+    assert.equal(intent.designScope, undefined);
+  });
+
+  it("does not latch to shell/menubar when adoptChrome is set but dashboard is also requested", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "sections",
+        targets: ["shell", "layout", "dashboard"],
+        adoptChrome: true,
+        notes: "Adopt the chrome and build the full dashboard",
+      }),
+    );
+    assert.equal(intent.designScope, undefined);
+  });
+
+  it("still narrows to shell/menubar for a narrow chrome-layout request", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "sections",
+        targets: ["shell", "layout"],
+        notes: "Centre the menubar over page content",
+      }),
+    );
+    assert.equal(intent.designScope?.kind, "shell");
+    assert.equal(intent.designScope?.focus, "menubar");
+  });
+
   it("detects full redesign as full_revise", () => {
     const intent = fallbackContinueIntentFromText(
       "Redesign the whole landing from scratch",

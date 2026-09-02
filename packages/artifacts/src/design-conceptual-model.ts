@@ -226,7 +226,11 @@ export function applyContinueIntentToScope(
   if (
     (intent.targets.includes("shell") || intent.targets.includes("nav")) &&
     intent.targets.length <= 2 &&
-    !intent.targets.includes("landing")
+    !intent.targets.some((t) =>
+      ["landing", "dashboard", "settings", "chat", "tasting-room", "lockups"].includes(
+        t,
+      ),
+    )
   ) {
     return DesignScopeSchema.parse({
       kind: "shell",
