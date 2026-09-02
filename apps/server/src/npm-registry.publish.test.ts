@@ -147,6 +147,10 @@ describe("publishLibraryToRegistry", () => {
         meta?.publishedPackages["@jamroast/components"]?.version,
         "0.0.1",
       );
+      assert.equal(
+        meta?.publishedPackages["@jamroast/components"]?.sourceProject,
+        "jamroast-components",
+      );
 
       // Consumer updated via its own toolchain (pnpm add).
       assert.equal(report.propagation?.length, 1);

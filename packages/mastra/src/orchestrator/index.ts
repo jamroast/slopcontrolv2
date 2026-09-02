@@ -191,6 +191,7 @@ import {
   formatSharedDesignPromptBlock,
   detectShareSourceFromText,
   resolveDesignShareSource,
+  resolveShareSourceFromRegistryPackage,
   readShareableDesign,
   importDesignShareIntoLoop,
   pickProjectPriorDesign,
@@ -245,7 +246,6 @@ import {
   formatPhaseBoundPlanPromptBlock,
   readPhasePlanPack,
   buildCrossProjectCatalog,
-  detectDependencyIntentFromText,
   listElementsToAutoImport,
   formatCrossProjectCatalogPromptBlock,
   formatDependencyIntentPromptBlock,
@@ -2633,10 +2633,10 @@ export class ChangeOrchestrator {
           timeoutMs: 90_000,
         });
       } catch (err) {
-        slog.warn("deps", "dependency intent LLM failed; regex fallback", {
+        slog.error("deps", "dependency intent LLM failed; no regex fallback", {
           error: err instanceof Error ? err.message : String(err),
         });
-        intent = detectDependencyIntentFromText(text);
+        intent = null;
       }
     }
     const intentBlock = formatDependencyIntentPromptBlock(intent);
@@ -4093,9 +4093,22 @@ ${message.trim()}`;
               })
             : null;
         if (!detected) {
+          // Registry package→project link (deterministic, authoritative).
+          detected = resolveShareSourceFromRegistryPackage({
+            targetRoot: project.rootPath,
+            text: shareText,
+            dataDir: input.dataDir ?? this.ctx.dataDir,
+            listProjects: input.listProjects,
+            findProjectByRootPath: input.findProjectByRootPath,
+          });
+        }
+        if (!detected && !hint) {
+          // Only regex-guess when the LLM produced no shareFrom. A set shareFrom
+          // that fails exact resolution means the project isn't registered — do
+          // NOT guess a different (wrong) project via regex.
           detected = detectShareSourceFromText({
             targetRoot: project.rootPath,
-            text: hint || shareText,
+            text: shareText,
             listProjects: input.listProjects,
             findProjectByRootPath: input.findProjectByRootPath,
           });
@@ -4187,8 +4200,13 @@ ${message.trim()}`;
                 message: elText,
                 timeoutMs: 90_000,
               });
-            } catch {
-              depIntent = detectDependencyIntentFromText(elText);
+            } catch (err) {
+              slog.error(
+                "design-loop",
+                "dependency intent LLM failed; no regex fallback",
+                { error: err instanceof Error ? err.message : String(err) },
+              );
+              depIntent = null;
             }
           }
           const catalog = buildCrossProjectCatalog({

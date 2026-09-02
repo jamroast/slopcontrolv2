@@ -8,6 +8,7 @@ import {
   isDesignLoopOpen,
   parseDesignLoopStatusFromDispatch,
   parseDesignLoopVersionFromDispatch,
+  parseDesignLoopTipFromDispatch,
   parseLoopDiscardVersion,
 } from "./design-routing.js";
 import { parseLoopIdFromDispatch } from "./plan-routing.js";
@@ -62,6 +63,8 @@ describe("design routing", () => {
     assert.match(text, /v3/);
     assert.match(text, /design_loop_continue/);
     assert.match(text, /NOT design_loop_get/);
+    assert.match(text, /design_loop_start/);
+    assert.match(text, /start again/);
   });
 
   it("id-dependent set covers revision, handoff, and terminal tools", () => {
@@ -123,6 +126,23 @@ describe("design routing", () => {
       7,
     );
     assert.equal(parseDesignLoopVersionFromDispatch("not json"), undefined);
+  });
+
+  it("parses the new tip (not the discarded version) from a discard dispatch", () => {
+    // Discard response carries both `tip` (rewound) and `version` (discarded).
+    assert.equal(
+      parseDesignLoopTipFromDispatch('{"tip":0,"version":3}'),
+      0,
+    );
+    assert.equal(
+      parseDesignLoopTipFromDispatch('{"tip":2,"version":3}'),
+      2,
+    );
+    assert.equal(
+      parseDesignLoopTipFromDispatch('{"loop":{"currentVersion":0}}'),
+      0,
+    );
+    assert.equal(parseDesignLoopTipFromDispatch("not json"), undefined);
   });
 
   it("parseLoopDiscardVersion reads version from args", () => {

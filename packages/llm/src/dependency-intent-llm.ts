@@ -39,22 +39,8 @@ export interface ClassifyDependencyIntentViaLlmOptions {
 }
 
 /**
- * @deprecated No longer used as a pre-gate — classification always runs when text is present.
- * Kept for tests that assert historical linking language cues.
- */
-export function shouldClassifyDependencyIntent(text: string): boolean {
-  const t = text ?? "";
-  return (
-    /@[\w.-]+\//.test(t) ||
-    /\b(use|from|package|element|registry|pnpm\s+add|npm\s+add|npm\s+link|pnpm\s+link|shared\s+lib|infra(structure)?)\b/i.test(
-      t,
-    )
-  );
-}
-
-/**
  * Classification-role JSON → DependencyIntent.
- * Success path: LLM JSON only (no regex merge). Callers catch → detectDependencyIntentFromText.
+ * Success path: LLM JSON only (no regex merge). Callers surface the error on failure.
  */
 export async function classifyDependencyIntentViaLlm(
   opts: ClassifyDependencyIntentViaLlmOptions,

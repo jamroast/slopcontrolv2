@@ -10,7 +10,6 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   buildCrossProjectCatalog,
-  detectDependencyIntentFromText,
   listElementsToAutoImport,
   formatAskDependencyTaskBriefNudge,
   formatCrossProjectCatalogPromptBlock,
@@ -112,50 +111,6 @@ describe("cross-project-catalog", () => {
     }
   });
 
-  it("detectDependencyIntentFromText: element from jamroast, npm package, and npm link forbid", () => {
-    const el = detectDependencyIntentFromText(
-      "use theme-toggle from jamroast",
-    );
-    assert.equal(el.useElement?.id, "theme-toggle");
-    assert.equal(el.useElement?.fromProject, "jamroast");
-    assert.equal(el.forbidNpmLink, true);
-
-    const pkg = detectDependencyIntentFromText(
-      "please add @jam/theme-toggle@1.0.0",
-    );
-    assert.equal(pkg.useNpmPackage?.name, "@jam/theme-toggle");
-    assert.equal(pkg.useNpmPackage?.version, "1.0.0");
-
-    const link = detectDependencyIntentFromText(
-      "just npm link the package from jamroast",
-    );
-    assert.equal(link.forbidNpmLink, true);
-    assert.match(link.notes, /link/i);
-
-    const intentBlock = formatDependencyIntentPromptBlock(el);
-    assert.match(intentBlock, /Do NOT recommend/i);
-    assert.match(intentBlock, /npm link/i);
-
-    const nudge = formatAskDependencyTaskBriefNudge(el);
-    assert.match(nudge, /Element:/);
-  });
-
-  it("detectDependencyIntentFromText: import-all and multi element ids", () => {
-    const bulk = detectDependencyIntentFromText(
-      "Please can you import the elements from the project jamroast-components and apply them to this mockup",
-    );
-    assert.equal(bulk.importAllElementsFrom, "jamroast-components");
-
-    const listed = detectDependencyIntentFromText(
-      "Import these shared design elements from jamroast-components: menubar, theme-toggle, sign-in",
-    );
-    const ids = (listed.useElements ?? []).map((e) => e.id).sort();
-    assert.ok(ids.includes("menubar"));
-    assert.ok(ids.includes("theme-toggle"));
-    assert.ok(ids.includes("sign-in"));
-    assert.equal(listed.importAllElementsFrom, "jamroast-components");
-  });
-
   it("listElementsToAutoImport expands importAllElementsFrom via catalog", () => {
     const parent = tmp("import-all");
     const jamroast = join(parent, "jamroast-components");
@@ -196,9 +151,12 @@ describe("cross-project-catalog", () => {
           },
         ],
       });
-      const intent = detectDependencyIntentFromText(
-        "import the elements from jamroast-components",
-      );
+      const intent = {
+        importAllElementsFrom: "jamroast-components",
+        useElements: [],
+        forbidNpmLink: true,
+        notes: "",
+      };
       const toImport = listElementsToAutoImport({
         intent,
         catalog,
@@ -250,6 +208,12 @@ describe("cross-project-catalog", () => {
       const { recommended } = resolveDependencyRecommendation({
         text: "use theme-toggle from jamroast",
         catalog,
+        intent: {
+          useElements: [{ id: "theme-toggle", fromProject: "jamroast" }],
+          useElement: { id: "theme-toggle", fromProject: "jamroast" },
+          forbidNpmLink: true,
+          notes: "",
+        },
       });
       assert.ok(recommended.some((r) => r.action === "ensure_rc"));
       assert.ok(recommended.some((r) => r.action === "import_element"));

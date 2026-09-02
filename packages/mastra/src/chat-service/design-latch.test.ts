@@ -243,7 +243,7 @@ describe("design loop latch", () => {
           content: [
             {
               type: "text",
-              text: 'loopId: dl-1\nstatus: open\n---\n{"version":6}',
+              text: 'loopId: dl-1\nstatus: open\n---\n{"tip":6,"version":7}',
             },
           ],
         },
@@ -266,6 +266,43 @@ describe("design loop latch", () => {
       };
       assert.equal(afterAccept.loopId, "dl-1");
       assert.equal(afterAccept.status, "accepted");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("discard to tip 0 clears the latch (no active version)", () => {
+    const { service, cleanup } = makeService();
+    try {
+      const conversation = service.createConversation({ projectId: "p1" });
+      const svc = service as unknown as {
+        rememberDesignFromDispatch: (
+          c: unknown,
+          n: string,
+          a: Record<string, unknown>,
+          r: ChatToolResult,
+        ) => void;
+        resolveDesignLatch: (id: string, p?: string | null) => unknown;
+      };
+      const result: ChatToolResult = {
+        content: [{ type: "text", text: "loopId: dl-1\nstatus: open" }],
+      };
+      svc.rememberDesignFromDispatch(conversation, "design_loop_start", {}, result);
+      assert.ok(svc.resolveDesignLatch(conversation.id, "p1"));
+      svc.rememberDesignFromDispatch(
+        conversation,
+        "design_loop_discard",
+        { loopId: "dl-1" },
+        {
+          content: [
+            {
+              type: "text",
+              text: 'loopId: dl-1\nstatus: open\n---\n{"tip":0,"version":1}',
+            },
+          ],
+        },
+      );
+      assert.equal(svc.resolveDesignLatch(conversation.id, "p1"), undefined);
     } finally {
       cleanup();
     }

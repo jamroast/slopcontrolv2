@@ -111,7 +111,7 @@ import {
   jamPackageNameForElement,
   buildCrossProjectCatalog,
   resolveDependencyRecommendation,
-  detectDependencyIntentFromText,
+  type DependencyIntent,
   DesignScopeSchema,
   conceptualModelFromLoop,
   defaultProductScope,
@@ -4327,7 +4327,8 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
         : tip;
   if (!Number.isFinite(baseVersion) || baseVersion < 1) {
     res.status(400).json({
-      error: "baseVersion required (or set tip via an active currentVersion)",
+      error:
+        "No active version to continue from — all versions were discarded. Use design_loop_start for a fresh mock, or restore a version with design_loop_retry.",
     });
     return;
   }
@@ -5073,9 +5074,7 @@ app.post("/projects/:id/resolve-dependency", async (req, res) => {
     dataDir: defaultDataDir(),
     listProjects: () => store.listProjects(),
   });
-  let intent = body.text
-    ? detectDependencyIntentFromText(body.text)
-    : undefined;
+  let intent: DependencyIntent | undefined;
   if (body.text?.trim()) {
     try {
       const { registry } = getRuntime(project.rootPath);
@@ -5087,8 +5086,11 @@ app.post("/projects/:id/resolve-dependency", async (req, res) => {
         message: body.text,
         timeoutMs: 90_000,
       });
-    } catch {
-      /* regex fallback already set */
+    } catch (err) {
+      log.error("deps", "dependency intent LLM failed; no regex fallback", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      intent = undefined;
     }
   }
   const resolved = resolveDependencyRecommendation({

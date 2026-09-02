@@ -38,6 +38,7 @@ import {
   replaceDesignLoopSelections,
 } from "./design-loop-selections.js";
 import type { DesignFacet } from "./continue-intent.js";
+import { readNpmRegistryMeta } from "./npm-registry.js";
 
 export type DesignShareSourceRef =
   | { kind: "projectId"; value: string }
@@ -226,6 +227,37 @@ export function detectShareSourceFromText(opts: {
     if (src) return src;
   }
   return null;
+}
+
+/**
+ * Resolve a share source from the registry's recorded package→project link.
+ * When the operator names an npm package (e.g. `@jamroast/components`), look up
+ * the registry meta's `sourceProject` and resolve that project by name. This is
+ * the deterministic, authoritative fallback — no name-guessing.
+ */
+export function resolveShareSourceFromRegistryPackage(opts: {
+  targetRoot: string;
+  text: string;
+  dataDir?: string;
+  listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+  findProjectByRootPath?: (rootPath: string) =>
+    | { id: string; name: string; rootPath: string }
+    | undefined;
+}): DesignShareSource | null {
+  const text = (opts.text ?? "").trim();
+  if (!text || !opts.dataDir) return null;
+  const pkgMatch = /@[\w.-]+\/[\w.-]+/g.exec(text);
+  if (!pkgMatch) return null;
+  const packageName = pkgMatch[0];
+  const meta = readNpmRegistryMeta(opts.dataDir);
+  const sourceProject = meta?.publishedPackages?.[packageName]?.sourceProject;
+  if (!sourceProject) return null;
+  return resolveDesignShareSource({
+    targetRoot: opts.targetRoot,
+    fromName: sourceProject,
+    listProjects: opts.listProjects,
+    findProjectByRootPath: opts.findProjectByRootPath,
+  });
 }
 
 /**

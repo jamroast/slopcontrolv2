@@ -97,6 +97,8 @@ export const NpmRegistryMetaSchema = z.object({
         version: z.string(),
         publishedAt: z.string(),
         toolchainKind: z.string().default(""),
+        /** Source project name that published this package (package→project link). */
+        sourceProject: z.string().optional(),
       }),
     )
     .default({}),

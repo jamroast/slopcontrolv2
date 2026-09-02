@@ -7,6 +7,7 @@ import {
   resolveShareAlias,
   resolveDesignShareSource,
   detectShareSourceFromText,
+  resolveShareSourceFromRegistryPackage,
   textMentionsProjectName,
   readShareableDesign,
   importDesignShareIntoLoop,
@@ -33,6 +34,7 @@ import {
   replaceDesignLoopSelections,
 } from "./design-loop-selections.js";
 import { existsSync } from "node:fs";
+import { ensureNpmRegistryLayout, writeNpmRegistryMeta } from "./npm-registry.js";
 
 function tmpRoot(name: string): string {
   const base = mkdtempSync(join(tmpdir(), `sc-share-${name}-`));
@@ -127,6 +129,57 @@ test("resolveDesignShareSource: by rootPath via findProjectByRootPath", () => {
   assert.equal(src?.projectId, "src-9");
   rmSync(target, { recursive: true, force: true });
   rmSync(source, { recursive: true, force: true });
+});
+
+test("resolveShareSourceFromRegistryPackage: maps @scope/name to recorded sourceProject", () => {
+  const target = tmpRoot("target");
+  const source = tmpRoot("jamroast-components");
+  const dataDir = tmpRoot("data");
+  try {
+    const meta = ensureNpmRegistryLayout(dataDir);
+    meta.publishedPackages = {
+      "@jamroast/components": {
+        version: "0.0.5",
+        publishedAt: new Date().toISOString(),
+        toolchainKind: "node-pnpm",
+        sourceProject: "jamroast-components",
+      },
+    };
+    writeNpmRegistryMeta(dataDir, meta);
+    const src = resolveShareSourceFromRegistryPackage({
+      targetRoot: target,
+      text: "Reuse @jamroast/components primitives",
+      dataDir,
+      listProjects: () => [
+        { id: "jc", name: "jamroast-components", rootPath: source },
+        { id: "jr", name: "JamRoast", rootPath: tmpRoot("burntjam") },
+      ],
+    });
+    assert.equal(src?.name, "jamroast-components");
+    assert.equal(src?.rootPath, source);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(source, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("resolveShareSourceFromRegistryPackage: returns null without a recorded sourceProject", () => {
+  const target = tmpRoot("target");
+  const dataDir = tmpRoot("data");
+  try {
+    ensureNpmRegistryLayout(dataDir);
+    const src = resolveShareSourceFromRegistryPackage({
+      targetRoot: target,
+      text: "Reuse @unknown/package primitives",
+      dataDir,
+      listProjects: () => [],
+    });
+    assert.equal(src, null);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("readShareableDesign picks up tokens + logos from source root", () => {

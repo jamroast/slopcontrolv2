@@ -517,12 +517,19 @@ export async function publishLibraryToRegistry(opts: {
   }
 
   // 4. Evidence in REGISTRY.json.
+  const sourceProject =
+    opts.projects?.find(
+      (p) =>
+        p.rootPath.replace(/\/$/, "") ===
+        opts.packageDir.replace(/\/$/, ""),
+    )?.name ?? basename(opts.packageDir);
   meta.publishedPackages = {
     ...(meta.publishedPackages ?? {}),
     [name]: {
       version,
       publishedAt: new Date().toISOString(),
       toolchainKind: spec.kind,
+      sourceProject,
     },
   };
   meta.updatedAt = new Date().toISOString();
@@ -775,12 +782,19 @@ export async function publishWorkspacePackageToRegistry(opts: {
     note: publishStdout.trim().slice(0, 200) || "published",
   });
 
+  const sourceProject =
+    opts.projects?.find(
+      (p) =>
+        p.rootPath.replace(/\/$/, "") ===
+        opts.projectRoot.replace(/\/$/, ""),
+    )?.name ?? basename(opts.projectRoot);
   meta.publishedPackages = {
     ...(meta.publishedPackages ?? {}),
     [name]: {
       version,
       publishedAt: new Date().toISOString(),
       toolchainKind: "workspace-npm",
+      sourceProject,
     },
   };
   meta.updatedAt = new Date().toISOString();

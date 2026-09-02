@@ -76,6 +76,9 @@ export function formatDesignLoopLatchPrompt(latch: DesignResumeLatch): string {
     "- omit loopId to use this latched loop (global chat: keep passing projectId).",
     "- To switch loops on the same project, pass the other loopId explicitly — list_design_loops when unsure.",
     "- design_loop_get is read-only status only — it never revises the mock.",
+    "",
+    "When the operator says they discarded the designs, wants to start again / fresh / from scratch, or explicitly asks for a new mock:",
+    "- call **design_loop_start** (or design_loop_abandon first) — NOT design_loop_continue.",
   ];
   return lines.filter(Boolean).join("\n");
 }
@@ -147,6 +150,45 @@ export function parseDesignLoopVersionFromDispatch(
   const whole = fromJson(raw);
   if (whole !== undefined) return whole;
   // Envelope: JSON body may sit after a `---` separator or on its own line.
+  const body = raw.split(/^---$/m)[1];
+  if (body) {
+    const fromBody = fromJson(body.trim());
+    if (fromBody !== undefined) return fromBody;
+  }
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    const fromLine = fromJson(trimmed);
+    if (fromLine !== undefined) return fromLine;
+  }
+  return undefined;
+}
+
+/**
+ * Parse the NEW tip (not the discarded version) from a discard dispatch.
+ * The discard response carries `tip` (the rewound tip) and `version` (the
+ * discarded version) — for latch invalidation we need the tip, so a discard
+ * that leaves no active version (tip 0) clears the latch.
+ */
+export function parseDesignLoopTipFromDispatch(
+  raw: string,
+): number | undefined {
+  const fromJson = (text: string): number | undefined => {
+    try {
+      const parsed = JSON.parse(text) as {
+        tip?: unknown;
+        loop?: { currentVersion?: unknown };
+      };
+      for (const v of [parsed.tip, parsed.loop?.currentVersion]) {
+        if (typeof v === "number") return v;
+      }
+    } catch {
+      /* not JSON */
+    }
+    return undefined;
+  };
+  const whole = fromJson(raw);
+  if (whole !== undefined) return whole;
   const body = raw.split(/^---$/m)[1];
   if (body) {
     const fromBody = fromJson(body.trim());

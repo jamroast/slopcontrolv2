@@ -306,118 +306,11 @@ export function buildCrossProjectCatalog(opts: {
   };
 }
 
-/** Regex fallback for dependency / linking language. */
-export function detectDependencyIntentFromText(text: string): DependencyIntent {
-  const t = text ?? "";
-  const fromMatch = t.match(
-    /\bfrom\s+(?:the\s+)?(?:project\s+)?(registry|[\w.-]+)/i,
-  );
-  const fromProject = fromMatch?.[1]
-    ? resolveShareAlias(fromMatch[1].replace(/\s+/g, " ").trim())
-    : undefined;
-
-  const bulkMatch = t.match(
-    /\b(?:import|pull|use|adopt|pin)\b[\s\S]{0,100}?\b(?:the\s+)?(?:shared\s+)?(?:design\s+)?(?:elements|components)\b[\s\S]{0,60}?\bfrom\s+(?:the\s+)?(?:project\s+)?([\w.-]+)/i,
-  );
-  const importAllElementsFrom = bulkMatch?.[1]
-    ? resolveShareAlias(bulkMatch[1].replace(/\s+/g, " ").trim())
-    : undefined;
-
-  const useElements: DependencyElementRef[] = [];
-  const pushEl = (id: string) => {
-    const slug = id.trim().toLowerCase();
-    if (!slug || useElements.some((e) => e.id === slug)) return;
-    useElements.push({
-      id: slug,
-      fromProject: fromProject || importAllElementsFrom,
-    });
-  };
-
-  for (const id of KNOWN_DESIGN_ELEMENT_IDS) {
-    if (new RegExp(`\\b${id.replace(/-/g, "[-\\s]?")}\\b`, "i").test(t)) {
-      pushEl(id);
-    }
-  }
-  // Generic *-toggle / *-control / *-element (excluding already known)
-  for (const m of t.matchAll(
-    /\b(?:use|import|pin|adopt|pull)\b.{0,60}\b([\w-]+(?:-toggle|-control|-element))\b/gi,
-  )) {
-    if (m[1]) pushEl(m[1]);
-  }
-  for (const m of t.matchAll(/\belement[:\s]+([\w-]+)\b/gi)) {
-    if (m[1]) pushEl(m[1]);
-  }
-  if (
-    !useElements.some((e) => e.id === "theme-toggle") &&
-    /\b(theme\s*toggle|day\s*\/\s*night\s*button)\b/i.test(t)
-  ) {
-    pushEl("theme-toggle");
-  }
-
-  const useElement = useElements[0];
-
-  const pkgMatch =
-    t.match(/@(jam|slopcontrol)\/([\w.-]+)(?:@([\w.^~*-]+))?/i) ||
-    t.match(
-      /\b(?:pnpm|npm)\s+add\s+(@?(?:jam|slopcontrol)\/[\w.-]+(?:@[\w.^~*-]+)?)/i,
-    );
-  let useNpmPackage: DependencyIntent["useNpmPackage"];
-  if (pkgMatch) {
-    if (pkgMatch[2] && pkgMatch[1]) {
-      useNpmPackage = {
-        name: `@${pkgMatch[1].toLowerCase()}/${pkgMatch[2]}`,
-        version: pkgMatch[3],
-        fromProject,
-      };
-    } else if (pkgMatch[1]?.includes("/")) {
-      const raw = pkgMatch[1];
-      const [name, version] = raw.includes("@", 1)
-        ? [raw.slice(0, raw.indexOf("@", 1)), raw.slice(raw.indexOf("@", 1) + 1)]
-        : [raw, undefined];
-      useNpmPackage = {
-        name: name.startsWith("@") ? name : `@${name}`,
-        version,
-        fromProject,
-      };
-    }
-  }
-
-  const infra =
-    /\b(reuse|use|borrow|pull)\b.{0,50}\b(infra|infrastructure|packages?|shared\s+lib)\b.{0,40}\bfrom\b/i.test(
-      t,
-    ) ||
-    (Boolean(fromProject) &&
-      /\b(infra|infrastructure|packages?|shared)\b/i.test(t) &&
-      !importAllElementsFrom);
-  const useProjectInfra =
-    infra && fromProject
-      ? { projectName: fromProject }
-      : fromProject &&
-          !useElement &&
-          !useNpmPackage &&
-          !importAllElementsFrom &&
-          useElements.length === 0
-        ? { projectName: fromProject }
-        : importAllElementsFrom && !useNpmPackage
-          ? { projectName: importAllElementsFrom }
-          : undefined;
-
-  const mentionsLink = /\bnpm\s+link\b|\bpnpm\s+link\b|\byarn\s+link\b|\blink:/i.test(
-    t,
-  );
-
-  return DependencyIntentSchema.parse({
-    useElement,
-    useElements,
-    importAllElementsFrom,
-    useNpmPackage,
-    useProjectInfra,
-    forbidNpmLink: true,
-    notes: mentionsLink
-      ? "Operator mentioned link — refuse npm/pnpm link; use private registry instead."
-      : "",
-  });
-}
+/**
+ * Dependency intent is LLM-only. The regex fallback was removed: it produced
+ * false positives (e.g. "distinct from the existing" → fromProject "existing")
+ * and masked LLM failures. Callers surface the LLM error instead.
+ */
 
 export function formatDependencyIntentPromptBlock(
   intent: DependencyIntent | null | undefined,
@@ -584,18 +477,7 @@ export function resolveDependencyRecommendation(opts: {
     from?: string;
   }>;
 } {
-  const intent =
-    opts.intent ??
-    detectDependencyIntentFromText(
-      [
-        opts.text ?? "",
-        opts.elementId ? `use element ${opts.elementId}` : "",
-        opts.packageName ? `pnpm add ${opts.packageName}` : "",
-        opts.fromName ? `from ${opts.fromName}` : "",
-      ]
-        .filter(Boolean)
-        .join(" "),
-    );
+  const intent = opts.intent ?? DependencyIntentSchema.parse({});
 
   const recommended: Array<{
     action: ResolvedDependencyAction;

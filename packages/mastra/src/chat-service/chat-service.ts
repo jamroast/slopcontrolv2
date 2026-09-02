@@ -126,6 +126,7 @@ import {
   isDesignLoopOpen,
   parseDesignLoopStatusFromDispatch,
   parseDesignLoopVersionFromDispatch,
+  parseDesignLoopTipFromDispatch,
   parseLoopDiscardVersion,
   type DesignResumeLatch,
   type DesignTurnDecision,
@@ -2581,13 +2582,19 @@ export class ChatService {
         (typeof args.loopId === "string" ? args.loopId : "");
       const latch = this.designLatches.get(conversation.id);
       if (!latch || (id && latch.loopId !== id)) return;
-      const currentVersion = parseDesignLoopVersionFromDispatch(raw);
-      if (currentVersion !== undefined) {
-        this.designLatches.set(conversation.id, {
-          ...latch,
-          currentVersion,
-          status: parseDesignLoopStatusFromDispatch(raw) || latch.status,
-        });
+      const tip = parseDesignLoopTipFromDispatch(raw);
+      if (tip !== undefined) {
+        if (tip < 1) {
+          // No active tip — the loop is no longer continuable. Clear the latch
+          // so the chat routes to design_loop_start, not design_loop_continue.
+          this.designLatches.delete(conversation.id);
+        } else {
+          this.designLatches.set(conversation.id, {
+            ...latch,
+            currentVersion: tip,
+            status: parseDesignLoopStatusFromDispatch(raw) || latch.status,
+          });
+        }
       }
       return;
     }
