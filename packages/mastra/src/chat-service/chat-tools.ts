@@ -436,6 +436,55 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     packagePath: z.string().min(1).optional(),
     tag: z.string().optional(),
   }),
+  list_design_elements: z.object({
+    projectId: optionalProject,
+    includeRegistry: z.boolean().optional(),
+  }),
+  design_element_get: z.object({
+    projectId: optionalProject,
+    elementId: z.string().min(1),
+    version: z.number().int().positive().optional(),
+    origin: z.string().optional(),
+  }),
+  list_extractable_design_elements: z.object({
+    projectId: optionalProject,
+    loopId: z.string().min(1),
+    version: z.number().int().positive().optional(),
+  }),
+  design_element_extract: z.object({
+    projectId: optionalProject,
+    loopId: z.string().min(1),
+    elementId: z.string().min(1).optional(),
+    version: z.number().int().positive().optional(),
+    label: z.string().optional(),
+    kind: z.string().optional(),
+    publish: z.boolean().optional(),
+    publishToRegistry: z.boolean().optional(),
+  }),
+  design_element_import: z.object({
+    projectId: optionalProject,
+    loopId: z.string().min(1),
+    elementId: z.string().min(1).optional(),
+    version: z.number().int().positive().optional(),
+    origin: z.string().optional(),
+  }),
+  design_element_publish: z.object({
+    projectId: optionalProject,
+    elementId: z.string().min(1),
+    spec: z.string().min(1),
+    mockHtml: z.string().min(1),
+    label: z.string().optional(),
+    kind: z.string().optional(),
+    tokensCss: z.string().optional(),
+    srcFiles: z.record(z.string(), z.string()).optional(),
+    mountHints: z.array(z.string()).optional(),
+    publishToRegistry: z.boolean().optional(),
+  }),
+  design_element_publish_npm: z.object({
+    projectId: optionalProject,
+    elementId: z.string().min(1),
+    version: z.number().int().positive().optional(),
+  }),
 };
 
 const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
@@ -514,6 +563,20 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Install/update a registry package on one consumer via its toolchain (pnpm add). Pass allowNew:true for first-time deps. Run npm_registry_ensure_rc first when scopes are missing.",
   npm_registry_publish:
     "Raw npm publish only (no build). Pass packageDir OR projectId+packagePath. Prefer project_workspace_package_publish for nested packages.",
+  list_design_elements:
+    "List shared design elements in the project library (.slopcontrol/elements) and the global registry (~/.slopcontrol/shared-elements). Use before design_element_import.",
+  design_element_get:
+    "Resolve and fetch a shared design element (meta, SPEC, mock snippet, hasCode). Pass elementId; optional version and origin (registry | project:<registered-name> | omit for resolve order).",
+  list_extractable_design_elements:
+    "List extractable shared-element candidates from a design-loop mock (data-element markers + known chrome: menubar, theme-toggle, user-pill, …). Use returned id/label with design_element_extract. Pass loopId explicitly — do NOT rely on this chat's design-loop latch. When the operator names a specific version (e.g. 'extract v9'), pass that version.",
+  design_element_extract:
+    "Extract a shared element from a design-loop mock and publish to the project library. Prefer list_extractable_design_elements first, then pass the listed elementId (and optional label). Without elementId, defaults to theme-toggle when present. Optional publishToRegistry. Pass loopId explicitly — do NOT rely on this chat's design-loop latch (it may point at a different project's loop). Works on any loop status (open/accepted/implemented) — no need to re-accept first. When the operator names a specific version (e.g. 'extract v9' / 'from the accepted v9'), pass that version — do NOT default to the current tip.",
+  design_element_import:
+    "Import a resolved shared element into a design loop (pins META.elements + selection). Mock continues must embed it once. Pass loopId explicitly. origin e.g. project:<registered-name> or registry.",
+  design_element_publish:
+    "Publish a design element into the project library (A/C). Set publishToRegistry=true to also write the global registry (B). Provide elementId + spec + mockHtml; optional srcFiles for TS/JS.",
+  design_element_publish_npm:
+    "Scaffold @jam/<elementId> from a design element's src/ and publish it to the private npm registry. Prefer after design_element_extract/publish.",
   stop_session:
     "Interrupt a live ask/agent/design_loop/plan_loop turn. Requires kind and id.",
   web_search:

@@ -355,6 +355,35 @@ describe("listExtractableDesignElementsFromMock", () => {
 </body>
 </html>`;
 
+/** Mock with chrome nav link + element comment + generic __stage preview. */
+const ELEMENT_COMMENT_MOCK = `<!DOCTYPE html><html><head><style>
+.auth-btn { padding: 0.5rem; border: 1px solid #ccc; }
+.auth-btn--primary { background: #06c; color: #fff; }
+.auth-btn__icon { width: 1rem; }
+.account-chip { display: flex; gap: 0.5rem; }
+.account-chip__name { font-weight: 600; }
+.__nav-link { font-size: 0.875rem; }
+</style></head><body>
+<nav class="topbar">
+  <a href="#auth" class="topbar__nav-link">Sign In</a>
+</nav>
+<main>
+  <!-- component: AuthBtn -->
+  <section class="preview">
+    <div class="preview__stage">
+      <button class="auth-btn" type="button">Sign In</button>
+      <button class="auth-btn auth-btn--primary" type="button">Sign In</button>
+    </div>
+  </section>
+  <!-- element: account-chip -->
+  <section class="preview">
+    <div class="preview__stage">
+      <div class="account-chip"><span class="account-chip__name">Ada Lovelace</span></div>
+    </div>
+  </section>
+</main>
+</body></html>`;
+
   it("lists known chrome and data-element markers", () => {
     const listed = listExtractableDesignElementsFromMock(RICH_MOCK, {
       publishedIds: ["theme-toggle"],
@@ -403,6 +432,26 @@ describe("listExtractableDesignElementsFromMock", () => {
     assert.match(region!.html, /^<a\b/i);
     assert.match(region!.html, /Sign In/);
     assert.ok(!region!.html.includes("Pricing"));
+  });
+
+  it("element comment + __stage extracts full preview, not chrome nav link", () => {
+    const region = resolveExtractableDesignElement(
+      ELEMENT_COMMENT_MOCK,
+      "auth-btn",
+    );
+    assert.ok(region);
+    assert.match(region!.html, /preview__stage|auth-btn-variants/);
+    assert.match(region!.html, /auth-btn--primary/);
+    assert.ok(!/topbar__nav-link/.test(region!.html));
+    const listed = listExtractableDesignElementsFromMock(ELEMENT_COMMENT_MOCK);
+    assert.ok(listed.some((c) => c.id === "account-chip"));
+    const chip = resolveExtractableDesignElement(
+      ELEMENT_COMMENT_MOCK,
+      "account-chip",
+    );
+    assert.ok(chip);
+    assert.match(chip!.html, /account-chip/);
+    assert.match(chip!.html, /account-chip__name/);
   });
 
   it("extract uses listed elementId (menubar, not theme-toggle default)", () => {
@@ -511,6 +560,26 @@ describe("listExtractableDesignElementsFromMock", () => {
       assert.ok(existsSync(
         join(root, ".slopcontrol", "elements", "menubar", "v1", "npm-package", "mock.html"),
       ));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("discovers source for an element not in the hardcoded map (slug fallback)", () => {
+    const root = tmpJam("src-sign-in");
+    try {
+      const srcPath = join(root, "src", "components", "shell", "sign-in.tsx");
+      mkdirSync(join(srcPath, ".."), { recursive: true });
+      writeFileSync(
+        srcPath,
+        `export function SignIn() { return <button>Sign In</button>; }\n`,
+        "utf-8",
+      );
+      const collected = collectSourceFilesForElement(root, "sign-in");
+      assert.ok(
+        collected.sourcePaths.includes("src/components/shell/sign-in.tsx"),
+      );
+      assert.ok(collected.srcFiles["components/shell/sign-in.tsx"]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

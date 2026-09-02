@@ -1612,12 +1612,16 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "list_extractable_design_elements",
       description:
-        "List extractable shared-element candidates from a design-loop mock (data-element markers + known chrome: menubar, theme-toggle, user-pill, …). Use returned id/label with design_element_extract. When the operator names a specific version (e.g. 'extract v9'), pass that version.",
+        "List extractable shared-element candidates from a design-loop mock (data-element markers + known chrome: menubar, theme-toggle, user-pill, …). Use returned id/label with design_element_extract. Pass loopId explicitly — do NOT rely on this chat's design-loop latch. When the operator names a specific version (e.g. 'extract v9'), pass that version.",
       inputSchema: {
         type: "object",
         properties: {
           projectId: { type: "string" },
-          loopId: { type: "string" },
+          loopId: {
+            type: "string",
+            description:
+              "Design loop to list from. Pass explicitly — do NOT rely on the chat's design-loop latch.",
+          },
           version: {
             type: "number",
             description:
@@ -1630,12 +1634,16 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_element_extract",
       description:
-        "Extract a shared element from a design-loop mock and publish to the project library. Prefer list_extractable_design_elements first, then pass the listed elementId (and optional label). Without elementId, defaults to theme-toggle when present. Optional publishToRegistry. When the operator names a specific version (e.g. 'extract v9' / 'from the accepted v9'), pass that version — do NOT default to the current tip.",
+        "Extract a shared element from a design-loop mock and publish to the project library. Prefer list_extractable_design_elements first, then pass the listed elementId (and optional label). Without elementId, defaults to theme-toggle when present. Optional publishToRegistry. Pass loopId explicitly — do NOT rely on this chat's design-loop latch (it may point at a different project's loop). Works on any loop status (open/accepted/implemented) — no need to re-accept first. When the operator names a specific version (e.g. 'extract v9' / 'from the accepted v9'), pass that version — do NOT default to the current tip.",
       inputSchema: {
         type: "object",
         properties: {
           projectId: { type: "string" },
-          loopId: { type: "string" },
+          loopId: {
+            type: "string",
+            description:
+              "Design loop to extract from. Pass explicitly — do NOT rely on the chat's design-loop latch.",
+          },
           elementId: {
             type: "string",
             description:
@@ -1678,7 +1686,8 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     },
     {
       name: "list_design_loops",
-      description: "List design-loop sessions for a project.",
+      description:
+        "List design-loop sessions for a project. Each entry has an `id` (the loopId to pass to other tools) and a `brief` (the human-readable brief/title). Match the loop the operator names by its `brief` (e.g. 'the sign-in design' / 'pull out the current theme'), then use that entry's `id` for design_loop_get / design_element_extract / etc. Do NOT ask the operator for the raw id hash.",
       inputSchema: {
         type: "object",
         properties: {

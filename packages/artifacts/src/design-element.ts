@@ -15,8 +15,9 @@ import {
   rmSync,
   statSync,
   writeFileSync,
+  type Dirent,
 } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, extname, join, relative } from "node:path";
 import { z } from "zod";
 import {
   designLoopDir,
@@ -314,30 +315,182 @@ export function extractByAttr(
   return extractBalancedElement(html, m.index);
 }
 
-function extractSignInControl(html: string): string {
-  // Prefer explicit sign-in markers on the control itself.
-  const byAttr =
-    extractByAttr(html, "href", "#signin") ||
-    extractByAttr(html, "href", "#sign-in") ||
-    extractByAttr(html, "id", "signin") ||
-    extractByAttr(html, "id", "sign-in") ||
-    extractByClass(html, "sign-in", ["a", "button"]) ||
-    extractByClass(html, "signin", ["a", "button"]);
-  if (byAttr) return byAttr;
+type ExtractableRegion = {
+  id: string;
+  label: string;
+  kind: DesignElementKind;
+  reason: string;
+  html: string;
+};
 
+/** PascalCase / camelCase component label → element slug (SignIn → sign-in). */
+function componentNameToElementId(name: string): string {
+  return slugElementId(
+    name
+      .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+      .replace(/_/g, "-"),
+  );
+}
+
+/** Class name candidates for an element slug (sign-in → sign-in, signin). */
+function classCandidatesForElementId(elementId: string): string[] {
+  const slug = slugElementId(elementId);
+  const compact = slug.replace(/-/g, "");
+  const out = [slug];
+  if (compact && compact !== slug) out.push(compact);
+  return [...new Set(out)];
+}
+
+function isChromeNavFallback(html: string): boolean {
+  // Generic: bare nav links / menu anchors, not standalone component controls.
+  return /\b(?:__nav-link|__menu-link|\bnav-link\b)\b/i.test(html);
+}
+
+/** Collect every balanced element whose class list includes className. */
+function extractAllByClass(
+  html: string,
+  className: string,
+  tagHint?: string[],
+): string[] {
+  const out: string[] = [];
+  const re = /<([a-zA-Z][\w:-]*)\b([^>]*?)>/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const tag = m[1]!.toLowerCase();
+    if (tagHint?.length && !tagHint.map((t) => t.toLowerCase()).includes(tag)) {
+      continue;
+    }
+    const attrs = m[2] ?? "";
+    const classMatch = attrs.match(/\bclass\s*=\s*(["'])([^"']*)\1/i);
+    if (!classMatch) continue;
+    if (!classAttrHas(classMatch[2] ?? "", className)) continue;
+    const block = extractBalancedElement(html, m.index);
+    if (block) out.push(block);
+  }
+  return out;
+}
+
+function blockContainsClass(block: string, className: string): boolean {
+  return new RegExp(
+    `\\bclass\\s*=\\s*["'][^"']*\\b${className.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`,
+    "i",
+  ).test(block);
+}
+
+/**
+ * Extract a preview stage container after an element marker comment.
+ * Matches any BEM `*__stage` block (e.g. preview-stage, widget__stage).
+ */
+function extractStageAfterMarker(htmlFragment: string): string {
+  const stageRe =
+    /<([a-zA-Z][\w:-]*)\b[^>]*class\s*=\s*(["'])[^"']*\b[\w-]+__stage\b[^"']*\2[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = stageRe.exec(htmlFragment))) {
+    const block = extractBalancedElement(htmlFragment, m.index);
+    if (block) return block;
+  }
+  return "";
+}
+
+function extractStageContainingClass(html: string, className: string): string {
+  const stageRe =
+    /<([a-zA-Z][\w:-]*)\b[^>]*class\s*=\s*(["'])[^"']*\b[\w-]+__stage\b[^"']*\2[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = stageRe.exec(html))) {
+    const block = extractBalancedElement(html, m.index);
+    if (block && blockContainsClass(block, className)) return block;
+  }
+  return "";
+}
+
+/**
+ * Regions declared via `<!-- element: foo-bar -->` or `<!-- component: FooBar -->`.
+ * Case-insensitive; optional decoration (dashes, parens) after the name is ignored.
+ */
+function extractRegionsFromElementComments(html: string): ExtractableRegion[] {
+  const regions: ExtractableRegion[] = [];
+  const re =
+    /<!--[\s\S]*?\b(?:element|component)\s*:\s*([A-Za-z][\w-]*)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const rawName = m[1]!.trim();
+    if (!rawName) continue;
+    const id = componentNameToElementId(rawName);
+    const afterComment = html.slice(m.index! + m[0].length);
+    const stage = extractStageAfterMarker(afterComment);
+    if (!stage?.trim()) continue;
+    regions.push({
+      id,
+      label: rawName.replace(/([a-z0-9])([A-Z])/g, "$1 $2"),
+      kind: "control",
+      reason: `element comment (${rawName})`,
+      html: stage,
+    });
+  }
+  return regions;
+}
+
+function extractByControlText(html: string, elementId: string): string {
+  const words = slugElementId(elementId).split("-").filter(Boolean);
+  if (!words.length) return "";
+  const pattern = new RegExp(
+    words
+      .map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("[\\s-]?"),
+    "i",
+  );
   const re = /<(a|button)\b([^>]*)>/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(html))) {
     const block = extractBalancedElement(html, m.index);
-    if (!block) continue;
+    if (!block || isChromeNavFallback(block)) continue;
     const text = block.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    if (/^sign[\s-]?in$/i.test(text) || /\bsign[\s-]?in\b/i.test(text)) {
-      // Avoid grabbing a huge parent; require the control's own text to mention sign-in
-      // and keep length modest.
-      if (block.length <= 800) return block;
-    }
+    if (pattern.test(text) && block.length <= 800) return block;
   }
   return "";
+}
+
+/**
+ * Generic control extraction: stage container > class variants > label match >
+ * chrome nav anchors (last resort).
+ */
+function extractControlRegion(html: string, elementId: string): string {
+  const classes = classCandidatesForElementId(elementId);
+  const compact = classes.find((c) => !c.includes("-")) ?? classes[0] ?? "";
+
+  for (const cls of classes) {
+    const stage = extractStageContainingClass(html, cls);
+    if (stage) return stage;
+  }
+
+  for (const cls of classes) {
+    const dedicated = extractAllByClass(html, cls, ["button", "a", "div"]).filter(
+      (b) => !isChromeNavFallback(b),
+    );
+    if (dedicated.length === 1) return dedicated[0]!;
+    if (dedicated.length > 1) {
+      return `<div class="${cls}-variants">\n${dedicated.join("\n")}\n</div>`;
+    }
+  }
+
+  for (const cls of classes) {
+    const hit = extractByClass(html, cls, ["a", "button", "div"]);
+    if (hit && !isChromeNavFallback(hit)) return hit;
+  }
+
+  const byText = extractByControlText(html, elementId);
+  if (byText) return byText;
+
+  for (const cls of classes) {
+    const nav = extractByClass(html, cls, ["a"]);
+    if (nav) return nav;
+  }
+
+  return (
+    extractByAttr(html, "href", `#${compact}`) ||
+    extractByAttr(html, "href", `#${slugElementId(elementId)}`) ||
+    ""
+  );
 }
 
 type KnownExtractPattern = {
@@ -380,10 +533,9 @@ const KNOWN_EXTRACT_PATTERNS: KnownExtractPattern[] = [
     id: "user-pill",
     label: "User pill / account control",
     kind: "control",
-    reason: "class user-pill",
-    test: (html) => /\buser-pill\b/i.test(html),
-    snippet: (html) =>
-      extractByClass(html, "user-pill", ["div", "button", "a"]) || "",
+    reason: "user pill / account control class",
+    test: (html) => /\buser[-]?pill\b/i.test(html),
+    snippet: (html) => extractControlRegion(html, "user-pill"),
   },
   {
     id: "view-switcher",
@@ -420,11 +572,11 @@ const KNOWN_EXTRACT_PATTERNS: KnownExtractPattern[] = [
     id: "sign-in",
     label: "Sign-in control",
     kind: "control",
-    reason: "sign-in link or control in chrome",
+    reason: "sign-in control in chrome or component showcase",
     test: (html) =>
       /\bsign-?in\b/i.test(html) &&
       /<(?:a|button)\b/i.test(html),
-    snippet: (html) => extractSignInControl(html),
+    snippet: (html) => extractControlRegion(html, "sign-in"),
   },
 ];
 
@@ -458,6 +610,60 @@ const ELEMENT_SOURCE_CANDIDATES: Record<string, string[]> = {
 };
 
 /**
+ * Generic fallback: find source files whose basename matches an element slug
+ * under the conventional component/hook roots. This keeps source discovery
+ * generic — any element id (sign-in, signup, footer, …) resolves to its
+ * matching `src/components/<slug>.tsx` (at any depth) without a hardcoded entry.
+ */
+function findSourceFilesBySlug(
+  projectRoot: string,
+  elementId: string,
+): string[] {
+  const id = slugElementId(elementId);
+  if (!id || !projectRoot || !existsSync(projectRoot)) return [];
+  const roots = ["src/components", "src/hooks"];
+  const found: string[] = [];
+  const seen = new Set<string>();
+  const skipDirs = new Set([
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    "coverage",
+  ]);
+  const walk = (dir: string) => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const abs = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (skipDirs.has(entry.name)) continue;
+        walk(abs);
+      } else if (entry.isFile() && /\.(tsx?|jsx?)$/i.test(entry.name)) {
+        const base = slugElementId(basename(entry.name, extname(entry.name)));
+        if (base === id) {
+          const rel = relative(projectRoot, abs);
+          if (!seen.has(rel)) {
+            seen.add(rel);
+            found.push(rel);
+          }
+        }
+      }
+    }
+  };
+  for (const r of roots) {
+    const abs = join(projectRoot, r);
+    if (existsSync(abs)) walk(abs);
+  }
+  return found;
+}
+
+/**
  * Resolve existing source files for an element under a project root.
  * Returns paths relative to projectRoot and file contents keyed for element src/.
  */
@@ -466,13 +672,19 @@ export function collectSourceFilesForElement(
   elementId: string,
 ): { sourcePaths: string[]; srcFiles: Record<string, string> } {
   const id = slugElementId(elementId);
-  const candidates = ELEMENT_SOURCE_CANDIDATES[id] ?? [];
+  const candidates = [
+    ...(ELEMENT_SOURCE_CANDIDATES[id] ?? []),
+    ...findSourceFilesBySlug(projectRoot, id),
+  ];
   const sourcePaths: string[] = [];
   const srcFiles: Record<string, string> = {};
   if (!projectRoot || !existsSync(projectRoot)) {
     return { sourcePaths, srcFiles };
   }
+  const seen = new Set<string>();
   for (const rel of candidates) {
+    if (seen.has(rel)) continue;
+    seen.add(rel);
     const abs = join(projectRoot, rel);
     if (!existsSync(abs) || !statSync(abs).isFile()) continue;
     sourcePaths.push(rel);
@@ -503,7 +715,10 @@ export function harvestCssForClass(html: string, className: string): string {
     const body = chunk.trim();
     if (!body) continue;
     const rule = `${body}}`;
-    if (new RegExp(`\\.${needle}\\b`, "i").test(rule)) {
+    if (
+      new RegExp(`\\.${needle}\\b`, "i").test(rule) ||
+      new RegExp(`\\.${needle}(?:--|__|-)`, "i").test(rule)
+    ) {
       rules.push(rule.trim());
     }
   }
@@ -521,23 +736,18 @@ export function harvestCssForClass(html: string, className: string): string {
   return [...new Set(rules)].join("\n\n");
 }
 
-type ExtractableRegion = {
-  id: string;
-  label: string;
-  kind: DesignElementKind;
-  reason: string;
-  html: string;
-};
-
-/** Collect full HTML regions for extractable controls (deduped by id). */
+/** Collect extractable regions from mock HTML (deduped by id). */
 function collectExtractableRegions(html: string): ExtractableRegion[] {
   const source = html ?? "";
   const byId = new Map<string, ExtractableRegion>();
 
   const push = (c: ExtractableRegion) => {
     const id = slugElementId(c.id);
-    if (!id || byId.has(id)) return;
-    byId.set(id, { ...c, id });
+    if (!id) return;
+    const prev = byId.get(id);
+    if (!prev || c.html.trim().length > prev.html.trim().length) {
+      byId.set(id, { ...c, id });
+    }
   };
 
   // 1. Explicit data-element markers (authoritative names).
@@ -564,7 +774,12 @@ function collectExtractableRegions(html: string): ExtractableRegion[] {
     });
   }
 
-  // 2. Known chrome patterns.
+  // 2. Element/component marker comments (full __stage regions beat chrome snippets).
+  for (const region of extractRegionsFromElementComments(source)) {
+    push(region);
+  }
+
+  // 3. Known chrome patterns.
   for (const p of KNOWN_EXTRACT_PATTERNS) {
     if (!p.test(source)) continue;
     const snip = p.snippet(source);
@@ -1122,7 +1337,7 @@ export function extractDesignElementFromMock(opts: {
   }
 
   const classRoots = [
-    elementId,
+    ...classCandidatesForElementId(elementId),
     ...(elementId === "dashboard-shell" ? ["dashboard-layout"] : []),
     ...(elementId === "menubar" ? ["topbar"] : []),
   ];
@@ -1138,7 +1353,10 @@ export function extractDesignElementFromMock(opts: {
   const tokensCss = [...new Set(styleChunks)].join("\n\n");
 
   const wrapInHeader =
-    kind === "control" || elementId === "theme-toggle" || elementId === "sign-in";
+    kind === "control" &&
+    !/[\w-]+__stage\b/.test(snippet) &&
+    !/-variants\b/.test(snippet) &&
+    snippet.length <= 900;
   const mockHtml = `<!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
