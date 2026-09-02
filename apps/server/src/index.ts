@@ -242,6 +242,7 @@ function getChatService(): ChatService {
         },
       },
       endpointsPath: join(dataDir, "endpoints.json"),
+      skillsDir: join(dataDir, "skills"),
       onEndpointsChanged: () => clearSlopcontrolRuntimeCache(),
       subscribeRunUpdates: (runId, listener) =>
         runStageBroker.subscribe(runId, listener),

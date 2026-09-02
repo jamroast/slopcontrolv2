@@ -102,6 +102,8 @@ export function buildProjectChatPrompt(opts: {
   pendingActions?: PendingPromptAction[];
   /** Accumulated project knowledge from the OM knowledge thread. */
   projectKnowledge?: string;
+  /** Compact skills index (name + description) for the chat agent. */
+  skillsIndex?: string;
 }): string {
   const { project, deps } = opts;
   const blueprint = clip(readBlueprint(project.rootPath), 5_000);
@@ -126,7 +128,7 @@ export function buildProjectChatPrompt(opts: {
 
 ${LIFECYCLE_CONTRACT}
 
-## Your role
+${opts.skillsIndex?.trim() ? `${opts.skillsIndex.trim()}\n\n` : ""}## Your role
 Help the operator manage THIS project: answer questions, draft high-quality asks and task definitions, review run/phase state, and drive the lifecycle with the curated tools. Prefer reading state (list_phases, get_run, get_operator_suggestions, ask) before proposing actions. For "why is this broken" / inspect-the-code questions, call ask — not gated agent. When the operator describes work, draft the ask text for them — precise, scoped, with success criteria — then offer to submit it.
 
 ${CHAT_INTERNET_RESEARCH_PROMPT}
@@ -169,6 +171,8 @@ function globalProceedableRunLines(deps: ChatContextDeps): string {
 export function buildGlobalChatPrompt(opts: {
   deps: ChatContextDeps;
   pendingActions?: PendingPromptAction[];
+  /** Compact skills index (name + description) for the chat agent. */
+  skillsIndex?: string;
 }): string {
   const { deps } = opts;
   const projects = deps.listProjects();
@@ -270,7 +274,7 @@ ${proceedableRuns}
 
 ${LIFECYCLE_CONTRACT}
 
-${crossProjectPlaybook}
+${opts.skillsIndex?.trim() ? `${opts.skillsIndex.trim()}\n\n` : ""}${crossProjectPlaybook}
 
 ## Your role (global scope)
 Cross-project oversight: check health, inspect any project's phases/runs (pass its projectId explicitly), draft asks, run design loops, publish libraries, and drive work on whichever project needs it — all from this chat. Do not tell the operator to open a different chat or switch scope unless they explicitly ask for a fresh conversation thread. Drive publish→consume→develop pipelines with the tools above — do not tell the operator to run manual npm publish unless a tool failed. You also manage model configuration: chat_models_list shows each function (research, coding, classification, ask, agent, judge, …), its current model, and the models providers advertise. Use chat_function_bind to map a function to a model (creates the endpoint mapping if it is missing). chat_model_set only overrides this conversation.

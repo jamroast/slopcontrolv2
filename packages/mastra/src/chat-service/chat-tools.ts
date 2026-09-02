@@ -8,6 +8,7 @@ import {
   type FetchUrlResult,
   type WebSearchResult,
 } from "../tools/web-tools.js";
+import { readSkill } from "../orchestrator/skills.js";
 
 /**
  * Curated chat-tool surface over the SlopControl tool dispatch.
@@ -67,6 +68,8 @@ export const CHAT_FREE_TOOLS: ReadonlySet<string> = new Set([
   // internet research (read-only, direct execution)
   "web_search",
   "fetch_url",
+  // procedural skills (read-only, direct execution)
+  "get_skill",
 ]);
 
 /** Free tools registered only for global-scope conversations (projectId null). */
@@ -241,6 +244,9 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   }),
   fetch_url: z.object({
     url: z.string().url(),
+  }),
+  get_skill: z.object({
+    name: z.string().min(1),
   }),
   archive_decision: z.object({
     note: z.string().min(1),
@@ -583,6 +589,8 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Search the public web (Ollama Cloud when OLLAMA_API_KEY is set, else Exa when EXA_API_KEY is set). Use for current vendor docs, model catalogs, API differences. Prefer repo tools first; cite returned URLs.",
   fetch_url:
     "Fetch a public https:// URL and return truncated text (HTML stripped). Use for vendor docs, GitHub raw, API references. No Authorization headers; blocked for localhost/private IPs.",
+  get_skill:
+    "Fetch the full procedure for a named skill (from the Skills index in your instructions). Pass the skill name (e.g. extract-design-element). Returns the complete When-to-use / Procedure / Pitfalls / Verification body.",
   archive_decision:
     "Record a durable design decision / architectural note from this global chat into the global knowledge store (survives the finite chat history). Use when the operator settles a design choice, model binding, or cross-project convention worth keeping.",
 };
@@ -1078,6 +1086,8 @@ export function buildChatTools(opts: {
   ) => void;
   /** Persist a durable global-chat decision (archive_decision tool). */
   appendGlobalKnowledge?: (items: string[]) => Promise<void>;
+  /** Directory of operator-authored procedural skills (get_skill tool). */
+  skillsDir?: string;
 }) {
   const { dispatch, projectId } = opts;
   const tools: Record<string, ReturnType<typeof createTool>> = {};
@@ -1104,6 +1114,18 @@ export function buildChatTools(opts: {
         if (name === "fetch_url") {
           const result = await fetchUrlContent(String(args.url ?? ""));
           return clipChatToolText(formatFetchUrlResult(result));
+        }
+        if (name === "get_skill") {
+          const skillName = String(args.name ?? "").trim();
+          if (!skillName) return "ERROR: get_skill requires a skill name";
+          if (!opts.skillsDir) {
+            return "ERROR: no skills directory configured";
+          }
+          const body = readSkill(opts.skillsDir, skillName);
+          if (!body) {
+            return `ERROR: skill "${skillName}" not found. Available skills are listed in the Skills index in your instructions.`;
+          }
+          return body;
         }
         if (name === "archive_decision") {
           const note = String(args.note ?? "").trim();

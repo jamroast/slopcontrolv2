@@ -42,6 +42,7 @@ import {
   recallGlobalKnowledge,
   recallProjectKnowledge,
 } from "../orchestrator/project-knowledge.js";
+import { formatSkillsIndex, listSkills } from "../orchestrator/skills.js";
 import { isPromptTooLongError } from "../supervisor-enrich.js";
 import {
   buildChatTools,
@@ -166,6 +167,8 @@ export interface ChatServiceDeps {
   context: ChatContextDeps;
   /** Path to endpoints.json — re-read per turn so model edits apply live. */
   endpointsPath: string;
+  /** Directory of operator-authored procedural skills (markdown). */
+  skillsDir?: string;
   /** Called after endpoints.json is rewritten so cached runtimes pick up the new default. */
   onEndpointsChanged?: () => void;
   /**
@@ -3100,6 +3103,9 @@ export class ChatService {
     const globalKnowledge = conversation.projectId
       ? ""
       : await recallGlobalKnowledge({ memory: this.deps.getMemory() });
+    const skillsIndex = this.deps.skillsDir
+      ? formatSkillsIndex(listSkills(this.deps.skillsDir))
+      : "";
     const planLatch = this.resolvePlanLatch(
       conversation.id,
       conversation.projectId,
@@ -3124,10 +3130,12 @@ export class ChatService {
             deps: this.deps.context,
             pendingActions,
             projectKnowledge,
+            skillsIndex,
           })
         : buildGlobalChatPrompt({
             deps: this.deps.context,
             pendingActions,
+            skillsIndex,
           })
     ).concat(
       globalKnowledge
@@ -3170,6 +3178,7 @@ export class ChatService {
           memory: this.deps.getMemory(),
           items,
         }),
+      skillsDir: this.deps.skillsDir,
     });
 
     const agent = new Agent({
