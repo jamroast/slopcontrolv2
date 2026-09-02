@@ -166,7 +166,6 @@ import {
   formatDesignLoopReviseBlock,
   formatPhaseBoundMockPromptBlock,
   formatDesignPackPromptBlock,
-  formatClaimProofChecksGuidance,
   formatDesignLoopSelectionsPromptBlock,
   maybeAutoPinFromOperatorMessage,
   maybeAutoPinDominantLogoFromMock,
@@ -5966,24 +5965,6 @@ CRITICAL theme contract (theme_modes):
 - Cite DESIGN_PACK.theme.requirements and lightTokensCss when present.
 `
         : "";
-    const claimProofResearchNote = (() => {
-      const designShellOrTheme = Boolean(
-        designAcceptance?.features?.some(
-          (f) =>
-            f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
-        ) ||
-          phasePackForResearch?.inScope?.includes("theme_modes") ||
-          phasePackForResearch?.inScope?.includes("applied_shell"),
-      );
-      const askSignalsShellTheme =
-        changeIntentIsBrandTheming(intent) ||
-        changeIntentIsThemeWiringOnly(intent);
-      if (!designShellOrTheme && !askSignalsShellTheme) return "";
-      return `\n${formatClaimProofChecksGuidance({
-        shellNotes: phasePackForResearch?.shell,
-        designShellOrTheme,
-      })}\n`;
-    })();
     const antiAuditThemeNote = formatAntiAuditThemeDeliveryNote({
       description: phase.description,
       projectRoot: project.rootPath,
@@ -6024,10 +6005,10 @@ ${acceptanceBlock}
 - If applied_shell is in scope, plan portal/dashboard UI fidelity to the accepted mock frames — not palette-only.
 - Obey DESIGN_PACK.json logos/tokens/contentPillars/scope/theme/elements; do not invent a competing mark or control.
 - If conceptual model scope.kind is component/flow, File Changes must stay within focusPaths/focus — do not expand to full site shell.
-${themeResearchNote}${claimProofResearchNote}${elementsResearchNote}${crossDepResearchPack ? `\n${crossDepResearchPack}\n` : ""}${designPackBlock ? `\n${designPackBlock}\n` : ""}${boundMockBlock ? `\n${boundMockBlock}\n` : ""}
+${themeResearchNote}${elementsResearchNote}${crossDepResearchPack ? `\n${crossDepResearchPack}\n` : ""}${designPackBlock ? `\n${designPackBlock}\n` : ""}${boundMockBlock ? `\n${boundMockBlock}\n` : ""}
 `
       : [designPackBlock, boundMockBlock, crossDepResearchPack].filter(Boolean).join("\n\n")
-        ? `\n${themeResearchNote}${claimProofResearchNote}${elementsResearchNote}${[crossDepResearchPack, designPackBlock, boundMockBlock].filter(Boolean).join("\n\n")}\n`
+        ? `\n${themeResearchNote}${elementsResearchNote}${[crossDepResearchPack, designPackBlock, boundMockBlock].filter(Boolean).join("\n\n")}\n`
         : crossDepResearchPack
           ? `\n${crossDepResearchPack}\n`
           : "";
@@ -6427,27 +6408,9 @@ ${draftPlanBlock ? `\n${draftPlanBlock}\n` : ""}
         ? `\n${draftPlanBlock}\n`
         : "";
     const draftThemeNote = (() => {
-      const designShellOrTheme = Boolean(
-        draftAcceptance?.features?.some(
-          (f) =>
-            f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
-        ) ||
-          draftPhasePack?.inScope?.includes("theme_modes") ||
-          draftPhasePack?.inScope?.includes("applied_shell"),
-      );
       const themeModes = packHasThemeModes(draftPhasePack);
-      if (!themeModes && !designShellOrTheme) return "";
-      const parts: string[] = [];
-      if (themeModes) {
-        parts.push(`CRITICAL theme_modes: Plan File Changes for html[data-theme] light remaps of semantic tokens; ThemeToggle must set data-theme; body/chrome on var(--background)/var(--foreground) — not hard-coded --color-dark-* alone.`);
-      }
-      parts.push(
-        formatClaimProofChecksGuidance({
-          shellNotes: draftPhasePack?.shell,
-          designShellOrTheme: themeModes || designShellOrTheme,
-        }),
-      );
-      return `\n${parts.join("\n")}\n`;
+      if (!themeModes) return "";
+      return `\nCRITICAL theme_modes: Plan File Changes for html[data-theme] light remaps of semantic tokens; ThemeToggle must set data-theme; body/chrome on var(--background)/var(--foreground) — not hard-coded --color-dark-* alone.\n`;
     })();
     const draftAntiAuditThemeNote = formatAntiAuditThemeDeliveryNote({
       description: phase.description,
