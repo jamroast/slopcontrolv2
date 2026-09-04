@@ -53,6 +53,7 @@ describe("live-turn watcher heuristics", () => {
     ...resolveLiveWatcherConfig(),
     enabled: true,
     stallMs: 1_000,
+    stallMsByKind: {},
     repeatToolLimit: 3,
     thrashToolLimit: 4,
     maxAgeMs: 60_000,
@@ -87,6 +88,20 @@ describe("live-turn watcher heuristics", () => {
     turn.lastEventAt = new Date(Date.now() - 5_000).toISOString();
     const reason = evaluateLiveTurnWatch(turn, baseCfg, Date.now());
     assert.equal(reason, "watcher_stall");
+  });
+
+  it("ask kind gets a longer stall budget than the global default", () => {
+    const cfg = resolveLiveWatcherConfig();
+    assert.ok((cfg.stallMsByKind.ask ?? 0) > cfg.stallMs);
+  });
+
+  it("ask kind uses its per-kind stall budget, not the global default", () => {
+    const reg = new LiveTurnRegistry();
+    const turn = reg.start({ kind: "ask", projectId: "p", sessionId: "d" });
+    // 100s ago — past the global 90s default, but under the ask 180s budget.
+    turn.lastEventAt = new Date(Date.now() - 100_000).toISOString();
+    const cfg = resolveLiveWatcherConfig();
+    assert.equal(evaluateLiveTurnWatch(turn, cfg, Date.now()), null);
   });
 
   it("trips on thrash (many calls, low diversity, no text)", () => {

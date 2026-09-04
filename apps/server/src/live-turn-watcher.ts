@@ -15,6 +15,8 @@ export type LiveWatcherConfig = {
   enabled: boolean;
   /** No events while running → interrupt */
   stallMs: number;
+  /** Per-kind stall budget (no events while running) — e.g. ask/judge no-tools turns. */
+  stallMsByKind: Partial<Record<LiveTurnKind, number>>;
   /** Same tool fingerprint this many times → interrupt */
   repeatToolLimit: number;
   /** Tool calls with almost no text AND almost no diversity → interrupt */
@@ -38,6 +40,11 @@ export function resolveLiveWatcherConfig(): LiveWatcherConfig {
   return {
     enabled,
     stallMs: envInt("SLOPCONTROL_LIVE_STALL_MS", 90_000),
+    stallMsByKind: {
+      // ask turns run a no-tools judge pass whose model can be slow to first
+      // token; give it a longer stall budget than the global 90s default.
+      ask: envInt("SLOPCONTROL_LIVE_STALL_MS_ASK", 180_000),
+    },
     repeatToolLimit: envInt("SLOPCONTROL_LIVE_REPEAT_TOOL", 5),
     thrashToolLimit: envInt("SLOPCONTROL_LIVE_THRASH_TOOLS", 16),
     thrashToolLimitByKind: {
@@ -67,7 +74,8 @@ export function evaluateLiveTurnWatch(
   if (Number.isFinite(started) && nowMs - started >= cfg.maxAgeMs) {
     return "watcher_max_age";
   }
-  if (Number.isFinite(last) && nowMs - last >= cfg.stallMs) {
+  const stallMs = cfg.stallMsByKind[turn.kind] ?? cfg.stallMs;
+  if (Number.isFinite(last) && nowMs - last >= stallMs) {
     return "watcher_stall";
   }
 
