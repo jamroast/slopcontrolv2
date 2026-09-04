@@ -294,6 +294,7 @@ Keep the Task brief to a title plus 2–5 bullets so promote_ask can seed start_
 - Clickable chrome (control does nothing on click / should navigate) is not form engagement. Success criteria must be "click navigates to route X" — not fill/submit/form-populate. A destination sign-in page is not the thing being filled in this phase. Intent engagement is only for fill/submit at a mount.
 - If the question is purely informational / investigate-only, answer without a Task brief.
 - If the operator needs several separate investigations, recommend MCP/HTTP \`ask_sub_research\` with a short topics list (max 4). Do not pretend sub-research ran unless that API was invoked.
+- Return a concise findings document: \`## Summary\` (2–4 sentences — the answer/root cause), \`## Key paths\` (bullets of the files that matter), \`## Task brief\` (only when shaping a change). Do NOT paste large code blocks or raw grep output — cite the path and one line, not the dump.
 - Cite paths you inspected. Do not claim work is implemented unless you verified it.`,
     model: registry.resolve("ask"),
     memory,

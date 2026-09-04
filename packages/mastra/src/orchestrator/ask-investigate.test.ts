@@ -8,6 +8,7 @@ import {
   buildJudgeExtensionPrompt,
   buildJudgeSteeringCard,
   buildPiInvestigatePrompt,
+  clipFindingsForJudge,
   filterScreensForAsk,
   formatScreenSeed,
   namedRoutesFromMessage,
@@ -315,5 +316,50 @@ describe("develop-loop judge decisions", () => {
     assert.match(prompt, /NOT merged/);
     assert.match(prompt, /Close ONLY the judge gaps/);
     assert.match(prompt, /DEV_COMPLETE/);
+  });
+
+  it("clipFindingsForJudge keeps summary + task brief and collapses the middle", () => {
+    const summary = "## Summary\nThe signup loop is caused by the register prompt never being resolved.\n";
+    const middle = "## Details\n" + "x".repeat(20_000) + "\n";
+    const taskBrief = "## Task brief\n- Title: resolve register prompt\n- Goal: end the loop\n";
+    const findings = summary + middle + taskBrief;
+    const clipped = clipFindingsForJudge(findings);
+    assert.match(clipped, /## Summary/);
+    assert.match(clipped, /## Task brief/);
+    assert.match(clipped, /clipped \d+ chars/);
+    assert.match(clipped, /Details/); // middle heading preserved
+    assert.ok(clipped.length < findings.length);
+    assert.ok(clipped.length < 12_000);
+  });
+
+  it("clipFindingsForJudge is a no-op for small findings", () => {
+    const small = "## Summary\nShort answer.";
+    assert.equal(clipFindingsForJudge(small), small);
+  });
+
+  it("clipFindingsForJudge falls back to head+tail for findings without headings", () => {
+    const head = "The root cause is X. ";
+    const middle = "y".repeat(20_000);
+    const tail = " Fix: do Y.";
+    const findings = head + middle + tail;
+    const clipped = clipFindingsForJudge(findings);
+    assert.match(clipped, /The root cause is X/);
+    assert.match(clipped, /Fix: do Y/);
+    assert.match(clipped, /clipped \d+ chars/);
+    assert.ok(clipped.length < findings.length);
+  });
+
+  it("clipFindingsForJudge keeps Key paths (signal) and collapses Details (noise)", () => {
+    const summary = "## Summary\nThe signup loop is caused by the register prompt never being resolved.\n";
+    const keyPaths = "## Key paths\n- src/lib/oidc/interaction.ts\n- web/src/lib/oidc-capture.ts\n";
+    const details = "## Details\n" + "x".repeat(20_000) + "\n";
+    const taskBrief = "## Task brief\n- Title: resolve register prompt\n";
+    const findings = summary + keyPaths + details + taskBrief;
+    const clipped = clipFindingsForJudge(findings);
+    assert.match(clipped, /## Summary/);
+    assert.match(clipped, /## Key paths/); // signal kept, not dropped as middle
+    assert.match(clipped, /## Task brief/);
+    assert.match(clipped, /Details/); // noise heading preserved in marker
+    assert.ok(clipped.length < findings.length);
   });
 });

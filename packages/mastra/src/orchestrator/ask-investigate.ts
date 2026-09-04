@@ -108,7 +108,7 @@ ${opts.screenSeed}
 
 ${PLANNING_DOCS_POINTER}
 
-Walk the named route module and its imported section components until you can reconstruct what a user would see. Then verify comparison targets the operator named (marketplace, connectors, chat, etc.) against what is actually built. Cite paths. Return markdown findings only — no Task brief unless they asked for a change.`;
+Walk the named route module and its imported section components until you can reconstruct what a user would see. Then verify comparison targets the operator named (marketplace, connectors, chat, etc.) against what is actually built. Cite paths. Return a concise findings document: \`## Summary\` (2–4 sentences — the answer/root cause), \`## Key paths\` (bullets of the files that matter), \`## Task brief\` (only when shaping a change). Do NOT paste large code blocks or raw grep output — cite the path and one line, not the dump.`;
 }
 
 export const ASK_ALIGN_JUDGE_PREFIX = `You already have investigation findings (from a read-only codebase walker). Write the final operator-facing answer now.
@@ -118,6 +118,69 @@ If this is an implementable fix, include ## Task brief with Title, Goal, Likely 
 
 Use the BLUEPRINT product-definition clip below only to align after the walk — not as a substitute for what the page shows.
 `;
+
+const FINDINGS_HEAD_CHARS = 8_000;
+const FINDINGS_TAIL_CHARS = 4_000;
+
+/**
+ * Section headings that carry the signal (conclusion / what-to-do), kept in
+ * full. Everything else (Details, Evidence, raw grep, code dumps) is noise and
+ * collapsed.
+ */
+const SIGNAL_SECTION_RE =
+  /^(summary|key paths|task brief|likely areas|risks|handoff|sibling|conclusion|verdict|gaps|next)/i;
+
+/**
+ * Clip investigation findings for the judge prompt without losing the signal.
+ * Keeps signal sections (Summary, Key paths, Task brief, Likely areas, …) in
+ * full and collapses noise sections (Details, Evidence, raw grep) into a
+ * marker. Falls back to a head+tail character clip when the findings have no
+ * `## ` headings or no signal sections.
+ */
+export function clipFindingsForJudge(
+  text: string,
+  opts?: { headChars?: number; tailChars?: number },
+): string {
+  const body = (text ?? "").trim();
+  if (!body) return "(empty findings)";
+  const headChars = opts?.headChars ?? FINDINGS_HEAD_CHARS;
+  const tailChars = opts?.tailChars ?? FINDINGS_TAIL_CHARS;
+  const budget = headChars + tailChars;
+  if (body.length <= budget) return body;
+
+  const sections = body.split(/(?=^## )/m).filter((s) => s.trim());
+  if (sections.length <= 1) {
+    const head = body.slice(0, headChars);
+    const tail = body.slice(-tailChars);
+    return `${head}\n\n…[clipped ${body.length - budget} chars]…\n\n${tail}`;
+  }
+
+  const headingOf = (s: string) => s.match(/^## (.+)$/m)?.[1]?.trim() ?? "";
+  const signal = sections.filter((s) => SIGNAL_SECTION_RE.test(headingOf(s)));
+  const noise = sections.filter((s) => !SIGNAL_SECTION_RE.test(headingOf(s)));
+
+  // No signal sections → fall back to first + last (head + tail).
+  const keep =
+    signal.length > 0
+      ? signal
+      : [sections[0]!, sections[sections.length - 1]!];
+  const drop = signal.length > 0 ? noise : sections.slice(1, -1);
+
+  const dropChars = drop.reduce((n, s) => n + s.length, 0);
+  const dropHeadings = drop.map(headingOf).filter((h): h is string => Boolean(h));
+
+  let kept = keep.join("\n\n");
+  if (kept.length > budget) {
+    const head = kept.slice(0, headChars);
+    const tail = kept.slice(-tailChars);
+    kept = `${head}\n\n…[clipped ${kept.length - budget} chars]…\n\n${tail}`;
+  }
+
+  const omitted = dropHeadings.length
+    ? ` (${dropHeadings.join(", ")})`
+    : "";
+  return `${kept}\n\n…[clipped ${dropChars} chars${omitted}]…`;
+}
 
 export function buildAskAlignJudgePrompt(opts: {
   operatorMessage: string;
@@ -137,7 +200,7 @@ Operator request:
 ${opts.operatorMessage.trim()}
 
 Investigation findings:
-${opts.findings.trim() || "(empty findings)"}
+${clipFindingsForJudge(opts.findings)}
 
 BLUEPRINT product definition (for alignment, after the walk):
 ${clip}`;
@@ -178,7 +241,7 @@ Operator planning brief:
 ${opts.operatorMessage.trim()}
 
 Raw investigation findings:
-${opts.findings.trim() || "(empty findings)"}
+${clipFindingsForJudge(opts.findings)}
 
 BLUEPRINT product definition (alignment only):
 ${clip}`;
