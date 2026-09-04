@@ -143,6 +143,18 @@ describe("planning-pipeline", () => {
     assert.doesNotMatch(prompt, /starting with # Title/);
   });
 
+  it("phaseQualityRetryPrompt re-states the Automated Checks rules (vitest grep-quiet antipattern)", () => {
+    const prompt = phaseQualityRetryPrompt({
+      canonicalPath: ".slopcontrol/phases/25-x/PHASE.md",
+      intentBlock: "intent",
+      description: "desc",
+      research: "research",
+      judgeFeedback: "feedback",
+    });
+    assert.match(prompt, /Never pipe vitest\/jest to `grep -q`/);
+    assert.match(prompt, /npx vitest run … \|\| exit 1/);
+  });
+
   it("callPlanningJudgeWithInfraRetry surfaces the underlying cause on total failure", async () => {
     await assert.rejects(
       () =>

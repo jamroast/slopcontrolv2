@@ -3,7 +3,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { isSpecificationAsk } from "@slopcontrol/artifacts";
+import { isSpecificationAsk, PLANNING_AUTOMATED_CHECKS_RULES } from "@slopcontrol/artifacts";
 
 export type PlanningFaultLeg = "none" | "research" | "draft" | "both";
 
@@ -132,6 +132,7 @@ If you use write_file, path must be exactly: ${opts.canonicalPath}
 Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence), ## Blueprint Deltas.
 Base Scope/File Changes ONLY on the RESEARCH below.
 ${opts.intentBlock}
+${PLANNING_AUTOMATED_CHECKS_RULES}
 End with PHASE_COMPLETE.
 
 Description:

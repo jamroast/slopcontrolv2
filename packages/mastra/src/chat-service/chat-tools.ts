@@ -316,6 +316,31 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   }),
   design_loop_accept: z.object({
     loopId: z.string().min(1).optional(),
+    version: z.number().int().positive().optional(),
+    features: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          label: z.string().optional(),
+          accepted: z.boolean(),
+        }),
+      )
+      .optional(),
+    acceptedFeatureIds: z.array(z.string().min(1)).optional(),
+    projectId: optionalProject,
+  }),
+  design_loop_acceptance: z.object({
+    loopId: z.string().min(1).optional(),
+    features: z
+      .array(
+        z.object({
+          id: z.string().min(1),
+          label: z.string().optional(),
+          accepted: z.boolean(),
+        }),
+      )
+      .optional(),
+    acceptedFeatureIds: z.array(z.string().min(1)).optional(),
     projectId: optionalProject,
   }),
   design_loop_discard: z.object({
@@ -531,7 +556,9 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   design_loop_start:
     "Start a look-and-feel design loop (mock HTML exploration). Requires brief — pass the operator's words in brief. In global chat always pass projectId. When several loops exist on a project, pass loopId on accept/discard/continue/get. Notification-driven when live turn active.",
   design_loop_accept:
-    "Freeze the chosen design loop as accepted. Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first). Updates the latch to accepted for the implement_design handoff — only design_loop_abandon clears it.",
+    "Freeze the chosen design loop as accepted (requires ≥1 ticked feature — pass acceptedFeatureIds or features, e.g. palette/logo/applied_shell). Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first). Updates the latch to accepted for the implement_design handoff — only design_loop_abandon clears it.",
+  design_loop_acceptance:
+    "Save accept-time feature checklist ticks (does not freeze the loop). Pass features[] with {id,label,accepted} or acceptedFeatureIds[]. Use before design_loop_accept, or pass the ticks directly to design_loop_accept.",
   design_loop_discard:
     "Soft-discard a bad mock VERSION (marks invalid; rewinds tip if it was latest). Pass version (e.g. 7), or omit to discard this chat's latched loop's currentVersion. Does NOT delete an entire loop — when the operator says the whole design is wrong, call design_loop_abandon instead. Global chat: always pass projectId.",
   design_loop_abandon:
