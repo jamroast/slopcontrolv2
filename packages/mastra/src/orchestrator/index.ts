@@ -900,6 +900,28 @@ function isProviderBadRequest(error: unknown): boolean {
   return false;
 }
 
+/** True when an LLM/agent error is transient and worth retrying (5xx, 429, network). */
+function isTransientLlmError(error: unknown): boolean {
+  if (error == null) return false;
+  const any = error as { statusCode?: number; status?: number; cause?: unknown };
+  const code = any.statusCode ?? any.status;
+  if (code === 408 || code === 429 || (code != null && code >= 500)) {
+    return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error);
+  if (
+    /internal server error|service unavailable|bad gateway|gateway timeout|rate limit|too many requests|ECONNRESET|ETIMEDOUT|ECONNREFUSED|network error|socket hang up|fetch failed/i.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  if (any.cause != null) return isTransientLlmError(any.cause);
+  return false;
+}
+
+const MAX_AGENT_RETRIES = 2;
+
 async function runAgent(
   agent: Agent,
   prompt: string,
@@ -936,76 +958,95 @@ async function runAgent(
     memory: memoryOpt ? "thread" : "none",
     modelOverride: modelOverride ? modelOverride.id : undefined,
   });
-  try {
-    const generate = () =>
-      agent.generate(prompt, {
-        maxSteps,
-        ...(memoryOpt ? { memory: memoryOpt } : {}),
-        ...(modelOverride ? { model: modelOverride } : {}),
-      });
-    const result =
-      timeoutMs && timeoutMs > 0
-        ? await Promise.race([
-            generate(),
-            new Promise<never>((_, reject) => {
-              setTimeout(
-                () =>
-                  reject(
-                    new Error(
-                      `Agent ${name} timed out after ${timeoutMs}ms`,
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= MAX_AGENT_RETRIES; attempt++) {
+    try {
+      const generate = () =>
+        agent.generate(prompt, {
+          maxSteps,
+          ...(memoryOpt ? { memory: memoryOpt } : {}),
+          ...(modelOverride ? { model: modelOverride } : {}),
+        });
+      const result =
+        timeoutMs && timeoutMs > 0
+          ? await Promise.race([
+              generate(),
+              new Promise<never>((_, reject) => {
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        `Agent ${name} timed out after ${timeoutMs}ms`,
+                      ),
                     ),
-                  ),
-                timeoutMs,
-              );
-            }),
-          ])
-        : await generate();
-    const text = result.text ?? "";
-    slog.info("agent", `done ${name}`, {
-      resourceId,
-      threadId,
-      durationMs: Date.now() - started,
-      duration: formatDurationMs(Date.now() - started),
-      outputChars: text.length,
-    });
-    return text;
-  } catch (error) {
-    const detail = formatLlmErrorForLog(error);
-    slog.error("agent", `failed ${name}`, {
-      resourceId,
-      threadId,
-      durationMs: Date.now() - started,
-      error: detail,
-    });
-    if (
-      /memory|storage|libsql|observational/i.test(detail) &&
-      !/requires a threadId|none was found in RequestContext/i.test(detail)
-    ) {
-      slog.error(
-        "agent",
-        "Mastra Memory/storage failure — check ~/.slopcontrol/mastra.db is writable and the supervisor LLM endpoint resolves for observationalMemory",
-        {
-          hint: "GET /health → mastraStorage; configure endpoints.json supervisor role",
-        },
-      );
-    }
-    if (/requires a threadId|ObservationalMemory.*threadId/i.test(detail)) {
-      slog.error(
-        "agent",
-        "ObservationalMemory requires threadId — supervisor enrich must use memory:false without OM Memory on the agent",
-        {
-          hint: "createDevSupervisorAgent must not attach shared Memory with observationalMemory",
-        },
-      );
-    }
-    if (error instanceof Error) {
-      if (detail !== error.message) {
-        throw new Error(detail, { cause: error });
+                  timeoutMs,
+                );
+              }),
+            ])
+          : await generate();
+      const text = result.text ?? "";
+      slog.info("agent", `done ${name}`, {
+        resourceId,
+        threadId,
+        durationMs: Date.now() - started,
+        duration: formatDurationMs(Date.now() - started),
+        outputChars: text.length,
+      });
+      return text;
+    } catch (error) {
+      lastError = error;
+      if (attempt < MAX_AGENT_RETRIES && isTransientLlmError(error)) {
+        slog.warn(
+          "agent",
+          `transient error, retrying ${name} (attempt ${attempt + 1}/${MAX_AGENT_RETRIES})`,
+          {
+            resourceId,
+            threadId,
+            error: formatLlmErrorForLog(error).slice(0, 200),
+          },
+        );
+        await new Promise((r) => setTimeout(r, 1_000 * (attempt + 1)));
+        continue;
       }
-      throw error;
+      break;
     }
-    throw new Error(detail, { cause: error });
   }
+  const error = lastError;
+  const detail = formatLlmErrorForLog(error);
+  slog.error("agent", `failed ${name}`, {
+    resourceId,
+    threadId,
+    durationMs: Date.now() - started,
+    error: detail,
+  });
+  if (
+    /memory|storage|libsql|observational/i.test(detail) &&
+    !/requires a threadId|none was found in RequestContext/i.test(detail)
+  ) {
+    slog.error(
+      "agent",
+      "Mastra Memory/storage failure — check ~/.slopcontrol/mastra.db is writable and the supervisor LLM endpoint resolves for observationalMemory",
+      {
+        hint: "GET /health → mastraStorage; configure endpoints.json supervisor role",
+      },
+    );
+  }
+  if (/requires a threadId|ObservationalMemory.*threadId/i.test(detail)) {
+    slog.error(
+      "agent",
+      "ObservationalMemory requires threadId — supervisor enrich must use memory:false without OM Memory on the agent",
+      {
+        hint: "createDevSupervisorAgent must not attach shared Memory with observationalMemory",
+      },
+    );
+  }
+  if (error instanceof Error) {
+    if (detail !== error.message) {
+      throw new Error(detail, { cause: error });
+    }
+    throw error;
+  }
+  throw new Error(detail, { cause: error });
 }
 
 /**
