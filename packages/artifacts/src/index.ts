@@ -34,6 +34,9 @@ import {
   changeIntentIsThemeWiringOnly,
   isNotApplicableDesignSection,
   formatChangeIntentPromptBlock,
+  intentWatchPaths,
+  extractJsonObject,
+  parseChangeIntentJson,
 } from "./change-intent.js";
 import type { ChangeIntent } from "./change-intent.js";
 import type { PersistedDiagnosis } from "./diagnosis.js";
@@ -2201,6 +2204,38 @@ export function resolvePhaseDocFromAgentTurn(opts: {
     gate: validatePhaseDocForDev("", claimOpts),
     ...(alignIssues.length > 0 ? { alignIssues } : {}),
   };
+}
+
+/**
+ * Harvest a revised INTENT.json from an agent turn (tool write or output).
+ * Prefers a tool-written canonical INTENT.json, then a JSON object in the
+ * agent output. Validates against ChangeIntentSchema so a corrupt rewrite is
+ * never accepted.
+ */
+export function resolveIntentFromAgentTurn(opts: {
+  projectRoot: string;
+  phaseId: string;
+  agentOutput: string;
+  beforeStats: FileStatSnapshot;
+}): {
+  intent: ChangeIntent | null;
+  source: "agent_output" | "tool_write" | "none";
+} {
+  const watch = intentWatchPaths(opts.projectRoot, opts.phaseId);
+  const changed = new Set(filesChangedSince(opts.beforeStats, watch));
+
+  for (const path of changed) {
+    const intent = readChangeIntent(opts.projectRoot, opts.phaseId);
+    if (intent) return { intent, source: "tool_write" };
+  }
+
+  const json = extractJsonObject(opts.agentOutput);
+  if (json) {
+    const intent = parseChangeIntentJson(json);
+    if (intent) return { intent, source: "agent_output" };
+  }
+
+  return { intent: null, source: "none" };
 }
 
 /**

@@ -3,12 +3,12 @@ import type { LlmEndpoint } from "@slopcontrol/types";
 import { chatJson } from "./json-chat.js";
 
 export const IntentResearchConflictSchema = z.object({
-  /** True when research explicitly rejects or overrides wording in the intent. */
-  hasConflict: z.boolean(),
-  /** The intent wording research rejects (verbatim, e.g. "--packages=external"). */
-  rejectedWording: z.string().optional(),
-  /** One-sentence description of the research-backed correction. */
-  correction: z.string().optional(),
+  conflicts: z.array(
+    z.object({
+      rejectedWording: z.string(),
+      correction: z.string().optional(),
+    }),
+  ),
 });
 
 export type IntentResearchConflict = z.infer<typeof IntentResearchConflictSchema>;
@@ -18,14 +18,13 @@ export const INTENT_RESEARCH_CONFLICT_SYSTEM_PROMPT = `You detect when a phase's
 Output ONLY a single JSON object. No prose, no markdown fences.
 
 Schema:
-- hasConflict: boolean
-- rejectedWording: optional string — the exact intent wording research rejects (e.g. a build flag, file path, or approach the intent names)
-- correction: optional one-sentence summary of the research-backed alternative
+- conflicts: array of { rejectedWording: string, correction?: string } — every intent wording research rejects (empty array when none)
 
 Meaning:
-- hasConflict=true only when research EXPLICITLY says the intent wording is wrong/unsafe/stale ("do not use X", "X is not safe", "intent says X but package.json does not", "instead of X use Y"). Research merely adding detail or agreeing with the intent is NOT a conflict.
-- Judge intent, not keywords. If research restates the intent in different words without contradicting it, hasConflict=false.
-- rejectedWording must be copied verbatim from the intent text when hasConflict=true.
+- A conflict exists only when research EXPLICITLY says the intent wording is wrong/unsafe/stale ("do not use X", "X is not safe", "intent says X but package.json does not", "instead of X use Y"). Research merely adding detail or agreeing with the intent is NOT a conflict.
+- Judge intent, not keywords. If research restates the intent in different words without contradicting it, conflicts is empty.
+- rejectedWording must be copied verbatim from the intent text.
+- List EVERY rejected wording, not just the first.
 `;
 
 export interface ClassifyIntentResearchConflictOptions {

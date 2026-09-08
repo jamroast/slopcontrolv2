@@ -14,6 +14,12 @@ import {
   extractLiveDecisions,
   finalizeChangeIntent,
   formatChangeIntentPromptBlock,
+  parseChangeIntentJson,
+  extractJsonObject,
+  intentWatchPaths,
+  resolveIntentFromAgentTurn,
+  writeChangeIntent,
+  snapshotFileStats,
   ChangeIntentLlmOutputSchema,
   interactionProofKind,
   isClickNavigateAsk,
@@ -1115,5 +1121,92 @@ src/app/product/page.tsx
       ),
       false,
     );
+  });
+});
+
+describe("intent revision harvest", () => {
+  it("parseChangeIntentJson accepts a valid intent and rejects corruption", () => {
+    const valid = JSON.stringify({
+      title: "t",
+      goal: "g",
+      uiMount: "composer",
+      refinementOf: [],
+      supersedes: [],
+      mustNot: [],
+      rawDescription: "d",
+    });
+    const parsed = parseChangeIntentJson(valid);
+    assert.ok(parsed);
+    assert.equal(parsed.title, "t");
+    assert.equal(parseChangeIntentJson("{ not json"), null);
+    assert.equal(parseChangeIntentJson(JSON.stringify({ title: "t" })), null);
+  });
+
+  it("extractJsonObject pulls fenced and bare JSON", () => {
+    const fenced = "here is the result:\n```json\n{\"a\":1}\n```\ndone";
+    assert.equal(extractJsonObject(fenced), "{\"a\":1}");
+    const bare = "prefix {\"a\":1} suffix";
+    assert.equal(extractJsonObject(bare), "{\"a\":1}");
+    assert.equal(extractJsonObject("no json here"), null);
+    // Prose braces before the real object are skipped.
+    const prose = "the set {a, b} is not JSON; here is {\"title\":\"t\"}";
+    assert.equal(extractJsonObject(prose), "{\"title\":\"t\"}");
+    // Braces inside strings do not confuse the balanced scan.
+    const nested = "{\"goal\":\"use {braces} here\",\"title\":\"t\"}";
+    assert.equal(extractJsonObject(nested), nested);
+  });
+
+  it("resolveIntentFromAgentTurn harvests a tool-written INTENT.json", () => {
+    const dir = mkdtempSync(join(tmpdir(), "intent-rev-"));
+    const phaseId = "1-test";
+    const intent = {
+      title: "t",
+      goal: "g",
+      uiMount: "composer" as const,
+      refinementOf: [],
+      supersedes: [],
+      mustNot: ["stale"],
+      rawDescription: "d",
+    };
+    writeChangeIntent(dir, phaseId, intent);
+    const before = snapshotFileStats(intentWatchPaths(dir, phaseId));
+    writeChangeIntent(dir, phaseId, { ...intent, mustNot: [] });
+    const resolved = resolveIntentFromAgentTurn({
+      projectRoot: dir,
+      phaseId,
+      agentOutput: "",
+      beforeStats: before,
+    });
+    assert.ok(resolved.intent);
+    assert.equal(resolved.source, "tool_write");
+    assert.deepEqual(resolved.intent.mustNot, []);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("resolveIntentFromAgentTurn harvests JSON from agent output", () => {
+    const dir = mkdtempSync(join(tmpdir(), "intent-rev-"));
+    const phaseId = "1-test";
+    const before = snapshotFileStats(intentWatchPaths(dir, phaseId));
+    const output =
+      "```json\n" +
+      JSON.stringify({
+        title: "t",
+        goal: "g",
+        uiMount: "composer",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: "d",
+      }) +
+      "\n```";
+    const resolved = resolveIntentFromAgentTurn({
+      projectRoot: dir,
+      phaseId,
+      agentOutput: output,
+      beforeStats: before,
+    });
+    assert.ok(resolved.intent);
+    assert.equal(resolved.source, "agent_output");
+    rmSync(dir, { recursive: true, force: true });
   });
 });

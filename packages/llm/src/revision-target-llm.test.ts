@@ -9,6 +9,10 @@ describe("RevisionTargetSchema", () => {
     assert.equal(RevisionTargetSchema.parse({ targets: "phase" }).targets, "phase");
     assert.equal(RevisionTargetSchema.parse({ targets: "both" }).targets, "both");
   });
+  it("accepts the optional intent flag", () => {
+    assert.equal(RevisionTargetSchema.parse({ targets: "phase", intent: true }).intent, true);
+    assert.equal(RevisionTargetSchema.parse({ targets: "phase" }).intent, undefined);
+  });
   it("rejects unknown targets", () => {
     assert.throws(() => RevisionTargetSchema.parse({ targets: "nope" }));
   });

@@ -13,7 +13,7 @@ export const RevisionTargetSchema = z.enum(["research", "phase", "both"]);
 export type RevisionTarget = z.infer<typeof RevisionTargetSchema>;
 
 export const RevisionArtifactOutcomeSchema = z.object({
-  artifact: z.enum(["research", "phase"]),
+  artifact: z.enum(["research", "phase", "intent"]),
   attempted: z.boolean(),
   harvested: z.boolean().optional(),
   changed: z.boolean().optional(),
@@ -32,6 +32,7 @@ export const RevisionOutcomeSchema = z.object({
   updatedAt: z.string().datetime(),
   research: RevisionArtifactOutcomeSchema.optional(),
   phase: RevisionArtifactOutcomeSchema.optional(),
+  intent: RevisionArtifactOutcomeSchema.optional(),
 });
 
 export type RevisionOutcome = z.infer<typeof RevisionOutcomeSchema>;
@@ -74,7 +75,7 @@ export function readRevisionOutcome(
 
 export function summarizeRevisionOutcome(outcome: RevisionOutcome): string {
   const parts = [`targets=${outcome.targets}`, `ok=${outcome.ok}`];
-  for (const key of ["research", "phase"] as const) {
+  for (const key of ["research", "phase", "intent"] as const) {
     const row = outcome[key];
     if (!row) continue;
     if (!row.attempted) {
@@ -132,9 +133,11 @@ export function buildPlanningRevisionFailureDiagnosis(opts: {
   phaseId: string;
   runId: string;
 }): PersistedDiagnosis {
-  const failed = [opts.outcome.research, opts.outcome.phase].filter(
-    (row) => row?.attempted && !row.ok,
-  );
+  const failed = [
+    opts.outcome.research,
+    opts.outcome.phase,
+    opts.outcome.intent,
+  ].filter((row) => row?.attempted && !row.ok);
   const first = failed[0];
   const kind =
     first?.harvested === false
@@ -156,7 +159,7 @@ export function buildPlanningRevisionFailureDiagnosis(opts: {
     .slice(0, 16);
   const operatorActions = [
     "Re-submit submit_review(request_changes) with explicit, bullet-point feedback for the failed artifact(s).",
-    "Do NOT call retry_draft — in_review runs must use submit_review(request_changes) to revise PHASE.md/RESEARCH.md.",
+    "Do NOT call retry_draft — in_review runs must use submit_review(request_changes) to revise PHASE.md/RESEARCH.md/INTENT.json.",
     "Call get_run and inspect revision_outcome plus diagnosis — do not judge readiness from RESEARCH.md alone; read PHASE.md too.",
     failed.some((r) => r?.artifact === "research")
       ? "If research revision failed structurally at failed/interrupted stage, use rerun_research then retry_draft — not while in_review."
@@ -270,6 +273,9 @@ export function composeReviewRevisionFeedback(opts: {
     if (ro.research?.attempted && !ro.research.ok) {
       parts.push(`RESEARCH revision: ${ro.research.reason}`);
     }
+    if (ro.intent?.attempted && !ro.intent.ok) {
+      parts.push(`INTENT revision: ${ro.intent.reason}`);
+    }
   }
 
   if (parts.length === 0) {
@@ -284,7 +290,7 @@ export function composeReviewRevisionFeedback(opts: {
 }
 
 export function buildRevisionArtifactOutcome(opts: {
-  artifact: "research" | "phase";
+  artifact: "research" | "phase" | "intent";
   attempted: boolean;
   before?: string;
   after?: string;

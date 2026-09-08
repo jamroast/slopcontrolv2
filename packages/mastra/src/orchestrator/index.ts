@@ -68,9 +68,11 @@ import {
   readTokensCss,
   readUiSpec,
   researchDocWatchPaths,
+  intentWatchPaths,
   resetProjectToPhaseZero,
   resolvePhaseDocFromAgentTurn,
   resolveResearchFromAgentTurn,
+  resolveIntentFromAgentTurn,
   scaffoldPhaseDoc,
   scaffoldResearch,
   scaffoldLlmTestHarness,
@@ -86,6 +88,7 @@ import {
   changeIntentIsThemeWiringOnly,
   phaseHasUsableLogo,
   readChangeIntent,
+  writeChangeIntent,
   ensureTestServices,
   phaseDocAlignsWithChangeIntentAsync,
   type IntentAlignmentJudgeFn,
@@ -2577,8 +2580,8 @@ export class ChangeOrchestrator {
   private async detectIntentResearchConflict(
     intent: ChangeIntent,
     research: string,
-  ): Promise<{ rejectedWording: string; correction?: string } | null> {
-    if (!research.trim()) return null;
+  ): Promise<Array<{ rejectedWording: string; correction?: string }>> {
+    if (!research.trim()) return [];
     try {
       const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
         "classification",
@@ -2590,18 +2593,17 @@ export class ChangeOrchestrator {
         research,
         timeoutMs: 90_000,
       });
-      if (!conflict.hasConflict || !conflict.rejectedWording?.trim()) {
-        return null;
-      }
-      return {
-        rejectedWording: conflict.rejectedWording.trim(),
-        correction: conflict.correction?.trim(),
-      };
+      return (conflict.conflicts ?? [])
+        .filter((c) => c.rejectedWording?.trim())
+        .map((c) => ({
+          rejectedWording: c.rejectedWording.trim(),
+          correction: c.correction?.trim(),
+        }));
     } catch (err) {
       slog.warn("design-loop", "intent-research conflict classify failed", {
         error: err instanceof Error ? err.message : String(err),
       });
-      return null;
+      return [];
     }
   }
 
@@ -6250,7 +6252,7 @@ Phase id: ${phase.id}`;
       phase,
       run,
       description,
-      intentBlock: formatChangeIntentPromptBlock(intentForReconcile),
+      intentBlock: formatChangeIntentPromptBlock(reconciled.intent),
       allowLegRetry: true,
     });
     if (!gate.ok) {
@@ -7533,17 +7535,24 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
 `
             : "";
 
-    const targets = await this.classifyRevisionTargets(
+    const classification = await this.classifyRevisionTargets(
       feedback ?? "",
       research,
       phaseDoc,
     );
-    log(project, run, `--- Revision targets: ${targets} ---`);
+    const targets = classification.targets;
+    const reviseIntent = classification.intent;
+    log(
+      project,
+      run,
+      `--- Revision targets: ${targets}${reviseIntent ? " + intent" : ""} ---`,
+    );
     const judge = this.bindDocRevisionJudge();
 
     const revisionState: {
       research?: RevisionArtifactOutcome;
       phase?: RevisionArtifactOutcome;
+      intent?: RevisionArtifactOutcome;
     } = {};
     const finish = async (): Promise<SubmitReviewResult> =>
       this.finalizeReviewRevision(project, phase, run, {
@@ -7560,6 +7569,12 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           revisionState.phase ??
           buildRevisionArtifactOutcome({
             artifact: "phase",
+            attempted: false,
+          }),
+        intent:
+          revisionState.intent ??
+          buildRevisionArtifactOutcome({
+            artifact: "intent",
             attempted: false,
           }),
       });
@@ -7772,6 +7787,61 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         after: phaseAfterDoc,
         harvested: true,
         verdict,
+      });
+    }
+
+    if (reviseIntent) {
+      const intentRev = await this.reviseIntentDoc({
+        project,
+        phase,
+        run,
+        feedback: feedback ?? "",
+        intent,
+      });
+      if (!intentRev.harvested) {
+        log(project, run, "--- INTENT revision harvest failed; blocking ---");
+        revisionState.intent = buildRevisionArtifactOutcome({
+          artifact: "intent",
+          attempted: true,
+          harvested: false,
+          failReason: "harvest failed",
+        });
+        return await finish();
+      }
+      const intentVerdict = await verifyDocRevisionApplied({
+        before: JSON.stringify(intent, null, 2),
+        after: JSON.stringify(intentRev.intent, null, 2),
+        feedback: feedback ?? "",
+        judge,
+      });
+      if (!intentVerdict.ok) {
+        log(
+          project,
+          run,
+          `--- INTENT revision rejected: ${intentVerdict.reason} ---`,
+        );
+        revisionState.intent = buildRevisionArtifactOutcome({
+          artifact: "intent",
+          attempted: true,
+          before: JSON.stringify(intent, null, 2),
+          after: JSON.stringify(intentRev.intent, null, 2),
+          harvested: true,
+          verdict: intentVerdict,
+        });
+        return await finish();
+      }
+      log(
+        project,
+        run,
+        `--- INTENT revision applied (${intentVerdict.reason}) ---`,
+      );
+      revisionState.intent = buildRevisionArtifactOutcome({
+        artifact: "intent",
+        attempted: true,
+        before: JSON.stringify(intent, null, 2),
+        after: JSON.stringify(intentRev.intent, null, 2),
+        harvested: true,
+        verdict: intentVerdict,
       });
     }
 
@@ -8004,11 +8074,13 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       planningSnapshot: PlanningSnapshot;
       research: RevisionArtifactOutcome;
       phase: RevisionArtifactOutcome;
+      intent: RevisionArtifactOutcome;
     },
   ): Promise<SubmitReviewResult> {
     const revisionOk =
       (!opts.research.attempted || opts.research.ok) &&
-      (!opts.phase.attempted || opts.phase.ok);
+      (!opts.phase.attempted || opts.phase.ok) &&
+      (!opts.intent.attempted || opts.intent.ok);
 
     const researchDoc = readResearch(project.rootPath, phase.id);
     const intent = await ensureChangeIntentAsync(
@@ -8035,6 +8107,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       updatedAt: new Date().toISOString(),
       research: opts.research,
       phase: opts.phase,
+      intent: opts.intent,
     };
     writeRevisionOutcome(project.rootPath, run.id, outcome);
     log(
@@ -8105,11 +8178,11 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     feedback: string,
     research: string,
     phaseDoc: string,
-  ): Promise<"research" | "phase" | "both"> {
+  ): Promise<{ targets: "research" | "phase" | "both"; intent: boolean }> {
     try {
       const { endpoint, modelId } =
         this.ctx.registry.resolveEndpointForRole("classification");
-      return await classifyRevisionTargetsViaLlm({
+      const result = await classifyRevisionTargetsViaLlm({
         endpoint,
         modelId,
         feedback,
@@ -8117,8 +8190,15 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         phaseExcerpt: clipPromptSection("PHASE.md", phaseDoc, 4_000),
         timeoutMs: 90_000,
       });
+      return { targets: result.targets, intent: result.intent === true };
     } catch {
-      return "both";
+      // Fail-open on intent: if the classifier is unavailable, a cheap keyword
+      // check still routes intent-only feedback to reviseIntentDoc rather than
+      // silently dropping it (the same class of bug as the original gap).
+      const intent = /\b(?:INTENT\.json|mustNot|researchNote|change intent|intent metadata)\b/i.test(
+        feedback,
+      );
+      return { targets: "both", intent };
     }
   }
 
@@ -8285,6 +8365,64 @@ ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
     }
 
     return { doc: priorPhaseDoc, harvested: false };
+  }
+
+  /** Surgical edit of INTENT.json from review feedback (review agent). */
+  private async reviseIntentDoc(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+    feedback: string;
+    intent: ChangeIntent;
+  }): Promise<{ intent: ChangeIntent; harvested: boolean }> {
+    const { project, phase, run, feedback, intent } = input;
+    const priorIntent = intent;
+    const intentPath = `.slopcontrol/phases/${phase.id}/INTENT.json`;
+    const prompt = `Revise INTENT.json based on this review feedback:\n${feedback ?? ""}
+
+INTENT.json is the change-intent metadata (title, goal, uiMount, mustNot, researchNote, etc.). Apply surgical edits:
+- Do NOT return unchanged content.
+- Preserve fields not mentioned in the feedback.
+- Drop stale mustNot entries and dedupe researchNote when the feedback asks.
+- Keep the operator's goal/rawDescription verbatim unless the feedback explicitly asks to change them.
+- Output ONLY a single JSON object (no prose, no markdown fences) that is the full revised INTENT.json.
+If you use write_file, write ONLY to ${intentPath}.
+
+Current INTENT.json:
+${JSON.stringify(intent, null, 2)}`;
+
+    const watch = intentWatchPaths(project.rootPath, phase.id);
+    const beforeStats = snapshotFileStats(watch);
+    const output = await runAgent(
+      this.ctx.agents.reviewAgent,
+      prompt,
+      project.id,
+      `${phase.id}-intent-revise`,
+      { maxSteps: 16 },
+    );
+    log(project, run, output);
+    const resolved = resolveIntentFromAgentTurn({
+      projectRoot: project.rootPath,
+      phaseId: phase.id,
+      agentOutput: output,
+      beforeStats,
+    });
+    if (resolved.intent) {
+      log(
+        project,
+        run,
+        `--- Harvested revised INTENT.json (source=${resolved.source}) ---`,
+      );
+      writeChangeIntent(project.rootPath, phase.id, resolved.intent);
+      return { intent: resolved.intent, harvested: true };
+    }
+    log(
+      project,
+      run,
+      "--- INTENT revise harvest failed; restoring prior INTENT.json ---",
+    );
+    writeChangeIntent(project.rootPath, phase.id, priorIntent);
+    return { intent: priorIntent, harvested: false };
   }
 
   async startDesign(input: {

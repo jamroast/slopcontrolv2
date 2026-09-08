@@ -62,41 +62,85 @@ export function readResearchConclusionForPhase(
 }
 
 /**
- * Annotate (never rewrite) INTENT.json with a research-backed correction.
- * Conflict DETECTION is the caller's job (LLM classification in
- * packages/llm — never regex). The operator's goal/rawDescription stay
- * verbatim; corrections go to mustNot + a researchNote line so the planner
- * sees both the original ask and the research-backed adjustment.
+ * Reconcile INTENT.json with research-backed corrections.
+ *
+ * Rebuilds (not just appends) the research-derived fields so stale entries
+ * do not accumulate across research revisions: reconcile-added mustNot
+ * entries whose wording is no longer flagged are pruned, and researchNote is
+ * rebuilt from the current conflict set (deduped by wording). The operator's
+ * goal/rawDescription stay verbatim.
  */
 export function reconcileChangeIntentFromResearch(
   projectRoot: string,
   phaseId: string,
   intent: ChangeIntent,
-  conflict: { rejectedWording: string; correction?: string } | null,
+  conflicts: Array<{ rejectedWording: string; correction?: string }>,
 ): IntentReconcileResult {
   const patches: string[] = [];
   const next = { ...intent };
   let updated = false;
 
-  if (conflict?.rejectedWording?.trim()) {
-    const wording = conflict.rejectedWording.trim();
-    const correction = conflict.correction?.trim();
-    const note = `Research overrides intent wording "${wording}"${correction ? ` — ${correction}` : ""} — implement per RESEARCH.md, not the original phrasing`;
-    if (!next.mustNot.some((m) => m.includes(wording))) {
-      next.mustNot = [
-        ...next.mustNot,
-        `Do not use ${wording} — research flags it as unsafe for this phase`,
-      ];
+  // Reconcile-added mustNot entries carry a stable marker so we can prune
+  // stale ones when research no longer flags their wording.
+  const RECONCILE_MUSTNOT_RE =
+    /^Do not use (.+) — research flags it as unsafe for this phase$/;
+
+  const flagged = new Set(
+    conflicts
+      .map((c) => c.rejectedWording?.trim())
+      .filter((w): w is string => Boolean(w)),
+  );
+
+  // 1. Prune stale reconcile-added mustNot entries, keep everything else in place.
+  const keptMustNot: string[] = [];
+  for (const m of next.mustNot) {
+    const match = RECONCILE_MUSTNOT_RE.exec(m);
+    if (!match) {
+      keptMustNot.push(m);
+      continue;
+    }
+    const wording = match[1]!.trim();
+    if (flagged.has(wording)) {
+      keptMustNot.push(m);
+    } else {
+      patches.push(`Pruned stale mustNot entry for "${wording}"`);
+      updated = true;
+    }
+  }
+
+  // 2. Append mustNot entries for newly-flagged wording.
+  for (const wording of flagged) {
+    const entry = `Do not use ${wording} — research flags it as unsafe for this phase`;
+    if (!keptMustNot.includes(entry)) {
+      keptMustNot.push(entry);
       patches.push(`Flagged research-rejected wording "${wording}" in mustNot`);
       updated = true;
     }
-    const existing = (next as { researchNote?: string }).researchNote ?? "";
-    if (!existing.includes(wording)) {
-      (next as { researchNote?: string }).researchNote = existing
-        ? `${existing} ${note}`
-        : note;
-      updated = true;
+  }
+  next.mustNot = keptMustNot;
+
+  // 3. Rebuild researchNote from the current conflicts (dedupe by wording).
+  const correctionByWording = new Map<string, string | undefined>();
+  for (const c of conflicts) {
+    const w = c.rejectedWording?.trim();
+    if (w && !correctionByWording.has(w)) {
+      correctionByWording.set(w, c.correction?.trim());
     }
+  }
+  const notes = [...flagged].map((wording) => {
+    const correction = correctionByWording.get(wording);
+    return `Research overrides intent wording "${wording}"${correction ? ` — ${correction}` : ""} — implement per RESEARCH.md, not the original phrasing`;
+  });
+  const nextResearchNote = notes.join(" ");
+  const priorResearchNote = (next as { researchNote?: string }).researchNote ?? "";
+  if (nextResearchNote !== priorResearchNote) {
+    (next as { researchNote?: string }).researchNote = nextResearchNote;
+    updated = true;
+    patches.push(
+      nextResearchNote
+        ? `Rebuilt researchNote (${notes.length} note(s))`
+        : "Cleared stale researchNote",
+    );
   }
 
   if (updated) {

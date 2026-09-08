@@ -833,6 +833,99 @@ export function readChangeIntent(
   }
 }
 
+/** Lenient on-disk Change Intent schema — validates required fields, tolerates extras. */
+export const ChangeIntentSchema = z
+  .object({
+    title: z.string(),
+    goal: z.string(),
+    uiMount: z.enum(["composer", "bubble", "modal", "page", "n/a"]),
+    changeKind: z
+      .enum(["engagement", "chrome-hide", "backend", "specification", "other"])
+      .optional(),
+    brandTheming: z.boolean().optional(),
+    themeWiringOnly: z.boolean().optional(),
+    stockAdoption: z.boolean().optional(),
+    assetSwap: z.boolean().optional(),
+    requestsMissingThemeControl: z.boolean().optional(),
+    refinementOf: z.array(z.string()),
+    supersedes: z.array(z.string()),
+    mustNot: z.array(z.string()),
+    rawDescription: z.string(),
+    interaction: z
+      .object({
+        mount: z.enum(["composer", "bubble", "modal", "page", "n/a"]),
+        primaryAction: z.string(),
+        proof: z.array(z.string()),
+        forbiddenSubstitutes: z.array(z.string()),
+      })
+      .optional(),
+    researchNote: z.string().optional(),
+  })
+  .passthrough();
+
+/** Paths the intent-revision agent may write INTENT.json via tools. */
+export function intentWatchPaths(
+  projectRoot: string,
+  phaseId: string,
+): string[] {
+  return [changeIntentPath(projectRoot, phaseId)];
+}
+
+/** Extract a JSON object from agent output (fenced ```json or balanced bare {...}). */
+export function extractJsonObject(output: string): string | null {
+  const fenced = output.match(/```(?:json)?\s*\n?([\s\S]*?)```/i);
+  if (fenced?.[1]) {
+    const trimmed = fenced[1].trim();
+    if (trimmed.startsWith("{")) return trimmed;
+  }
+  // Balanced scan: try each `{` as a candidate and return the first that
+  // parses as JSON (tolerates prose braces and multiple objects).
+  for (let i = 0; i < output.length; i++) {
+    if (output[i] !== "{") continue;
+    const candidate = extractBalancedJson(output, i);
+    if (candidate == null) continue;
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      // Not valid JSON — try the next candidate.
+    }
+  }
+  return null;
+}
+
+/** Balanced `{…}` span starting at `start`, skipping string contents. */
+function extractBalancedJson(text: string, start: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/** Parse + validate a candidate INTENT.json body into a ChangeIntent. */
+export function parseChangeIntentJson(body: string): ChangeIntent | null {
+  try {
+    return ChangeIntentSchema.parse(JSON.parse(body)) as ChangeIntent;
+  } catch {
+    return null;
+  }
+}
+
 /** True when on-disk Intent should be refreshed for this description. */
 export function isChangeIntentWeak(
   existing: ChangeIntent,

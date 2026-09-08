@@ -56,10 +56,12 @@ describe("research-intent-reconcile", () => {
         root,
         phaseId,
         intent,
-        {
-          rejectedWording: "--packages=external",
-          correction: "use targeted externals per research",
-        },
+        [
+          {
+            rejectedWording: "--packages=external",
+            correction: "use targeted externals per research",
+          },
+        ],
       );
       assert.equal(result.updated, true);
       // Operator wording untouched.
@@ -88,15 +90,62 @@ describe("research-intent-reconcile", () => {
         root,
         phaseId,
         result.intent,
-        {
-          rejectedWording: "--packages=external",
-          correction: "use targeted externals per research",
-        },
+        [
+          {
+            rejectedWording: "--packages=external",
+            correction: "use targeted externals per research",
+          },
+        ],
       );
       assert.equal(again.updated, false);
-      // Null conflict → no-op.
-      const noop = reconcileChangeIntentFromResearch(root, phaseId, intent, null);
+      // Empty conflict list → no-op.
+      const noop = reconcileChangeIntentFromResearch(root, phaseId, intent, []);
       assert.equal(noop.updated, false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("prunes stale reconcile-added mustNot entries and rebuilds researchNote", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-reconcile-prune-"));
+    try {
+      ensureSlopcontrolDir(root);
+      const phaseId = "12-test";
+      mkdirSync(join(root, ".slopcontrol", "phases", phaseId), {
+        recursive: true,
+      });
+      const intent = extractChangeIntent("Repoint the server entry");
+      // Simulate a prior reconcile that flagged two wordings.
+      const prior = {
+        ...intent,
+        mustNot: [
+          ...intent.mustNot,
+          "Do not use --packages=external — research flags it as unsafe for this phase",
+          "Do not use --bundle — research flags it as unsafe for this phase",
+        ],
+        researchNote:
+          'Research overrides intent wording "--packages=external" — use targeted externals — implement per RESEARCH.md, not the original phrasing Research overrides intent wording "--bundle" — use esbuild — implement per RESEARCH.md, not the original phrasing',
+      };
+      writeChangeIntent(root, phaseId, prior);
+
+      // New research still flags --packages=external; --bundle is resolved.
+      const result = reconcileChangeIntentFromResearch(root, phaseId, prior, [
+        {
+          rejectedWording: "--packages=external",
+          correction: "use targeted externals",
+        },
+      ]);
+      assert.equal(result.updated, true);
+      // Stale --bundle entry pruned.
+      assert.ok(!result.intent.mustNot.some((m) => m.includes("--bundle")));
+      // --packages=external entry kept.
+      assert.ok(
+        result.intent.mustNot.some((m) => m.includes("--packages=external")),
+      );
+      // researchNote rebuilt (no --bundle note).
+      const note = (result.intent as { researchNote?: string }).researchNote ?? "";
+      assert.match(note, /--packages=external/);
+      assert.ok(!note.includes("--bundle"));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
