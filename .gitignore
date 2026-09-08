@@ -9,3 +9,4 @@ dist/
 coverage/
 .mastra/
 .slopcontrol/
+*.tsbuildinfo
