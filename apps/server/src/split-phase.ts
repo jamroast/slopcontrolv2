@@ -41,6 +41,7 @@ export function splitPhase(opts: {
   const unsplittable = new Set([
     "developing",
     "designing",
+    "design_complete",
     "complete",
     "superseded",
   ]);

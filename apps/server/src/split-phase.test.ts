@@ -200,6 +200,19 @@ describe("splitPhase", () => {
         /Cannot split a phase in status "developing"/,
       );
 
+      phase.status = "design_complete";
+      store.updatePhase(phase);
+      assert.throws(
+        () =>
+          splitPhase({
+            store,
+            project,
+            phaseId: phase.id,
+            parts: [{ description: "a" }, { description: "b" }],
+          }),
+        /Cannot split a phase in status "design_complete"/,
+      );
+
       phase.status = "draft";
       phase.worktreePath = "/tmp/some-worktree";
       store.updatePhase(phase);
