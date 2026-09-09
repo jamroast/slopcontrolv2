@@ -401,6 +401,11 @@ function updatePhaseStatus(phaseId: string, status: string): void {
   store.updatePhase(phase);
 }
 
+/** True when a phase was split into narrower phases and is no longer active. */
+function isSupersededPhase(phaseId: string): boolean {
+  return store.getPhase(phaseId)?.status === "superseded";
+}
+
 /**
  * Resolve a design loop for relaunch_design_research.
  * Prefer loopId; else match meta.phaseId or design/STATUS.md Source line.
@@ -735,6 +740,12 @@ async function executeRetryVerify(
   if (!project || !phase) {
     return { status: 404, body: { error: "Project or phase not found" } };
   }
+  if (isSupersededPhase(phase.id)) {
+    return {
+      status: 409,
+      body: { error: "Phase is superseded — it was split into narrower phases" },
+    };
+  }
   if (!RETRY_VERIFY_STAGES.has(run.stage)) {
     return {
       status: 409,
@@ -858,6 +869,12 @@ async function executeRetryRootVerify(
   const phase = store.getPhase(run.phaseId);
   if (!project || !phase) {
     return { status: 404, body: { error: "Project or phase not found" } };
+  }
+  if (isSupersededPhase(phase.id)) {
+    return {
+      status: 409,
+      body: { error: "Phase is superseded — it was split into narrower phases" },
+    };
   }
   if (!RETRY_VERIFY_STAGES.has(run.stage)) {
     return {
@@ -997,6 +1014,12 @@ async function executeRetryDraft(
   const phase = store.getPhase(run.phaseId);
   if (!project || !phase) {
     return { status: 404, body: { error: "Project or phase not found" } };
+  }
+  if (isSupersededPhase(phase.id)) {
+    return {
+      status: 409,
+      body: { error: "Phase is superseded — it was split into narrower phases" },
+    };
   }
   if (!RETRY_DRAFT_STAGES.has(run.stage)) {
     return {
@@ -7371,6 +7394,12 @@ app.post("/runs", async (req, res) => {
         res.status(404).json({ error: "Project or phase not found" });
         return;
       }
+      if (isSupersededPhase(phase.id)) {
+        res.status(409).json({
+          error: "Phase is superseded — it was split into narrower phases",
+        });
+        return;
+      }
 
       // Approve is sync/fast; request_changes can call the LLM so run async.
       if (action.decision === "approve") {
@@ -7443,6 +7472,12 @@ app.post("/runs", async (req, res) => {
       const phase = store.getPhase(run.phaseId);
       if (!project || !phase) {
         res.status(404).json({ error: "Project or phase not found" });
+        return;
+      }
+      if (isSupersededPhase(phase.id)) {
+        res.status(409).json({
+          error: "Phase is superseded — it was split into narrower phases",
+        });
         return;
       }
 
@@ -7573,6 +7608,12 @@ app.post("/runs", async (req, res) => {
         res.status(404).json({ error: "Project or phase not found" });
         return;
       }
+      if (isSupersededPhase(phase.id)) {
+        res.status(409).json({
+          error: "Phase is superseded — it was split into narrower phases",
+        });
+        return;
+      }
 
       if (
         run.stage !== "accepted" &&
@@ -7672,6 +7713,12 @@ app.post("/runs", async (req, res) => {
       const phase = store.getPhase(run.phaseId);
       if (!project || !phase) {
         res.status(404).json({ error: "Project or phase not found" });
+        return;
+      }
+      if (isSupersededPhase(phase.id)) {
+        res.status(409).json({
+          error: "Phase is superseded — it was split into narrower phases",
+        });
         return;
       }
 
@@ -7774,6 +7821,12 @@ app.post("/runs", async (req, res) => {
         res.status(404).json({ error: "Project not found" });
         return;
       }
+      if (isSupersededPhase(phase.id)) {
+        res.status(409).json({
+          error: "Phase is superseded — it was split into narrower phases",
+        });
+        return;
+      }
 
       const dependsOn = [...new Set(action.dependsOn.filter(Boolean))];
       if (dependsOn.includes(phase.id)) {
@@ -7824,6 +7877,12 @@ app.post("/runs", async (req, res) => {
       const phase = store.getPhase(run.phaseId);
       if (!project || !phase) {
         res.status(404).json({ error: "Project or phase not found" });
+        return;
+      }
+      if (isSupersededPhase(phase.id)) {
+        res.status(409).json({
+          error: "Phase is superseded — it was split into narrower phases",
+        });
         return;
       }
 
