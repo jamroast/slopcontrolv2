@@ -80,6 +80,7 @@ export const CHAT_GLOBAL_ONLY_FREE_TOOLS: ReadonlySet<string> = new Set([
 export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   // lifecycle
   "start_change",
+  "split_phase",
   "promote_ask",
   "fork_ask",
   "start_design",
@@ -378,6 +379,18 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     dependsOn: z.array(z.string()).optional(),
     projectId: optionalProject,
   }),
+  split_phase: z.object({
+    phaseId: z.string().min(1),
+    parts: z
+      .array(
+        z.object({
+          title: z.string().optional(),
+          description: z.string().min(1),
+        }),
+      )
+      .min(2),
+    projectId: optionalProject,
+  }),
   start_development: z
     .object({
       runId: z.string().min(1),
@@ -569,6 +582,8 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Recovery when accept/implement bound design artifacts but research never ran. Creates a new phase, rebinds mock + pack + UI-SPEC, starts research. Pass loopId (or omit when this chat latched the loop / project has one accepted loop); phaseId resolves the loop when loopId is omitted.",
   start_change:
     "Start research for a new phase. Requires description — pass the operator's full task definition (title, goal, affected areas, success criteria). Do not call with only projectId. Optional dependsOn for phase ordering.",
+  split_phase:
+    "Split one over-broad phase into N narrower phases. Requires phaseId and parts (at least 2 { title?, description }). Marks the original phase superseded and creates N fresh draft phases chained by dependsOn. Use when a plan was promoted too broadly and request_changes cannot trim the scope.",
   ask: "Investigate the project (read source, explain why something is broken). Pass the operator's words through in message — do not replace a page/route/product-gap question with a source-claim checklist. Optional investigateTool: mastra (faster) | pi (thorough) | auto. Thorough vs quick intent in the operator message is classified by the LLM, never keyword-matched; with no expressed intent the fast mastra path runs. Prefer this over gated agent for read-only traces. Requires message. You may pass askId or newAsk; the chat service will choose continue vs a new ask so this never resumes some other open ask on the project.",
   project_set_ask_investigate_tool:
     "Set the project's default Ask walker: auto, mastra (fast), or pi (thorough). Requires tool. Bind the judge model with chat_function_bind function=judge.",

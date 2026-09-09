@@ -502,6 +502,31 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "split_phase",
+      description:
+        "Split one over-broad phase into N narrower phases. Marks the original phase superseded and creates N fresh draft phases chained by dependsOn (the first inherits the original's dependencies; each subsequent depends on the previous). Use when a plan was promoted too broadly and request_changes cannot trim the scope.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          phaseId: { type: "string" },
+          parts: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                title: { type: "string" },
+                description: { type: "string" },
+              },
+              required: ["description"],
+            },
+            description: "The N narrower phases to create (at least 2)",
+          },
+        },
+        required: ["projectId", "phaseId", "parts"],
+      },
+    },
+    {
       name: "list_runs",
       description: "List runs for a single project (required projectId)",
       inputSchema: {
@@ -2969,6 +2994,24 @@ export async function dispatchSlopcontrolTool(
             dependsOn: args.dependsOn,
           }),
         });
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "split_phase") {
+      return wrap(async () => {
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(String(args.projectId))}/phases/${encodeURIComponent(String(args.phaseId))}/split`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ parts: args.parts }),
+          },
+        );
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

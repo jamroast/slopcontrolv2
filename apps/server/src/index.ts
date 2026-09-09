@@ -197,6 +197,7 @@ import { ObsidianSync } from "@slopcontrol/obsidian";
 import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, AgentRoleSchema, AskInvestigateToolSchema, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
 import { createStore, defaultDataDir } from "./store.js";
+import { splitPhase } from "./split-phase.js";
 import { shouldNotifyRunStageChange } from "./run-settled.js";
 import { DevelopLock } from "./develop-lock.js";
 import { NO_ENV_SYNC_HINT, runProjectEnvSync } from "./env-sync.js";
@@ -1997,6 +1998,38 @@ app.get("/projects/:id/phases", (req, res) => {
     return;
   }
   res.json({ phases: store.listPhases(project.id) });
+});
+
+app.post("/projects/:id/phases/:phaseId/split", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const parts = req.body?.parts;
+  if (!Array.isArray(parts) || parts.length < 2) {
+    res.status(400).json({
+      error: "parts must be an array of at least 2 { title?, description }",
+    });
+    return;
+  }
+  try {
+    const result = splitPhase({
+      store,
+      project,
+      phaseId: req.params.phaseId,
+      parts,
+      interruptRun: (runId) => {
+        abortControllers.get(runId)?.abort();
+        activeRuns.delete(runId);
+      },
+    });
+    res.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = /not found/i.test(message) ? 404 : 400;
+    res.status(status).json({ error: message });
+  }
 });
 
 app.get("/projects/:id/asks", (req, res) => {

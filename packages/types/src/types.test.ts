@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   AgentRoleSchema,
   LlmEndpointSchema,
+  PhaseStatusSchema,
   ProjectConfigSchema,
   RoleModelBindingsSchema,
   RunActionSchema,
@@ -301,5 +302,11 @@ describe("@slopcontrol/types", () => {
     recordStageTransition(run, "developing", t0);
     recordStageTransition(run, "interrupted", tStop);
     assert.equal(run.finishedAt, tStop.toISOString());
+  });
+
+  it("PhaseStatusSchema accepts superseded and rejects unknown values", () => {
+    assert.equal(PhaseStatusSchema.parse("superseded"), "superseded");
+    assert.equal(PhaseStatusSchema.parse("draft"), "draft");
+    assert.throws(() => PhaseStatusSchema.parse("nope"));
   });
 });

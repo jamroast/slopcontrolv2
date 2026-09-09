@@ -163,6 +163,8 @@ export const PhaseStatusSchema = z.enum([
   "complete",
   "blocked",
   "interrupted",
+  /** Split into narrower phases; no longer active. */
+  "superseded",
 ]);
 
 export type PhaseStatus = z.infer<typeof PhaseStatusSchema>;
