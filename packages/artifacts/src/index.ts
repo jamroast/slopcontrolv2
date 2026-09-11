@@ -2256,8 +2256,9 @@ export function phaseDocMatchesPhase(
     /\bPhase\s+(\d+)\b/i.exec(h1)?.[1];
   // A phase id like "37-phase-36-…" carries a stale "phase-N" token in its
   // slug (the title number), distinct from the leading slot number. Accept an
-  // H1 that matches either the slot number or the slug's phase token.
-  const slugPhaseNum = /^phase-(\d+)/i.exec(
+  // H1 that matches either the slot number or the slug's phase token. The
+  // token may sit mid-slug (e.g. "title-phase-74-d-…"), so do not anchor it.
+  const slugPhaseNum = /phase-(\d+)/i.exec(
     phaseId.replace(/^\d+-/, ""),
   )?.[1];
   if (

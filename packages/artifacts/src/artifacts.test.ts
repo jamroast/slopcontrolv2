@@ -571,6 +571,20 @@ None.
     );
   });
 
+  it("phaseDocMatchesPhase accepts a mid-slug phase-N token", () => {
+    // jamauth phase 81: id "81-title-phase-74-d-…" but H1 "# Phase 74 (D) …".
+    const doc =
+      "# Phase 74 (D) — Checkout precondition + tier reconciliation\n\n## Scope\n\nBackend-only.";
+    assert.equal(
+      phaseDocMatchesPhase(
+        doc,
+        "81-title-phase-74-d-checkout-precondition-t",
+        "Title: Phase 74 (D) — checkout precondition + tier reconciliation",
+      ),
+      true,
+    );
+  });
+
   it("phaseDocMatchesPhase still rejects a genuinely stale H1 number", () => {
     const doc = "# Phase 30 — Some unrelated prior phase\n\n## Scope\n\nUnrelated.";
     assert.equal(
