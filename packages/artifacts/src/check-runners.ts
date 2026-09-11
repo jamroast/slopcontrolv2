@@ -147,6 +147,34 @@ function stripQuotedRegionsForShellValidation(s: string): string {
   return out;
 }
 
+/**
+ * Strip `<<'DELIM'` … `DELIM` heredoc bodies so JavaScript inside a
+ * `node <<'EOF'` check is not misread as shell `if`/`for` compounds.
+ * Keeps the `<<'DELIM'` line and the terminator line.
+ */
+function stripHeredocBodiesForShellValidation(s: string): string {
+  const lines = s.split("\n");
+  const out: string[] = [];
+  let delim: string | null = null;
+  for (const line of lines) {
+    if (delim) {
+      if (line.trim() === delim) {
+        delim = null;
+        out.push(line);
+      }
+      continue;
+    }
+    const m = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
+    if (m) {
+      delim = m[2]!;
+      out.push(line);
+    } else {
+      out.push(line);
+    }
+  }
+  return out.join("\n");
+}
+
 /** Join `\` continuations in a fence body before validate/run heuristics. */
 export function normalizeShellCheckBody(body: string): string {
   const lines = body.replace(/\r\n/g, "\n").split("\n");
@@ -305,7 +333,9 @@ function shellValidate(cell: CheckCell): string[] {
       `Broken Automated Check ends with '\\' (line continuation was not joined). Put the full command on one line: ${normalized.slice(0, 120)}`,
     );
   }
-  const forCompound = stripQuotedRegionsForShellValidation(normalized);
+  const forCompound = stripQuotedRegionsForShellValidation(
+    stripHeredocBodiesForShellValidation(normalized),
+  );
   if (isIncompleteShellCompound(forCompound)) {
     issues.push(
       `Broken Automated Check is an incomplete shell compound (e.g. \`if\` without \`fi\`). Use one complete fence with a closed if/fi (while/done) block: ${normalized.slice(0, 120)}`,

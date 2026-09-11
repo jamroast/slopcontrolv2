@@ -75,6 +75,36 @@ echo "PASS: distinct models"
     assert.equal(validatePhaseDocForDev(doc).ok, true);
   });
 
+  it("accepts a node heredoc with JS if statements as a complete check", () => {
+    const doc = `# Phase
+
+## Scope
+x
+
+## File Changes
+- a.ts
+
+## Success Criteria
+ok
+
+## Automated Checks
+
+\`\`\`bash
+node <<'EOF' || exit 1
+const fs = require('fs');
+const src = fs.readFileSync('src/lib/admin/routes.ts', 'utf8');
+if (src.includes('authorize(')) {
+  console.log('ok');
+} else {
+  process.exit(1);
+}
+EOF
+\`\`\`
+`;
+    const gate = validatePhaseDocForDev(doc);
+    assert.equal(gate.ok, true);
+  });
+
   it("parseFenceInfo reads language and cmd meta", () => {
     assert.deepEqual(parseFenceInfo("python cmd=python3"), {
       language: "python",
