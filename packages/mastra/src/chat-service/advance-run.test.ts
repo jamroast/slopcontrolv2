@@ -200,6 +200,7 @@ describe("advanceRun", () => {
     assert.equal(result.kind, "stop");
     assert.match(result.reason, /Stuck at in_review/);
     assert.match(result.reason, /long-lived server/);
+    assert.match(result.reason, /submit_review\(request_changes\)/);
   });
 
   it("seeds rejection reason from the just-confirmed submit_review", async () => {

@@ -224,10 +224,15 @@ export async function advanceRun(opts: {
 
     const key = `${stage}:${decision.tool}`;
     if (attempted.has(key)) {
+      const hint =
+        stage === "in_review" && decision.tool === "submit_review"
+          ? " Use submit_review(request_changes) to fix the PHASE.md, then approve."
+          : "";
       return finish(
         "stop",
         `Stuck at ${stage} after ${decision.tool}.` +
-          (lastReason ? ` ${lastReason}` : ""),
+          (lastReason ? ` ${lastReason}` : "") +
+          hint,
       );
     }
     attempted.add(key);
