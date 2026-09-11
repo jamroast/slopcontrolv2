@@ -1244,6 +1244,57 @@ describe("ChatService lifecycle", () => {
     }
   });
 
+  it("getMessagesPage pages the thread newest-first with metadata", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-chat-page-"));
+    const store = makeStore();
+    let lastArgs: { perPage?: number | false; page?: number; orderBy?: unknown } = {};
+    const service = new ChatService({
+      store,
+      getMemory: () =>
+        ({
+          recall: async (args: {
+            perPage?: number | false;
+            page?: number;
+            orderBy?: unknown;
+          }) => {
+            lastArgs = args;
+            return {
+              messages: [
+                { role: "assistant", createdAt: "2026-08-13T09:00:02.000Z", content: "second" },
+                { role: "user", createdAt: "2026-08-13T09:00:01.000Z", content: "first" },
+              ],
+              total: 5,
+              page: 0,
+              perPage: 2,
+              hasMore: true,
+            };
+          },
+          deleteThread: async () => {},
+        }) as never,
+      dispatch: async () => ({ content: [{ type: "text", text: "{}" }] }),
+      context: {
+        listProjects: () => [],
+        listPhases: () => [],
+        listRuns: () => [],
+        getProject: () => undefined,
+      },
+      endpointsPath: makeEndpointsPath(dir),
+    });
+    try {
+      const conv = service.createConversation({ projectId: null });
+      const page = await service.getMessagesPage(conv.id, { perPage: 2, page: 0 });
+      assert.equal(page.messages.length, 2);
+      assert.equal(page.total, 5);
+      assert.equal(page.hasMore, true);
+      assert.equal(page.perPage, 2);
+      assert.deepEqual(lastArgs.orderBy, { field: "createdAt", direction: "DESC" });
+      assert.equal(lastArgs.perPage, 2);
+      assert.equal(lastArgs.page, 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("updateEndpointDefaultModel notifies onEndpointsChanged", () => {
     const dir = mkdtempSync(join(tmpdir(), "slop-chat-ep-"));
     let calls = 0;

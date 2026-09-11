@@ -8525,10 +8525,34 @@ app.get("/projects/:id/chat-models", async (req, res) => {
   }
 });
 
+function parsePositiveIntParam(value: unknown, max = 200): number | undefined {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return undefined;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) return undefined;
+  return Math.min(n, max);
+}
+
+function parseNonNegativeIntParam(value: unknown): number | undefined {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return undefined;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0) return undefined;
+  return n;
+}
+
 app.get("/chats/:id", async (req, res) => {
   try {
     const service = getChatService();
     const conversation = service.getConversation(req.params.id);
+    const perPage = parsePositiveIntParam(req.query.perPage);
+    if (perPage != null) {
+      const page = parseNonNegativeIntParam(req.query.page) ?? 0;
+      const result = await service.getMessagesPage(req.params.id, {
+        perPage,
+        page,
+      });
+      res.json({ conversation, ...result });
+      return;
+    }
     const messages = await service.getMessages(req.params.id);
     res.json({ conversation, messages });
   } catch (err) {

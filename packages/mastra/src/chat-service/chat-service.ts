@@ -371,8 +371,15 @@ export class ChatService {
     return Promise.all(
       rows.map(async (conversation) => {
         try {
-          const messages = await this.getMessages(conversation.id);
-          return { ...conversation, messageCount: messages.length };
+          // Fetch one message only — recall returns the total count without
+          // replaying the whole thread.
+          const recalled = await this.deps.getMemory().recall({
+            threadId: conversation.id,
+            resourceId: conversation.projectId ?? "global",
+            perPage: 1,
+            page: 0,
+          });
+          return { ...conversation, messageCount: recalled.total };
         } catch {
           return { ...conversation, messageCount: 0 };
         }
@@ -451,6 +458,40 @@ export class ChatService {
     return (recalled.messages ?? [])
       .map((row) => toTranscriptMessage(row))
       .filter((m): m is ChatTranscriptMessage => m !== null);
+  }
+
+  /**
+   * Page the Memory thread (newest first) so long chats can be loaded in
+   * chunks instead of one full replay. Returns pagination metadata.
+   */
+  async getMessagesPage(
+    id: string,
+    opts: { perPage: number; page: number },
+  ): Promise<{
+    messages: ChatTranscriptMessage[];
+    total: number;
+    page: number;
+    perPage: number | false;
+    hasMore: boolean;
+  }> {
+    const conversation = this.getConversation(id);
+    const recalled = await this.deps.getMemory().recall({
+      threadId: conversation.id,
+      resourceId: conversation.projectId ?? "global",
+      perPage: opts.perPage,
+      page: opts.page,
+      orderBy: { field: "createdAt", direction: "DESC" },
+    });
+    const messages = (recalled.messages ?? [])
+      .map((row) => toTranscriptMessage(row))
+      .filter((m): m is ChatTranscriptMessage => m !== null);
+    return {
+      messages,
+      total: recalled.total,
+      page: recalled.page,
+      perPage: recalled.perPage,
+      hasMore: recalled.hasMore,
+    };
   }
 
   /**
