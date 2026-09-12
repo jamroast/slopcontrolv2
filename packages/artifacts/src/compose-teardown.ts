@@ -230,12 +230,27 @@ export async function applyHostVerifyEnvOverlay(
   }
   const publishedPorts = collectComposePublishedPorts(projectRoot);
   const canonicalDbPort = deriveCanonicalDbPort(projectRoot);
-  const evaluated = await evaluate({
-    env,
-    services: [...services],
-    publishedPorts,
-    canonicalDbPort,
-  });
+  let evaluated: { rewrites: { key: string; original: string; rewritten: string }[] };
+  try {
+    evaluated = await evaluate({
+      env,
+      services: [...services],
+      publishedPorts,
+      canonicalDbPort,
+    });
+  } catch (error) {
+    // The classification LLM (or its network path) is transiently unavailable.
+    // Fail open with no overlay rather than aborting the whole merge/verify:
+    // the host-verify overlay is an optimization, and skipping it surfaces a
+    // real, classifiable env error (or none) instead of an opaque exception.
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      env,
+      notes: [
+        `host-verify: classification unavailable — skipped overlay (${message.slice(0, 200)})`,
+      ],
+    };
+  }
   const notes: string[] = [];
   const out = { ...env };
   for (const rewrite of evaluated.rewrites) {

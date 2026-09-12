@@ -252,6 +252,34 @@ describe("snapshotCanonicalRuntimeEnv", () => {
       }
     });
 
+    it("applyHostVerifyEnvOverlay fails open when the evaluator throws (transient LLM outage)", async () => {
+      const root = mkdtempSync(join(tmpdir(), "slop-compose-overlay-"));
+      try {
+        writeFileSync(
+          join(root, "docker-compose.yml"),
+          'services:\n  svc-postgres:\n    ports:\n      - "5430:5432"\n',
+        );
+        const env = { DATABASE_URL: "postgresql://u:p@svc-postgres:5432/db" };
+        const evaluate = async () => {
+          throw new Error("fetch failed");
+        };
+        const { env: out, notes } = await applyHostVerifyEnvOverlay(
+          root,
+          env,
+          evaluate,
+        );
+        assert.equal(
+          out.DATABASE_URL,
+          "postgresql://u:p@svc-postgres:5432/db",
+        );
+        assert.ok(
+          notes.some((n) => n.includes("classification unavailable")),
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
     it("applyHostVerifyEnvOverlay rejects bad evaluator mappings", async () => {
       const root = mkdtempSync(join(tmpdir(), "slop-compose-overlay-"));
       try {

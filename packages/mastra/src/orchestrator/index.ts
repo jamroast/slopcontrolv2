@@ -910,7 +910,7 @@ function isTransientLlmError(error: unknown): boolean {
   }
   const msg = error instanceof Error ? error.message : String(error);
   if (
-    /internal server error|service unavailable|bad gateway|gateway timeout|rate limit|too many requests|ECONNRESET|ETIMEDOUT|ECONNREFUSED|network error|socket hang up|fetch failed/i.test(
+    /internal server error|service unavailable|bad gateway|gateway timeout|rate limit|too many requests|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|getaddrinfo|network error|socket hang up|fetch failed|connect timeout|UND_ERR_CONNECT_TIMEOUT|connection reset/i.test(
       msg,
     )
   ) {

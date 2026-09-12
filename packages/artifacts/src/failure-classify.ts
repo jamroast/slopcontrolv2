@@ -661,6 +661,34 @@ export function classifyVerifyFailure(
     );
   }
 
+  // Transient network / LLM fetch failure (harness's own fetch to a remote
+  // endpoint — classification, smoke, or deps-install network path). Not an app bug.
+  if (
+    /fetch failed|connect timeout|UND_ERR_CONNECT_TIMEOUT|getaddrinfo|EAI_AGAIN|ENOTFOUND|network error|ECONNRESET|socket hang up|connection reset/i.test(
+      stepCtx,
+    )
+  ) {
+    return build(
+      "infra",
+      "high",
+      "Transient network / LLM fetch failure",
+      ["infra", "network", "transient", "fetch-failed"],
+      {
+        codingAgentShouldFix: false,
+        harnessRecoverable: true,
+        lesson:
+          "The step failed because a fetch to a remote endpoint (LLM classification / smoke / dependency registry) failed — a transient network outage, not an application bug. Do not rewrite product code for this. Re-run the check after connectivity recovers (retry_root_verify for post-merge, retry_verify for worktree).",
+        evidence: stepCtx.slice(-800),
+        opts,
+        severity: "blocker",
+        operatorActions: [
+          "Confirm outbound connectivity to the remote LLM/registry endpoint (ollama.com, npm registry) has recovered.",
+          "Retry the same verify path after recovery (retry_root_verify for post-merge, retry_verify for worktree) — do not burn a fresh develop iteration.",
+        ],
+      },
+    );
+  }
+
   // Generic infra
   const infraHit =
     /econnrefused|enotfound|ehostunreach|etimedout|connection refused|could not connect|connect econnrefused|no such host|docker.*(?:daemon|not running|cannot connect)|compose.*(?:not running|exited)|waiting for .*?(?:ready|healthy)|port \d+.*(refused|unreachable)/i.test(
@@ -1147,7 +1175,7 @@ export function applyWorktreeGreenPostMergeContext(
 ): FailureDiagnosis {
   const infraDrift =
     diagnosis.class === "infra" ||
-    /econnrefused|enotfound|connection refused|could not connect|port .* refused/i.test(
+    /econnrefused|enotfound|connection refused|could not connect|port .* refused|fetch failed|connect timeout|getaddrinfo|network error/i.test(
       `${diagnosis.rootCause}\n${diagnosis.evidence}`,
     );
   return {

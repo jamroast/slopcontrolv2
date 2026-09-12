@@ -160,7 +160,10 @@ export function isChatJsonTimeoutError(
 export function isRetryableChatJsonError(message: string, err?: unknown): boolean {
   return (
     /empty content|parse failed/i.test(message) ||
-    isChatJsonTimeoutError(err, message)
+    isChatJsonTimeoutError(err, message) ||
+    /fetch failed|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|getaddrinfo|socket hang up|network error|connect timeout|UND_ERR_CONNECT_TIMEOUT/i.test(
+      message,
+    )
   );
 }
 

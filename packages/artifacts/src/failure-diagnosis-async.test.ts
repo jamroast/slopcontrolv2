@@ -218,3 +218,42 @@ describe("extractFailureSignals", () => {
     assert.equal(signals.missingCommand, null);
   });
 });
+
+describe("transient network fetch classification", () => {
+  it("classifies a post-merge 'fetch failed' step as infra (transient), not unknown", () => {
+    const diagnosis = buildFailureDiagnosis({
+      output:
+        "Post-merge step threw after a successful merge (e0514974): fetch failed",
+      firstFailure: {
+        name: "post-merge",
+        exitCode: 1,
+        output:
+          "Post-merge step threw after a successful merge (e0514974): fetch failed",
+      },
+    });
+    assert.equal(diagnosis.class, "infra");
+    assert.equal(diagnosis.codingAgentShouldFix, false);
+    assert.equal(diagnosis.audience, "operator");
+    assert.ok(diagnosis.tags?.includes("fetch-failed"));
+    assert.ok(diagnosis.operatorActions.length > 0);
+  });
+
+  it("routes the LLM-threw fallback path to the same infra class", async () => {
+    const classifyFn: ClassifyVerifyFailureFn = async () => {
+      throw new Error("endpoint down");
+    };
+    const diagnosis = await buildFailureDiagnosisAsync(
+      {
+        output: "fetch failed",
+        firstFailure: {
+          name: "post-merge",
+          exitCode: 1,
+          output: "Post-merge step threw after a successful merge: fetch failed",
+        },
+      },
+      { classifyFn },
+    );
+    assert.equal(diagnosis.class, "infra");
+    assert.ok(diagnosis.tags?.includes("llm-fallback"));
+  });
+});

@@ -115,6 +115,22 @@ describe("json-chat helpers", () => {
     );
     assert.equal(isRetryableChatJsonError("JSON chat failed (500): boom"), false);
   });
+
+  it("isRetryableChatJsonError covers transient network/fetch failures", () => {
+    assert.equal(isRetryableChatJsonError("fetch failed"), true);
+    assert.equal(
+      isRetryableChatJsonError("Cannot connect: Connect Timeout Error"),
+      true,
+    );
+    assert.equal(isRetryableChatJsonError("UND_ERR_CONNECT_TIMEOUT"), true);
+    assert.equal(isRetryableChatJsonError("getaddrinfo ENOTFOUND host"), true);
+    assert.equal(isRetryableChatJsonError("socket hang up"), true);
+    // 4xx client errors are NOT transient
+    assert.equal(
+      isRetryableChatJsonError("JSON chat failed (403): quota"),
+      false,
+    );
+  });
 });
 
 describe("chatJson empty-content retry", () => {
