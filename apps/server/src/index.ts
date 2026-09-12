@@ -2557,6 +2557,17 @@ app.post("/projects/:id/asks/:askId/sub-research", async (req, res) => {
 
 // ===== Agent chat (inspect/verify with run_command; not develop) =====
 
+/** Normalize an optional id from a request body / MCP arg: a literal
+ * "null"/"undefined"/"None" string means "not provided", not a real id. */
+function normalizeOptionalId(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (trimmed === "" || /^(null|undefined|none|nan)$/i.test(trimmed)) {
+    return "";
+  }
+  return trimmed;
+}
+
 app.get("/projects/:id/agents", (req, res) => {
   const project = store.getProject(req.params.id);
   if (!project) {
@@ -2602,8 +2613,7 @@ app.post("/projects/:id/agents", async (req, res) => {
   }
   const title =
     typeof req.body?.title === "string" ? req.body.title.trim() : undefined;
-  const agentId =
-    typeof req.body?.agentId === "string" ? req.body.agentId.trim() : "";
+  const agentId = normalizeOptionalId(req.body?.agentId);
   const stream = wantsLiveStream(req);
 
   const now = new Date().toISOString();

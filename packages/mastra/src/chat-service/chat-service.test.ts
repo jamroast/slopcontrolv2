@@ -1440,6 +1440,33 @@ describe("chat tool input schemas", () => {
       }),
     );
   });
+
+  it("normalizes LLM-emitted string 'null'/'undefined'/'None' for optional id fields", () => {
+    const agentNull = CHAT_TOOL_INPUT_SCHEMA.agent!.parse({
+      message: "add logs",
+      agentId: "null",
+    }) as { agentId?: unknown };
+    assert.equal(agentNull.agentId, undefined);
+
+    const agentNone = CHAT_TOOL_INPUT_SCHEMA.agent!.parse({
+      message: "add logs",
+      agentId: "None",
+    }) as { agentId?: unknown };
+    assert.equal(agentNone.agentId, undefined);
+
+    const ask = CHAT_TOOL_INPUT_SCHEMA.ask!.parse({
+      message: "trace",
+      askId: "undefined",
+    }) as { askId?: unknown };
+    assert.equal(ask.askId, undefined);
+
+    // Real ids survive unchanged
+    const real = CHAT_TOOL_INPUT_SCHEMA.agent!.parse({
+      message: "add logs",
+      agentId: "ag-123",
+    }) as { agentId?: unknown };
+    assert.equal(real.agentId, "ag-123");
+  });
 });
 
 describe("chat dispatch result shaping", () => {

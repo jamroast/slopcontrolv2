@@ -175,7 +175,28 @@ export function listChatToolNames(): {
   };
 }
 
-const optionalProject = z.string().min(1).optional();
+/** Strip LLM-emitted string "null"/"undefined"/"None" so optional fields
+ * behave as "not provided" instead of a literal id that fails downstream
+ * lookups (e.g. agentId: "null" -> 404 "Agent session not found"). */
+function normalizeNullishString(value: unknown): unknown {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed === "" || /^(null|undefined|none|nan)$/i.test(trimmed)) {
+      return undefined;
+    }
+  }
+  return value;
+}
+
+const optionalString = z.preprocess(
+  normalizeNullishString,
+  z.string().optional(),
+);
+const optionalId = z.preprocess(
+  normalizeNullishString,
+  z.string().min(1).optional(),
+);
+const optionalProject = optionalId;
 
 /** Structured input schemas so the model fills required ids instead of guessing. */
 export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
@@ -196,12 +217,12 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
   }),
   get_development_report: z.object({
-    runId: z.string().min(1).optional(),
-    phaseId: z.string().min(1).optional(),
+    runId: optionalId,
+    phaseId: optionalId,
     projectId: optionalProject,
   }),
   get_ask: z.object({
-    askId: z.string().min(1).optional(),
+    askId: optionalId,
     projectId: optionalProject,
   }),
   get_agent: z.object({
@@ -209,17 +230,17 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
   }),
   design_loop_get: z.object({
-    loopId: z.string().min(1).optional(),
+    loopId: optionalId,
     projectId: optionalProject,
   }),
   plan_loop_get: z.object({
-    loopId: z.string().min(1).optional(),
+    loopId: optionalId,
     projectId: optionalProject,
   }),
   ask: z.object({
     message: z.string().min(1),
-    askId: z.string().min(1).optional(),
-    title: z.string().optional(),
+    askId: optionalId,
+    title: optionalString,
     newAsk: z.boolean().optional(),
     investigateTool: z.enum(["auto", "mastra", "pi"]).optional(),
     projectId: optionalProject,
@@ -230,12 +251,12 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   }),
   agent: z.object({
     message: z.string().min(1),
-    agentId: z.string().min(1).optional(),
-    title: z.string().optional(),
+    agentId: optionalId,
+    title: optionalString,
     projectId: optionalProject,
   }),
   ask_sub_research: z.object({
-    askId: z.string().min(1).optional(),
+    askId: optionalId,
     topics: z.array(z.string().min(1)).min(1),
     projectId: optionalProject,
   }),
@@ -253,19 +274,19 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     note: z.string().min(1),
   }),
   promote_ask: z.object({
-    askId: z.string().min(1).optional(),
-    description: z.string().optional(),
+    askId: optionalId,
+    description: optionalString,
     dependsOn: z.array(z.string()).optional(),
     projectId: optionalProject,
   }),
   fork_ask: z.object({
-    askId: z.string().min(1).optional(),
-    title: z.string().optional(),
+    askId: optionalId,
+    title: optionalString,
     projectId: optionalProject,
   }),
   design_loop_continue: z
     .object({
-      loopId: z.string().min(1).optional(),
+      loopId: optionalId,
       message: z.string().min(1),
       projectId: optionalProject,
     })
@@ -279,18 +300,18 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     .passthrough(),
   plan_loop_start: z.object({
     brief: z.string().min(1),
-    askId: z.string().min(1).optional(),
+    askId: optionalId,
     investigateTool: z.enum(["auto", "mastra", "pi"]).optional(),
     projectId: optionalProject,
   }),
   plan_loop_acceptance: z.object({
-    loopId: z.string().min(1).optional(),
+    loopId: optionalId,
     acceptedFeatureIds: z.array(z.string().min(1)).optional(),
     features: z
       .array(
         z.object({
           id: z.string().min(1),
-          label: z.string().optional(),
+          label: optionalString,
           accepted: z.boolean(),
         }),
       )
@@ -298,31 +319,31 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
   }),
   plan_loop_accept: z.object({
-    loopId: z.string().min(1).optional(),
+    loopId: optionalId,
     version: z.number().int().positive().optional(),
     acceptedFeatureIds: z.array(z.string().min(1)).optional(),
     projectId: optionalProject,
   }),
   plan_loop_promote: z.object({
-    loopId: z.string().min(1).optional(),
+    loopId: optionalId,
     startResearch: z.boolean().optional(),
     dependsOn: z.array(z.string()).optional(),
     projectId: optionalProject,
   }),
   design_loop_start: z.object({
     brief: z.string().min(1),
-    askId: z.string().min(1).optional(),
-    phaseId: z.string().min(1).optional(),
+    askId: optionalId,
+    phaseId: optionalId,
     projectId: optionalProject,
   }),
   design_loop_accept: z.object({
-    loopId: z.string().min(1).optional(),
+    loopId: optionalId,
     version: z.number().int().positive().optional(),
     features: z
       .array(
         z.object({
           id: z.string().min(1),
-          label: z.string().optional(),
+          label: optionalString,
           accepted: z.boolean(),
         }),
       )
@@ -331,12 +352,12 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
   }),
   design_loop_acceptance: z.object({
-    loopId: z.string().min(1).optional(),
+    loopId: optionalId,
     features: z
       .array(
         z.object({
           id: z.string().min(1),
-          label: z.string().optional(),
+          label: optionalString,
           accepted: z.boolean(),
         }),
       )
@@ -345,33 +366,33 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
   }),
   design_loop_discard: z.object({
-    loopId: z.string().min(1).optional(),
+    loopId: optionalId,
     version: z.number().int().positive().optional(),
-    reason: z.string().optional(),
+    reason: optionalString,
     projectId: optionalProject,
   }),
   design_loop_abandon: z.object({
-    loopId: z.string().min(1).optional(),
-    reason: z.string().optional(),
+    loopId: optionalId,
+    reason: optionalString,
     projectId: optionalProject,
   }),
   implement_design: z.object({
-    loopId: z.string().min(1).optional(),
-    phaseId: z.string().min(1).optional(),
+    loopId: optionalId,
+    phaseId: optionalId,
     startResearch: z.boolean().optional(),
     dependsOn: z.array(z.string()).optional(),
     projectId: optionalProject,
   }),
   relaunch_design_research: z.object({
-    loopId: z.string().min(1).optional(),
-    phaseId: z.string().min(1).optional(),
+    loopId: optionalId,
+    phaseId: optionalId,
     dependsOn: z.array(z.string()).optional(),
     projectId: optionalProject,
   }),
   plan_loop_discard: z.object({
-    loopId: z.string().min(1).optional(),
+    loopId: optionalId,
     version: z.number().int().positive().optional(),
-    reason: z.string().optional(),
+    reason: optionalString,
     projectId: optionalProject,
   }),
   start_change: z.object({
@@ -384,7 +405,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     parts: z
       .array(
         z.object({
-          title: z.string().optional(),
+          title: optionalString,
           description: z.string().min(1),
         }),
       )
@@ -402,7 +423,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     .object({
       runId: z.string().min(1),
       decision: z.enum(["approve", "request_changes"]),
-      feedback: z.string().optional(),
+      feedback: optionalString,
       projectId: optionalProject,
     })
     .passthrough(),
@@ -471,14 +492,14 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   project_library_consume: z.object({
     projectId: optionalProject,
     packageName: z.string().min(1),
-    version: z.string().optional(),
+    version: optionalString,
     allowNew: z.boolean().optional(),
   }),
   npm_registry_publish: z.object({
-    packageDir: z.string().min(1).optional(),
+    packageDir: optionalId,
     projectId: optionalProject,
-    packagePath: z.string().min(1).optional(),
-    tag: z.string().optional(),
+    packagePath: optionalId,
+    tag: optionalString,
   }),
   list_design_elements: z.object({
     projectId: optionalProject,
@@ -488,7 +509,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     projectId: optionalProject,
     elementId: z.string().min(1),
     version: z.number().int().positive().optional(),
-    origin: z.string().optional(),
+    origin: optionalString,
   }),
   list_extractable_design_elements: z.object({
     projectId: optionalProject,
@@ -498,28 +519,28 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   design_element_extract: z.object({
     projectId: optionalProject,
     loopId: z.string().min(1),
-    elementId: z.string().min(1).optional(),
+    elementId: optionalId,
     version: z.number().int().positive().optional(),
-    label: z.string().optional(),
-    kind: z.string().optional(),
+    label: optionalString,
+    kind: optionalString,
     publish: z.boolean().optional(),
     publishToRegistry: z.boolean().optional(),
   }),
   design_element_import: z.object({
     projectId: optionalProject,
     loopId: z.string().min(1),
-    elementId: z.string().min(1).optional(),
+    elementId: optionalId,
     version: z.number().int().positive().optional(),
-    origin: z.string().optional(),
+    origin: optionalString,
   }),
   design_element_publish: z.object({
     projectId: optionalProject,
     elementId: z.string().min(1),
     spec: z.string().min(1),
     mockHtml: z.string().min(1),
-    label: z.string().optional(),
-    kind: z.string().optional(),
-    tokensCss: z.string().optional(),
+    label: optionalString,
+    kind: optionalString,
+    tokensCss: optionalString,
     srcFiles: z.record(z.string(), z.string()).optional(),
     mountHints: z.array(z.string()).optional(),
     publishToRegistry: z.boolean().optional(),
