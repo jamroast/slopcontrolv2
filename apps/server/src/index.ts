@@ -197,7 +197,7 @@ import { ObsidianSync } from "@slopcontrol/obsidian";
 import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, AgentRoleSchema, AskInvestigateToolSchema, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
 import { createStore, defaultDataDir } from "./store.js";
-import { splitPhase } from "./split-phase.js";
+import { splitPhase, resolveStartResearchPhase } from "./split-phase.js";
 import { shouldNotifyRunStageChange } from "./run-settled.js";
 import { DevelopLock } from "./develop-lock.js";
 import { NO_ENV_SYNC_HINT, runProjectEnvSync } from "./env-sync.js";
@@ -7340,12 +7340,22 @@ app.post("/runs", async (req, res) => {
         return;
       }
 
-      const phase = store.createPhase({
-        projectId: project.id,
+      // Reuse an existing draft phase when phaseId is passed (e.g. a fresh
+      // sub-phase produced by split_phase). Otherwise create a new phase.
+      const resolved = resolveStartResearchPhase({
+        store,
+        project,
+        phaseId:
+          typeof action.phaseId === "string" ? action.phaseId.trim() : undefined,
         description: action.description,
-        rootPath: project.rootPath,
         dependsOn: action.dependsOn,
       });
+      if (!resolved.ok) {
+        res.status(resolved.status).json({ error: resolved.error });
+        return;
+      }
+      const phase = resolved.phase;
+      const description = resolved.description;
       const run = store.createRun({ phaseId: phase.id, projectId: project.id });
       touchRunStage(run.id, "researching");
       updatePhaseStatus(phase.id, "draft");
@@ -7354,7 +7364,7 @@ app.post("/runs", async (req, res) => {
         await ensureChangeIntentAsync(
           project.rootPath,
           phase.id,
-          action.description,
+          description,
           { registry },
         );
       }
@@ -7375,7 +7385,7 @@ app.post("/runs", async (req, res) => {
           project,
           phase: store.getPhase(phase.id) ?? phase,
           run: store.getRun(run.id) ?? run,
-          description: action.description,
+          description,
           listProjects: () => store.listProjects(),
       onStage: (s) => touchRunStage(run.id, s),
         });

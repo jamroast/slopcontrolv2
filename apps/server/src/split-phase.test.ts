@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { readRoadmap } from "@slopcontrol/artifacts";
 import { SlopStore } from "./store.js";
-import { splitPhase } from "./split-phase.js";
+import { resolveStartResearchPhase, splitPhase } from "./split-phase.js";
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), "slop-split-"));
@@ -226,6 +226,97 @@ describe("splitPhase", () => {
           }),
         /active worktree/,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveStartResearchPhase", () => {
+  it("reuses an existing draft phase instead of creating a duplicate", () => {
+    const { dir, store, project, projectRoot } = setup();
+    try {
+      const draft = store.createPhase({
+        projectId: project.id,
+        description: "Workstream 1 — schema invariants",
+        rootPath: projectRoot,
+        dependsOn: ["00-prior"],
+      });
+      const resolved = resolveStartResearchPhase({
+        store,
+        project,
+        phaseId: draft.id,
+        description: "ignored — should reuse the draft's description",
+        dependsOn: ["should-be-ignored"],
+      });
+      assert.equal(resolved.ok, true);
+      if (resolved.ok) {
+        assert.equal(resolved.reused, true);
+        assert.equal(resolved.phase.id, draft.id);
+        assert.equal(resolved.description, "Workstream 1 — schema invariants");
+        assert.deepEqual(resolved.phase.dependsOn, ["00-prior"]);
+      }
+      // No new phase was created
+      assert.equal(store.listPhases(project.id).length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a new phase when no phaseId is passed", () => {
+    const { dir, store, project, projectRoot } = setup();
+    try {
+      const resolved = resolveStartResearchPhase({
+        store,
+        project,
+        description: "Workstream 1 — schema invariants",
+        dependsOn: ["00-prior"],
+      });
+      assert.equal(resolved.ok, true);
+      if (resolved.ok) {
+        assert.equal(resolved.reused, false);
+        assert.equal(resolved.description, "Workstream 1 — schema invariants");
+        assert.deepEqual(resolved.phase.dependsOn, ["00-prior"]);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects superseded and non-draft phases", () => {
+    const { dir, store, project, projectRoot } = setup();
+    try {
+      const superseded = store.createPhase({
+        projectId: project.id,
+        description: "split original",
+        rootPath: projectRoot,
+      });
+      superseded.status = "superseded";
+      store.updatePhase(superseded);
+      const r1 = resolveStartResearchPhase({
+        store,
+        project,
+        phaseId: superseded.id,
+        description: "x",
+      });
+      assert.equal(r1.ok, false);
+      if (!r1.ok) assert.equal(r1.status, 409);
+
+      const inReview = store.createPhase({
+        projectId: project.id,
+        description: "already reviewed",
+        rootPath: projectRoot,
+      });
+      inReview.status = "in_review";
+      store.updatePhase(inReview);
+      const r2 = resolveStartResearchPhase({
+        store,
+        project,
+        phaseId: inReview.id,
+        description: "x",
+      });
+      assert.equal(r2.ok, false);
+      if (!r2.ok) assert.equal(r2.status, 409);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

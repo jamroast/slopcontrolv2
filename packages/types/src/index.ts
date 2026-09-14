@@ -851,6 +851,9 @@ export const RunActionSchema = z.discriminatedUnion("action", [
     action: z.literal("start_research"),
     projectId: z.string(),
     description: z.string(),
+    /** Optional existing phase id to start research on (reuse a draft phase
+     * from split_phase instead of creating a new one). */
+    phaseId: z.string().min(1).optional(),
     /** Optional phase ids this new phase depends on */
     dependsOn: z.array(z.string().min(1)).optional(),
   }),

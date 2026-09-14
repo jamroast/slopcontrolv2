@@ -486,12 +486,17 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "start_change",
       description:
-        "Start research for a new ordered phase on an opened project (project-scoped). Optional dependsOn: phase ids that must be complete before development.",
+        "Start research for a new ordered phase on an opened project (project-scoped). Optional dependsOn: phase ids that must be complete before development. Pass phaseId to start research on an existing draft phase instead of creating a new one (use this for the draft sub-phases split_phase just created — do not re-create them).",
       inputSchema: {
         type: "object",
         properties: {
           projectId: { type: "string" },
           description: { type: "string" },
+          phaseId: {
+            type: "string",
+            description:
+              "Optional existing draft phase id to start research on (e.g. a sub-phase from split_phase). Omit to create a new phase.",
+          },
           dependsOn: {
             type: "array",
             items: { type: "string" },
@@ -524,6 +529,24 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           },
         },
         required: ["projectId", "phaseId", "parts"],
+      },
+    },
+    {
+      name: "set_phase_dependencies",
+      description:
+        "Re-point a phase's dependsOn list (phase bookkeeping). Use to repair a broken dependency chain — e.g. after a duplicate phase, re-point the stale sub-phase's dependents to the canonical phase. Requires phaseId and the full new dependsOn array (may be empty).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          phaseId: { type: "string" },
+          dependsOn: {
+            type: "array",
+            items: { type: "string" },
+            description: "The full new dependency list (may be empty)",
+          },
+        },
+        required: ["projectId", "phaseId", "dependsOn"],
       },
     },
     {
@@ -2991,6 +3014,7 @@ export async function dispatchSlopcontrolTool(
             action: "start_research",
             projectId: args.projectId,
             description: args.description,
+            phaseId: args.phaseId,
             dependsOn: args.dependsOn,
           }),
         });
@@ -3012,6 +3036,25 @@ export async function dispatchSlopcontrolTool(
             body: JSON.stringify({ parts: args.parts }),
           },
         );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "set_phase_dependencies") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "set_phase_dependencies",
+            phaseId: args.phaseId,
+            dependsOn: args.dependsOn,
+          }),
+        });
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],

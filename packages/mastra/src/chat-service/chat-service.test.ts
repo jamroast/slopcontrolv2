@@ -1432,6 +1432,13 @@ describe("chat tool input schemas", () => {
         description: "Implement service-token issuer",
       }),
     );
+    assert.ok(
+      CHAT_TOOL_INPUT_SCHEMA.start_change!.parse({
+        projectId: "p1",
+        description: "Implement service-token issuer",
+        phaseId: "phase-9",
+      }),
+    );
     assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.stop_session!.parse({ kind: "ask" }));
     assert.ok(
       CHAT_TOOL_INPUT_SCHEMA.stop_session!.parse({

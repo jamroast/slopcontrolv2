@@ -1,8 +1,63 @@
 import { writePhaseStatus, upsertRoadmapEntry } from "@slopcontrol/artifacts";
-import { isBusyRunStage } from "@slopcontrol/types";
+import { isBusyRunStage, type Phase } from "@slopcontrol/types";
 import type { SlopStore } from "./store.js";
 
 export type SplitPhasePart = { title?: string; description: string };
+
+export type StartResearchResolution =
+  | { ok: true; phase: Phase; reused: boolean; description: string }
+  | { ok: false; status: number; error: string };
+
+/**
+ * Resolve the phase that start_research should run on.
+ *
+ * With a phaseId this reuses an existing draft phase (e.g. a fresh sub-phase
+ * from split_phase) instead of creating a duplicate new phase. Without a
+ * phaseId it creates a new phase. Non-draft phases are rejected so callers
+ * don't accidentally overwrite work already in flight.
+ */
+export function resolveStartResearchPhase(opts: {
+  store: SlopStore;
+  project: { id: string; rootPath: string };
+  phaseId?: string;
+  description: string;
+  dependsOn?: string[];
+}): StartResearchResolution {
+  const { store, project, phaseId, description, dependsOn } = opts;
+  if (phaseId) {
+    const existing = store.getPhase(phaseId);
+    if (!existing || existing.projectId !== project.id) {
+      return { ok: false, status: 404, error: "Phase not found" };
+    }
+    if (existing.status === "superseded") {
+      return {
+        ok: false,
+        status: 409,
+        error: "Phase is superseded — it was split into narrower phases",
+      };
+    }
+    if (existing.status !== "draft") {
+      return {
+        ok: false,
+        status: 409,
+        error: `Phase is ${existing.status}; start a new phase instead of reusing it`,
+      };
+    }
+    return {
+      ok: true,
+      phase: existing,
+      reused: true,
+      description: existing.description,
+    };
+  }
+  const phase = store.createPhase({
+    projectId: project.id,
+    description,
+    rootPath: project.rootPath,
+    dependsOn,
+  });
+  return { ok: true, phase, reused: false, description };
+}
 
 export type SplitPhaseResult = {
   supersededPhaseId: string;

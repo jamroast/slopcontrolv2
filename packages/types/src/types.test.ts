@@ -73,6 +73,16 @@ describe("@slopcontrol/types", () => {
 
     assert.equal(parsed.action, "start_research");
 
+    const resume = RunActionSchema.parse({
+      action: "start_research",
+      projectId: "proj-1",
+      description: "Add auth middleware",
+      phaseId: "phase-9",
+    });
+    if (resume.action === "start_research") {
+      assert.equal(resume.phaseId, "phase-9");
+    }
+
     const open = RunActionSchema.parse({
       action: "open_project",
       rootPath: "/tmp/proj",
