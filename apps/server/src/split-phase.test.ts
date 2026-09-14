@@ -122,6 +122,49 @@ describe("splitPhase", () => {
     }
   });
 
+  it("supersedes gate runs (in_review/accepted) so they don't linger on the superseded phase", () => {
+    const { dir, store, project, projectRoot } = setup();
+    try {
+      const original = store.createPhase({
+        projectId: project.id,
+        description: "Broad phase",
+        rootPath: projectRoot,
+      });
+      const inReview = store.createRun({
+        phaseId: original.id,
+        projectId: project.id,
+      });
+      inReview.stage = "in_review";
+      store.updateRun(inReview);
+      const accepted = store.createRun({
+        phaseId: original.id,
+        projectId: project.id,
+      });
+      accepted.stage = "accepted";
+      store.updateRun(accepted);
+      const complete = store.createRun({
+        phaseId: original.id,
+        projectId: project.id,
+      });
+      complete.stage = "complete";
+      store.updateRun(complete);
+
+      splitPhase({
+        store,
+        project,
+        phaseId: original.id,
+        parts: [{ description: "Part one" }, { description: "Part two" }],
+      });
+
+      assert.equal(store.getRun(inReview.id)?.stage, "interrupted");
+      assert.equal(store.getRun(accepted.id)?.stage, "interrupted");
+      // Terminal runs are left untouched
+      assert.equal(store.getRun(complete.id)?.stage, "complete");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("writes the roadmap with superseded original and draft sub-phases", () => {
     const { dir, store, project, projectRoot } = setup();
     try {

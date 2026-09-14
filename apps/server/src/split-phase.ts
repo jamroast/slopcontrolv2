@@ -1,5 +1,9 @@
 import { writePhaseStatus, upsertRoadmapEntry } from "@slopcontrol/artifacts";
-import { isBusyRunStage, type Phase } from "@slopcontrol/types";
+import {
+  isBusyRunStage,
+  isGateRunStage,
+  type Phase,
+} from "@slopcontrol/types";
 import type { SlopStore } from "./store.js";
 
 export type SplitPhasePart = { title?: string; description: string };
@@ -110,11 +114,15 @@ export function splitPhase(opts: {
   store.updatePhase(original);
   writePhaseStatus(project.rootPath, original.id, "superseded");
 
-  // 2. Interrupt any active run on the original.
+  // 2. Interrupt any active run on the original, and supersede gate runs
+  // (in_review / accepted / design_complete) so they don't linger as
+  // "awaiting review" on a phase that is now superseded.
   for (const run of store.listRuns(project.id)) {
     if (run.phaseId !== original.id) continue;
     if (isBusyRunStage(run.stage)) {
       opts.interruptRun?.(run.id);
+    }
+    if (isBusyRunStage(run.stage) || isGateRunStage(run.stage)) {
       run.stage = "interrupted";
       run.updatedAt = new Date().toISOString();
       store.updateRun(run);
