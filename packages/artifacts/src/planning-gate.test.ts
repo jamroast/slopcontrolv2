@@ -13,6 +13,7 @@ import {
 } from "./index.js";
 import {
   buildPhaseDocRepairPrompt,
+  PLANNING_AUTOMATED_CHECKS_RULES,
 } from "./planning-gate.js";
 import { buildPlanningGateBlockedDiagnosis } from "./revision-outcome.js";
 
@@ -56,6 +57,19 @@ describe("planning gate helpers", () => {
       !prompt.includes("MUST use:"),
       "contract no longer mandates docker bring-up",
     );
+  });
+
+  it("automated-checks contract requires a shared-shell regression guard", () => {
+    assert.match(PLANNING_AUTOMATED_CHECKS_RULES, /Shared shell regression guard/);
+    assert.match(PLANNING_AUTOMATED_CHECKS_RULES, /vendor, remove, or structurally rewrite/);
+    const prompt = buildPhaseDocRepairPrompt({
+      issues: ["missing section"],
+      intentBlock: "intent",
+      canonicalPath: ".slopcontrol/phases/x/PHASE.md",
+      phaseDescription: "desc",
+      research: "research",
+    });
+    assert.match(prompt, /Shared shell regression guard/);
   });
 
   it("buildPhaseDocRepairPrompt instructs a `# Phase …` title (matches validatePhaseDocForDev)", () => {

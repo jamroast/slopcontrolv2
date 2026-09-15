@@ -5,7 +5,8 @@ export const PLANNING_AUTOMATED_CHECKS_RULES = `## Automated Checks rules (MUST 
 - Runtime probes must not restart infra: SlopControl verify already brings up test-services (Postgres/Redis/…). Do NOT \`docker compose up\` any service and do NOT add \`trap 'docker compose down' EXIT\` in checks. DB-dependent checks assume services are up: \`export DATABASE_URL=… && pnpm db:migrate && pnpm seed && npx vitest run <file>\`; app-runtime proofs use build/typecheck or a short Node one-shot.
 - Static proofs use \`grep -q\` per token joined by \`&&\` — never same-line \`.*\` chains.
 - Never pipe vitest/jest to \`grep -q\` to match "Tests N passed" — use \`npx vitest run … || exit 1\` and trust the runner exit code.
-- No curl with API keys or secrets in Automated Checks.`;
+- No curl with API keys or secrets in Automated Checks.
+- Shared shell regression guard: when a change reuses existing shared shell/navigation (top menubar, dashboard shell, sidebar, theme toggle), the ## Automated Checks MUST include a structural assertion that those shared components are still imported and rendered unchanged — one \`grep -q\` per token joined by \`&&\`, using the project's real component names (e.g. \`grep -q '<Menubar' src/App.tsx && grep -q 'Shell' src/App.tsx\`). Do NOT let the implementer vendor, remove, or structurally rewrite a shared shell component; only its content slots may change.`;
 
 export type PlanningSnapshot = {
   phaseDoc: string;
