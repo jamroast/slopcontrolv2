@@ -50,4 +50,21 @@ describe("element-honor-llm", () => {
     assert.match(snip, /menubar/);
     assert.match(snip, /theme-toggle/);
   });
+
+  it("buildElementHonorSnippets includes the shell/sidebar layout region", () => {
+    const html = `
+      <html><body>
+      <header class="menubar"><button class="theme-toggle">T</button></header>
+      <div class="shell shell--with-pane">
+        <aside class="sidebar">Applications</aside>
+        <main>rows</main>
+      </div>
+      </body></html>
+    `;
+    const snip = buildElementHonorSnippets(html);
+    assert.match(snip, /### layout/);
+    assert.match(snip, /shell--with-pane/);
+    assert.match(snip, /### sidebar/);
+    assert.match(snip, /Applications/);
+  });
 });

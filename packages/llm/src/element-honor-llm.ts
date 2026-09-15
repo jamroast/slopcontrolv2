@@ -32,6 +32,7 @@ Rules:
 - One button.theme-toggle with svg.theme-toggle__sun and svg.theme-toggle__moon = ONE control, not three.
 - Substring "theme-toggle" in class names of children does not mean competing controls.
 - Prefer honorsPinnedElements=true when apply already merged shared chrome and only BEM/icon markup differs.
+- A shell wrapper + <aside> sidebar (even with classes like .shell/.sidebar) counts as honoring pinned dashboard-shell/dashboard-sidebar — do NOT report those absent merely because the wrapper class differs from .dashboard-layout.
 - competingThemeControl=true only when you see a distinct second control that also toggles theme (e.g. another button with day/night or a second .theme-toggle outside the menubar).
 `;
 
@@ -117,6 +118,20 @@ export function buildElementHonorSnippets(html: string): string {
   );
   if (toggleMatch?.[0]) {
     parts.push("### theme-toggle", toggleMatch[0].slice(0, 1_500));
+  }
+  // Composite layout containers (dashboard-shell / dashboard-sidebar) must be
+  // visible to the judge too — otherwise it reports them "absent" even when
+  // the mock renders a shell + sidebar. Match the pinned class names first,
+  // then fall back to generic shell/sidebar wrappers the agent may have used.
+  const layoutMatch = html.match(
+    /<(?:div|section)\b[^>]*class=["'][^"']*\b(?:dashboard-layout|dashboard-shell|shell)\b[^"']*["'][^>]*>[\s\S]{0,3000}?<\/(?:div|section)>/i,
+  )?.[0];
+  if (layoutMatch) {
+    parts.push("### layout", layoutMatch.slice(0, 2_500));
+  }
+  const asideMatch = html.match(/<aside\b[^>]*>[\s\S]{0,2000}?<\/aside>/i);
+  if (asideMatch?.[0]) {
+    parts.push("### sidebar", asideMatch[0].slice(0, 2_000));
   }
   if (!parts.length) {
     parts.push(html.slice(0, 2_500));

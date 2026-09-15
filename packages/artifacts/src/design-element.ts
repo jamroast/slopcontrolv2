@@ -1649,7 +1649,7 @@ export function formatDesignElementsPromptBlock(
     lines.push("");
   }
   lines.push(
-    "CRITICAL: When an element is listed here, reuse its markup/behavior. A second invented day/night button is a defect.",
+    "CRITICAL: When an element is listed here, reuse its EXACT markup and class names (e.g. `dashboard-layout`, `dashboard-sidebar`, `dashboard-main`) — do NOT invent your own shell/sidebar class names like `.shell` / `.sidebar`. A second invented day/night button is a defect.",
   );
   return lines.join("\n");
 }
