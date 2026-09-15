@@ -1474,6 +1474,21 @@ describe("chat tool input schemas", () => {
     }) as { agentId?: unknown };
     assert.equal(real.agentId, "ag-123");
   });
+
+  it("design_loop_retry accepts an explicit loopId (fixes multi-loop ambiguity)", () => {
+    const retry = CHAT_TOOL_INPUT_SCHEMA.design_loop_retry!.parse({
+      projectId: "p1",
+      loopId: "loop-123",
+    }) as { loopId?: unknown; projectId?: unknown };
+    assert.equal(retry.loopId, "loop-123");
+    assert.equal(retry.projectId, "p1");
+
+    // loopId may be omitted (latched) — but must be expressible for ambiguity.
+    const latched = CHAT_TOOL_INPUT_SCHEMA.design_loop_retry!.parse({
+      projectId: "p1",
+    }) as { loopId?: unknown };
+    assert.equal(latched.loopId, undefined);
+  });
 });
 
 describe("chat dispatch result shaping", () => {

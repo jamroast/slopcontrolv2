@@ -292,6 +292,14 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
       projectId: optionalProject,
     })
     .passthrough(),
+  design_loop_retry: z
+    .object({
+      loopId: optionalId,
+      version: z.number().int().positive().optional(),
+      message: z.string().optional(),
+      projectId: optionalProject,
+    })
+    .passthrough(),
   plan_loop_continue: z
     .object({
       loopId: z.string().min(1),
@@ -594,6 +602,10 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Freeze the plan loop as accepted (requires a complete PLAN.md). Pass loopId (or omit latched). On operator confirm with no ticks, all checklist features are auto-ticked. Then call plan_loop_promote — not start_development directly.",
   plan_loop_promote:
     "Bind accepted plan to a new phase and start research (returns runId). Pass loopId (or omit latched). After research reaches in_review, use advance_run with that runId — plan_loop_promote does not start development.",
+  design_loop_continue:
+    "Revise the design-loop mock from operator visual feedback (new version). Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first). Notification-driven when a live turn is active — do not poll design_loop_get.",
+  design_loop_retry:
+    "Regenerate the current design-loop version in place after a timeout/scaffold failure (no version bump). Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first).",
   design_loop_start:
     "Start a look-and-feel design loop (mock HTML exploration). Requires brief — pass the operator's words in brief. In global chat always pass projectId. When several loops exist on a project, pass loopId on accept/discard/continue/get. Notification-driven when live turn active.",
   design_loop_accept:
