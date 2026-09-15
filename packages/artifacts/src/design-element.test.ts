@@ -766,6 +766,55 @@ describe("applyPinnedDesignElementsToMock + prompt block", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("applies dashboard-shell/sidebar when includeDashboard forces a dashboard surface", () => {
+    const root = tmp("force-dash");
+    try {
+      publishDesignElement({
+        projectRoot: root,
+        elementId: "dashboard-shell",
+        kind: "shell",
+        label: "Dashboard shell",
+        spec: "#",
+        mockHtml: "<div class='dashboard-layout'><main></main></div>",
+        tokensCss: ".dashboard-layout{display:flex;min-height:100vh}",
+      });
+      publishDesignElement({
+        projectRoot: root,
+        elementId: "dashboard-sidebar",
+        kind: "shell",
+        label: "Dashboard sidebar",
+        spec: "#",
+        mockHtml: "<nav class='dashboard-sidebar'></nav>",
+        tokensCss: ".dashboard-sidebar{width:288px}",
+      });
+      const loop = createDesignLoopMeta({ projectId: "p1", brief: "x" });
+      writeDesignLoopMeta(root, loop);
+      const refs = ["dashboard-shell", "dashboard-sidebar"].map((id) => {
+        const bundle = resolveDesignElement({ elementId: id, targetRoot: root });
+        return importDesignElementIntoLoop({
+          targetRoot: root,
+          loopId: loop.id,
+          bundle: bundle!,
+          origin: "project",
+        });
+      });
+      // Sections-only consumer mock — no dashboard-* class token of its own.
+      const out = applyPinnedDesignElementsToMock({
+        html: `<!DOCTYPE html><html><head><style>body{}</style></head><body>
+<main><h1>Management dashboard</h1><section>rows</section></main></body></html>`,
+        elements: refs,
+        projectRoot: root,
+        includeDashboard: true,
+      });
+      assert.match(out, /dashboard-layout/);
+      assert.match(out, /dashboard-sidebar/);
+      assert.match(out, /\.dashboard-layout\s*\{/);
+      assert.match(out, /\.dashboard-sidebar\s*\{/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("design-element drift", () => {

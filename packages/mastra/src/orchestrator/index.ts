@@ -4400,6 +4400,15 @@ ${message.trim()}`;
 
     const loopMetaForScope = readDesignLoopMeta(project.rootPath, loopId);
     const conceptualScope = getDesignLoopScope(loopMetaForScope);
+    // A dashboard-surface loop (screen focus "dashboard" or a dashboard brief)
+    // must apply the pinned dashboard-shell/dashboard-sidebar elements. The
+    // element-merger otherwise only applies them when the agent's raw HTML
+    // already contains a dashboard-* class token — which sections-only renders
+    // (and v2/v3/v4 here) omit, so the shell/sidebar keep getting dropped.
+    const isDashboardSurface =
+      conceptualScope?.focus === "dashboard" ||
+      /\bdashboard\b/i.test(conceptualScope?.focus ?? "") ||
+      /\bdashboard\b/i.test(brief ?? "");
     const priorMockForTheme =
       workingPreviousHtml?.trim() ||
       previousHtml?.trim() ||
@@ -4648,6 +4657,7 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
           projectRoot: project.rootPath,
           pinnedLogoSrc: logoSrc,
           brandName: project.name,
+          includeDashboard: isDashboardSurface,
         });
         if (html !== before) {
           slog.info("design-loop", "applied pinned design elements to mock", {
@@ -4788,6 +4798,7 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
               projectRoot: project.rootPath,
               pinnedLogoSrc: logoSrc,
               brandName: project.name,
+              includeDashboard: isDashboardSurface,
             });
           }
         }
