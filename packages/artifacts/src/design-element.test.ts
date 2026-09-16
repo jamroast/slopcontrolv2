@@ -31,6 +31,13 @@ import {
   countExactClassToken,
   extractAndPublishDesignElementFromLoop,
   bindDesignElementsToPhase,
+  findBaseLibraryProject,
+  recordElementConsumer,
+  promoteElementToBaseLibrary,
+  recordElementPinAndMaybePromote,
+  readDesignElementBundle,
+  projectElementsRoot,
+  registryElementsRoot,
 } from "./design-element.js";
 import { jamPackageNameForElement } from "./npm-registry.js";
 import {
@@ -1065,6 +1072,205 @@ describe("design-element drift", () => {
       assert.equal(gaps.length, 0);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("design-element estate promotion", () => {
+  function makeBaseLib(name: string): string {
+    const root = tmp(name);
+    mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+    writeFileSync(
+      join(root, ".slopcontrol", "config.json"),
+      JSON.stringify({ componentLibrary: true }),
+    );
+    return root;
+  }
+
+  it("findBaseLibraryProject returns the componentLibrary:true project", () => {
+    const app = tmp("base-app");
+    const lib = makeBaseLib("base-lib");
+    try {
+      const found = findBaseLibraryProject({
+        listProjects: () => [
+          { id: "app", name: "app", rootPath: app },
+          { id: "lib", name: "lib", rootPath: lib },
+        ],
+      });
+      assert.ok(found);
+      assert.equal(found.id, "lib");
+      assert.equal(findBaseLibraryProject({ listProjects: () => [] }), null);
+    } finally {
+      rmSync(app, { recursive: true, force: true });
+      rmSync(lib, { recursive: true, force: true });
+    }
+  });
+
+  it("recordElementConsumer dedupes repeated pins by the same project", () => {
+    const dataDir = tmp("cons-data");
+    const app = tmp("cons-app");
+    try {
+      const meta = publishDesignElement({
+        projectRoot: app,
+        elementId: "menubar",
+        kind: "shell",
+        label: "Menubar",
+        spec: "top nav",
+        mockHtml: "<header class='menubar'></header>",
+        publishToRegistry: true,
+        dataDir,
+        sourceProjectId: "app",
+      });
+      const first = recordElementConsumer({
+        dataDir,
+        elementId: "menubar",
+        version: meta.version,
+        consumerProjectId: "b",
+      });
+      const second = recordElementConsumer({
+        dataDir,
+        elementId: "menubar",
+        version: meta.version,
+        consumerProjectId: "b",
+      });
+      assert.deepEqual(first, ["b"]);
+      assert.deepEqual(second, ["b"]);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(app, { recursive: true, force: true });
+    }
+  });
+
+  it("promotes an element to the base library when a second project pins it", () => {
+    const dataDir = tmp("promote-data");
+    const app = tmp("promote-app");
+    const lib = makeBaseLib("promote-lib");
+    try {
+      const meta = publishDesignElement({
+        projectRoot: app,
+        elementId: "dashboard-sidebar",
+        kind: "shell",
+        label: "Dashboard sidebar",
+        spec: "nested sidebar",
+        mockHtml: "<aside class='sidebar'></aside>",
+        srcFiles: { "index.tsx": "export const Sidebar = () => null;" },
+        publishToRegistry: true,
+        dataDir,
+        sourceProjectId: "app",
+      });
+
+      const res = recordElementPinAndMaybePromote({
+        dataDir,
+        elementId: "dashboard-sidebar",
+        version: meta.version,
+        consumerProjectId: "other",
+        listProjects: () => [
+          { id: "app", name: "app", rootPath: app },
+          { id: "lib", name: "lib", rootPath: lib },
+        ],
+      });
+      assert.equal(res.promoted, true);
+      assert.equal(res.promotedTo, "lib");
+
+      const baseBundle = readDesignElementBundle(
+        projectElementsRoot(lib),
+        "dashboard-sidebar",
+        meta.version,
+      );
+      assert.ok(baseBundle);
+      assert.equal(baseBundle.meta.sourceProjectId, "lib");
+      assert.ok(baseBundle.srcFiles["index.tsx"]);
+
+      const regBundle = readDesignElementBundle(
+        registryElementsRoot(dataDir),
+        "dashboard-sidebar",
+        meta.version,
+      );
+      assert.ok(regBundle);
+      assert.equal(regBundle.meta.sourceProjectId, "lib");
+      assert.ok(regBundle.meta.consumers.includes("other"));
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(app, { recursive: true, force: true });
+      rmSync(lib, { recursive: true, force: true });
+    }
+  });
+
+  it("does not promote when only the source project consumes the element", () => {
+    const dataDir = tmp("no-promote-data");
+    const app = tmp("no-promote-app");
+    const lib = makeBaseLib("no-promote-lib");
+    try {
+      const meta = publishDesignElement({
+        projectRoot: app,
+        elementId: "theme-toggle",
+        kind: "control",
+        label: "Theme toggle",
+        spec: "toggle",
+        mockHtml: "<button class='theme-toggle'></button>",
+        publishToRegistry: true,
+        dataDir,
+        sourceProjectId: "app",
+      });
+      const res = recordElementPinAndMaybePromote({
+        dataDir,
+        elementId: "theme-toggle",
+        version: meta.version,
+        consumerProjectId: "app",
+        listProjects: () => [
+          { id: "app", name: "app", rootPath: app },
+          { id: "lib", name: "lib", rootPath: lib },
+        ],
+      });
+      assert.equal(res.promoted, false);
+      assert.equal(
+        readDesignElementBundle(
+          projectElementsRoot(lib),
+          "theme-toggle",
+          meta.version,
+        ),
+        null,
+      );
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(app, { recursive: true, force: true });
+      rmSync(lib, { recursive: true, force: true });
+    }
+  });
+
+  it("does not re-promote an element already owned by the base library", () => {
+    const dataDir = tmp("already-base-data");
+    const lib = makeBaseLib("already-base-lib");
+    try {
+      const meta = publishDesignElement({
+        projectRoot: lib,
+        elementId: "sign-in",
+        kind: "control",
+        label: "Sign In",
+        spec: "sign-in form",
+        mockHtml: "<form class='sign-in'></form>",
+        publishToRegistry: true,
+        dataDir,
+        sourceProjectId: "lib",
+      });
+      const res = recordElementPinAndMaybePromote({
+        dataDir,
+        elementId: "sign-in",
+        version: meta.version,
+        consumerProjectId: "other",
+        listProjects: () => [{ id: "lib", name: "lib", rootPath: lib }],
+      });
+      assert.equal(res.promoted, false);
+      const regBundle = readDesignElementBundle(
+        registryElementsRoot(dataDir),
+        "sign-in",
+        meta.version,
+      );
+      assert.ok(regBundle);
+      assert.equal(regBundle.meta.sourceProjectId, "lib");
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(lib, { recursive: true, force: true });
     }
   });
 });

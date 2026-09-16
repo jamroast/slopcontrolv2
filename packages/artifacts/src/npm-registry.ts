@@ -637,7 +637,7 @@ export function jamPackageNameForElement(
 
 /**
  * Scaffold an npm package directory from design-element src files.
- * Always produces a proper @jam/<id> package.json. When src is empty,
+ * Always produces a proper @<scope>/<id> package.json. When src is empty,
  * exports mock.html / tokens.css so the registry shape stays consistent.
  * Returns the package root path (created under elementVersionDir/npm-package).
  */

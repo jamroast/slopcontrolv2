@@ -1364,7 +1364,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_element_publish_npm",
       description:
-        "Scaffold @jam/<elementId> from a design element's src/ and publish it to the private npm registry. Prefer after design_element_extract/publish.",
+        "Scaffold @<scope>/<elementId> from a design element's src/ and publish it to the private npm registry. Prefer after design_element_extract/publish.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1378,7 +1378,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_library_publish",
       description:
-        "Publish a component-library project (e.g. jamroast-components) to the private registry via its OWN toolchain: build (when dist stale) → semver bump → publish (409 → bump+retry), then propagate name@^version to all registered consumers so their lockfiles refresh natively.",
+        "Publish a component-library project (componentLibrary:true) to the private registry via its OWN toolchain: build (when dist stale) → semver bump → publish (409 → bump+retry), then propagate name@^version to all registered consumers so their lockfiles refresh natively.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1399,7 +1399,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "project_workspace_package_publish",
       description:
-        "Publish a NESTED workspace package from an app project (e.g. JamRoast packages/service-token → @jam/service-token): install → build → semver bump → npm publish → optional propagate/wire to consumer projects. Use when componentLibrary is false but a packages/* folder should feed other apps. NOT for jamroast-components root — use design_library_publish there.",
+        "Publish a NESTED workspace package from an app project (e.g. packages/service-token → @<scope>/service-token): install → build → semver bump → npm publish → optional propagate/wire to consumer projects. Use when componentLibrary is false but a packages/* folder should feed other apps. NOT for a componentLibrary root — use design_library_publish there.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1448,7 +1448,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "project_library_consume",
       description:
-        "Update this project to a published library version from the local SlopControl registry via the project's own toolchain (e.g. pnpm add @jamroast/components@^x.y.z) and commit the bump. Version defaults to the registry's latest. Pass allowNew:true to add a package not yet in package.json (after npm_registry_ensure_rc).",
+        "Update this project to a published library version from the local SlopControl registry via the project's own toolchain (e.g. pnpm add @<scope>/components@^x.y.z) and commit the bump. Version defaults to the registry's latest. Pass allowNew:true to add a package not yet in package.json (after npm_registry_ensure_rc).",
       inputSchema: {
         type: "object",
         properties: {

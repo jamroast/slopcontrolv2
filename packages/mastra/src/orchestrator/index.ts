@@ -4312,6 +4312,9 @@ ${message.trim()}`;
                 sourceName: elBundle.meta.sourceRootPath
                   ? basename(elBundle.meta.sourceRootPath)
                   : from || "registry",
+                dataDir: input.dataDir ?? this.ctx.dataDir,
+                consumerProjectId: project.id,
+                listProjects: input.listProjects,
               });
               slog.info("design-loop", "auto-imported shared element from chat", {
                 loopId,

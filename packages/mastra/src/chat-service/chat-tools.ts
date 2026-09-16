@@ -644,9 +644,9 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   promote_ask:
     "Promote an ask into a phase. Pass askId, or omit to promote this chat's latched ask.",
   design_library_publish:
-    "Publish a component-library PROJECT ROOT (componentLibrary:true, e.g. jamroast-components): build → bump → publish → propagate to consumers. Requires projectId.",
+    "Publish a component-library PROJECT ROOT (componentLibrary:true): build → bump → publish → propagate to consumers. Requires projectId.",
   project_workspace_package_publish:
-    "Publish a NESTED package inside an app project (e.g. JamRoast packages/service-token). install → build → bump → npm publish → wire consumers. Pass projectId + packagePath. NOT for jamroast-components root.",
+    "Publish a NESTED package inside an app project (e.g. packages/service-token). install → build → bump → npm publish → wire consumers. Pass projectId + packagePath. NOT for a componentLibrary root (use design_library_publish there).",
   cross_project_wire_package:
     "Master-chat cross-project wire: publish nested package from publisherProjectId/packagePath and pnpm-add on consumerProjectIds. Preferred one-shot after list_cross_project_deps.",
   project_library_consume:
@@ -666,7 +666,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   design_element_publish:
     "Publish a design element into the project library (A/C). Set publishToRegistry=true to also write the global registry (B). Provide elementId + spec + mockHtml; optional srcFiles for TS/JS.",
   design_element_publish_npm:
-    "Scaffold @jam/<elementId> from a design element's src/ and publish it to the private npm registry. Prefer after design_element_extract/publish.",
+    "Scaffold @<scope>/<elementId> from a design element's src/ and publish it to the private npm registry. Prefer after design_element_extract/publish.",
   stop_session:
     "Interrupt a live ask/agent/design_loop/plan_loop turn. Requires kind and id.",
   web_search:

@@ -91,6 +91,8 @@ export const DesignElementMetaSchema = z.object({
   npmVersion: z.string().optional(),
   /** Self-describing structural capabilities (e.g. "flat-sections", "nested-accordion"). */
   capabilities: z.array(z.string()).default([]),
+  /** Distinct project ids that have pinned/consumed this element (promotion signal). */
+  consumers: z.array(z.string()).default([]),
   publishedAt: z.string(),
   updatedAt: z.string(),
 });
@@ -1525,6 +1527,10 @@ export function importDesignElementIntoLoop(opts: {
   bundle: DesignElementBundle;
   origin: DesignElementOrigin;
   sourceName?: string;
+  /** Record this project as a consumer + auto-promote when 2+ distinct consumers. */
+  dataDir?: string;
+  consumerProjectId?: string;
+  listProjects?: () => ProjectSummary[];
 }): DesignElementRef {
   const meta = readDesignLoopMeta(opts.targetRoot, opts.loopId);
   if (!meta) throw new Error(`Design loop not found: ${opts.loopId}`);
@@ -1585,6 +1591,20 @@ export function importDesignElementIntoLoop(opts: {
     });
   } catch {
     /* pin best-effort */
+  }
+
+  if (opts.dataDir && opts.consumerProjectId && opts.listProjects) {
+    try {
+      recordElementPinAndMaybePromote({
+        dataDir: opts.dataDir,
+        elementId: ref.id,
+        version: ref.version,
+        consumerProjectId: opts.consumerProjectId,
+        listProjects: opts.listProjects,
+      });
+    } catch {
+      /* promotion best-effort */
+    }
   }
 
   return ref;
@@ -2350,4 +2370,245 @@ export function recordDesignElementNpmPublish(opts: {
   writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
   upsertIndexEntry(libraryRoot, meta);
   return meta;
+}
+
+// ===== Element ownership + estate promotion =====
+// Elements start in their source project's library. When a SECOND distinct
+// project pins an element, SlopControl promotes it into the estate's base
+// component library (componentLibrary:true) so it becomes shared. This keeps
+// app-specific components out of the shared base until real reuse is observed.
+
+export type ProjectSummary = {
+  id: string;
+  name: string;
+  rootPath: string;
+};
+
+function readProjectComponentLibrary(projectRoot: string): boolean {
+  const cfgPath = join(projectRoot, SLOP_DIR, "config.json");
+  if (existsSync(cfgPath)) {
+    try {
+      const cfg = JSON.parse(readFileSync(cfgPath, "utf-8")) as {
+        componentLibrary?: boolean;
+      };
+      return cfg.componentLibrary === true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
+/**
+ * Find the estate base component-library project (componentLibrary:true).
+ * When scope is given, prefer a base whose publish scope matches; otherwise
+ * fall back to the first componentLibrary project.
+ */
+export function findBaseLibraryProject(opts: {
+  listProjects: () => ProjectSummary[];
+  scope?: string;
+}): ProjectSummary | null {
+  const libs = opts
+    .listProjects()
+    .filter((p) => readProjectComponentLibrary(p.rootPath));
+  if (libs.length === 0) return null;
+  if (libs.length === 1) return libs[0]!;
+  if (opts.scope) {
+    const match = libs.find(
+      (p) => elementPublishScope(p.rootPath) === opts.scope,
+    );
+    if (match) return match;
+  }
+  return libs[0]!;
+}
+
+/**
+ * Record a consumer project on a registry element version (deduped).
+ * Returns the updated distinct consumer list.
+ */
+export function recordElementConsumer(opts: {
+  dataDir: string;
+  elementId: string;
+  version: number;
+  consumerProjectId: string;
+}): string[] {
+  const regRoot = registryElementsRoot(opts.dataDir);
+  const bundle = readDesignElementBundle(
+    regRoot,
+    opts.elementId,
+    opts.version,
+  );
+  if (!bundle) return [opts.consumerProjectId];
+  const consumers = [
+    ...new Set([...(bundle.meta.consumers ?? []), opts.consumerProjectId]),
+  ];
+  const dir = elementVersionDir(regRoot, opts.elementId, opts.version);
+  const now = new Date().toISOString();
+  const meta = DesignElementMetaSchema.parse({
+    ...bundle.meta,
+    consumers,
+    updatedAt: now,
+  });
+  writeFileSync(join(dir, "ELEMENT.json"), `${JSON.stringify(meta, null, 2)}\n`);
+  writeFileSync(
+    join(dir, "META.json"),
+    `${JSON.stringify(
+      {
+        publishedAt: meta.publishedAt,
+        sourceProjectId: meta.sourceProjectId,
+        sourceRootPath: meta.sourceRootPath,
+        status: meta.status,
+        consumers,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return consumers;
+}
+
+/**
+ * Promote a registry element into the estate base component library: copy the
+ * bundle under the base's element library, re-scaffold its npm package under
+ * the base's publish scope, and re-point the registry copy so future consumers
+ * resolve it from the base library. Idempotent (same version overwrite).
+ */
+export function promoteElementToBaseLibrary(opts: {
+  dataDir: string;
+  elementId: string;
+  version: number;
+  baseLibrary: ProjectSummary;
+}): DesignElementMeta | null {
+  const regRoot = registryElementsRoot(opts.dataDir);
+  const bundle = readDesignElementBundle(
+    regRoot,
+    opts.elementId,
+    opts.version,
+  );
+  if (!bundle) return null;
+  const id = slugElementId(opts.elementId);
+  const baseLibRoot = projectElementsRoot(opts.baseLibrary.rootPath);
+  const destDir = elementVersionDir(baseLibRoot, id, opts.version);
+  mkdirSync(destDir, { recursive: true });
+  writeFileSync(join(destDir, "SPEC.md"), `${bundle.spec.trim()}\n`);
+  writeFileSync(join(destDir, "mock.html"), `${bundle.mockHtml.trim()}\n`);
+  if (bundle.tokensCss.trim()) {
+    writeFileSync(join(destDir, "tokens.css"), `${bundle.tokensCss.trim()}\n`);
+  }
+  if (Object.keys(bundle.srcFiles).length) {
+    const destSrc = join(destDir, "src");
+    if (existsSync(destSrc)) rmSync(destSrc, { recursive: true, force: true });
+    writeSrcTree(destSrc, bundle.srcFiles);
+  }
+  scaffoldElementNpmPackage({
+    outDir: join(destDir, "npm-package"),
+    elementId: id,
+    version: opts.version,
+    label: bundle.meta.label,
+    srcFiles: bundle.srcFiles,
+    description: bundle.meta.label,
+    mockHtml: bundle.mockHtml,
+    tokensCss: bundle.tokensCss,
+    scope: elementPublishScope(opts.baseLibrary.rootPath),
+  });
+  const now = new Date().toISOString();
+  const promotedMeta = DesignElementMetaSchema.parse({
+    ...bundle.meta,
+    sourceProjectId: opts.baseLibrary.id,
+    sourceRootPath: opts.baseLibrary.rootPath,
+    updatedAt: now,
+  });
+  writeFileSync(
+    join(destDir, "ELEMENT.json"),
+    `${JSON.stringify(promotedMeta, null, 2)}\n`,
+  );
+  writeFileSync(
+    join(destDir, "META.json"),
+    `${JSON.stringify(
+      {
+        publishedAt: promotedMeta.publishedAt,
+        sourceProjectId: promotedMeta.sourceProjectId,
+        sourceRootPath: promotedMeta.sourceRootPath,
+        status: promotedMeta.status,
+        consumers: promotedMeta.consumers ?? [],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  upsertIndexEntry(baseLibRoot, promotedMeta);
+
+  // Re-point the registry copy so future consumers resolve from the base library.
+  const regDir = elementVersionDir(regRoot, id, opts.version);
+  writeFileSync(
+    join(regDir, "ELEMENT.json"),
+    `${JSON.stringify(promotedMeta, null, 2)}\n`,
+  );
+  writeFileSync(
+    join(regDir, "META.json"),
+    `${JSON.stringify(
+      {
+        publishedAt: promotedMeta.publishedAt,
+        sourceProjectId: opts.baseLibrary.id,
+        sourceRootPath: opts.baseLibrary.rootPath,
+        status: promotedMeta.status,
+        consumers: promotedMeta.consumers ?? [],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  upsertIndexEntry(regRoot, promotedMeta);
+  return promotedMeta;
+}
+
+/**
+ * Record a pin of a registry element by a project and, when the element has
+ * 2+ distinct consumers, promote it into the estate base library automatically.
+ */
+export function recordElementPinAndMaybePromote(opts: {
+  dataDir: string;
+  elementId: string;
+  version: number;
+  consumerProjectId: string;
+  listProjects: () => ProjectSummary[];
+}): { consumers: string[]; promoted: boolean; promotedTo?: string } {
+  const consumers = recordElementConsumer({
+    dataDir: opts.dataDir,
+    elementId: opts.elementId,
+    version: opts.version,
+    consumerProjectId: opts.consumerProjectId,
+  });
+  const regRoot = registryElementsRoot(opts.dataDir);
+  const bundle = readDesignElementBundle(
+    regRoot,
+    opts.elementId,
+    opts.version,
+  );
+  if (!bundle) return { consumers, promoted: false };
+
+  // The source project is an implicit consumer (it authored/uses the element).
+  const effective = new Set(consumers);
+  if (bundle.meta.sourceProjectId) effective.add(bundle.meta.sourceProjectId);
+  if (effective.size < 2) return { consumers, promoted: false };
+
+  const scope =
+    bundle.meta.npmPackage?.match(/^(@[\w.-]+)\//)?.[1] ??
+    (bundle.meta.sourceRootPath
+      ? elementPublishScope(bundle.meta.sourceRootPath)
+      : undefined);
+  const base = findBaseLibraryProject({
+    listProjects: opts.listProjects,
+    scope,
+  });
+  if (!base || base.id === bundle.meta.sourceProjectId) {
+    return { consumers, promoted: false };
+  }
+  promoteElementToBaseLibrary({
+    dataDir: opts.dataDir,
+    elementId: opts.elementId,
+    version: opts.version,
+    baseLibrary: base,
+  });
+  return { consumers, promoted: true, promotedTo: base.id };
 }

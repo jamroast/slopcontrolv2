@@ -5448,6 +5448,9 @@ app.post("/projects/:id/design-loops/:loopId/elements/import", (req, res) => {
     sourceName: bundle.meta.sourceRootPath
       ? basename(bundle.meta.sourceRootPath)
       : undefined,
+    dataDir: defaultDataDir(),
+    consumerProjectId: project.id,
+    listProjects: () => store.listProjects(),
   });
   res.json({
     ok: true,
