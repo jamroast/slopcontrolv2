@@ -808,6 +808,14 @@ export const ProjectConfigSchema = z.object({
    */
   componentLibrary: z.boolean().default(false),
   /**
+   * Relative path (under the project root) to a nested package that aggregates
+   * this project's OWN design elements into a project-specific component
+   * library (e.g. "packages/jamauth-components" → @jamroast/jamauth-components).
+   * Distinct from componentLibrary (which marks the estate BASE library).
+   * When set, extracted/evolved elements sync their src/ into that package.
+   */
+  elementLibraryPackagePath: z.string().min(1).optional(),
+  /**
    * Private npm scopes this project publishes/consumes (e.g. ["@acme"]).
    * Resolution: this config → scopes discovered from the project's .npmrc
    * lines pointing at the SlopControl registry → ["@slopcontrol"].

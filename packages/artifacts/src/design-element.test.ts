@@ -38,6 +38,8 @@ import {
   readDesignElementBundle,
   projectElementsRoot,
   registryElementsRoot,
+  syncElementToProjectLibraryPackage,
+  removeElementFromProjectLibraryPackage,
 } from "./design-element.js";
 import { jamPackageNameForElement } from "./npm-registry.js";
 import {
@@ -1271,6 +1273,155 @@ describe("design-element estate promotion", () => {
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(lib, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("project element-library package sync", () => {
+  function makeAppWithLibrary(name: string): {
+    root: string;
+    pkgDir: string;
+  } {
+    const root = tmp(name);
+    mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+    writeFileSync(
+      join(root, ".slopcontrol", "config.json"),
+      JSON.stringify({ elementLibraryPackagePath: "packages/app-components" }),
+    );
+    const pkgDir = join(root, "packages", "app-components");
+    mkdirSync(join(pkgDir, "src", "components"), { recursive: true });
+    writeFileSync(
+      join(pkgDir, "package.json"),
+      JSON.stringify({ name: "@x/app-components", version: "0.0.1" }),
+    );
+    return { root, pkgDir };
+  }
+
+  it("syncs a single-file element flat + regenerates the barrel", () => {
+    const { root, pkgDir } = makeAppWithLibrary("sync-flat");
+    try {
+      const res = syncElementToProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "application-navigation",
+        srcFiles: {
+          "application-navigation.tsx":
+            "export const ApplicationNavigation = () => null;",
+        },
+      });
+      assert.equal(res.synced, true);
+      assert.equal(res.packagePath, "packages/app-components");
+      assert.ok(
+        existsSync(
+          join(pkgDir, "src", "components", "application-navigation.tsx"),
+        ),
+      );
+      const barrel = readFileSync(
+        join(pkgDir, "src", "components", "index.ts"),
+        "utf-8",
+      );
+      assert.match(barrel, /export \* from "\.\/application-navigation";/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("syncs a multi-file element into a directory with an inner barrel", () => {
+    const { root, pkgDir } = makeAppWithLibrary("sync-multi");
+    try {
+      const res = syncElementToProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "dashboard-shell",
+        srcFiles: {
+          "shell.tsx": "export const Shell = () => null;",
+          "styles.css": ".shell {}",
+        },
+      });
+      assert.equal(res.synced, true);
+      assert.ok(
+        existsSync(join(pkgDir, "src", "components", "dashboard-shell", "shell.tsx")),
+      );
+      assert.ok(
+        existsSync(join(pkgDir, "src", "components", "dashboard-shell", "index.ts")),
+      );
+      const barrel = readFileSync(
+        join(pkgDir, "src", "components", "index.ts"),
+        "utf-8",
+      );
+      assert.match(barrel, /export \* from "\.\/dashboard-shell";/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("is a no-op without elementLibraryPackagePath", () => {
+    const root = tmp("sync-noop");
+    try {
+      const res = syncElementToProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "x",
+        srcFiles: { "x.tsx": "export {};" },
+      });
+      assert.equal(res.synced, false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removes an element and regenerates the barrel", () => {
+    const { root, pkgDir } = makeAppWithLibrary("sync-remove");
+    try {
+      syncElementToProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "theme-toggle",
+        srcFiles: { "theme-toggle.tsx": "export const ThemeToggle = () => null;" },
+      });
+      syncElementToProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "sign-in",
+        srcFiles: { "sign-in.tsx": "export const SignIn = () => null;" },
+      });
+      const removed = removeElementFromProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "theme-toggle",
+      });
+      assert.equal(removed.removed, true);
+      assert.equal(
+        existsSync(join(pkgDir, "src", "components", "theme-toggle.tsx")),
+        false,
+      );
+      const barrel = readFileSync(
+        join(pkgDir, "src", "components", "index.ts"),
+        "utf-8",
+      );
+      assert.doesNotMatch(barrel, /theme-toggle/);
+      assert.match(barrel, /sign-in/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("publishDesignElement syncs into the project element-library package", () => {
+    const { root, pkgDir } = makeAppWithLibrary("publish-sync");
+    try {
+      publishDesignElement({
+        projectRoot: root,
+        elementId: "company-navigation",
+        kind: "shell",
+        label: "Company navigation",
+        spec: "company nav",
+        mockHtml: "<nav class='company-nav'></nav>",
+        srcFiles: {
+          "company-navigation.tsx":
+            "export const CompanyNavigation = () => null;",
+        },
+      });
+      assert.ok(
+        existsSync(
+          join(pkgDir, "src", "components", "company-navigation.tsx"),
+        ),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
