@@ -728,6 +728,14 @@ export async function publishWorkspacePackageToRegistry(opts: {
 
   const pkg = readWorkspacePackageJson(packageDir);
   if (pkg.scripts?.build) {
+    // Ensure the nested package resolves @scope deps from the private registry
+    // (it lacks the project-root .npmrc).
+    ensureProjectNpmrc({
+      projectRoot: packageDir,
+      registryUrl: meta.url,
+      authToken: meta.authToken,
+      scopes: meta.scopes,
+    });
     const install = await run("install", ["npm", "install"], packageDir);
     if (install.code !== 0) {
       throw new Error(

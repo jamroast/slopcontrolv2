@@ -194,7 +194,7 @@ import {
   verifyProjectBuildProcess,
 } from "./build-process.js";
 import { ObsidianSync } from "@slopcontrol/obsidian";
-import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, AgentRoleSchema, AskInvestigateToolSchema, type Run, type RunStage } from "@slopcontrol/types";
+import { RunActionSchema, ASK_SUB_RESEARCH_MAX_TOPICS, formatDurationMs, log, recordStageTransition, unmetPhaseDependencies, AgentRoleSchema, AskInvestigateToolSchema, ProjectConfigSchema, type Run, type RunStage } from "@slopcontrol/types";
 import { mountMcpHttp } from "./mcp-http.js";
 import { createStore, defaultDataDir } from "./store.js";
 import { splitPhase, resolveStartResearchPhase } from "./split-phase.js";
@@ -1472,6 +1472,35 @@ app.patch("/projects/:id", (req, res) => {
   store.updateProject(project);
   log.info("project", "renamed", { projectId: project.id, name });
   res.json({ project });
+});
+
+/**
+ * Update project config fields (partial merge, zod-whitelisted). Use for
+ * SlopControl-driven configuration — e.g. elementLibraryPackagePath for a
+ * project-owned component library — instead of hand-editing config.json.
+ */
+app.put("/projects/:id/config", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const patch = ProjectConfigSchema.partial().safeParse(req.body ?? {});
+  if (!patch.success) {
+    res.status(400).json({
+      error: "Invalid config fields",
+      issues: patch.error.issues,
+    });
+    return;
+  }
+  const config = readProjectConfig(project.rootPath);
+  const merged = { ...config, ...patch.data };
+  writeProjectConfig(project.rootPath, merged);
+  log.info("project", "config updated", {
+    projectId: project.id,
+    keys: Object.keys(patch.data),
+  });
+  res.json({ projectId: project.id, config: merged });
 });
 
 /**
