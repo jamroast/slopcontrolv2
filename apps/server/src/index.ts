@@ -4983,6 +4983,7 @@ app.post("/projects/:id/design-loops/:loopId/accept", (req, res) => {
       }`,
     );
     const acceptPack = readDesignLoopPack(project.rootPath, accepted.id);
+    const evolveDirective = acceptPack?.evolveDirective?.trim();
     res.json({
       loop: accepted,
       ...(olderThanLatest
@@ -4995,6 +4996,7 @@ app.post("/projects/:id/design-loops/:loopId/accept", (req, res) => {
       html,
       acceptance,
       designPack: acceptPack,
+      ...(evolveDirective ? { evolve: evolveDirective } : {}),
       conceptualModel: conceptualModelFromLoop({
         meta: accepted,
         pack: acceptPack,
@@ -5002,7 +5004,9 @@ app.post("/projects/:id/design-loops/:loopId/accept", (req, res) => {
         acceptanceInScope:
           acceptance?.features.filter((f) => f.accepted).map((f) => f.id) ?? [],
       }),
-      next: "Call implement_design to bind this mock + acceptance checklist + design pack to a phase, then research plans those features.",
+      next: evolveDirective
+        ? `${evolveDirective}\nThen call implement_design to bind this mock + acceptance checklist + design pack to a phase (after the element is evolved).`
+        : "Call implement_design to bind this mock + acceptance checklist + design pack to a phase, then research plans those features.",
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);

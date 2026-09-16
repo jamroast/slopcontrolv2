@@ -4702,11 +4702,31 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
               embedSignal = "skipped";
             }
           }
+          const elementBodies = pinnedEls
+            .map((e) => {
+              if (!e.mockPath) return null;
+              const abs = join(project.rootPath, e.mockPath);
+              if (!existsSync(abs)) return null;
+              try {
+                return {
+                  elementId: e.id,
+                  bodyHtml: extractElementBodyHtml(
+                    readFileSync(abs, "utf-8"),
+                  ),
+                };
+              } catch {
+                return null;
+              }
+            })
+            .filter(
+              (b): b is { elementId: string; bodyHtml: string } => b != null,
+            );
           const honor = await classifyElementHonorViaLlm({
             endpoint,
             modelId,
             pinnedElementIds: pinnedEls.map((e) => e.id),
             mockSnippets: buildElementHonorSnippets(html),
+            elementBodies,
             operatorHints: [
               `adoptChrome=${continueIntent.adoptChrome}`,
               `scope=${continueIntent.scope}`,
@@ -4743,6 +4763,14 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
           elementHonorNotes = [
             `Element honor: honors=${honor.honorsPinnedElements} competing=${honor.competingThemeControl} missingMenubar=${honor.missingMenubar} missingToggle=${honor.missingThemeToggle} confidence=${honor.confidence}.`,
             honor.notes.trim(),
+            honor.capabilityGaps.length
+              ? `CAPABILITY GAPS (evolve the element before implement): ${honor.capabilityGaps
+                  .map(
+                    (g) =>
+                      `${g.elementId} needs ${g.missingCapability}${g.note ? ` (${g.note})` : ""}`,
+                  )
+                  .join("; ")}`
+              : "",
           ]
             .filter(Boolean)
             .join(" ")
@@ -6047,11 +6075,17 @@ CRITICAL theme contract (theme_modes):
           f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
       ),
     });
+    const gappedElementIds = new Set(
+      (phasePackForResearch?.capabilityGaps ?? []).map((g) => g.elementId),
+    );
     const elementsResearchNote = phasePackForResearch?.elements?.length
       ? `
 CRITICAL shared elements (DESIGN_PACK.elements):
 ${phasePackForResearch.elements
   .map((e) => {
+    if (gappedElementIds.has(e.id)) {
+      return `- EVOLVE ${e.id}@${e.version} (the accepted mock needs a capability it lacks) — extract ${e.id}@${e.version + 1}, publish, then consume the new version; do NOT mount the stale pinned version.`;
+    }
     const npm = e.npmPackage
       ? ` — prefer \`pnpm add ${e.npmPackage}@${e.npmVersion ?? "*"}\` from SlopControl private registry (never npm link)`
       : e.hasCode

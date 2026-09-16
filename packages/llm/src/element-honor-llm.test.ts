@@ -35,6 +35,33 @@ describe("element-honor-llm", () => {
       confidence: "high",
     });
     assert.equal(competing.competingThemeControl, true);
+
+    const gapped = ElementHonorResultSchema.parse({
+      honorsPinnedElements: false,
+      competingThemeControl: false,
+      missingMenubar: false,
+      missingThemeToggle: false,
+      notes: "nested sidebar",
+      confidence: "medium",
+      capabilityGaps: [
+        {
+          elementId: "dashboard-sidebar",
+          missingCapability: "nested / collapsible structure",
+        },
+      ],
+    });
+    assert.equal(gapped.capabilityGaps.length, 1);
+    assert.equal(gapped.capabilityGaps[0]!.elementId, "dashboard-sidebar");
+
+    const noGaps = ElementHonorResultSchema.parse({
+      honorsPinnedElements: true,
+      competingThemeControl: false,
+      missingMenubar: false,
+      missingThemeToggle: false,
+      notes: "ok",
+      confidence: "high",
+    });
+    assert.equal(noGaps.capabilityGaps.length, 0);
   });
 
   it("buildElementHonorSnippets extracts header and toggle", () => {

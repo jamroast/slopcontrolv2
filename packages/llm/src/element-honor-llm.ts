@@ -11,6 +11,21 @@ export const ElementHonorResultSchema = z.object({
   missingThemeToggle: z.boolean(),
   notes: z.string(),
   confidence: z.enum(["low", "medium", "high"]),
+  /**
+   * Pinned elements whose structure the mock EXCEEDS — i.e. the mock requires
+   * a capability the pinned version lacks (e.g. a nested accordion sidebar vs a
+   * flat dashboard-sidebar). Each entry drives an "evolve the element"
+   * directive instead of "mount the pinned element".
+   */
+  capabilityGaps: z
+    .array(
+      z.object({
+        elementId: z.string(),
+        missingCapability: z.string(),
+        note: z.string().optional(),
+      }),
+    )
+    .default([]),
 });
 
 export type ElementHonorResult = z.infer<typeof ElementHonorResultSchema>;
@@ -26,6 +41,7 @@ Return ONLY a JSON object with these fields:
 - missingThemeToggle: boolean — pinned theme-toggle but mock has no theme toggle control
 - notes: string — 1–2 sentences for operator NOTES.md
 - confidence: "low" | "medium" | "high"
+- capabilityGaps: array of { elementId, missingCapability, note? } — ONLY for pinned elements whose structure the mock EXCEEDS (the mock needs a capability the pinned version lacks, e.g. nested/collapsible sections vs a flat list). Omit (empty array) when the mock stays within each pinned element's capabilities.
 
 Rules:
 - A pinned menubar may contain the theme-toggle; that is correct.
@@ -34,6 +50,7 @@ Rules:
 - Prefer honorsPinnedElements=true when apply already merged shared chrome and only BEM/icon markup differs.
 - A shell wrapper + <aside> sidebar (even with classes like .shell/.sidebar) counts as honoring pinned dashboard-shell/dashboard-sidebar — do NOT report those absent merely because the wrapper class differs from .dashboard-layout.
 - competingThemeControl=true only when you see a distinct second control that also toggles theme (e.g. another button with day/night or a second .theme-toggle outside the menubar).
+- A capabilityGap means "the pinned element CANNOT express this mock's structure" — e.g. the mock sidebar has collapsible nested groups but the pinned sidebar body is a flat link list. This is NOT a competing-control violation; it is a request to evolve the element to a new version.
 `;
 
 export interface ClassifyElementHonorViaLlmOptions {
@@ -42,6 +59,9 @@ export interface ClassifyElementHonorViaLlmOptions {
   pinnedElementIds: string[];
   /** Short HTML snippets (header / toggle regions), not full documents. */
   mockSnippets: string;
+  /** Pinned element bodies (id → body HTML) so the judge can compare the mock's
+   * structure against each pinned element's own structure and detect capability gaps. */
+  elementBodies?: Array<{ elementId: string; bodyHtml: string }>;
   operatorHints?: string;
   /** Optional 0–1 cosine similarity of pinned menubar vs mock header. */
   menubarSimilarity?: number;
@@ -61,6 +81,18 @@ export async function classifyElementHonorViaLlm(
     "Mock snippets:",
     opts.mockSnippets.slice(0, 6_000),
   ];
+  if (opts.elementBodies?.length) {
+    userParts.push(
+      "",
+      "Pinned element bodies (structure reference):",
+      ...opts.elementBodies
+        .slice(0, 8)
+        .map(
+          (b) =>
+            `### ${b.elementId}\n${b.bodyHtml.slice(0, 1_800)}`,
+        ),
+    );
+  }
   if (opts.operatorHints?.trim()) {
     userParts.push("", "Operator / continue hints:", opts.operatorHints.trim().slice(0, 1_000));
   }
@@ -89,6 +121,30 @@ export async function classifyElementHonorViaLlm(
       ? (parsed as Record<string, unknown>)
       : {};
 
+  const rawGaps = Array.isArray(raw.capabilityGaps) ? raw.capabilityGaps : [];
+  const capabilityGaps = rawGaps
+    .map((g) => {
+      if (typeof g !== "object" || g == null) return null;
+      const r = g as Record<string, unknown>;
+      const elementId =
+        typeof r.elementId === "string" ? r.elementId.trim() : "";
+      const missingCapability =
+        typeof r.missingCapability === "string"
+          ? r.missingCapability.trim()
+          : "";
+      if (!elementId || !missingCapability) return null;
+      const note = typeof r.note === "string" ? r.note.trim() : "";
+      return note
+        ? { elementId, missingCapability, note }
+        : { elementId, missingCapability };
+    })
+    .filter(
+      (
+        g,
+      ): g is { elementId: string; missingCapability: string; note?: string } =>
+        g != null,
+    );
+
   return ElementHonorResultSchema.parse({
     honorsPinnedElements: Boolean(raw.honorsPinnedElements),
     competingThemeControl: Boolean(raw.competingThemeControl),
@@ -101,6 +157,7 @@ export async function classifyElementHonorViaLlm(
       raw.confidence === "high"
         ? raw.confidence
         : "low",
+    capabilityGaps,
   });
 }
 

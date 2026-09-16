@@ -89,6 +89,8 @@ export const DesignElementMetaSchema = z.object({
   /** Published npm package name when bridged to the private registry. */
   npmPackage: z.string().optional(),
   npmVersion: z.string().optional(),
+  /** Self-describing structural capabilities (e.g. "flat-sections", "nested-accordion"). */
+  capabilities: z.array(z.string()).default([]),
   publishedAt: z.string(),
   updatedAt: z.string(),
 });
@@ -2027,6 +2029,57 @@ export function selectionConceptMatchesElementId(
   const id = elementId.trim().toLowerCase();
   if (!c || !id) return false;
   return c === id || c.startsWith(`${id}-`) || c.startsWith(`${id}@`);
+}
+
+export type ElementCapabilityGap = {
+  elementId: string;
+  version: number;
+  missingCapability: string;
+  note: string;
+};
+
+/**
+ * Heuristic pre-signal for element evolution. Flags pinned shell elements when
+ * the mock uses nested/collapsible structure the pinned element's own body does
+ * not (e.g. an accordion sidebar vs a flat link list). The LLM honor judge is
+ * the authoritative arbiter; this fires a warning even when it is unavailable.
+ */
+export function detectElementCapabilityGaps(opts: {
+  html: string;
+  elements: DesignElementRef[];
+  projectRoot: string;
+}): ElementCapabilityGap[] {
+  const html = opts.html ?? "";
+  if (!html.trim() || !opts.elements.length) return [];
+
+  const hasNesting = (body: string): boolean =>
+    /<details\b|<summary\b|aria-expanded|accordion|collaps/i.test(body) ||
+    /<ul\b[^>]*>[\s\S]*?<li\b[^>]*>[\s\S]*?<ul\b/i.test(body);
+
+  // Only consider a gap when the mock itself is nested/collapsible.
+  if (!hasNesting(html)) return [];
+
+  const gaps: ElementCapabilityGap[] = [];
+  for (const el of opts.elements) {
+    if (el.kind !== "shell") continue;
+    if (!el.mockPath) continue;
+    const abs = join(opts.projectRoot, el.mockPath);
+    if (!existsSync(abs)) continue;
+    let body = "";
+    try {
+      body = extractElementBodyHtml(readFileSync(abs, "utf-8"));
+    } catch {
+      continue;
+    }
+    if (!body.trim() || hasNesting(body)) continue;
+    gaps.push({
+      elementId: el.id,
+      version: el.version,
+      missingCapability: "nested / collapsible structure",
+      note: `mock uses nested/collapsible structure but pinned ${el.id}@${el.version} is flat`,
+    });
+  }
+  return gaps;
 }
 
 /**

@@ -31,6 +31,7 @@ import {
   type ThemeContract,
 } from "./design-conceptual-model.js";
 import {
+  detectElementCapabilityGaps,
   getDesignLoopElements,
   type DesignElementRef,
 } from "./design-element.js";
@@ -81,6 +82,21 @@ export type DesignPack = {
   theme?: ThemeContract;
   /** Pinned shared design elements (controls/patterns) on accept. */
   elements?: DesignElementRef[];
+  /**
+   * Pinned elements the accepted mock EXCEEDS (needs a new capability/version).
+   * Drives the "evolve the element" directive instead of "mount the pinned element".
+   */
+  capabilityGaps?: Array<{
+    elementId: string;
+    version: number;
+    missingCapability: string;
+    note: string;
+  }>;
+  /**
+   * Operator/agent-facing evolve directive when capabilityGaps exist: extract a
+   * new element version → publish to the library → consume the new version.
+   */
+  evolveDirective?: string;
   /**
    * Operator-pinned selections (logo, palette, …) at accept time. The pinned
    * logo is authoritative — implement must wire THIS asset as the product logo.
@@ -388,6 +404,30 @@ export function compileDesignPackFromAccept(opts: {
 
   const elements = getDesignLoopElements(meta);
 
+  // Detect pinned elements the accepted mock EXCEEDS (e.g. a nested accordion
+  // sidebar vs a flat dashboard-sidebar). These drive an "evolve the element"
+  // directive instead of the blunt "mount the pinned element" mustNot.
+  const capabilityGaps = detectElementCapabilityGaps({
+    html,
+    elements,
+    projectRoot: opts.projectRoot,
+  });
+  const gappedIds = new Set(capabilityGaps.map((g) => g.elementId));
+  const evolveDirective = capabilityGaps.length
+    ? [
+        "EVOLVE shared elements before implement — the accepted mock needs capabilities the pinned versions lack:",
+        ...capabilityGaps.map(
+          (g) =>
+            `- ${g.elementId}@${g.version} needs ${g.missingCapability}: run design_element_extract (loopId=${opts.loopId}, elementId=${g.elementId}) to bump ${g.elementId} to @${g.version + 1}, then design_library_publish (or design_element_publish_npm) and pnpm add the new version in the consumer. Do NOT hand-roll the difference in the consumer.`,
+        ),
+      ].join("\n")
+    : undefined;
+  const elementMustNots = elements.map((e) =>
+    gappedIds.has(e.id)
+      ? `EVOLVE shared element ${e.id}: the accepted mock requires a capability ${e.id}@${e.version} lacks — extract ${e.id}@${e.version + 1} via design_element_extract, publish via design_library_publish, and consume the new version; do NOT hand-roll the difference in the consumer.`
+      : `Do not invent a competing control for shared element ${e.id}@${e.version} — mount the pinned element`,
+  );
+
   const selections = getDesignLoopSelections(meta).map((s) => ({
     ...s,
     path: s.asset
@@ -423,16 +463,15 @@ export function compileDesignPackFromAccept(opts: {
     mustNot: [
       ...buildMustNot(opts.acceptance, logos, scope, inScope),
       ...alreadyAppliedMustNots,
-      ...elements.map(
-        (e) =>
-          `Do not invent a competing control for shared element ${e.id}@${e.version} — mount the pinned element`,
-      ),
+      ...elementMustNots,
     ].slice(0, 32),
     mockPath: `.slopcontrol/design-loops/${opts.loopId}/v${opts.version}/mock.html`,
     scope: { ...scope, source: "accept" },
     // Theme contract only authoritative when theme_modes is in this implement delta.
     theme: inScope.includes("theme_modes") ? theme : undefined,
     elements: elements.length ? elements : undefined,
+    capabilityGaps: capabilityGaps.length ? capabilityGaps : undefined,
+    evolveDirective,
     selections: selections.length ? selections : undefined,
     createdAt: now,
     updatedAt: now,
@@ -670,6 +709,11 @@ export function formatDesignPackPromptBlock(
         );
       }
     }
+    lines.push("");
+  }
+  if (pack.evolveDirective?.trim()) {
+    lines.push("### evolve (REQUIRED before implement — do not hand-roll)");
+    lines.push(pack.evolveDirective.trim());
     lines.push("");
   }
   if (pack.mustNot.length) {

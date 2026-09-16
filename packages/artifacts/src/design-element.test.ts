@@ -26,6 +26,7 @@ import {
   applyPinnedLogoToMenubarRegion,
   extractConsumerBrandLabel,
   detectPinnedElementDrift,
+  detectElementCapabilityGaps,
   unpinDesignElementsFromLoop,
   countExactClassToken,
   extractAndPublishDesignElementFromLoop,
@@ -978,6 +979,90 @@ describe("design-element drift", () => {
       assert.ok(!sels.some((s) => s.conceptId.startsWith("dashboard-sidebar")));
       assert.ok(sels.some((s) => s.conceptId === "menubar-2"));
       assert.ok(sels.some((s) => s.slot === "logo"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("detectElementCapabilityGaps flags a nested mock vs a flat pinned shell element", () => {
+    const root = tmp("cap-gap");
+    try {
+      const loop = createDesignLoopMeta({ projectId: "p", brief: "b" });
+      writeDesignLoopMeta(root, loop);
+      const elDir = join(
+        root,
+        ".slopcontrol",
+        "design-loops",
+        loop.id,
+        "elements",
+        "dashboard-sidebar",
+        "v2",
+      );
+      mkdirSync(elDir, { recursive: true });
+      writeFileSync(
+        join(elDir, "mock.html"),
+        '<html><body><aside class="dashboard-sidebar"><a href="#">Home</a><a href="#">Chat</a></aside></body></html>\n',
+      );
+      const ref = {
+        id: "dashboard-sidebar",
+        version: 2,
+        origin: "project" as const,
+        kind: "shell" as const,
+        mockPath: `.slopcontrol/design-loops/${loop.id}/elements/dashboard-sidebar/v2/mock.html`,
+        mountHints: [],
+        hasCode: false,
+      };
+      const nestedMock =
+        '<html><body><div class="shell"><aside class="sidebar"><details><summary>Applications</summary><ul><li>App A</li></ul></details></aside></div></body></html>';
+      const gaps = detectElementCapabilityGaps({
+        html: nestedMock,
+        elements: [ref],
+        projectRoot: root,
+      });
+      assert.equal(gaps.length, 1);
+      assert.equal(gaps[0]!.elementId, "dashboard-sidebar");
+      assert.match(gaps[0]!.missingCapability, /nested|collapsible/i);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("detectElementCapabilityGaps reports no gap for a flat mock", () => {
+    const root = tmp("cap-gap-none");
+    try {
+      const loop = createDesignLoopMeta({ projectId: "p", brief: "b" });
+      writeDesignLoopMeta(root, loop);
+      const elDir = join(
+        root,
+        ".slopcontrol",
+        "design-loops",
+        loop.id,
+        "elements",
+        "dashboard-sidebar",
+        "v2",
+      );
+      mkdirSync(elDir, { recursive: true });
+      writeFileSync(
+        join(elDir, "mock.html"),
+        '<html><body><aside class="dashboard-sidebar"><a href="#">Home</a></aside></body></html>\n',
+      );
+      const ref = {
+        id: "dashboard-sidebar",
+        version: 2,
+        origin: "project" as const,
+        kind: "shell" as const,
+        mockPath: `.slopcontrol/design-loops/${loop.id}/elements/dashboard-sidebar/v2/mock.html`,
+        mountHints: [],
+        hasCode: false,
+      };
+      const flatMock =
+        '<html><body><div class="shell"><aside class="sidebar"><a href="#">Home</a><a href="#">Chat</a></aside></div></body></html>';
+      const gaps = detectElementCapabilityGaps({
+        html: flatMock,
+        elements: [ref],
+        projectRoot: root,
+      });
+      assert.equal(gaps.length, 0);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
