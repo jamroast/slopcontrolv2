@@ -2765,3 +2765,24 @@ export function removeElementFromProjectLibraryPackage(opts: {
   if (removed) regenerateComponentBarrel(componentsDir);
   return { removed };
 }
+
+/**
+ * Remove a design element from a library (project or registry): delete the
+ * element version dir and drop it from the library INDEX.
+ */
+export function removeDesignElement(opts: {
+  libraryRoot: string;
+  elementId: string;
+}): { removed: boolean; remaining: string[] } {
+  const id = slugElementId(opts.elementId);
+  const dir = join(opts.libraryRoot, id);
+  const removed = existsSync(dir);
+  if (removed) rmSync(dir, { recursive: true, force: true });
+  const index = readElementIndex(opts.libraryRoot);
+  const remaining = index.elements.filter((e) => e.id !== id);
+  writeElementIndex(opts.libraryRoot, {
+    updatedAt: new Date().toISOString(),
+    elements: remaining,
+  });
+  return { removed, remaining: remaining.map((e) => e.id) };
+}

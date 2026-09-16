@@ -40,6 +40,7 @@ import {
   registryElementsRoot,
   syncElementToProjectLibraryPackage,
   removeElementFromProjectLibraryPackage,
+  removeDesignElement,
 } from "./design-element.js";
 import { jamPackageNameForElement } from "./npm-registry.js";
 import {
@@ -1420,6 +1421,28 @@ describe("project element-library package sync", () => {
           join(pkgDir, "src", "components", "company-navigation.tsx"),
         ),
       );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("removeDesignElement deletes the element and drops it from the INDEX", () => {
+    const root = tmp("remove-element");
+    try {
+      publishDesignElement({
+        projectRoot: root,
+        elementId: "sign-in",
+        kind: "control",
+        label: "Sign In",
+        spec: "sign-in form",
+        mockHtml: "<form class='sign-in'></form>",
+      });
+      const lib = projectElementsRoot(root);
+      assert.ok(readDesignElementBundle(lib, "sign-in", 1));
+      const res = removeDesignElement({ libraryRoot: lib, elementId: "sign-in" });
+      assert.equal(res.removed, true);
+      assert.ok(!res.remaining.includes("sign-in"));
+      assert.equal(readDesignElementBundle(lib, "sign-in", 1), null);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

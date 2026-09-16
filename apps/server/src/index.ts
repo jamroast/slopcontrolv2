@@ -99,6 +99,8 @@ import {
   formatDesignElementsPromptBlock,
   projectElementsRoot,
   registryElementsRoot,
+  removeDesignElement,
+  removeElementFromProjectLibraryPackage,
   ensureNpmRegistryLayout,
   ensureProjectNpmrc,
   listNpmRegistryPackages,
@@ -5323,6 +5325,40 @@ app.post("/projects/:id/design-elements/publish", (req, res) => {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+});
+
+/**
+ * Remove a design element from the project library + global registry + the
+ * project's element-library package (purge/cleanup).
+ */
+app.delete("/projects/:id/design-elements/:elementId", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const elementId = req.params.elementId;
+  const fromProject = removeDesignElement({
+    libraryRoot: projectElementsRoot(project.rootPath),
+    elementId,
+  });
+  const fromRegistry = removeDesignElement({
+    libraryRoot: registryElementsRoot(defaultDataDir()),
+    elementId,
+  });
+  const fromPackage = removeElementFromProjectLibraryPackage({
+    projectRoot: project.rootPath,
+    elementId,
+  });
+  res.json({
+    ok: true,
+    elementId,
+    removed: {
+      project: fromProject.removed,
+      registry: fromRegistry.removed,
+      package: fromPackage.removed,
+    },
+  });
 });
 
 app.get(
