@@ -124,6 +124,7 @@ import {
   DESIGN_LOOP_ID_DEPENDENT_TOOLS,
   formatDesignLoopLatchPrompt,
   formatDesignTurnRoutingPrefix,
+  isDesignLoopContinuable,
   isDesignLoopOpen,
   parseDesignLoopStatusFromDispatch,
   parseDesignLoopVersionFromDispatch,
@@ -1602,18 +1603,22 @@ export class ChatService {
       return latch;
     }
     if (open.length > 1) return undefined;
-    const accepted = loops.filter((l) => l.status === "accepted");
-    if (accepted.length !== 1) return undefined;
-    const loop = accepted[0]!;
-    const latch: DesignResumeLatch = {
-      loopId: loop.id,
-      projectId: resolvedProjectId,
-      title: loop.brief.split("\n")[0]?.slice(0, 120),
-      status: loop.status,
-      currentVersion: loop.currentVersion,
-    };
-    this.designLatches.set(conversationId, latch);
-    return latch;
+    // Finalized loops stay continuable (continue reopens them to iterate).
+    for (const status of ["accepted", "implemented"] as const) {
+      const matches = loops.filter((l) => l.status === status);
+      if (matches.length !== 1) continue;
+      const loop = matches[0]!;
+      const latch: DesignResumeLatch = {
+        loopId: loop.id,
+        projectId: resolvedProjectId,
+        title: loop.brief.split("\n")[0]?.slice(0, 120),
+        status: loop.status,
+        currentVersion: loop.currentVersion,
+      };
+      this.designLatches.set(conversationId, latch);
+      return latch;
+    }
+    return undefined;
   }
 
   private latchFromDesignLoopId(
@@ -1725,6 +1730,7 @@ export class ChatService {
       latchTitle: latch.title,
       latchLastUser: latch.lastUserLine,
       currentVersion: latch.currentVersion,
+      latchStatus: latch.status,
     });
   }
 
@@ -1902,7 +1908,7 @@ export class ChatService {
       this.designLatches.get(conversation.id)?.projectId ??
         conversation.projectId,
     );
-    if (!latch?.loopId || !isDesignLoopOpen(latch.status)) return text;
+    if (!latch?.loopId || !isDesignLoopContinuable(latch.status)) return text;
     const operatorMessage = this.turnOperatorMessage.trim() || text.trim();
     if (!operatorMessage) return text;
 
@@ -1929,7 +1935,7 @@ export class ChatService {
       projectId,
       hintLoopId,
     );
-    if (!latch?.loopId || !isDesignLoopOpen(latch.status)) return null;
+    if (!latch?.loopId || !isDesignLoopContinuable(latch.status)) return null;
 
     const operatorMessage = this.turnOperatorMessage.trim();
     if (!operatorMessage) return null;
@@ -3161,7 +3167,7 @@ export class ChatService {
         this.designLatches.get(conversation.id)?.projectId,
     );
     const designLatchBlock =
-      designLatch && isDesignLoopOpen(designLatch.status)
+      designLatch && isDesignLoopContinuable(designLatch.status)
         ? `\n\n${formatDesignLoopLatchPrompt(designLatch)}`
         : "";
     const systemPrompt = (

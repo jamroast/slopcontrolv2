@@ -38,6 +38,16 @@ export function isDesignLoopOpen(status: string | undefined): boolean {
   return !status || status === "open";
 }
 
+/** A loop the operator may keep iterating — design_loop_continue reopens finalized loops. */
+export function isDesignLoopContinuable(status: string | undefined): boolean {
+  return (
+    !status ||
+    status === "open" ||
+    status === "accepted" ||
+    status === "implemented"
+  );
+}
+
 /**
  * Structural design-turn routing when the classification LLM is unavailable.
  * Mirrors decidePlanTurn: routing intent from operator text is the
@@ -51,8 +61,8 @@ export function decideDesignTurn(input: {
 }): DesignTurnDecision {
   const latch = input.latch;
   const message = input.operatorMessage.trim();
-  if (!latch?.loopId || !isDesignLoopOpen(latch.status)) {
-    return { action: "unrelated", reason: "no open design latch" };
+  if (!latch?.loopId || !isDesignLoopContinuable(latch.status)) {
+    return { action: "unrelated", reason: "no continuable design latch" };
   }
   if (!message) {
     return { action: "ambiguous", reason: "empty operator message" };
@@ -61,6 +71,8 @@ export function decideDesignTurn(input: {
 }
 
 export function formatDesignLoopLatchPrompt(latch: DesignResumeLatch): string {
+  const finalized =
+    latch.status === "accepted" || latch.status === "implemented";
   const lines = [
     "## Active design loop (this chat)",
     `- loopId: ${latch.loopId}`,
@@ -70,6 +82,9 @@ export function formatDesignLoopLatchPrompt(latch: DesignResumeLatch): string {
       : null,
     latch.title ? `- brief: ${latch.title.slice(0, 200)}` : null,
     `- status: ${latch.status ?? "open"}`,
+    finalized
+      ? `- NOTE: this loop is ${latch.status}; design_loop_continue reopens it and iterates to the next version — do NOT start a new loop for revisions/extensions.`
+      : null,
     "",
     "When the operator gives visual feedback, dissatisfaction, or asks for design changes (colours, layout, spacing, copy, components):",
     "- call **design_loop_continue** (gated) — NOT design_loop_get.",

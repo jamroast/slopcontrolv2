@@ -5,6 +5,7 @@ import {
   DESIGN_LOOP_ID_DEPENDENT_TOOLS,
   formatDesignLoopLatchPrompt,
   formatDesignTurnRoutingPrefix,
+  isDesignLoopContinuable,
   isDesignLoopOpen,
   parseDesignLoopStatusFromDispatch,
   parseDesignLoopVersionFromDispatch,
@@ -21,18 +22,38 @@ describe("design routing", () => {
     assert.equal(isDesignLoopOpen("implemented"), false);
   });
 
-  it("decideDesignTurn is unrelated without an open latch", () => {
+  it("isDesignLoopContinuable treats open/accepted/implemented as continuable", () => {
+    assert.equal(isDesignLoopContinuable(undefined), true);
+    assert.equal(isDesignLoopContinuable("open"), true);
+    assert.equal(isDesignLoopContinuable("accepted"), true);
+    assert.equal(isDesignLoopContinuable("implemented"), true);
+    assert.equal(isDesignLoopContinuable("abandoned"), false);
+  });
+
+  it("decideDesignTurn is unrelated without a continuable latch", () => {
     assert.deepEqual(
       decideDesignTurn({ operatorMessage: "make it darker", latch: null }),
-      { action: "unrelated", reason: "no open design latch" },
+      { action: "unrelated", reason: "no continuable design latch" },
     );
     assert.deepEqual(
       decideDesignTurn({
         operatorMessage: "make it darker",
-        latch: { loopId: "d1", status: "accepted" },
+        latch: { loopId: "d1", status: "abandoned" },
       }),
-      { action: "unrelated", reason: "no open design latch" },
+      { action: "unrelated", reason: "no continuable design latch" },
     );
+  });
+
+  it("decideDesignTurn treats finalized loops as continuable", () => {
+    for (const status of ["accepted", "implemented"]) {
+      assert.deepEqual(
+        decideDesignTurn({
+          operatorMessage: "add theming",
+          latch: { loopId: "d1", status },
+        }),
+        { action: "ambiguous", reason: "need classifier" },
+      );
+    }
   });
 
   it("decideDesignTurn stays ambiguous when classification is needed", () => {
@@ -65,6 +86,18 @@ describe("design routing", () => {
     assert.match(text, /NOT design_loop_get/);
     assert.match(text, /design_loop_start/);
     assert.match(text, /start again/);
+  });
+
+  it("formatDesignLoopLatchPrompt warns finalized loops are reopened by continue", () => {
+    const text = formatDesignLoopLatchPrompt({
+      loopId: "d1",
+      title: "dashboard mock",
+      currentVersion: 6,
+      status: "implemented",
+    });
+    assert.match(text, /status: implemented/);
+    assert.match(text, /reopens it and iterates/);
+    assert.match(text, /do NOT start a new loop/);
   });
 
   it("id-dependent set covers revision, handoff, and terminal tools", () => {
