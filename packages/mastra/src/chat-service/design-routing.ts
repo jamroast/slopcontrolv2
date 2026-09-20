@@ -88,6 +88,7 @@ export function formatDesignLoopLatchPrompt(latch: DesignResumeLatch): string {
     "",
     "When the operator gives visual feedback, dissatisfaction, or asks for design changes (colours, layout, spacing, copy, components):",
     "- call **design_loop_continue** (gated) — NOT design_loop_get.",
+    "- Reopen only for a genuine capability gap — first read the consumer's actual composition and the project's own library; if a project-owned component already provides the capability, compose it instead.",
     "- omit loopId to use this latched loop (global chat: keep passing projectId).",
     "- To switch loops on the same project, pass the other loopId explicitly — list_design_loops when unsure.",
     "- design_loop_get is read-only status only — it never revises the mock.",

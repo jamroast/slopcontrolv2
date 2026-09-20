@@ -169,13 +169,102 @@ describe("project knowledge in chat prompt", () => {
         getProject: () => undefined,
       },
     });
-    // Rows come from config: componentLibrary root vs nested-packages app.
-    assert.match(prompt, /acme-components \| componentLibrary:true root → design_library_publish/);
-    assert.match(prompt, /acme-app \| app with nested packages/);
+    // Rows come from config: base library vs own library vs consume-only app.
+    assert.match(prompt, /acme-components \| BASE component library → design_library_publish/);
+    assert.match(prompt, /acme-app \| app \(consume only\) → project_workspace_package_publish/);
+    assert.match(prompt, /Component-library ownership rule/);
     // The flow example names the actual registered projects.
     assert.match(prompt, /cross_project_wire_package publisher=acme-components/);
     assert.match(prompt, /consumers=\[acme-app\]/);
     // No Jam-estate names leak.
     assert.doesNotMatch(prompt, /JamRoast|JamPress|jamroast-components|@jam\/service-token|burntjam/);
+  });
+});
+
+describe("component library ownership + cross-project knowledge", () => {
+  it("surfaces ownership in the project prompt for an own-library project", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-lc-own-"));
+    roots.push(root);
+    mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+    writeFileSync(
+      join(root, ".slopcontrol", "config.json"),
+      JSON.stringify({
+        componentLibrary: false,
+        elementLibraryPackagePath: "packages/acme-components",
+        publishScope: "@acme",
+      }),
+    );
+    const ownProject: Project = {
+      id: "own",
+      name: "acme-app",
+      rootPath: root,
+      blueprintVersion: 0,
+      createdAt: "",
+      updatedAt: "",
+    };
+    const prompt = buildProjectChatPrompt({
+      project: ownProject,
+      deps: emptyDeps,
+    });
+    assert.ok(prompt.includes("## Component library ownership"));
+    assert.ok(prompt.includes("packages/acme-components"));
+    assert.ok(prompt.includes("promote an element to the base only when a second project reuses it"));
+  });
+
+  it("classifies an own-library project in the global publish table", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-lc-own2-"));
+    roots.push(root);
+    mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+    writeFileSync(
+      join(root, ".slopcontrol", "config.json"),
+      JSON.stringify({
+        componentLibrary: false,
+        elementLibraryPackagePath: "packages/acme-components",
+      }),
+    );
+    const ownProject: Project = {
+      id: "own2",
+      name: "acme-app",
+      rootPath: root,
+      blueprintVersion: 0,
+      createdAt: "",
+      updatedAt: "",
+    };
+    const prompt = buildGlobalChatPrompt({
+      deps: {
+        listProjects: () => [ownProject],
+        listPhases: () => [],
+        listRuns: () => [],
+        getProject: () => undefined,
+      },
+    });
+    assert.match(prompt, /acme-app \| own library packages\/acme-components \(extends base\)/);
+  });
+
+  it("surfaces the global knowledge block in the project prompt when provided", () => {
+    const prompt = buildProjectChatPrompt({
+      project,
+      deps: emptyDeps,
+      globalKnowledge: "- Base library stays generic",
+    });
+    assert.ok(prompt.includes("## Global knowledge (durable cross-project decisions)"));
+    assert.ok(prompt.includes("Base library stays generic"));
+    assert.ok(
+      prompt.indexOf("## Global knowledge") <
+        prompt.indexOf("## BLUEPRINT.md"),
+    );
+  });
+
+  it("omits the global knowledge block when empty", () => {
+    const prompt = buildProjectChatPrompt({ project, deps: emptyDeps });
+    assert.ok(!prompt.includes("## Global knowledge"));
+  });
+
+  it("includes investigate-before-mutate guidance for design elements", () => {
+    const prompt = buildProjectChatPrompt({ project, deps: emptyDeps });
+    assert.ok(prompt.includes("read the consumer's actual composition and the project's own library"));
+    assert.ok(prompt.includes("compose that component instead of extracting/evolving"));
+    assert.ok(prompt.includes("carry its :root custom properties"));
+    assert.ok(prompt.includes("never reference var(--x) in code without defining --x"));
   });
 });

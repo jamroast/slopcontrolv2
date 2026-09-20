@@ -4767,7 +4767,7 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
             `Element honor: honors=${honor.honorsPinnedElements} competing=${honor.competingThemeControl} missingMenubar=${honor.missingMenubar} missingToggle=${honor.missingThemeToggle} confidence=${honor.confidence}.`,
             honor.notes.trim(),
             honor.capabilityGaps.length
-              ? `CAPABILITY GAPS (evolve the element before implement): ${honor.capabilityGaps
+              ? `CAPABILITY GAPS (resolve before implement): ${honor.capabilityGaps
                   .map(
                     (g) =>
                       `${g.elementId} needs ${g.missingCapability}${g.note ? ` (${g.note})` : ""}`,
@@ -6078,15 +6078,22 @@ CRITICAL theme contract (theme_modes):
           f.accepted && (f.id === "theme_modes" || f.id === "applied_shell"),
       ),
     });
-    const gappedElementIds = new Set(
-      (phasePackForResearch?.capabilityGaps ?? []).map((g) => g.elementId),
+    const gapByElementId = new Map(
+      (phasePackForResearch?.capabilityGaps ?? []).map((g) => [
+        g.elementId,
+        g,
+      ]),
     );
     const elementsResearchNote = phasePackForResearch?.elements?.length
       ? `
 CRITICAL shared elements (DESIGN_PACK.elements):
 ${phasePackForResearch.elements
   .map((e) => {
-    if (gappedElementIds.has(e.id)) {
+    const gap = gapByElementId.get(e.id);
+    if (gap?.composeWith) {
+      return `- COMPOSE ${gap.composeWith} inside ${e.id}@${e.version} (the accepted mock marks ${gap.composeWith} as a distinct sub-element) — mount ${gap.composeWith} inside the pinned ${e.id} shell; do NOT evolve ${e.id} or hand-roll the difference.`;
+    }
+    if (gap) {
       return `- EVOLVE ${e.id}@${e.version} (the accepted mock needs a capability it lacks) — extract ${e.id}@${e.version + 1}, publish, then consume the new version; do NOT mount the stale pinned version.`;
     }
     const npm = e.npmPackage

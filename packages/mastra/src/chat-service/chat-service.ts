@@ -3147,9 +3147,9 @@ export class ChatService {
           projectId: conversation.projectId,
         })
       : "";
-    const globalKnowledge = conversation.projectId
-      ? ""
-      : await recallGlobalKnowledge({ memory: this.deps.getMemory() });
+    const globalKnowledge = await recallGlobalKnowledge({
+      memory: this.deps.getMemory(),
+    });
     const skillsIndex = this.deps.skillsDir
       ? formatSkillsIndex(listSkills(this.deps.skillsDir))
       : "";
@@ -3177,6 +3177,7 @@ export class ChatService {
             deps: this.deps.context,
             pendingActions,
             projectKnowledge,
+            globalKnowledge,
             skillsIndex,
           })
         : buildGlobalChatPrompt({
@@ -3185,9 +3186,11 @@ export class ChatService {
             skillsIndex,
           })
     ).concat(
-      globalKnowledge
-        ? `\n\n## Global knowledge (durable decisions from prior global chats)\n${globalKnowledge}`
-        : "",
+      conversation.projectId
+        ? ""
+        : globalKnowledge
+          ? `\n\n## Global knowledge (durable decisions from prior global chats)\n${globalKnowledge}`
+          : "",
       planLatchBlock,
       designLatchBlock,
     );

@@ -1,5 +1,5 @@
 import { readBlueprint, readProjectConfig, readRoadmap } from "@slopcontrol/artifacts";
-import type { Phase, Project, Run } from "@slopcontrol/types";
+import type { Phase, Project, ProjectConfig, Run } from "@slopcontrol/types";
 import type { ChatContextDeps } from "./types.js";
 
 function clip(text: string, maxChars: number): string {
@@ -23,7 +23,8 @@ Waiting on long stages:
 - start_change / promote_ask / start_development / start_design return immediately while work continues (stage researching or developing).
 - After those start, call wait_for_run with the runId. Do not tell the operator the work finished until wait_for_run (or the start tool's wait appendix) reports a settled stage such as in_review, complete, blocked, or failed.
 - While still researching/developing, say that plainly. When it settles, brief them on the outcome and next step (review, design, or develop).
-- COMPONENT LIBRARIES: publish with design_library_publish; consumers update via project_library_consume. Never npm/pnpm link.
+- COMPONENT LIBRARIES: publish with design_library_publish; consumers update via project_library_consume. Never npm/pnpm link. Before design_element_extract / design_element_continue / evolving a shared element, read the consumer's actual composition and the project's own library (list_design_elements, list_extractable_design_elements, ask) — if a project-owned component already provides the capability, compose that component instead of extracting/evolving the pinned element.
+- DESIGN TOKENS: when implementing an accepted design mock, carry its :root custom properties (layout/dimension tokens like --pane-w, --sidebar-w) into the consumer's CSS — never reference var(--x) in code without defining --x somewhere in the shipped CSS.
 - NESTED WORKSPACE PACKAGES (apps with packages/*): publish with project_workspace_package_publish or cross_project_wire_package — NOT design_library_publish (that is for componentLibrary:true project roots only). npm_registry_publish alone does not build.
 - ENV: after env-template changes, project_env_sync refreshes runtime env files.
 
@@ -97,12 +98,29 @@ You have web_search and fetch_url for current vendor docs, model catalogs, and A
 export const CHAT_GLOBAL_DECISIONS_PROMPT = `## Durable decisions
 When the operator settles a design choice, model binding, or cross-project convention, call archive_decision with a one-line note so it survives this chat's finite history. Do not archive every message — only decisions worth keeping for later phases.`;
 
+const COMPONENT_LIBRARY_OWNERSHIP_RULE =
+  "Base library components stay generic/cross-project; project-specific components belong in the project's own library; promote an element to the base only when a second project reuses it.";
+
+function componentLibraryOwnershipLine(config: ProjectConfig): string {
+  const scope =
+    config.publishScope ?? config.registryScopes?.[0] ?? "@slopcontrol";
+  if (config.componentLibrary) {
+    return `This project is the estate BASE component library (componentLibrary:true) — publishes generic components under ${scope}.`;
+  }
+  if (config.elementLibraryPackagePath) {
+    return `This project publishes its own component library at ${config.elementLibraryPackagePath} (scope ${scope}), extending the estate base library.`;
+  }
+  return "This project consumes the estate base library and has no own component library configured (set elementLibraryPackagePath to add one).";
+}
+
 export function buildProjectChatPrompt(opts: {
   project: Project;
   deps: ChatContextDeps;
   pendingActions?: PendingPromptAction[];
   /** Accumulated project knowledge from the OM knowledge thread. */
   projectKnowledge?: string;
+  /** Durable cross-project decisions (global knowledge thread). */
+  globalKnowledge?: string;
   /** Compact skills index (name + description) for the chat agent. */
   skillsIndex?: string;
 }): string {
@@ -124,6 +142,10 @@ export function buildProjectChatPrompt(opts: {
   const mergePolicy = autoMergeOnComplete
     ? "autoMergeOnComplete: enabled — successful develop runs merge into the project root automatically. On complete, brief outcomes and follow-ups; never offer a main-vs-branch merge choice."
     : "autoMergeOnComplete: disabled — park merge_phase only when the operator explicitly asks to merge.";
+  const ownership = componentLibraryOwnershipLine(config);
+  const globalKnowledgeBlock = opts.globalKnowledge?.trim()
+    ? `## Global knowledge (durable cross-project decisions)\n${opts.globalKnowledge.trim()}\n\n`
+    : "";
 
   return `You are the SlopControl operator agent for project "${project.name}" (${project.rootPath}).
 
@@ -150,7 +172,11 @@ ${busy.map(runLine).join("\n") || "- (none)"}
 ## Project merge policy
 ${mergePolicy}
 
-${opts.projectKnowledge?.trim() ? `## Project knowledge (accumulated)\n${opts.projectKnowledge.trim()}\n\n` : ""}## BLUEPRINT.md (excerpt — the project definition)
+## Component library ownership
+${ownership}
+Rule: ${COMPONENT_LIBRARY_OWNERSHIP_RULE}
+
+${opts.projectKnowledge?.trim() ? `## Project knowledge (accumulated)\n${opts.projectKnowledge.trim()}\n\n` : ""}${globalKnowledgeBlock}## BLUEPRINT.md (excerpt — the project definition)
 ${blueprint || "(empty)"}
 
 ## ROADMAP.md (excerpt)
@@ -198,16 +224,18 @@ export function buildGlobalChatPrompt(opts: {
     try {
       const cfg = readProjectConfig(project.rootPath);
       kind = cfg.componentLibrary
-        ? "componentLibrary:true root → design_library_publish"
-        : "app with nested packages/* → project_workspace_package_publish OR cross_project_wire_package";
+        ? "BASE component library → design_library_publish"
+        : cfg.elementLibraryPackagePath
+          ? `own library ${cfg.elementLibraryPackagePath} (extends base) → project_workspace_package_publish OR cross_project_wire_package`
+          : "app (consume only) → project_workspace_package_publish OR cross_project_wire_package";
     } catch {
-      kind = "app with nested packages/* → project_workspace_package_publish OR cross_project_wire_package";
+      kind = "app (consume only) → project_workspace_package_publish OR cross_project_wire_package";
     }
     return `| ${project.name} | ${kind} |`;
   });
   const publishTable =
     publishRows.length > 0
-      ? `| Project | Publish path |\n|---|---|\n${publishRows.join("\n")}`
+      ? `| Project | Publish path |\n|---|---|\n${publishRows.join("\n")}\n\nComponent-library ownership rule: ${COMPONENT_LIBRARY_OWNERSHIP_RULE}`
       : "| (none registered) | |";
   const firstComponentLib = projects.find((p) => {
     try {
