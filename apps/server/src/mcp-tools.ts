@@ -933,7 +933,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_start",
       description:
-        "Start a chat-driven look-and-feel loop: generates self-contained mock HTML (no product edits). Returns loopId + html + transcript + conceptualModel (scope/theme). Optional scope narrows the conceptual model (e.g. component+chat.composer). Briefs that ask to pull current/existing theming or design concepts seed PRIOR_DESIGN from the latest accepted/implemented loop (or phase design) and ground v1 on that mock — prefer design_loop_continue when iterating the same dirty loop. If usedScaffold/timeout, call design_loop_retry. Iterate with design_loop_continue, freeze with design_loop_accept, then implement_design.",
+        "Start a chat-driven look-and-feel loop: generates self-contained mock HTML (no product edits). Returns loopId + html + transcript + conceptualModel (scope/theme). Optional scope narrows the conceptual model (e.g. component+chat.composer). Briefs that ask to pull current/existing theming or design concepts seed PRIOR_DESIGN from the latest accepted/implemented loop (or phase design) and ground v1 on that mock — prefer design_loop_continue when iterating the same dirty loop. If the project already has a finalized (implemented/accepted) loop for the same surface, prefer design_loop_continue on it rather than starting a fresh loop. If usedScaffold/timeout, call design_loop_retry. Iterate with design_loop_continue, freeze with design_loop_accept, then implement_design.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1682,7 +1682,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_element_extract",
       description:
-        "Extract a shared element from a design-loop mock and publish to the project library. Prefer list_extractable_design_elements first, then pass the listed elementId (and optional label). Without elementId, defaults to theme-toggle when present. Optional publishToRegistry. Pass loopId explicitly — do NOT rely on this chat's design-loop latch (it may point at a different project's loop). Works on any loop status (open/accepted/implemented) — no need to re-accept first. When the operator names a specific version (e.g. 'extract v9' / 'from the accepted v9'), pass that version — do NOT default to the current tip.",
+        "Extract a shared element from a design-loop mock and publish to the project library. Prefer list_extractable_design_elements first, then pass the listed elementId (and optional label). Without elementId, defaults to theme-toggle when present. Optional publishToRegistry. Pass loopId explicitly — do NOT rely on this chat's design-loop latch (it may point at a different project's loop). Works on any loop status (open/accepted/implemented) — no need to re-accept first. When the operator names a specific version (e.g. 'extract v9' / 'from the accepted v9'), pass that version — do NOT default to the current tip. Before extracting/evolving, read the consumer's actual composition and the project's own library (list_design_elements, list_extractable_design_elements, ask) — if a project-owned component already provides the capability, compose that component instead of extracting/evolving the pinned element.",
       inputSchema: {
         type: "object",
         properties: {

@@ -46,6 +46,7 @@ import {
   appendDesignLoopTranscript,
   writeDesignLoopVersion,
   readDesignLoopMockHtml,
+  extractMockCustomProperties,
   readDesignLoopNotes,
   readDesignLoopTranscript,
   readDesignLoopRequest,
@@ -4225,6 +4226,19 @@ app.post("/projects/:id/design-loops", async (req, res) => {
     }
   }
 
+  const finalizedLoops = listDesignLoops(project.rootPath).filter(
+    (l) => l.status === "implemented" || l.status === "accepted",
+  );
+  const continuationWarning = finalizedLoops.length
+    ? `This project already has ${finalizedLoops.length} finalized design loop(s): ${finalizedLoops
+        .slice(0, 3)
+        .map(
+          (l) =>
+            `"${(l.brief ?? "").slice(0, 60)}" (${l.id.slice(0, 8)}, ${l.status})`,
+        )
+        .join("; ")}. If this brief covers the same surface, prefer design_loop_continue on that loop instead of starting a fresh one.`
+    : undefined;
+
   const meta = createDesignLoopMeta({
     projectId: project.id,
     brief,
@@ -4354,6 +4368,7 @@ app.post("/projects/:id/design-loops", async (req, res) => {
       loop: next,
       loopId: next.id,
       version,
+      warning: continuationWarning,
       html: rewriteDesignLoopAssetUrls(html, {
         projectId: project.id,
         loopId: next.id,
@@ -5015,6 +5030,9 @@ app.post("/projects/:id/design-loops/:loopId/accept", (req, res) => {
     );
     const acceptPack = readDesignLoopPack(project.rootPath, accepted.id);
     const evolveDirective = acceptPack?.evolveDirective?.trim();
+    const hasComposeGap = (acceptPack?.capabilityGaps ?? []).some((g) =>
+      Boolean(g.composeWith),
+    );
     res.json({
       loop: accepted,
       ...(olderThanLatest
@@ -5036,7 +5054,11 @@ app.post("/projects/:id/design-loops/:loopId/accept", (req, res) => {
           acceptance?.features.filter((f) => f.accepted).map((f) => f.id) ?? [],
       }),
       next: evolveDirective
-        ? `${evolveDirective}\nThen call implement_design to bind this mock + acceptance checklist + design pack to a phase (after the element is evolved).`
+        ? `${evolveDirective}\nThen call implement_design to bind this mock + acceptance checklist + design pack to a phase (${
+            hasComposeGap
+              ? "after composing the sub-element(s) into the pinned shell"
+              : "after the element is evolved"
+          }).`
         : "Call implement_design to bind this mock + acceptance checklist + design pack to a phase, then research plans those features.",
     });
   } catch (error) {
@@ -6045,6 +6067,15 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
     }
 
     const implementPack = readDesignLoopPack(project.rootPath, meta.id);
+    const mockTokens = extractMockCustomProperties(
+      readDesignLoopMockHtml(project.rootPath, meta.id, bound.version) ?? "",
+    );
+    const tokenCarryoverNote = mockTokens.length
+      ? `Carry the accepted mock's :root custom properties into the consumer's CSS: ${mockTokens
+          .map((t) => t.name)
+          .slice(0, 40)
+          .join(", ")}. Layout/dimension tokens (e.g. --pane-w, --sidebar-w) are the most commonly dropped — never reference var(--x) in implemented code without defining --x.`
+      : undefined;
     let themeContractWarning: string[] | undefined;
     if (packHasThemeModes(implementPack) && implementPack?.theme) {
       const check = checkThemeContractInProject({
@@ -6079,6 +6110,8 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
         acceptanceInScope: implementPack?.inScope,
       }),
       themeContractWarning,
+      mockTokens,
+      tokenCarryoverNote,
       next: willResearch
         ? "Research started from acceptance checklist. After review approval, call start_development."
         : "Design contract bound (UI-SPEC + mock + ACCEPTANCE + DESIGN_COMPLETE). Call start_development when the phase is accepted/ready.",
