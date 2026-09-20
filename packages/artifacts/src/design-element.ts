@@ -2068,6 +2068,12 @@ export type ElementCapabilityGap = {
   version: number;
   missingCapability: string;
   note: string;
+  /**
+   * When set, the mock composes this distinct sub-element to provide the
+   * missing capability — so the pinned element should COMPOSE it rather than
+   * evolve. The id is a stable slug from the mock's data-element markers.
+   */
+  composeWith?: string;
 };
 
 /**
@@ -2091,6 +2097,14 @@ export function detectElementCapabilityGaps(opts: {
   // Only consider a gap when the mock itself is nested/collapsible.
   if (!hasNesting(html)) return [];
 
+  // Distinct sub-elements marked in the mock whose own body carries the
+  // nesting. When a pinned shell's own body is flat but the mock nests a
+  // DIFFERENT sub-element, the capability belongs to that sub-element — the
+  // pinned shell should COMPOSE it, not evolve.
+  const nestedSubElements = collectExtractableRegions(html).filter((r) =>
+    hasNesting(r.html),
+  );
+
   const gaps: ElementCapabilityGap[] = [];
   for (const el of opts.elements) {
     if (el.kind !== "shell") continue;
@@ -2104,12 +2118,26 @@ export function detectElementCapabilityGaps(opts: {
       continue;
     }
     if (!body.trim() || hasNesting(body)) continue;
-    gaps.push({
-      elementId: el.id,
-      version: el.version,
-      missingCapability: "nested / collapsible structure",
-      note: `mock uses nested/collapsible structure but pinned ${el.id}@${el.version} is flat`,
-    });
+
+    const composer = nestedSubElements.find(
+      (r) => slugElementId(r.id) !== slugElementId(el.id),
+    );
+    gaps.push(
+      composer
+        ? {
+            elementId: el.id,
+            version: el.version,
+            missingCapability: "nested / collapsible structure",
+            note: `mock composes distinct sub-element ${composer.id} for nested/collapsible structure — mount it inside pinned ${el.id}@${el.version}`,
+            composeWith: composer.id,
+          }
+        : {
+            elementId: el.id,
+            version: el.version,
+            missingCapability: "nested / collapsible structure",
+            note: `mock uses nested/collapsible structure but pinned ${el.id}@${el.version} is flat`,
+          },
+    );
   }
   return gaps;
 }

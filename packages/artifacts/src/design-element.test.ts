@@ -1077,6 +1077,58 @@ describe("design-element drift", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("detectElementCapabilityGaps marks a compose sub-element (even when pinned) instead of evolving the shell", () => {
+    const root = tmp("cap-gap-compose");
+    try {
+      const loop = createDesignLoopMeta({ projectId: "p", brief: "b" });
+      writeDesignLoopMeta(root, loop);
+      const elDir = join(
+        root,
+        ".slopcontrol",
+        "design-loops",
+        loop.id,
+        "elements",
+        "dashboard-sidebar",
+        "v2",
+      );
+      mkdirSync(elDir, { recursive: true });
+      writeFileSync(
+        join(elDir, "mock.html"),
+        '<html><body><aside class="dashboard-sidebar"><a href="#">Home</a></aside></body></html>\n',
+      );
+      const ref = {
+        id: "dashboard-sidebar",
+        version: 2,
+        origin: "project" as const,
+        kind: "shell" as const,
+        mockPath: `.slopcontrol/design-loops/${loop.id}/elements/dashboard-sidebar/v2/mock.html`,
+        mountHints: [],
+        hasCode: false,
+      };
+      const navRef = {
+        id: "application-navigation",
+        version: 1,
+        origin: "project" as const,
+        kind: "control" as const,
+        mockPath: `.slopcontrol/design-loops/${loop.id}/elements/application-navigation/v1/mock.html`,
+        mountHints: [],
+        hasCode: true,
+      };
+      const composeMock =
+        '<html><body><aside class="dashboard-sidebar" data-element="dashboard-sidebar"><div data-element="application-navigation"><details><summary>Applications</summary><ul><li>App A</li></ul></details></div></aside></body></html>';
+      const gaps = detectElementCapabilityGaps({
+        html: composeMock,
+        elements: [ref, navRef],
+        projectRoot: root,
+      });
+      assert.equal(gaps.length, 1);
+      assert.equal(gaps[0]!.elementId, "dashboard-sidebar");
+      assert.equal(gaps[0]!.composeWith, "application-navigation");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("design-element estate promotion", () => {

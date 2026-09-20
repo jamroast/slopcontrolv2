@@ -438,6 +438,84 @@ describe("design-pack", () => {
       ),
       pack.mustNot.join("; "),
     );
-    assert.match(formatDesignPackPromptBlock(pack), /### evolve/);
+    assert.match(
+      formatDesignPackPromptBlock(pack),
+      /### shared-element gaps/,
+    );
+  });
+
+  it("emits a COMPOSE directive when the mock nests a distinct sub-element", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-dpack-compose-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({
+      projectId: "p1",
+      brief: "nested accordion sidebar",
+    });
+    const elements = [
+      {
+        id: "dashboard-sidebar",
+        version: 2,
+        origin: "project" as const,
+        kind: "shell" as const,
+        mockPath: `.slopcontrol/design-loops/${meta.id}/elements/dashboard-sidebar/v2/mock.html`,
+        mountHints: [] as string[],
+        hasCode: false,
+      },
+    ];
+    const metaWithEls = { ...meta, elements } as DesignLoopMetaWithElements;
+    writeDesignLoopMeta(root, metaWithEls);
+    const elDir = join(
+      root,
+      ".slopcontrol",
+      "design-loops",
+      meta.id,
+      "elements",
+      "dashboard-sidebar",
+      "v2",
+    );
+    mkdirSync(elDir, { recursive: true });
+    writeFileSync(
+      join(elDir, "mock.html"),
+      '<html><body><aside class="dashboard-sidebar"><a href="#">Home</a><a href="#">Chat</a></aside></body></html>\n',
+    );
+    writeDesignLoopVersion({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      html: '<!DOCTYPE html><html><head><style>:root{--x:1}</style></head><body><aside class="dashboard-sidebar" data-element="dashboard-sidebar"><div data-element="application-navigation"><details><summary>Applications</summary><ul><li>App A</li></ul></details></div></aside></body></html>',
+      notes: "ok",
+      request: "nested accordion sidebar",
+    });
+
+    const pack = compileDesignPackFromAccept({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      acceptance: {
+        version: 1,
+        features: [
+          { id: "screen_dashboard", label: "Dashboard", accepted: true },
+        ],
+      },
+      meta: metaWithEls,
+    });
+
+    assert.ok(pack.evolveDirective, "expected evolveDirective");
+    assert.match(pack.evolveDirective!, /COMPOSE application-navigation/);
+    assert.equal(pack.capabilityGaps?.[0]?.composeWith, "application-navigation");
+    assert.ok(
+      pack.mustNot.some((m) =>
+        /COMPOSE sub-element application-navigation inside shared element dashboard-sidebar/.test(
+          m,
+        ),
+      ),
+      pack.mustNot.join("; "),
+    );
+    assert.ok(
+      !pack.mustNot.some((m) =>
+        /EVOLVE shared element dashboard-sidebar/.test(m),
+      ),
+      pack.mustNot.join("; "),
+    );
   });
 });

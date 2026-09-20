@@ -83,14 +83,17 @@ export type DesignPack = {
   /** Pinned shared design elements (controls/patterns) on accept. */
   elements?: DesignElementRef[];
   /**
-   * Pinned elements the accepted mock EXCEEDS (needs a new capability/version).
-   * Drives the "evolve the element" directive instead of "mount the pinned element".
+   * Pinned elements the accepted mock EXCEEDS (needs a new capability/version)
+   * or that should COMPOSE a distinct sub-element instead of evolving.
+   * Drives the "evolve or compose" directive instead of "mount the pinned element".
    */
   capabilityGaps?: Array<{
     elementId: string;
     version: number;
     missingCapability: string;
     note: string;
+    /** When set, the mock composes this distinct sub-element rather than needing the pinned element to evolve. */
+    composeWith?: string;
   }>;
   /**
    * Operator/agent-facing evolve directive when capabilityGaps exist: extract a
@@ -412,21 +415,28 @@ export function compileDesignPackFromAccept(opts: {
     elements,
     projectRoot: opts.projectRoot,
   });
-  const gappedIds = new Set(capabilityGaps.map((g) => g.elementId));
+  const gapByElementId = new Map(
+    capabilityGaps.map((g) => [g.elementId, g]),
+  );
   const evolveDirective = capabilityGaps.length
     ? [
-        "EVOLVE shared elements before implement — the accepted mock needs capabilities the pinned versions lack:",
-        ...capabilityGaps.map(
-          (g) =>
-            `- ${g.elementId}@${g.version} needs ${g.missingCapability}: run design_element_extract (loopId=${opts.loopId}, elementId=${g.elementId}) to bump ${g.elementId} to @${g.version + 1}, then design_library_publish (or design_element_publish_npm) and pnpm add the new version in the consumer. Do NOT hand-roll the difference in the consumer.`,
+        "Resolve shared-element capability gaps before implement:",
+        ...capabilityGaps.map((g) =>
+          g.composeWith
+            ? `- COMPOSE ${g.composeWith} inside ${g.elementId}: the accepted mock marks ${g.composeWith} as a distinct sub-element that provides ${g.missingCapability}. Mount ${g.composeWith} inside the pinned ${g.elementId} shell — do NOT evolve ${g.elementId}@${g.version} or hand-roll the difference in the consumer. Extract ${g.composeWith} first (design_element_extract) only if it is not already in a library.`
+            : `- ${g.elementId}@${g.version} needs ${g.missingCapability}: run design_element_extract (loopId=${opts.loopId}, elementId=${g.elementId}) to bump ${g.elementId} to @${g.version + 1}, then design_library_publish (or design_element_publish_npm) and pnpm add the new version in the consumer. Do NOT hand-roll the difference in the consumer.`,
         ),
       ].join("\n")
     : undefined;
-  const elementMustNots = elements.map((e) =>
-    gappedIds.has(e.id)
-      ? `EVOLVE shared element ${e.id}: the accepted mock requires a capability ${e.id}@${e.version} lacks — extract ${e.id}@${e.version + 1} via design_element_extract, publish via design_library_publish, and consume the new version; do NOT hand-roll the difference in the consumer.`
-      : `Do not invent a competing control for shared element ${e.id}@${e.version} — mount the pinned element`,
-  );
+  const elementMustNots = elements.map((e) => {
+    const gap = gapByElementId.get(e.id);
+    if (!gap) {
+      return `Do not invent a competing control for shared element ${e.id}@${e.version} — mount the pinned element`;
+    }
+    return gap.composeWith
+      ? `COMPOSE sub-element ${gap.composeWith} inside shared element ${e.id}@${e.version}: the accepted mock marks ${gap.composeWith} as a distinct sub-element — mount it inside the pinned ${e.id} shell; do NOT evolve ${e.id} or hand-roll the difference in the consumer.`
+      : `EVOLVE shared element ${e.id}: the accepted mock requires a capability ${e.id}@${e.version} lacks — extract ${e.id}@${e.version + 1} via design_element_extract, publish via design_library_publish, and consume the new version; do NOT hand-roll the difference in the consumer.`;
+  });
 
   const selections = getDesignLoopSelections(meta).map((s) => ({
     ...s,
@@ -712,7 +722,7 @@ export function formatDesignPackPromptBlock(
     lines.push("");
   }
   if (pack.evolveDirective?.trim()) {
-    lines.push("### evolve (REQUIRED before implement — do not hand-roll)");
+    lines.push("### shared-element gaps (REQUIRED before implement — do not hand-roll)");
     lines.push(pack.evolveDirective.trim());
     lines.push("");
   }
