@@ -1496,6 +1496,15 @@ describe("project element-library package sync", () => {
       assert.ok(
         existsSync(join(pkgDir, "src", "components", "dashboard-shell", "index.ts")),
       );
+      const innerBarrel = readFileSync(
+        join(pkgDir, "src", "components", "dashboard-shell", "index.ts"),
+        "utf-8",
+      );
+      assert.match(innerBarrel, /export \* from "\.\/shell";/);
+      assert.ok(
+        !innerBarrel.includes("styles.css"),
+        "non-JS assets must not be re-exported (export * from './x.css' breaks tsup dts)",
+      );
       const barrel = readFileSync(
         join(pkgDir, "src", "components", "index.ts"),
         "utf-8",

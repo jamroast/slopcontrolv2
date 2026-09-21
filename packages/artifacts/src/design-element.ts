@@ -2868,7 +2868,11 @@ export function syncElementToProjectLibraryPackage(opts: {
     for (const [rel, body] of files) {
       const base = basename(rel);
       writeFileSync(join(dir, base), body, "utf-8");
-      names.push(base.replace(/\.(tsx|ts|jsx|js)$/, ""));
+      // Only JS/TS modules are re-exported — assets like .css have no ES
+      // exports and `export * from "./x.css"` breaks tsup dts (TS2307).
+      if (/\.(tsx|ts|jsx|js)$/.test(base)) {
+        names.push(base.replace(/\.(tsx|ts|jsx|js)$/, ""));
+      }
     }
     writeFileSync(
       join(dir, "index.ts"),
