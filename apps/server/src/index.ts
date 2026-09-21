@@ -8804,6 +8804,14 @@ app.post("/chats/:id/confirm", async (req, res) => {
       res.status(400).json({ error: "token and approve (boolean) required" });
       return;
     }
+    if (token === "all") {
+      const batch = await getChatService().confirmAll({
+        conversationId: req.params.id,
+        approve,
+      });
+      res.json(batch);
+      return;
+    }
     const result = await getChatService().confirm({
       conversationId: req.params.id,
       token,

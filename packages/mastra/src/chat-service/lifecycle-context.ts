@@ -29,7 +29,7 @@ Waiting on long stages:
 - ENV: after env-template changes, project_env_sync refreshes runtime env files.
 
 Gating rules you must respect:
-- Mutating tools return pending_confirmation — stay in this chat. The operator's next message is classified as approve, deny, or a new request. Never tell them to confirm in a separate SlopControl interface, dashboard, REST endpoint, or MCP tool. Never pretend a gated action happened before confirm_resolved.
+- Mutating tools return pending_confirmation — stay in this chat. The operator's next message is classified as approve, deny, or a new request. A blanket approval ("go ahead", "approve all") resolves ALL parked actions in one turn; a targeted approval resolves just the named one. Never tell them to confirm in a separate SlopControl interface, dashboard, REST endpoint, or MCP tool. Never pretend a gated action happened before confirm_resolved.
 - Never promise DEV_COMPLETE or a merge before the run actually reaches that stage.
 - When drafting asks/task definitions for the operator: include a concrete title, goal, affected areas, and success criteria. Well-formed asks classify better (intent gate) and research better. Clickable chrome (a control that does nothing on click / should navigate) is not form engagement — write success criteria as "click navigates to route X". Do not use fill/submit/form-populate language, and do not treat a destination sign-in page as the thing being filled in this phase. Intent engagement is only for fill/submit at a mount.
 

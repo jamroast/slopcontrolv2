@@ -947,6 +947,57 @@ describe("ChatService in-chat LLM confirm intercept", () => {
     }
   });
 
+  it("confirmAll resolves every parked action in parked order", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, events, cleanup } = makeService({
+      dispatch: async (name, args) => {
+        dispatched.push({ name, args });
+        return { content: [{ type: "text", text: '{"ok":true}' }] };
+      },
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      park(service, conv, "design_element_extract", { elementId: "a" });
+      park(service, conv, "design_element_extract", { elementId: "b" });
+
+      const result = await service.confirmAll({
+        conversationId: conv.id,
+        approve: true,
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.results.length, 2);
+      assert.deepEqual(
+        dispatched.map((d) => d.args.elementId),
+        ["a", "b"],
+      );
+      assert.equal(
+        events.filter(
+          (e) => e.type === "confirm_resolved" && e.approved === true,
+        ).length,
+        2,
+      );
+      assert.equal(service.listPendingForConversation(conv.id).length, 0);
+      assert.match(result.reply, /design_element_extract/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("confirmAll with nothing parked returns a friendly error", async () => {
+    const { service, cleanup } = makeService({});
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const result = await service.confirmAll({
+        conversationId: conv.id,
+        approve: true,
+      });
+      assert.equal(result.ok, false);
+      assert.match(result.error ?? "", /No pending confirmations/);
+    } finally {
+      cleanup();
+    }
+  });
+
   it("deny skips dispatch and clears the parked action", async () => {
     let dispatched = false;
     const { service, events, cleanup } = makeService({

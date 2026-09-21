@@ -2277,7 +2277,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "chat_confirm",
       description:
-        "Approve or deny a pending confirmation-gated action in a chat conversation (token comes from a confirm_request event / chat_send transcript).",
+        "Approve or deny a pending confirmation-gated action in a chat conversation (token comes from a confirm_request event / chat_send transcript). Pass token \"all\" to resolve EVERY pending confirmation in the conversation at once (batch approve/deny) — use this when the agent parked several actions and the operator approved them all.",
       inputSchema: {
         type: "object",
         properties: {

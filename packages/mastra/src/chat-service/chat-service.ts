@@ -1392,6 +1392,64 @@ export class ChatService {
     return { ok: !failed, error: failed ? text : undefined, reply: text };
   }
 
+  /**
+   * Resolve EVERY parked gated action for a conversation (batch approve/deny)
+   * — the REST/MCP counterpart of the in-chat blanket confirm. Each action
+   * goes through confirm() in parked order, so events and synthetic-turn
+   * recording match single confirms.
+   */
+  async confirmAll(opts: {
+    conversationId: string;
+    approve: boolean;
+  }): Promise<{
+    ok: boolean;
+    results: Array<{
+      token: string;
+      tool: string;
+      ok: boolean;
+      reply?: string;
+      error?: string;
+    }>;
+    reply: string;
+    error?: string;
+  }> {
+    const parked = this.listPendingForConversation(opts.conversationId);
+    if (parked.length === 0) {
+      return {
+        ok: false,
+        results: [],
+        reply: "No pending confirmations for this conversation",
+        error: "No pending confirmations for this conversation",
+      };
+    }
+    const results: Array<{
+      token: string;
+      tool: string;
+      ok: boolean;
+      reply?: string;
+      error?: string;
+    }> = [];
+    for (const action of parked) {
+      const r = await this.confirm({
+        conversationId: opts.conversationId,
+        token: action.token,
+        approve: opts.approve,
+      });
+      results.push({
+        token: action.token,
+        tool: action.tool,
+        ok: r.ok,
+        reply: r.reply,
+        error: r.error,
+      });
+    }
+    const ok = results.every((r) => r.ok);
+    const reply = results
+      .map((r) => `${r.ok ? "✓" : "✗"} ${r.tool}: ${r.reply ?? r.error ?? ""}`)
+      .join("\n\n");
+    return { ok, results, reply };
+  }
+
   listPendingForConversation(conversationId: string): PendingAction[] {
     const now = Date.now();
     const out: PendingAction[] = [];
