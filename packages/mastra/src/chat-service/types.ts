@@ -24,6 +24,7 @@ export interface ChatEvent {
     | "tool_result"
     | "confirm_request"
     | "confirm_resolved"
+    | "pending_expired"
     | "status"
     | "done"
     | "error"

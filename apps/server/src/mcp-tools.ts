@@ -5164,6 +5164,10 @@ export async function dispatchSlopcontrolTool(
                     token: event.token,
                     tool: event.tool,
                   });
+                } else if (event.type === "pending_expired") {
+                  transcript.push(
+                    `⚠ confirmation expired without a decision: ${event.tool}`,
+                  );
                 } else if (event.type === "done" && event.text) {
                   reply = event.text;
                 } else if (event.type === "error") {

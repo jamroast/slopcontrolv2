@@ -866,6 +866,87 @@ describe("ChatService in-chat LLM confirm intercept", () => {
     }
   });
 
+  it("blanket approve dispatches every parked action in one turn", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, events, cleanup } = makeService({
+      dispatch: async (name, args) => {
+        dispatched.push({ name, args });
+        return { content: [{ type: "text", text: '{"ok":true}' }] };
+      },
+      classifyConfirm: async ({ parked }) => ({
+        decision: "approve" as const,
+        tokens: parked.map((p) => p.token),
+      }),
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      park(service, conv, "design_element_extract", { elementId: "a" });
+      park(service, conv, "design_element_extract", { elementId: "b" });
+      park(service, conv, "design_element_extract", { elementId: "c" });
+
+      const { error } = await drainSend(service, conv.id, "go ahead, all of them");
+      assert.deepEqual(
+        dispatched.map((d) => d.args.elementId),
+        ["a", "b", "c"],
+      );
+      assert.equal(
+        events.filter(
+          (e) => e.type === "confirm_resolved" && e.approved === true,
+        ).length,
+        3,
+      );
+      assert.equal(service.listPendingForConversation(conv.id).length, 0);
+      assert.ok(error, "turn proceeds after confirm (memory stub throws)");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("single-token approve with several parked resolves only that action", async () => {
+    const dispatched: { name: string; args: Record<string, unknown> }[] = [];
+    const { service, cleanup } = makeService({
+      dispatch: async (name, args) => {
+        dispatched.push({ name, args });
+        return { content: [{ type: "text", text: '{"ok":true}' }] };
+      },
+      classifyConfirm: async ({ parked }) => ({
+        decision: "approve" as const,
+        token: parked[1]!.token,
+      }),
+    });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      park(service, conv, "design_element_extract", { elementId: "a" });
+      park(service, conv, "design_element_extract", { elementId: "b" });
+
+      await drainSend(service, conv.id, "just the second one");
+      assert.deepEqual(
+        dispatched.map((d) => d.args.elementId),
+        ["b"],
+      );
+      assert.equal(service.listPendingForConversation(conv.id).length, 1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("expired parked actions emit pending_expired", async () => {
+    const { service, events, cleanup } = makeService({ confirmTimeoutMs: 1 });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      park(service, conv, "agent", { prompt: "x" });
+      await new Promise((r) => setTimeout(r, 5));
+      assert.equal(service.listPendingForConversation(conv.id).length, 0);
+      assert.ok(
+        events.some(
+          (e) => e.type === "pending_expired" && e.tool === "agent",
+        ),
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
   it("deny skips dispatch and clears the parked action", async () => {
     let dispatched = false;
     const { service, events, cleanup } = makeService({

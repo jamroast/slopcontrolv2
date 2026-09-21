@@ -38,12 +38,72 @@ describe("chat-confirm-llm", () => {
     );
   });
 
+  it("schema accepts a tokens array for blanket decisions", () => {
+    assert.deepEqual(
+      ChatConfirmClassificationSchema.parse({
+        decision: "approve",
+        tokens: ["a", "b"],
+      }),
+      { decision: "approve", tokens: ["a", "b"] },
+    );
+  });
+
+  it("system prompt teaches blanket-approval tokens", () => {
+    assert.ok(CHAT_CONFIRM_SYSTEM_PROMPT.includes("tokens"));
+    assert.ok(CHAT_CONFIRM_SYSTEM_PROMPT.includes("Blanket go-aheads"));
+    assert.ok(CHAT_CONFIRM_SYSTEM_PROMPT.includes("ALL"));
+  });
+
   it("implies token when exactly one action is parked", () => {
     const out = normalizeChatConfirmClassification(
       { decision: "approve" },
       [{ token: "tok-1", tool: "agent" }],
     );
-    assert.deepEqual(out, { decision: "approve", token: "tok-1" });
+    assert.deepEqual(out, { decision: "approve", tokens: ["tok-1"] });
+  });
+
+  it("blanket approve resolves every parked token", () => {
+    const out = normalizeChatConfirmClassification(
+      { decision: "approve", tokens: ["a", "b"] },
+      [
+        { token: "a", tool: "design_element_extract" },
+        { token: "b", tool: "design_element_extract" },
+      ],
+    );
+    assert.deepEqual(out, { decision: "approve", tokens: ["a", "b"] });
+  });
+
+  it("merges token and tokens, deduped", () => {
+    const out = normalizeChatConfirmClassification(
+      { decision: "approve", token: "a", tokens: ["a", "b"] },
+      [
+        { token: "a", tool: "agent" },
+        { token: "b", tool: "promote_ask" },
+      ],
+    );
+    assert.deepEqual(out, { decision: "approve", tokens: ["a", "b"] });
+  });
+
+  it("drops unknown tokens but keeps valid parked ones", () => {
+    const out = normalizeChatConfirmClassification(
+      { decision: "approve", tokens: ["a", "nope"] },
+      [
+        { token: "a", tool: "agent" },
+        { token: "b", tool: "promote_ask" },
+      ],
+    );
+    assert.deepEqual(out, { decision: "approve", tokens: ["a"] });
+  });
+
+  it("fails closed when every listed token is unknown", () => {
+    const out = normalizeChatConfirmClassification(
+      { decision: "approve", tokens: ["x", "y"] },
+      [
+        { token: "a", tool: "agent" },
+        { token: "b", tool: "promote_ask" },
+      ],
+    );
+    assert.equal(out.decision, "unrelated");
   });
 
   it("fails closed when several parked actions have no token", () => {

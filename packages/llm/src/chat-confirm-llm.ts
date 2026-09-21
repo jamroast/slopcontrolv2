@@ -7,6 +7,7 @@ export const ChatConfirmDecisionSchema = z.enum(["approve", "deny", "unrelated"]
 export const ChatConfirmClassificationSchema = z.object({
   decision: ChatConfirmDecisionSchema,
   token: z.string().min(1).optional(),
+  tokens: z.array(z.string().min(1)).optional(),
 });
 
 export type ChatConfirmClassification = z.infer<
@@ -25,17 +26,20 @@ Output ONLY a single JSON object. No prose, no markdown fences.
 
 Schema:
 - decision: "approve" | "deny" | "unrelated"
-- token: string — required when more than one parked action is listed and decision is approve or deny. When there is exactly one parked action, omit token (it is implied).
+- token: string — when the operator's decision addresses exactly ONE of several parked actions, set token to that action's token.
+- tokens: string[] — when the operator's decision addresses ALL parked actions at once (blanket approval/denial), list every parked token here.
+- When there is exactly one parked action, omit token/tokens (it is implied).
 
 Meaning:
-- approve: the operator wants the parked action to proceed now (they are authorizing that specific tool call).
-- deny: the operator wants the parked action cancelled / not run.
+- approve: the operator wants the parked action(s) to proceed now (they are authorizing those tool calls).
+- deny: the operator wants the parked action(s) cancelled / not run.
 - unrelated: the message is a new question, a clarification, a different task, or anything that is not a decision about the parked action.
 
 Rules:
 - Judge intent, not keywords. Short authorizations, explicit go-aheads, and restatements of "do that investigation/action" are approve when they clearly refer to the parked tool.
+- Blanket go-aheads ("go ahead", "yes", "do it", "approve all", "confirm all", "both", "all of them") in reply to a batch of parked actions approve ALL of them — return every parked token in tokens.
 - A new problem statement, a different phase, or "wait, first tell me X" is unrelated even if polite.
-- If two parked actions exist and the operator only addresses one, set token to that action's token.
+- If several parked actions exist and the operator only addresses one, set token to that action's token.
 - If you cannot tell which action they mean, decision=unrelated.
 - Never invent a token that is not in the parked-action list.
 `;
@@ -91,24 +95,31 @@ export async function classifyChatConfirmViaLlm(
   return normalizeChatConfirmClassification(classified, opts.parked);
 }
 
-/** Bind/drop token after JSON parse. Unknown or missing token → unrelated. */
+/**
+ * Bind/drop tokens after JSON parse. Returns a validated `tokens` list for
+ * approve/deny. Unknown tokens are dropped; when none survive (or none were
+ * given with several parked) fail closed to unrelated.
+ */
 export function normalizeChatConfirmClassification(
   classified: ChatConfirmClassification,
   parked: ParkedChatAction[],
 ): ChatConfirmClassification {
   if (parked.length === 0) return { decision: "unrelated" };
+  if (classified.decision === "unrelated") return { decision: "unrelated" };
   const allowed = new Set(parked.map((p) => p.token));
-  if (classified.token && !allowed.has(classified.token)) {
-    return { decision: "unrelated" };
-  }
+  const requested = [
+    ...(classified.tokens ?? []),
+    ...(classified.token ? [classified.token] : []),
+  ];
+  const valid = [...new Set(requested.filter((t) => allowed.has(t)))];
   if (parked.length === 1) {
-    return { decision: classified.decision, token: parked[0]!.token };
+    // An explicit but unknown token fails closed; otherwise the single
+    // parked action is implied.
+    if (requested.length > 0 && valid.length === 0) {
+      return { decision: "unrelated" };
+    }
+    return { decision: classified.decision, tokens: [parked[0]!.token] };
   }
-  if (
-    (classified.decision === "approve" || classified.decision === "deny") &&
-    !classified.token
-  ) {
-    return { decision: "unrelated" };
-  }
-  return classified;
+  if (valid.length === 0) return { decision: "unrelated" };
+  return { decision: classified.decision, tokens: valid };
 }

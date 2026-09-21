@@ -1399,6 +1399,18 @@ export class ChatService {
       if (action.conversationId !== conversationId) continue;
       if (now > action.expiresAt) {
         this.pending.delete(token);
+        const conv = this.deps.store.getConversation(action.conversationId);
+        this.emit(
+          { id: action.conversationId, projectId: conv?.projectId ?? null },
+          {
+            type: "pending_expired",
+            tool: action.tool,
+            token,
+            summary:
+              `${action.tool} confirmation expired without a decision — ` +
+              `ask the agent to re-run it if still needed.`,
+          },
+        );
         continue;
       }
       out.push(action);
@@ -1409,6 +1421,7 @@ export class ChatService {
   /**
    * When gated actions are parked, classify the operator's next message.
    * Approve/deny goes through confirm(); unrelated leaves them parked.
+   * A blanket approve/deny resolves every matched parked action in one turn.
    * Classifier throw → unrelated (never auto-approve).
    */
   private async maybeResolvePendingConfirm(
@@ -1436,29 +1449,45 @@ export class ChatService {
       return null;
     }
     if (classified.decision === "unrelated") return null;
-    const token =
-      classified.token ??
-      (parked.length === 1 ? parked[0]!.token : undefined);
-    if (!token) return null;
-    const action = parked.find((p) => p.token === token);
-    const confirmed = await this.confirm({
-      conversationId: conversation.id,
-      token,
-      approve: classified.decision === "approve",
-      skipSynthetic: true,
-    });
-    if (!confirmed.ok && classified.decision === "approve" && !confirmed.reply) {
-      return buildConfirmedTurnPrefix({
-        tool: action?.tool ?? "tool",
-        approve: false,
-        resultText: confirmed.error ?? "confirmation failed",
+    const tokens =
+      classified.tokens && classified.tokens.length > 0
+        ? classified.tokens
+        : classified.token
+          ? [classified.token]
+          : parked.length === 1
+            ? [parked[0]!.token]
+            : [];
+    if (tokens.length === 0) return null;
+    const approve = classified.decision === "approve";
+    const prefixes: string[] = [];
+    for (const token of tokens) {
+      const action = parked.find((p) => p.token === token);
+      if (!action) continue;
+      const confirmed = await this.confirm({
+        conversationId: conversation.id,
+        token,
+        approve,
+        skipSynthetic: true,
       });
+      if (!confirmed.ok && approve && !confirmed.reply) {
+        prefixes.push(
+          buildConfirmedTurnPrefix({
+            tool: action.tool,
+            approve: false,
+            resultText: confirmed.error ?? "confirmation failed",
+          }),
+        );
+        continue;
+      }
+      prefixes.push(
+        buildConfirmedTurnPrefix({
+          tool: action.tool,
+          approve,
+          resultText: confirmed.reply ?? confirmed.error ?? "",
+        }),
+      );
     }
-    return buildConfirmedTurnPrefix({
-      tool: action?.tool ?? "tool",
-      approve: classified.decision === "approve",
-      resultText: confirmed.reply ?? confirmed.error ?? "",
-    });
+    return prefixes.length > 0 ? prefixes.join("\n\n") : null;
   }
 
   private async classifyPendingViaLlm(
