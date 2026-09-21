@@ -103,6 +103,7 @@ import {
   registryElementsRoot,
   removeDesignElement,
   removeElementFromProjectLibraryPackage,
+  resyncElementToProjectLibraryPackage,
   ensureNpmRegistryLayout,
   ensureProjectNpmrc,
   listNpmRegistryPackages,
@@ -5247,12 +5248,19 @@ app.get("/projects/:id/design-elements", (req, res) => {
     return;
   }
   const includeRegistry = req.query.includeRegistry !== "false";
+  const registryElements = includeRegistry
+    ? listRegistryElements(defaultDataDir())
+    : [];
+  const registryLatest = new Map(registryElements.map((e) => [e.id, e.latestVersion]));
   res.json({
     projectId: project.id,
-    projectElements: listProjectElements(project.rootPath),
-    registryElements: includeRegistry
-      ? listRegistryElements(defaultDataDir())
-      : [],
+    // registryLatestVersion sits next to latestVersion so a project/registry
+    // version skew (e.g. project v1 vs registry v2) is visible at a glance.
+    projectElements: listProjectElements(project.rootPath).map((e) => ({
+      ...e,
+      registryLatestVersion: registryLatest.get(e.id) ?? null,
+    })),
+    registryElements,
     projectLibrary: projectElementsRoot(project.rootPath),
     registryLibrary: registryElementsRoot(defaultDataDir()),
   });
@@ -5352,6 +5360,41 @@ app.post("/projects/:id/design-elements/publish", (req, res) => {
       error: err instanceof Error ? err.message : String(err),
     });
   }
+});
+
+/**
+ * Re-sync an element's on-disk src/ into the project's element-library
+ * package (regenerates the components barrel) WITHOUT re-publishing the
+ * element — repairs generated files after a generator fix, with no content
+ * round-trip through chat/LLM.
+ */
+app.post("/projects/:id/design-elements/:elementId/resync", (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const version =
+    typeof req.body?.version === "number" && Number.isInteger(req.body.version)
+      ? req.body.version
+      : undefined;
+  const result = resyncElementToProjectLibraryPackage({
+    projectRoot: project.rootPath,
+    elementId: req.params.elementId,
+    version,
+  });
+  if (!result.synced) {
+    res.status(400).json(result);
+    return;
+  }
+  res.json({
+    ok: true,
+    ...result,
+    note:
+      result.changedFiles && result.changedFiles.length > 0
+        ? `Library package ${result.packagePath} updated (${result.changedFiles.length} file(s)) — if it was published before, its registry dist is now stale: republish with project_workspace_package_publish to propagate.`
+        : `Library package ${result.packagePath} already up to date.`,
+  });
 });
 
 /**

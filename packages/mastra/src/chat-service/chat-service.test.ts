@@ -947,6 +947,45 @@ describe("ChatService in-chat LLM confirm intercept", () => {
     }
   });
 
+  it("active timer emits pending_expired with no listPending call", async () => {
+    const { service, events, cleanup } = makeService({ confirmTimeoutMs: 5 });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      park(service, conv, "agent", { prompt: "x" });
+      await new Promise((r) => setTimeout(r, 40));
+      assert.ok(
+        events.some(
+          (e) => e.type === "pending_expired" && e.tool === "agent",
+        ),
+      );
+      // Exactly once — the lazy sweep must not double-emit.
+      assert.equal(
+        events.filter((e) => e.type === "pending_expired").length,
+        1,
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("confirming before expiry cancels the timer (no pending_expired)", async () => {
+    const { service, events, cleanup } = makeService({ confirmTimeoutMs: 20 });
+    try {
+      const conv = service.createConversation({ projectId: "p1" });
+      const token = park(service, conv, "promote_ask", { askId: "a1" });
+      await service.confirm({
+        conversationId: conv.id,
+        token,
+        approve: true,
+        skipSynthetic: true,
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      assert.ok(!events.some((e) => e.type === "pending_expired"));
+    } finally {
+      cleanup();
+    }
+  });
+
   it("confirmAll resolves every parked action in parked order", async () => {
     const dispatched: { name: string; args: Record<string, unknown> }[] = [];
     const { service, events, cleanup } = makeService({

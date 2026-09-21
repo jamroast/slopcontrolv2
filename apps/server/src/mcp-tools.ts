@@ -1658,6 +1658,20 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "design_element_resync",
+      description:
+        "Re-sync an element's on-disk src/ (project library, latest or given version) into the project's element-library package — regenerates the components barrel WITHOUT re-publishing the element or round-tripping its content. Use to repair generated files (e.g. a broken barrel) after a SlopControl generator fix. Requires elementId; optional version. When the result reports changedFiles, republish the library package with project_workspace_package_publish to propagate.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          elementId: { type: "string" },
+          version: { type: "number" },
+        },
+        required: ["projectId", "elementId"],
+      },
+    },
+    {
       name: "list_extractable_design_elements",
       description:
         "List extractable shared-element candidates from a design-loop mock (data-element markers + known chrome: menubar, theme-toggle, user-pill, …). Use returned id/label with design_element_extract. Pass loopId explicitly — do NOT rely on this chat's design-loop latch. When the operator names a specific version (e.g. 'extract v9'), pass that version.",
@@ -4084,6 +4098,25 @@ export async function dispatchSlopcontrolTool(
           content: [{ type: "text", text: body }],
           isError: !res.ok,
         };
+      });
+    }
+
+    if (name === "design_element_resync") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const elementId = String(args.elementId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-elements/${encodeURIComponent(elementId)}/resync`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              version: typeof args.version === "number" ? args.version : undefined,
+            }),
+          },
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
       });
     }
 

@@ -128,6 +128,7 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   "npm_registry_publish",
   "design_element_publish",
   "design_element_publish_npm",
+  "design_element_resync",
   "design_element_extract",
   "design_element_import",
   "design_library_publish",
@@ -548,6 +549,11 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     version: z.number().int().positive().optional(),
     origin: optionalString,
   }),
+  design_element_resync: z.object({
+    projectId: optionalProject,
+    elementId: z.string().min(1),
+    version: z.number().int().positive().optional(),
+  }),
   design_element_publish: z.object({
     projectId: optionalProject,
     elementId: z.string().min(1),
@@ -667,6 +673,8 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Publish a design element into the project library (A/C). Set publishToRegistry=true to also write the global registry (B). Provide elementId + spec + mockHtml; optional srcFiles for TS/JS.",
   design_element_publish_npm:
     "Scaffold @<scope>/<elementId> from a design element's src/ and publish it to the private npm registry. Prefer after design_element_extract/publish.",
+  design_element_resync:
+    "Re-sync an element's on-disk src/ (project library, latest or given version) into the project's element-library package — regenerates the components barrel WITHOUT re-publishing the element or needing its content. Use to repair generated files (e.g. a broken barrel) after a SlopControl generator fix. Requires elementId. When the result reports changedFiles, republish the library package with project_workspace_package_publish to propagate.",
   stop_session:
     "Interrupt a live ask/agent/design_loop/plan_loop turn. Requires kind and id.",
   web_search:

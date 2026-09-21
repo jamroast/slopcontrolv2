@@ -40,6 +40,7 @@ import {
   projectElementsRoot,
   registryElementsRoot,
   syncElementToProjectLibraryPackage,
+  resyncElementToProjectLibraryPackage,
   removeElementFromProjectLibraryPackage,
   removeDesignElement,
 } from "./design-element.js";
@@ -1510,6 +1511,105 @@ describe("project element-library package sync", () => {
         "utf-8",
       );
       assert.match(barrel, /export \* from "\.\/dashboard-shell";/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("publish reports librarySync changedFiles + stale-publish note", () => {
+    const { root } = makeAppWithLibrary("sync-stale-note");
+    try {
+      const meta = publishDesignElement({
+        projectRoot: root,
+        elementId: "theme-toggle",
+        label: "Theme toggle",
+        spec: "# Theme toggle\n",
+        mockHtml: "<button class='theme-toggle'></button>",
+        srcFiles: { "theme-toggle.ts": "export const x = 1;\n" },
+      });
+      assert.ok(meta.librarySync);
+      assert.equal(meta.librarySync!.packagePath, "packages/app-components");
+      assert.ok(meta.librarySync!.changedFiles.length > 0);
+      assert.match(meta.librarySync!.note ?? "", /stale/);
+      assert.match(meta.librarySync!.note ?? "", /project_workspace_package_publish/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resync repairs a broken barrel from the on-disk element src/", () => {
+    const { root, pkgDir } = makeAppWithLibrary("resync-repair");
+    try {
+      publishDesignElement({
+        projectRoot: root,
+        elementId: "theme-toggle",
+        label: "Theme toggle",
+        spec: "# Theme toggle\n",
+        mockHtml: "<button class='theme-toggle'></button>",
+        srcFiles: {
+          "theme-toggle.ts": "export const ThemeToggle = () => null;",
+          "theme-toggle.css": ".toggle {}",
+        },
+      });
+      const innerBarrel = join(
+        pkgDir,
+        "src",
+        "components",
+        "theme-toggle",
+        "index.ts",
+      );
+      const healthy = readFileSync(innerBarrel, "utf-8");
+      assert.ok(!healthy.includes(".css"));
+      // Simulate a barrel written by an older, broken generator.
+      writeFileSync(innerBarrel, 'export * from "./theme-toggle.css";\n');
+
+      const res = resyncElementToProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "theme-toggle",
+      });
+      assert.equal(res.synced, true);
+      assert.equal(res.elementVersion, 1);
+      assert.equal(res.packagePath, "packages/app-components");
+      assert.ok(
+        res.changedFiles?.some((f) => f.endsWith("theme-toggle/index.ts")),
+      );
+      assert.equal(readFileSync(innerBarrel, "utf-8"), healthy);
+
+      // Idempotent: a second resync changes nothing.
+      const again = resyncElementToProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "theme-toggle",
+      });
+      assert.equal(again.synced, true);
+      assert.deepEqual(again.changedFiles, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("resync fails cleanly for an unknown element or one without src/", () => {
+    const { root } = makeAppWithLibrary("resync-errors");
+    try {
+      const missing = resyncElementToProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "nope",
+      });
+      assert.equal(missing.synced, false);
+      assert.match(missing.error ?? "", /not found/);
+
+      publishDesignElement({
+        projectRoot: root,
+        elementId: "spec-only",
+        label: "Spec only",
+        spec: "# Spec\n",
+        mockHtml: "<div></div>",
+      });
+      const noSrc = resyncElementToProjectLibraryPackage({
+        projectRoot: root,
+        elementId: "spec-only",
+      });
+      assert.equal(noSrc.synced, false);
+      assert.match(noSrc.error ?? "", /no src\//);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

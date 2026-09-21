@@ -155,7 +155,7 @@ import {
   type LiveTurnProgressEvent,
 } from "./live-turn-chat.js";
 
-const DEFAULT_CONFIRM_TIMEOUT_MS = 10 * 60 * 1_000;
+const DEFAULT_CONFIRM_TIMEOUT_MS = 60 * 60 * 1_000;
 const DEFAULT_TURN_TIMEOUT_MS = 720_000;
 const MAX_STEPS = 16;
 const SYSTEM_TURN_MAX_STEPS = 1;
@@ -251,6 +251,7 @@ export class ConversationNotFoundError extends Error {
 export class ChatService {
   private readonly emitter = new EventEmitter();
   private readonly pending = new Map<string, PendingAction>();
+  private readonly pendingTimers = new Map<string, NodeJS.Timeout>();
   private readonly confirmTimeoutMs: number;
   private readonly turnTimeoutMs: number;
   private readonly waitTimeoutMs: number;
@@ -1246,6 +1247,11 @@ export class ChatService {
       createdAt: now,
       expiresAt: now + this.confirmTimeoutMs,
     });
+    const timer = setTimeout(() => {
+      this.expirePendingAction(token);
+    }, this.confirmTimeoutMs);
+    timer.unref?.();
+    this.pendingTimers.set(token, timer);
     this.emit(conversation, {
       type: "confirm_request",
       tool,
@@ -1256,11 +1262,45 @@ export class ChatService {
     return { token };
   }
 
+  private clearPendingTimer(token: string): void {
+    const timer = this.pendingTimers.get(token);
+    if (timer) {
+      clearTimeout(timer);
+      this.pendingTimers.delete(token);
+    }
+  }
+
+  /**
+   * Active expiry: fires the moment a parked action lapses so the operator
+   * sees pending_expired immediately, not lazily on the next message.
+   * Idempotent — the lazy paths (getPendingAction/listPendingForConversation)
+   * no-op once the action is gone.
+   */
+  private expirePendingAction(token: string): void {
+    const action = this.pending.get(token);
+    this.clearPendingTimer(token);
+    if (!action) return;
+    this.pending.delete(token);
+    const conv = this.deps.store.getConversation(action.conversationId);
+    this.emit(
+      { id: action.conversationId, projectId: conv?.projectId ?? null },
+      {
+        type: "pending_expired",
+        tool: action.tool,
+        token,
+        summary:
+          `${action.tool} confirmation expired without a decision — ` +
+          `ask the agent to re-run it if still needed.`,
+      },
+    );
+  }
+
   getPendingAction(token: string): PendingAction | undefined {
     const action = this.pending.get(token);
     if (!action) return undefined;
     if (Date.now() > action.expiresAt) {
       this.pending.delete(token);
+      this.clearPendingTimer(token);
       return undefined;
     }
     return action;
@@ -1284,6 +1324,7 @@ export class ChatService {
       return { ok: false, error: "Unknown or expired confirmation token" };
     }
     this.pending.delete(opts.token);
+    this.clearPendingTimer(opts.token);
 
     if (!opts.approve) {
       const deniedRunId =
@@ -1456,19 +1497,8 @@ export class ChatService {
     for (const [token, action] of this.pending) {
       if (action.conversationId !== conversationId) continue;
       if (now > action.expiresAt) {
-        this.pending.delete(token);
-        const conv = this.deps.store.getConversation(action.conversationId);
-        this.emit(
-          { id: action.conversationId, projectId: conv?.projectId ?? null },
-          {
-            type: "pending_expired",
-            tool: action.tool,
-            token,
-            summary:
-              `${action.tool} confirmation expired without a decision — ` +
-              `ask the agent to re-run it if still needed.`,
-          },
-        );
+        // Lazy sweep fallback — the active timer normally beats this.
+        this.expirePendingAction(token);
         continue;
       }
       out.push(action);

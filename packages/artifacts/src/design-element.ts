@@ -1209,9 +1209,15 @@ export type PublishDesignElementOpts = {
   status?: "draft" | "published";
 };
 
+export type LibrarySyncInfo = {
+  packagePath: string;
+  changedFiles: string[];
+  note?: string;
+};
+
 export function publishDesignElement(
   opts: PublishDesignElementOpts,
-): DesignElementMeta {
+): DesignElementMeta & { librarySync?: LibrarySyncInfo } {
   const id = slugElementId(opts.elementId);
   const libraryRoot = projectElementsRoot(opts.projectRoot);
   mkdirSync(libraryRoot, { recursive: true });
@@ -1319,19 +1325,35 @@ export function publishDesignElement(
     upsertIndexEntry(regRoot, meta);
   }
 
+  let librarySync: LibrarySyncInfo | undefined;
   if (hasCode) {
     try {
-      syncElementToProjectLibraryPackage({
+      const sync = syncElementToProjectLibraryPackage({
         projectRoot: opts.projectRoot,
         elementId: id,
         srcFiles,
       });
+      if (sync.synced && sync.packagePath) {
+        librarySync = {
+          packagePath: sync.packagePath,
+          changedFiles: sync.changedFiles,
+          ...(sync.changedFiles.length > 0
+            ? {
+                note:
+                  `Element-library package ${sync.packagePath} updated ` +
+                  `(${sync.changedFiles.length} file(s)) — if it was published ` +
+                  `before, its registry dist is now stale: republish with ` +
+                  `project_workspace_package_publish to propagate.`,
+              }
+            : {}),
+        };
+      }
     } catch {
       /* element-library sync best-effort */
     }
   }
 
-  return meta;
+  return librarySync ? { ...meta, librarySync } : meta;
 }
 
 /** Extract a theme-toggle (or generic control) snippet from full mock HTML. */
@@ -2411,7 +2433,7 @@ export function extractAndPublishDesignElementFromLoop(opts: {
   dataDir?: string;
   sourceProjectId?: string;
   srcFiles?: Record<string, string>;
-}): DesignElementMeta {
+}): DesignElementMeta & { librarySync?: LibrarySyncInfo } {
   const meta = readDesignLoopMeta(opts.projectRoot, opts.loopId);
   if (!meta) throw new Error(`Design loop not found: ${opts.loopId}`);
   const version = opts.version ?? meta.currentVersion;
@@ -2840,52 +2862,133 @@ function regenerateComponentBarrel(componentsDir: string): void {
  * Sync an element's src/ into the project's element-library package (flat:
  * single file → src/components/<element-id>.<ext>; multi-file →
  * src/components/<element-id>/). Regenerates the components barrel.
+ * `changedFiles` lists the package-relative paths whose bytes actually
+ * changed — when non-empty and the package was published before, its
+ * registry dist is stale and should be republished.
  */
 export function syncElementToProjectLibraryPackage(opts: {
   projectRoot: string;
   elementId: string;
   srcFiles: Record<string, string>;
-}): { synced: boolean; packagePath?: string } {
+}): { synced: boolean; packagePath?: string; changedFiles: string[] } {
   const packagePath = readElementLibraryPackagePath(opts.projectRoot);
-  if (!packagePath) return { synced: false };
+  if (!packagePath) return { synced: false, changedFiles: [] };
   const packageDir = join(opts.projectRoot, packagePath);
-  if (!existsSync(join(packageDir, "package.json"))) return { synced: false };
+  if (!existsSync(join(packageDir, "package.json")))
+    return { synced: false, changedFiles: [] };
   const id = slugElementId(opts.elementId);
   const files = Object.entries(opts.srcFiles).filter(([, b]) => b.trim());
-  if (files.length === 0) return { synced: false };
+  if (files.length === 0) return { synced: false, changedFiles: [] };
 
   const componentsDir = join(packageDir, "src", "components");
   mkdirSync(componentsDir, { recursive: true });
+  const changedFiles: string[] = [];
+  const writeIfChanged = (path: string, body: string): void => {
+    let prior: string | null = null;
+    try {
+      prior = readFileSync(path, "utf-8");
+    } catch {
+      prior = null;
+    }
+    if (prior === body) return;
+    writeFileSync(path, body, "utf-8");
+    changedFiles.push(path.slice(packageDir.length + 1));
+  };
 
   if (files.length === 1) {
     const [rel, body] = files[0]!;
     const ext = extname(rel) || ".tsx";
-    writeFileSync(join(componentsDir, `${id}${ext}`), body, "utf-8");
+    writeIfChanged(join(componentsDir, `${id}${ext}`), body);
   } else {
     const dir = join(componentsDir, id);
     mkdirSync(dir, { recursive: true });
     const names: string[] = [];
     for (const [rel, body] of files) {
       const base = basename(rel);
-      writeFileSync(join(dir, base), body, "utf-8");
+      writeIfChanged(join(dir, base), body);
       // Only JS/TS modules are re-exported — assets like .css have no ES
       // exports and `export * from "./x.css"` breaks tsup dts (TS2307).
       if (/\.(tsx|ts|jsx|js)$/.test(base)) {
         names.push(base.replace(/\.(tsx|ts|jsx|js)$/, ""));
       }
     }
-    writeFileSync(
+    writeIfChanged(
       join(dir, "index.ts"),
       `// auto-generated — re-exports for ${id}\n${names
         .sort()
         .map((n) => `export * from "./${n}";`)
         .join("\n")}\n`,
-      "utf-8",
     );
   }
 
   regenerateComponentBarrel(componentsDir);
-  return { synced: true, packagePath };
+  return { synced: true, packagePath, changedFiles };
+}
+
+/**
+ * Re-sync an element's on-disk src/ (project library, latest or given
+ * version) into the element-library package — repairs generated files
+ * (e.g. the components barrel) after a generator fix WITHOUT re-publishing
+ * the element or round-tripping its content through a chat/LLM.
+ */
+export function resyncElementToProjectLibraryPackage(opts: {
+  projectRoot: string;
+  elementId: string;
+  version?: number;
+}): {
+  synced: boolean;
+  packagePath?: string;
+  changedFiles?: string[];
+  elementVersion?: number;
+  error?: string;
+} {
+  const libraryRoot = projectElementsRoot(opts.projectRoot);
+  const id = slugElementId(opts.elementId);
+  let version = opts.version;
+  if (!version) {
+    const entry = readElementIndex(libraryRoot).elements.find(
+      (e) => e.id === id,
+    );
+    version = entry?.latestVersion;
+  }
+  if (!version) {
+    return {
+      synced: false,
+      error: `element "${id}" not found in the project library`,
+    };
+  }
+  const srcDir = join(elementVersionDir(libraryRoot, id, version), "src");
+  if (!existsSync(srcDir)) {
+    return {
+      synced: false,
+      error: `element "${id}" v${version} has no src/ (hasCode=false) — nothing to sync`,
+    };
+  }
+  const srcFiles = readSrcTree(srcDir);
+  if (Object.keys(srcFiles).length === 0) {
+    return {
+      synced: false,
+      error: `element "${id}" v${version} src/ is empty`,
+    };
+  }
+  const res = syncElementToProjectLibraryPackage({
+    projectRoot: opts.projectRoot,
+    elementId: id,
+    srcFiles,
+  });
+  if (!res.synced) {
+    return {
+      synced: false,
+      error:
+        "project has no element-library package configured (elementLibraryPackagePath)",
+    };
+  }
+  return {
+    synced: true,
+    packagePath: res.packagePath,
+    changedFiles: res.changedFiles,
+    elementVersion: version,
+  };
 }
 
 /**
