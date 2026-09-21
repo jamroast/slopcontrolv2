@@ -1726,7 +1726,11 @@ import {
 } from "./check-runners.js";
 import { validateRuntimeClaimProofs } from "./claim-vs-proof.js";
 import { readPhaseDesignAcceptance } from "./design-loop.js";
-import { readPhaseDesignPack } from "./design-pack.js";
+import { readPhaseDesignPack, readDesignPackComponentStyles } from "./design-pack.js";
+import {
+  collectProjectCssVarNames,
+  extractMockCustomProperties,
+} from "./css-tokens.js";
 
 /**
  * Extract runnable check bodies from PHASE.md `## Automated Checks`.
@@ -2594,6 +2598,59 @@ export function scaffoldPhaseDoc(opts: {
     ? globalsCss.join(" ")
     : "src/app/globals.css playground/src/index.css";
 
+  // Style-fidelity gates (design-bound phases with pinned element styles):
+  // assert the accepted mock's named classes survive into product code, and
+  // that mock tokens absent from the project's CSS at scaffold time get wired.
+  const fidelityCheckLines: string[] = [];
+  if (designBoundShell && opts.projectRoot && pack) {
+    const componentStyles = readDesignPackComponentStyles(
+      opts.projectRoot,
+      pack,
+    );
+    const seenClasses = new Set<string>();
+    for (const styles of componentStyles) {
+      const classes = [
+        ...new Set(
+          [...styles.css.matchAll(/\.([a-zA-Z][\w-]*)/g)].map((m) => m[1]!),
+        ),
+      ]
+        // BEM roots first, shortest first — root classes are the stablest.
+        .sort((a, b) => a.length - b.length)
+        .slice(0, 3);
+      for (const cls of classes) {
+        if (seenClasses.has(cls)) continue;
+        seenClasses.add(cls);
+        fidelityCheckLines.push(
+          `grep -rq '${cls}' src packages apps web 2>/dev/null || grep -rq '\\.${cls}' dist .next 2>/dev/null || exit 1`,
+        );
+        if (seenClasses.size >= 8) break;
+      }
+      if (seenClasses.size >= 8) break;
+    }
+    if (pack.tokens?.trim()) {
+      const mockTokens = extractMockCustomProperties(
+        `<style>${pack.tokens}</style>`,
+      );
+      const defined = collectProjectCssVarNames(opts.projectRoot);
+      const missing = mockTokens
+        .filter((t) => !defined.has(t.name))
+        .slice(0, 10);
+      for (const t of missing) {
+        fidelityCheckLines.push(
+          `grep -rqE -- '${t.name}[[:space:]]*:' src packages apps web 2>/dev/null || exit 1`,
+        );
+      }
+    }
+    if (pack.fonts?.length) {
+      fidelityCheckLines.push(
+        `grep -rqiE 'fontsource|fonts\\.googleapis|fonts\\.gstatic|@font-face' index.html src packages apps web 2>/dev/null || exit 1`,
+      );
+    }
+  }
+  const fidelityChecksSection = fidelityCheckLines.length
+    ? `\n${fidelityCheckLines.join("\n")}`
+    : "";
+
   const shellChecksBlock = `\`\`\`bash
 ${testCmd}
 \`\`\`
@@ -2605,7 +2662,7 @@ grep -rn '<ThemeToggle' ${themeGrepTarget} 2>/dev/null | head -1 || grep -rn '<T
 grep -rnE '--content-max|maxWidth.*content-max|max-w-\\[var\\(--content-max\\)\\]' ${themeGrepTarget} 2>/dev/null | head -1 || grep -rnE '--content-max|maxWidth.*content-max' src --include='*menubar*' | head -1 || exit 1
 grep -rn 'Menubar' ${menubarGrepTarget} 2>/dev/null | head -1 || grep -rn 'Menubar' src/components/layout playground/src --include='*.tsx' | head -1 || exit 1
 pnpm build || npm run build || npx next build || pnpm exec vite build || exit 1
-grep -qE 'text-text-secondary|--text-secondary' ${cssGrepTarget} 2>/dev/null || exit 1
+grep -qE 'text-text-secondary|--text-secondary' ${cssGrepTarget} 2>/dev/null || exit 1${fidelityChecksSection}
 \`\`\``;
 
   const checksBlock = engagement

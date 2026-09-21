@@ -442,6 +442,7 @@ export * from "./revision-target-llm.js";
 export * from "./doc-revision-judge-llm.js";
 export * from "./dependency-intent-llm.js";
 export * from "./element-honor-llm.js";
+export * from "./implementation-honor-llm.js";
 export * from "./build-process-config-llm.js";
 export * from "./verify-failure-llm.js";
 export * from "./claim-proof-llm.js";

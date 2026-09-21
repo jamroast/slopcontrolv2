@@ -174,6 +174,9 @@ import {
   maybeAutoPinDominantLogoFromMock,
   refreshDesignLoopConcepts,
   readPhaseDesignPack,
+  readDesignPackComponentStyles,
+  collectImplementationStyleEvidence,
+  componentStyleClassNames,
   resolveDesignLoopGenerateFallback,
   detectMockDrift,
   hardMockDriftIssues,
@@ -300,6 +303,7 @@ import {
   classifyDependencyIntentViaLlm,
   classifyIntentResearchConflict,
   classifyElementHonorViaLlm,
+  judgeImplementationHonorViaLlm,
   classifyVerifyFailureViaLlm,
   classifyHostVerifyEnvViaLlm,
   classifyRevisionTargetsViaLlm,
@@ -2118,6 +2122,79 @@ export async function runSuccessChecks(
     }
     if (cells.length > 0) {
       parts.push(`Automated Checks OK (${cells.length}).`);
+    }
+
+    // Post-implementation honor judge: design-bound phases whose pack carries
+    // component styles get an LLM fidelity verdict after the deterministic
+    // checks pass. Fails open when the judge/endpoint is unavailable.
+    if (opts?.phaseId && opts.registry) {
+      const honorPack = readPhaseDesignPack(project.rootPath, opts.phaseId);
+      const honorStyles = readDesignPackComponentStyles(
+        project.rootPath,
+        honorPack,
+      );
+      if (honorPack && honorStyles.length > 0) {
+        try {
+          const { endpoint, modelId } =
+            opts.registry.resolveEndpointForRole("classification") ?? {};
+          if (endpoint) {
+            const classes = [
+              ...new Set(
+                honorStyles.flatMap((s) => componentStyleClassNames(s.css)),
+              ),
+            ];
+            const evidence = collectImplementationStyleEvidence({
+              root: cwd,
+              classes,
+            });
+            const verdict = await judgeImplementationHonorViaLlm({
+              endpoint,
+              modelId,
+              elementIds: honorStyles.map((s) => s.elementId),
+              mockSnippets: honorStyles
+                .map(
+                  (s) =>
+                    `### ${s.elementId}@${s.version} (${s.cssPath})\n${s.css}`,
+                )
+                .join("\n\n"),
+              implementationSnippets: evidence,
+            });
+            const honorOutput = [
+              `fidelity=${verdict.fidelity} confidence=${verdict.confidence}`,
+              verdict.notes.trim(),
+              verdict.missingStyles.length
+                ? `missing styles: ${verdict.missingStyles.join("; ")}`
+                : "",
+              verdict.missingTokens.length
+                ? `missing tokens: ${verdict.missingTokens.join("; ")}`
+                : "",
+            ]
+              .filter(Boolean)
+              .join("\n");
+            parts.push(`Implementation honor:\n${honorOutput}`);
+            if (verdict.fidelity === "low" && verdict.confidence === "high") {
+              return failResult(parts.slice(0, -1), steps, {
+                name: "implementation-honor",
+                exitCode: 1,
+                output: [
+                  honorOutput,
+                  "The implementation does not carry the accepted mock's component styling. Port the element styles.css rules (listed above) into the consumer instead of approximating with generic utility classes.",
+                ].join("\n"),
+              });
+            }
+            steps.push({
+              name: "implementation-honor",
+              exitCode: 0,
+              output: honorOutput,
+            });
+          }
+        } catch (error) {
+          // Fail open — deterministic checks remain the hard gate.
+          parts.push(
+            `Implementation honor judge skipped (${error instanceof Error ? error.message : String(error)}).`,
+          );
+        }
+      }
     }
 
     if (config.verifyCommand?.trim()) {
@@ -4374,14 +4451,27 @@ ${message.trim()}`;
         }
       }
     }
+    const loopMetaForScope = readDesignLoopMeta(project.rootPath, loopId);
+    const conceptualScope = getDesignLoopScope(loopMetaForScope);
+    // A dashboard-surface loop (screen focus "dashboard" or a dashboard brief)
+    // must apply the pinned dashboard-shell/dashboard-sidebar elements. The
+    // element-merger otherwise only applies them when the agent's raw HTML
+    // already contains a dashboard-* class token — which sections-only renders
+    // (and v2/v3/v4 here) omit, so the shell/sidebar keep getting dropped.
+    const isDashboardSurface =
+      conceptualScope?.focus === "dashboard" ||
+      /\bdashboard\b/i.test(conceptualScope?.focus ?? "") ||
+      /\bdashboard\b/i.test(brief ?? "");
     const loopElements = readDesignLoopElements(project.rootPath, loopId);
-    // Prompt: prefer landing chrome snippets; omit dashboard bodies unless present in prior mock.
+    // Prompt: prefer landing chrome snippets; omit dashboard bodies unless the
+    // loop is a dashboard surface (scope/brief) or the prior mock has them.
     const priorHasDashboard = /\b(?:dashboard-layout|dashboard-shell|dashboard-sidebar)\b/i.test(
       workingPreviousHtml ?? previousHtml ?? "",
     );
-    const elementsForPrompt = priorHasDashboard
-      ? loopElements
-      : loopElements.filter((e) => !/^dashboard-/i.test(e.id));
+    const elementsForPrompt =
+      isDashboardSurface || priorHasDashboard
+        ? loopElements
+        : loopElements.filter((e) => !/^dashboard-/i.test(e.id));
     const elementsBlock = formatDesignElementsPromptBlock(elementsForPrompt, {
       projectRoot: project.rootPath,
       loopId,
@@ -4401,17 +4491,6 @@ ${message.trim()}`;
             ? "Return a short rationale (1–3 sentences) then a complete self-contained HTML document in a ```html fence. Nav must match LIVE SITE inventory."
             : "Return a complete HTML document based on the prior mock — preserve hero, tokens, shell, and pinned logos; change only requested sections/targets. Nav must match LIVE SITE.";
 
-    const loopMetaForScope = readDesignLoopMeta(project.rootPath, loopId);
-    const conceptualScope = getDesignLoopScope(loopMetaForScope);
-    // A dashboard-surface loop (screen focus "dashboard" or a dashboard brief)
-    // must apply the pinned dashboard-shell/dashboard-sidebar elements. The
-    // element-merger otherwise only applies them when the agent's raw HTML
-    // already contains a dashboard-* class token — which sections-only renders
-    // (and v2/v3/v4 here) omit, so the shell/sidebar keep getting dropped.
-    const isDashboardSurface =
-      conceptualScope?.focus === "dashboard" ||
-      /\bdashboard\b/i.test(conceptualScope?.focus ?? "") ||
-      /\bdashboard\b/i.test(brief ?? "");
     const priorMockForTheme =
       workingPreviousHtml?.trim() ||
       previousHtml?.trim() ||
@@ -6049,7 +6128,9 @@ ${planContractBlock}
       inScopeIds: phasePackForResearch?.inScope,
       alreadyAppliedIds: phasePackForResearch?.alreadyApplied,
     });
-    const designPackBlock = formatDesignPackPromptBlock(phasePackForResearch);
+    const designPackBlock = formatDesignPackPromptBlock(phasePackForResearch, {
+      projectRoot: project.rootPath,
+    });
     const boundMockBlock = formatPhaseBoundMockPromptBlock({
       projectRoot: project.rootPath,
       phaseId: phase.id,
@@ -6509,7 +6590,9 @@ Infra / container smoke (mandatory — docker-compose.yml present):
       inScopeIds: draftPhasePack?.inScope,
       alreadyAppliedIds: draftPhasePack?.alreadyApplied,
     });
-    const draftPackBlock = formatDesignPackPromptBlock(draftPhasePack);
+    const draftPackBlock = formatDesignPackPromptBlock(draftPhasePack, {
+      projectRoot: project.rootPath,
+    });
     const draftPlanBlock = formatPhaseBoundPlanPromptBlock({
       projectRoot: project.rootPath,
       phaseId: phase.id,
@@ -9162,7 +9245,9 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         alreadyAppliedIds: developPhasePack?.alreadyApplied,
       },
     );
-    const developPackBlock = formatDesignPackPromptBlock(developPhasePack);
+    const developPackBlock = formatDesignPackPromptBlock(developPhasePack, {
+      projectRoot: project.rootPath,
+    });
     const developThemeNote = packHasThemeModes(developPhasePack)
       ? `CRITICAL: Implement DESIGN_PACK.theme — html[data-theme] toggle, light token remaps for --background/--surface/--foreground, body/chrome on semantic vars (not hard-coded --color-dark-* alone).`
       : null;

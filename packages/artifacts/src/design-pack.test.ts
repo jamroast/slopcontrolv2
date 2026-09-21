@@ -19,11 +19,13 @@ import {
 } from "./design-loop.js";
 import {
   compileDesignPackFromAccept,
+  detectUnloadedMockFonts,
   extractShellNotes,
   formatDesignPackPromptBlock,
   mockHasContentAlignedMenubar,
   mockHasDashboardFullBleedShell,
   readDesignLoopPack,
+  readDesignPackComponentStyles,
   readPhaseDesignPack,
 } from "./design-pack.js";
 import { replaceDesignLoopSelections } from "./design-loop-selections.js";
@@ -517,5 +519,222 @@ describe("design-pack", () => {
       ),
       pack.mustNot.join("; "),
     );
+  });
+
+  it("carries pinned elements' harvested styles.css as componentStyles", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-dpack-styles-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({
+      projectId: "p1",
+      brief: "env properties pane",
+    });
+    const elements = [
+      {
+        id: "application-environment-properties",
+        version: 1,
+        origin: "project" as const,
+        kind: "control" as const,
+        mockPath: `.slopcontrol/design-loops/${meta.id}/elements/application-environment-properties/v1/mock.html`,
+        mountHints: [] as string[],
+        hasCode: false,
+      },
+    ];
+    const metaWithEls = { ...meta, elements } as DesignLoopMetaWithElements;
+    writeDesignLoopMeta(root, metaWithEls);
+    // styles.css under the loop-imported element dir (import path).
+    const elDir = join(
+      root,
+      ".slopcontrol",
+      "design-loops",
+      meta.id,
+      "elements",
+      "application-environment-properties",
+      "v1",
+    );
+    mkdirSync(elDir, { recursive: true });
+    writeFileSync(
+      join(elDir, "mock.html"),
+      '<html><body><aside class="env-pane"><div class="card">x</div></aside></body></html>\n',
+    );
+    writeFileSync(
+      join(elDir, "styles.css"),
+      ".env-pane { width: 320px; }\n.card { border-radius: 0.75rem; }\n",
+    );
+    writeDesignLoopVersion({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      html: '<!DOCTYPE html><html><head><style>:root{--x:1}</style></head><body><aside class="env-pane"><div class="card">x</div></aside></body></html>',
+      notes: "ok",
+      request: "env properties pane",
+    });
+
+    const pack = compileDesignPackFromAccept({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      acceptance: {
+        version: 1,
+        features: [{ id: "screen_settings", label: "Settings", accepted: true }],
+      },
+      meta: metaWithEls,
+    });
+
+    assert.equal(pack.componentStyles?.length, 1);
+    assert.equal(
+      pack.componentStyles?.[0]?.elementId,
+      "application-environment-properties",
+    );
+    assert.match(pack.componentStyles?.[0]?.cssPath ?? "", /styles\.css$/);
+    assert.ok(
+      pack.mustNot.some((m) =>
+        /Do not restyle shared elements with generic utility classes/.test(m),
+      ),
+      pack.mustNot.join("; "),
+    );
+
+    const loaded = readDesignPackComponentStyles(root, pack);
+    assert.equal(loaded.length, 1);
+    assert.match(loaded[0]!.css, /\.env-pane\s*\{/);
+    assert.match(loaded[0]!.css, /\.card\s*\{/);
+
+    // Prompt block inlines the CSS when projectRoot is provided; otherwise it
+    // lists the paths only.
+    const block = formatDesignPackPromptBlock(pack, { projectRoot: root });
+    assert.match(block, /### element styles/);
+    assert.match(block, /\.env-pane\s*\{/);
+    const pathsOnly = formatDesignPackPromptBlock(pack);
+    assert.match(pathsOnly, /### element styles/);
+    assert.doesNotMatch(pathsOnly, /\.env-pane\s*\{/);
+  });
+
+  it("falls back to the project element library for componentStyles", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-dpack-styles-lib-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({
+      projectId: "p1",
+      brief: "env properties pane",
+    });
+    const elements = [
+      {
+        id: "application-environment-properties",
+        version: 2,
+        origin: "project" as const,
+        kind: "control" as const,
+        mountHints: [] as string[],
+        hasCode: false,
+      },
+    ];
+    const metaWithEls = { ...meta, elements } as DesignLoopMetaWithElements;
+    writeDesignLoopMeta(root, metaWithEls);
+    // styles.css only in the project element library (local publish path).
+    const libDir = join(
+      root,
+      ".slopcontrol",
+      "elements",
+      "application-environment-properties",
+      "v2",
+    );
+    mkdirSync(libDir, { recursive: true });
+    writeFileSync(
+      join(libDir, "styles.css"),
+      ".env-pane { border-left: 1px solid var(--accent); }\n",
+    );
+    writeDesignLoopVersion({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      html: '<!DOCTYPE html><html><head><style>:root{--x:1}</style></head><body><aside class="env-pane">x</aside></body></html>',
+      notes: "ok",
+      request: "env properties pane",
+    });
+
+    const pack = compileDesignPackFromAccept({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      acceptance: {
+        version: 1,
+        features: [{ id: "screen_settings", label: "Settings", accepted: true }],
+      },
+      meta: metaWithEls,
+    });
+
+    assert.equal(pack.componentStyles?.length, 1);
+    assert.match(
+      pack.componentStyles?.[0]?.cssPath ?? "",
+      /\.slopcontrol\/elements\/application-environment-properties\/v2\/styles\.css$/,
+    );
+    const loaded = readDesignPackComponentStyles(root, pack);
+    assert.match(loaded[0]?.css ?? "", /border-left/);
+  });
+
+  it("detectUnloadedMockFonts flags declared-but-unloaded families", () => {
+    // Declared via --font-* tokens, no loading mechanism → flagged.
+    assert.deepEqual(
+      detectUnloadedMockFonts(
+        '<html><head><style>:root{--font-display:"Space Grotesk",sans-serif;--font-body:"Inter",system-ui,sans-serif}body{font-family:var(--font-body)}</style></head></html>',
+      ),
+      ["Space Grotesk", "Inter"],
+    );
+    // System-only stacks are never flagged.
+    assert.deepEqual(
+      detectUnloadedMockFonts(
+        '<html><head><style>body{font-family:system-ui,sans-serif}</style></head></html>',
+      ),
+      [],
+    );
+    // @font-face in the mock → treated as loaded.
+    assert.deepEqual(
+      detectUnloadedMockFonts(
+        '<html><head><style>@font-face{font-family:"Space Grotesk";src:url(x.woff2)}:root{--font-display:"Space Grotesk",sans-serif}</style></head></html>',
+      ),
+      [],
+    );
+    // fonts.googleapis link → treated as loaded.
+    assert.deepEqual(
+      detectUnloadedMockFonts(
+        '<html><head><link href="https://fonts.googleapis.com/css2?family=Inter" rel="stylesheet"/><style>:root{--font-body:"Inter",sans-serif}</style></head></html>',
+      ),
+      [],
+    );
+  });
+
+  it("pack carries unloaded fonts with a load mustNot + prompt section", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-dpack-fonts-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({
+      projectId: "p1",
+      brief: "typography refresh",
+    });
+    writeDesignLoopMeta(root, meta);
+    writeDesignLoopVersion({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      html: '<!DOCTYPE html><html><head><style>:root{--font-display:"Space Grotesk",sans-serif;--x:1}h1{font-family:var(--font-display)}</style></head><body><h1>Hi</h1></body></html>',
+      notes: "ok",
+      request: "typography refresh",
+    });
+
+    const pack = compileDesignPackFromAccept({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      acceptance: {
+        version: 1,
+        features: [{ id: "typography", label: "Typography", accepted: true }],
+      },
+    });
+
+    assert.deepEqual(pack.fonts, ["Space Grotesk"]);
+    assert.ok(
+      pack.mustNot.some((m) => /Fonts declared but NOT loaded/.test(m)),
+      pack.mustNot.join("; "),
+    );
+    const block = formatDesignPackPromptBlock(pack);
+    assert.match(block, /### fonts \(declared but NOT loaded/);
+    assert.match(block, /Space Grotesk/);
+    assert.match(block, /@fontsource/);
   });
 });

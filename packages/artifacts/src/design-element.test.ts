@@ -36,6 +36,7 @@ import {
   promoteElementToBaseLibrary,
   recordElementPinAndMaybePromote,
   readDesignElementBundle,
+  readDesignElementStyles,
   projectElementsRoot,
   registryElementsRoot,
   syncElementToProjectLibraryPackage,
@@ -477,6 +478,105 @@ const ELEMENT_COMMENT_MOCK = `<!DOCTYPE html><html><head><style>
     assert.match(extracted.mockHtml, /class="menubar"/);
     assert.match(extracted.mockHtml, /menubar__logo-mark/);
     assert.match(extracted.mockHtml, /Sign In/);
+  });
+
+  const BEM_REGION_MOCK = `<!DOCTYPE html>
+<html data-theme="dark">
+<head><style>
+:root { --background:#0A0A0A; --foreground:#F5F0E8; --accent:#D97A4A; }
+[data-theme="light"] { --background:#FDF8F3; }
+.env-pane { width: 320px; border-left: 1px solid var(--accent); }
+.env-pane__title { font-size: 0.75rem; text-transform: uppercase; }
+.card { background: color-mix(in oklab, var(--foreground) 4%, transparent); border-radius: 0.75rem; }
+.secret-row { display: flex; justify-content: space-between; }
+.unrelated { color: red; }
+</style></head>
+<body>
+<aside data-element="application-environment-properties" class="env-pane">
+  <h3 class="env-pane__title">Environment</h3>
+  <div class="card">
+    <div class="secret-row"><span>API_KEY</span><span>***</span></div>
+  </div>
+</aside>
+<div class="unrelated">Outside region</div>
+</body>
+</html>`;
+
+  it("harvests region markup classes into componentCss (BEM, not id-slug)", () => {
+    const extracted = extractDesignElementFromMock({
+      html: BEM_REGION_MOCK,
+      elementId: "application-environment-properties",
+    });
+    assert.equal(extracted.elementId, "application-environment-properties");
+    // Component rules carried even though class names don't match the id slug.
+    assert.match(extracted.componentCss, /\.env-pane\s*\{/);
+    assert.match(extracted.componentCss, /\.env-pane__title/);
+    assert.match(extracted.componentCss, /\.card\s*\{/);
+    assert.match(extracted.componentCss, /\.secret-row\s*\{/);
+    // Rules for classes outside the region are not harvested.
+    assert.doesNotMatch(extracted.componentCss, /\.unrelated\b/);
+    // tokensCss keeps the token ladders alongside the component rules.
+    assert.match(extracted.tokensCss, /:root\s*\{/);
+    assert.match(extracted.tokensCss, /\.env-pane\s*\{/);
+  });
+
+  it("keeps id-slug harvesting for theme-toggle fallback", () => {
+    const extracted = extractDesignElementFromMock({
+      html: SAMPLE_MOCK,
+      brief: "shell theme toggle",
+    });
+    assert.equal(extracted.elementId, "theme-toggle");
+    assert.match(extracted.componentCss, /\.theme-toggle\s*\{/);
+  });
+
+  it("publish persists componentCss as styles.css with hasStyles meta", () => {
+    const root = tmpJam("extract-styles");
+    try {
+      const loop = createDesignLoopMeta({ projectId: "p1", brief: "env pane" });
+      writeDesignLoopMeta(root, loop);
+      writeDesignLoopVersion({
+        projectRoot: root,
+        loopId: loop.id,
+        version: 1,
+        html: BEM_REGION_MOCK,
+        notes: "",
+        request: "env pane",
+        usedScaffold: false,
+        parentVersion: null,
+      });
+      writeDesignLoopMeta(root, {
+        ...loop,
+        currentVersion: 1,
+        updatedAt: new Date().toISOString(),
+      });
+      const meta = extractAndPublishDesignElementFromLoop({
+        projectRoot: root,
+        loopId: loop.id,
+        elementId: "application-environment-properties",
+      });
+      assert.equal(meta.hasStyles, true);
+      const stylesPath = join(
+        projectElementsRoot(root),
+        "application-environment-properties",
+        `v${meta.version}`,
+        "styles.css",
+      );
+      assert.ok(existsSync(stylesPath));
+      const css = readFileSync(stylesPath, "utf-8");
+      assert.match(css, /\.env-pane\s*\{/);
+      assert.match(css, /\.card\s*\{/);
+      assert.equal(
+        listProjectElements(root).find((e) => e.id === meta.id)?.hasStyles,
+        true,
+      );
+      assert.match(
+        readDesignElementStyles({ projectRoot: root, elementId: meta.id }) ??
+          "",
+        /\.secret-row\s*\{/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("rejects unknown explicit elementId", () => {

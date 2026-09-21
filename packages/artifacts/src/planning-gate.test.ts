@@ -62,6 +62,8 @@ describe("planning gate helpers", () => {
   it("automated-checks contract requires a shared-shell regression guard", () => {
     assert.match(PLANNING_AUTOMATED_CHECKS_RULES, /Shared shell regression guard/);
     assert.match(PLANNING_AUTOMATED_CHECKS_RULES, /vendor, remove, or structurally rewrite/);
+    assert.match(PLANNING_AUTOMATED_CHECKS_RULES, /Mock class fidelity guard/);
+    assert.match(PLANNING_AUTOMATED_CHECKS_RULES, /componentStyles/);
     const prompt = buildPhaseDocRepairPrompt({
       issues: ["missing section"],
       intentBlock: "intent",

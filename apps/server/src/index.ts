@@ -60,6 +60,7 @@ import {
   seedDesignLoopAcceptanceFromHtml,
   readDesignLoopAcceptance,
   writeDesignLoopAcceptance,
+  readDesignPackComponentStyles,
   applyAcceptanceFeatureTicks,
   writePhaseStatus,
   rewriteDesignLoopAssetUrls,
@@ -5322,6 +5323,10 @@ app.post("/projects/:id/design-elements/publish", (req, res) => {
       mockHtml,
       tokensCss:
         typeof req.body?.tokensCss === "string" ? req.body.tokensCss : undefined,
+      componentCss:
+        typeof req.body?.componentCss === "string"
+          ? req.body.componentCss
+          : undefined,
       srcFiles,
       states: Array.isArray(req.body?.states) ? req.body.states : undefined,
       a11y: Array.isArray(req.body?.a11y) ? req.body.a11y : undefined,
@@ -6076,6 +6081,13 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
           .slice(0, 40)
           .join(", ")}. Layout/dimension tokens (e.g. --pane-w, --sidebar-w) are the most commonly dropped — never reference var(--x) in implemented code without defining --x.`
       : undefined;
+    const elementStyles = readDesignPackComponentStyles(
+      project.rootPath,
+      implementPack,
+    );
+    const elementStylesNote = elementStyles.length
+      ? `Element styles (styles.css) are the accepted mock's component CSS — port these rules verbatim into the consumer (tokens stay as var(--*) references); do NOT approximate with generic utility classes.`
+      : undefined;
     let themeContractWarning: string[] | undefined;
     if (packHasThemeModes(implementPack) && implementPack?.theme) {
       const check = checkThemeContractInProject({
@@ -6112,6 +6124,15 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
       themeContractWarning,
       mockTokens,
       tokenCarryoverNote,
+      elementStyles: elementStyles.length
+        ? elementStyles.map((s) => ({
+            elementId: s.elementId,
+            version: s.version,
+            cssPath: s.cssPath,
+            css: s.css,
+          }))
+        : undefined,
+      elementStylesNote,
       next: willResearch
         ? "Research started from acceptance checklist. After review approval, call start_development."
         : "Design contract bound (UI-SPEC + mock + ACCEPTANCE + DESIGN_COMPLETE). Call start_development when the phase is accepted/ready.",

@@ -178,4 +178,83 @@ describe("scaffoldPhaseDoc design-bound shell", () => {
     assert.match(doc, /jampress-menubar\.tsx/);
     assert.match(doc, /playground\/src\/App\.tsx/);
   });
+
+  it("scaffolds style-fidelity checks from pack componentStyles + token gaps", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-scaffold-fidelity-"));
+    roots.push(root);
+    const phaseId = "64-env-pane";
+    const designDir = join(root, ".slopcontrol", "phases", phaseId, "design");
+    mkdirSync(designDir, { recursive: true });
+    writeFileSync(
+      join(designDir, "ACCEPTANCE.json"),
+      `${JSON.stringify({
+        version: 1,
+        features: [{ id: "applied_shell", label: "Shell", accepted: true }],
+      }, null, 2)}\n`,
+    );
+    const stylesPath =
+      ".slopcontrol/design-loops/loop1/elements/application-environment-properties/v1/styles.css";
+    mkdirSync(join(root, stylesPath, ".."), { recursive: true });
+    writeFileSync(
+      join(root, stylesPath),
+      ".env-pane { width: 320px; }\n.env-pane__title { font-size: .75rem; }\n.card { border-radius: .75rem; }\n",
+    );
+    writeFileSync(
+      join(designDir, "DESIGN_PACK.json"),
+      `${JSON.stringify(
+        {
+          name: "t",
+          version: 1,
+          loopId: "loop1",
+          projectId: "p",
+          sourceMockVersion: 1,
+          tokens: ":root { --pane-w: 400px; --background: #0A0A0A; }",
+          logos: [],
+          typography: [],
+          shell: [],
+          contentPillars: [],
+          inScope: ["applied_shell"],
+          mustNot: [],
+          mockPath: "design/mock.html",
+          fonts: ["Space Grotesk"],
+          componentStyles: [
+            {
+              elementId: "application-environment-properties",
+              version: 1,
+              cssPath: stylesPath,
+            },
+          ],
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    // Project already defines --background but NOT --pane-w → only --pane-w
+    // earns a token-gap check line.
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "index.css"), ":root { --background: #0A0A0A; }\n");
+
+    const doc = scaffoldPhaseDoc({
+      phaseId,
+      description: "Apply env pane styling",
+      testCommand: "pnpm test",
+      projectRoot: root,
+    });
+
+    // Mock class fidelity: named classes must exist in product source or dist.
+    assert.ok(doc.includes("grep -rq 'env-pane' src packages apps web"));
+    assert.ok(doc.includes("grep -rq 'card' src packages apps web"));
+    // Token gap: --pane-w missing from project CSS → check emitted;
+    // --background already defined → no check.
+    assert.ok(doc.includes("--pane-w[[:space:]]*:"));
+    assert.ok(!doc.includes("--background[[:space:]]"));
+    // Font-load contract: pack.fonts → font loading check.
+    assert.ok(doc.includes("fontsource|fonts\\.googleapis|fonts\\.gstatic|@font-face"));
+
+    const gate = validatePhaseDocForDev(doc, {
+      projectRoot: root,
+      phaseId,
+    });
+    assert.equal(gate.ok, true, gate.issues.join("; "));
+  });
 });

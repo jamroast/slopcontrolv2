@@ -83,6 +83,8 @@ export const DesignElementMetaSchema = z.object({
   themeRequirements: z.array(z.string()).default([]),
   deps: z.array(z.string()).default([]),
   hasCode: z.boolean().default(false),
+  /** styles.css (component-scoped CSS harvested from the source mock) exists. */
+  hasStyles: z.boolean().default(false),
   status: z.enum(["draft", "published"]).default("published"),
   sourceProjectId: z.string().optional(),
   sourceRootPath: z.string().optional(),
@@ -109,10 +111,14 @@ export const DesignElementRefSchema = z.object({
   kind: DesignElementKindSchema.optional(),
   mountHints: z.array(z.string()).default([]),
   hasCode: z.boolean().default(false),
+  /** styles.css (component-scoped CSS harvested from the source mock) exists. */
+  hasStyles: z.boolean().optional(),
   /** Loop-relative or phase-relative paths after import. */
   mockPath: z.string().optional(),
   specPath: z.string().optional(),
   codePath: z.string().optional(),
+  /** Component-scoped CSS path (styles.css) after import. */
+  stylesPath: z.string().optional(),
   pinnedAt: z.string().optional(),
   npmPackage: z.string().optional(),
   npmVersion: z.string().optional(),
@@ -126,6 +132,7 @@ export const DesignElementIndexEntrySchema = z.object({
   label: z.string(),
   status: z.enum(["draft", "published"]),
   hasCode: z.boolean().default(false),
+  hasStyles: z.boolean().default(false),
   updatedAt: z.string(),
   npmPackage: z.string().optional(),
   npmVersion: z.string().optional(),
@@ -145,6 +152,8 @@ export type DesignElementBundle = {
   spec: string;
   mockHtml: string;
   tokensCss: string;
+  /** Component-scoped CSS harvested from the source mock (styles.css). */
+  componentCss: string;
   /** Relative paths under src/ → file contents */
   srcFiles: Record<string, string>;
   rootPath: string;
@@ -343,6 +352,18 @@ function classCandidatesForElementId(elementId: string): string[] {
   const out = [slug];
   if (compact && compact !== slug) out.push(compact);
   return [...new Set(out)];
+}
+
+/** All class tokens present in a markup snippet (class="..." attributes). */
+export function collectClassNamesFromMarkup(markup: string): string[] {
+  const out = new Set<string>();
+  for (const m of (markup ?? "").matchAll(/\bclass\s*=\s*["']([^"']+)["']/gi)) {
+    for (const tok of (m[1] ?? "").split(/\s+/)) {
+      const t = tok.trim();
+      if (t) out.add(t);
+    }
+  }
+  return [...out];
 }
 
 function isChromeNavFallback(html: string): boolean {
@@ -705,11 +726,11 @@ function truncatePreview(html: string, max = 400): string {
 }
 
 /** Harvest CSS rules whose selectors mention the root class. */
-export function harvestCssForClass(html: string, className: string): string {
+function harvestCssRulesForClass(html: string, className: string): string[] {
   const styles = [...html.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style>/gi)].map(
     (m) => m[1] ?? "",
   );
-  if (!styles.length) return "";
+  if (!styles.length) return [];
   const css = styles.join("\n");
   const needle = className.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const rules: string[] = [];
@@ -737,7 +758,43 @@ export function harvestCssForClass(html: string, className: string): string {
       rules.push(m[0]);
     }
   }
-  return [...new Set(rules)].join("\n\n");
+  return [...new Set(rules)];
+}
+
+/** Harvest CSS rules whose selectors mention the root class. */
+export function harvestCssForClass(html: string, className: string): string {
+  return harvestCssRulesForClass(html, className).join("\n\n");
+}
+
+/**
+ * Harvest every CSS rule referenced by the classes actually present in an
+ * extracted region's markup, unioned with the id-slug candidates. This is
+ * what carries component styling (.env-pane, .card, …) out of the mock —
+ * harvesting only id-slug candidates strips all component-specific styling.
+ */
+export function harvestCssForRegion(opts: {
+  html: string;
+  regionHtml: string;
+  elementId: string;
+  extraClasses?: string[];
+}): string {
+  const classes = [
+    ...classCandidatesForElementId(opts.elementId),
+    ...(opts.extraClasses ?? []),
+    ...collectClassNamesFromMarkup(opts.regionHtml),
+  ];
+  const rules: string[] = [];
+  const seen = new Set<string>();
+  for (const cls of new Set(classes)) {
+    for (const rule of harvestCssRulesForClass(opts.html, cls)) {
+      const key = rule.replace(/\s+/g, " ").trim();
+      if (key && !seen.has(key)) {
+        seen.add(key);
+        rules.push(rule);
+      }
+    }
+  }
+  return rules.join("\n\n");
 }
 
 /** Collect extractable regions from mock HTML (deduped by id). */
@@ -925,6 +982,7 @@ function upsertIndexEntry(
     label: meta.label,
     status: meta.status,
     hasCode: meta.hasCode,
+    hasStyles: meta.hasStyles,
     updatedAt: meta.updatedAt,
     npmPackage: meta.npmPackage,
     npmVersion: meta.npmVersion,
@@ -994,11 +1052,15 @@ export function readDesignElementBundle(
     const tokensCss = existsSync(join(dir, "tokens.css"))
       ? readFileSync(join(dir, "tokens.css"), "utf-8")
       : "";
+    const componentCss = existsSync(join(dir, "styles.css"))
+      ? readFileSync(join(dir, "styles.css"), "utf-8")
+      : "";
     return {
       meta,
       spec,
       mockHtml,
       tokensCss,
+      componentCss,
       srcFiles: readSrcTree(join(dir, "src")),
       rootPath: dir,
     };
@@ -1132,6 +1194,8 @@ export type PublishDesignElementOpts = {
   spec: string;
   mockHtml: string;
   tokensCss?: string;
+  /** Component-scoped CSS harvested from the source mock — persisted as styles.css. */
+  componentCss?: string;
   srcFiles?: Record<string, string>;
   states?: string[];
   a11y?: string[];
@@ -1157,6 +1221,7 @@ export function publishDesignElement(
   const now = new Date().toISOString();
   const srcFiles = opts.srcFiles ?? {};
   const hasCode = Object.keys(srcFiles).length > 0;
+  const hasStyles = Boolean(opts.componentCss?.trim());
   const meta = DesignElementMetaSchema.parse({
     id,
     kind: opts.kind ?? "control",
@@ -1168,6 +1233,7 @@ export function publishDesignElement(
     themeRequirements: opts.themeRequirements ?? [],
     deps: opts.deps ?? [],
     hasCode,
+    hasStyles,
     status: opts.status ?? "published",
     sourceProjectId: opts.sourceProjectId,
     sourceRootPath: opts.projectRoot,
@@ -1182,6 +1248,13 @@ export function publishDesignElement(
   writeFileSync(join(dir, "mock.html"), opts.mockHtml.trim() + "\n", "utf-8");
   if (opts.tokensCss?.trim()) {
     writeFileSync(join(dir, "tokens.css"), opts.tokensCss.trim() + "\n", "utf-8");
+  }
+  if (opts.componentCss?.trim()) {
+    writeFileSync(
+      join(dir, "styles.css"),
+      opts.componentCss.trim() + "\n",
+      "utf-8",
+    );
   }
   if (hasCode) writeSrcTree(join(dir, "src"), srcFiles);
   // Always scaffold @<scope>/<id> — code entry when present, else mock/tokens exports.
@@ -1221,6 +1294,7 @@ export function publishDesignElement(
       "SPEC.md",
       "mock.html",
       "tokens.css",
+      "styles.css",
       "META.json",
     ]) {
       const src = join(dir, name);
@@ -1276,6 +1350,9 @@ export function extractDesignElementFromMock(opts: {
   mockHtml: string;
   spec: string;
   tokensCss: string;
+  /** Component-scoped CSS rules harvested from the mock for this element's
+   * region classes (no :root ladders) — persisted as styles.css on publish. */
+  componentCss: string;
   states: string[];
   a11y: string[];
   mountHints: string[];
@@ -1352,17 +1429,17 @@ export function extractDesignElementFromMock(opts: {
       : `<div data-element="${elementId}" class="shared-element"><!-- define control --></div>`;
   }
 
-  const classRoots = [
-    ...classCandidatesForElementId(elementId),
-    ...(elementId === "dashboard-shell" ? ["dashboard-layout"] : []),
-    ...(elementId === "menubar" ? ["topbar"] : []),
-  ];
-  const harvested = classRoots
-    .map((c) => harvestCssForClass(html, c))
-    .filter(Boolean)
-    .join("\n\n");
+  const componentCss = harvestCssForRegion({
+    html,
+    regionHtml: snippet,
+    elementId,
+    extraClasses: [
+      ...(elementId === "dashboard-shell" ? ["dashboard-layout"] : []),
+      ...(elementId === "menubar" ? ["topbar"] : []),
+    ],
+  });
   const styleChunks = [
-    harvested,
+    componentCss,
     ...(html.match(/:root\s*\{[\s\S]*?\}/) ?? []),
     ...(html.match(/\[data-theme\s*=\s*["']light["']\]\s*\{[\s\S]*?\}/) ?? []),
   ].filter(Boolean);
@@ -1504,6 +1581,7 @@ export function bindThemeToggle(button: HTMLElement, root: HTMLElement = documen
     mockHtml,
     spec,
     tokensCss,
+    componentCss,
     states,
     a11y,
     mountHints,
@@ -1530,6 +1608,32 @@ export function readDesignLoopElements(
   loopId: string,
 ): DesignElementRef[] {
   return getDesignLoopElements(readDesignLoopMeta(projectRoot, loopId));
+}
+
+/** Read the harvested component CSS (styles.css) for a published element. */
+export function readDesignElementStyles(opts: {
+  projectRoot: string;
+  elementId: string;
+  version?: number;
+}): string | null {
+  const libraryRoot = projectElementsRoot(opts.projectRoot);
+  const id = slugElementId(opts.elementId);
+  let version = opts.version;
+  if (!version) {
+    const entry = readElementIndex(libraryRoot).elements.find(
+      (e) => e.id === id,
+    );
+    version = entry?.latestVersion;
+  }
+  if (!version) return null;
+  const path = join(elementVersionDir(libraryRoot, id, version), "styles.css");
+  if (!existsSync(path)) return null;
+  try {
+    const css = readFileSync(path, "utf-8").trim();
+    return css || null;
+  } catch {
+    return null;
+  }
 }
 
 /** Copy element assets into the loop and pin as a selection + META.elements. */
@@ -1563,6 +1667,12 @@ export function importDesignElementIntoLoop(opts: {
   if (opts.bundle.tokensCss.trim()) {
     writeFileSync(join(elDir, "tokens.css"), opts.bundle.tokensCss.trim() + "\n");
   }
+  if (opts.bundle.componentCss.trim()) {
+    writeFileSync(
+      join(elDir, "styles.css"),
+      opts.bundle.componentCss.trim() + "\n",
+    );
+  }
   if (Object.keys(opts.bundle.srcFiles).length) {
     writeSrcTree(join(elDir, "src"), opts.bundle.srcFiles);
   }
@@ -1578,9 +1688,14 @@ export function importDesignElementIntoLoop(opts: {
     kind: opts.bundle.meta.kind,
     mountHints: opts.bundle.meta.mountHints,
     hasCode: opts.bundle.meta.hasCode,
+    hasStyles:
+      opts.bundle.meta.hasStyles || Boolean(opts.bundle.componentCss.trim()),
     mockPath: `${base}/mock.html`,
     specPath: `${base}/SPEC.md`,
     codePath: opts.bundle.meta.hasCode ? `${base}/src` : undefined,
+    stylesPath: opts.bundle.componentCss.trim()
+      ? `${base}/styles.css`
+      : undefined,
     pinnedAt: new Date().toISOString(),
   });
 
@@ -2321,6 +2436,7 @@ export function extractAndPublishDesignElementFromLoop(opts: {
     spec: extracted.spec,
     mockHtml: extracted.mockHtml,
     tokensCss: extracted.tokensCss,
+    componentCss: extracted.componentCss,
     srcFiles: opts.srcFiles ?? extracted.srcFiles,
     states: extracted.states,
     a11y: extracted.a11y,

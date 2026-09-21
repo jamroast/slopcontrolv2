@@ -6,7 +6,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import {
   designLoopDir,
   extractFeaturesFromMockHtml,
@@ -61,6 +61,11 @@ export type DesignPack = {
   logos: Array<{ name: string; path: string }>;
   /** Font / type cues extracted from mock CSS when present. */
   typography: string[];
+  /**
+   * Font families the mock declares but never loads — the implementation MUST
+   * load them (@fontsource or fonts.googleapis link).
+   */
+  fonts?: string[];
   /** Short shell/chrome notes (dark/light, clerk, nav). */
   shell: string[];
   /** Content / positioning pillars from request + notes + sections. */
@@ -82,6 +87,17 @@ export type DesignPack = {
   theme?: ThemeContract;
   /** Pinned shared design elements (controls/patterns) on accept. */
   elements?: DesignElementRef[];
+  /**
+   * Component-scoped CSS harvested from the accepted mock for each pinned
+   * element (path reference — load via readDesignPackComponentStyles). This is
+   * the styling the implementer must port, not approximate with utilities.
+   */
+  componentStyles?: Array<{
+    elementId: string;
+    version: number;
+    /** Project-root-relative path to the harvested styles.css. */
+    cssPath: string;
+  }>;
   /**
    * Pinned elements the accepted mock EXCEEDS (needs a new capability/version)
    * or that should COMPOSE a distinct sub-element instead of evolving.
@@ -145,6 +161,64 @@ function extractTypographyCues(html: string): string[] {
     if (v && v.length < 120 && !cues.includes(v)) cues.push(v);
   }
   return cues.slice(0, 8);
+}
+
+const SYSTEM_FONT_FAMILIES = new Set([
+  "system-ui",
+  "sans-serif",
+  "serif",
+  "monospace",
+  "-apple-system",
+  "blinkmacsystemfont",
+  "ui-sans-serif",
+  "ui-serif",
+  "ui-monospace",
+  "cursive",
+  "fantasy",
+  "emoji",
+  "math",
+  "inherit",
+  "initial",
+  "unset",
+]);
+
+/**
+ * Font families the mock DECLARES (--font-* tokens / font-family) but never
+ * LOADS (no @font-face, fonts.googleapis/gstatic link, or font @import).
+ * Mocks run in a sandbox where fallback fonts mask this; the implementation
+ * must load them explicitly.
+ */
+export function detectUnloadedMockFonts(html: string): string[] {
+  const doc = html ?? "";
+  const css = [...doc.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi)]
+    .map((m) => m[1] ?? "")
+    .join("\n");
+  if (!css.trim()) return [];
+  // Any explicit loading mechanism in the mock → treat fonts as loaded.
+  if (
+    /@font-face/i.test(css) ||
+    /fonts\.(?:googleapis|gstatic)\.com/i.test(doc) ||
+    /@import[^;]+font/i.test(css)
+  ) {
+    return [];
+  }
+  const families = new Set<string>();
+  const addFamilies = (value: string) => {
+    for (const part of value.split(",")) {
+      const fam = part.trim().replace(/^["']|["']$/g, "");
+      if (!fam || fam.length > 60) continue;
+      if (SYSTEM_FONT_FAMILIES.has(fam.toLowerCase())) continue;
+      if (/^var\(/i.test(fam)) continue;
+      families.add(fam);
+    }
+  };
+  for (const m of css.matchAll(/--(?:font|type)[-\w]*\s*:\s*([^;}+]+)/gi)) {
+    addFamilies(m[1] ?? "");
+  }
+  for (const m of css.matchAll(/font-family\s*:\s*([^;}]+)/gi)) {
+    addFamilies(m[1] ?? "");
+  }
+  return [...families].slice(0, 6);
 }
 
 /**
@@ -407,6 +481,27 @@ export function compileDesignPackFromAccept(opts: {
 
   const elements = getDesignLoopElements(meta);
 
+  // Component-scoped CSS harvested per pinned element (styles.css) — carried
+  // into the pack so implement ports the accepted mock's styling instead of
+  // approximating it with generic utilities.
+  const componentStyles = elements
+    .map((e) => {
+      const candidates = [
+        e.stylesPath,
+        `.slopcontrol/design-loops/${opts.loopId}/elements/${e.id}/v${e.version}/styles.css`,
+        `.slopcontrol/elements/${e.id}/v${e.version}/styles.css`,
+      ].filter((p): p is string => Boolean(p));
+      const cssPath = candidates.find((p) =>
+        existsSync(join(opts.projectRoot, p)),
+      );
+      return cssPath
+        ? { elementId: e.id, version: e.version, cssPath }
+        : null;
+    })
+    .filter((s): s is { elementId: string; version: number; cssPath: string } =>
+      Boolean(s),
+    );
+
   // Detect pinned elements the accepted mock EXCEEDS (e.g. a nested accordion
   // sidebar vs a flat dashboard-sidebar). These drive an "evolve the element"
   // directive instead of the blunt "mount the pinned element" mustNot.
@@ -452,6 +547,8 @@ export function compileDesignPackFromAccept(opts: {
         `ALREADY APPLIED — do not re-implement ${id} (shipped on a prior design implement); only change it if explicitly inScope`,
     );
 
+  const unloadedFonts = detectUnloadedMockFonts(html);
+
   return {
     name,
     version: 1,
@@ -461,6 +558,7 @@ export function compileDesignPackFromAccept(opts: {
     tokens,
     logos,
     typography: extractTypographyCues(html),
+    fonts: unloadedFonts.length ? unloadedFonts : undefined,
     shell: extractShellNotes(html, request, `${notes}\n${transcriptTail}`),
     contentPillars: extractContentPillars({
       brief: meta.brief,
@@ -474,12 +572,23 @@ export function compileDesignPackFromAccept(opts: {
       ...buildMustNot(opts.acceptance, logos, scope, inScope),
       ...alreadyAppliedMustNots,
       ...elementMustNots,
+      ...(componentStyles.length
+        ? [
+            "Do not restyle shared elements with generic utility classes when element styles (styles.css) are provided — port the accepted mock's component CSS verbatim (tokens stay as var(--*) references)",
+          ]
+        : []),
+      ...(unloadedFonts.length
+        ? [
+            `Fonts declared but NOT loaded by the mock: ${unloadedFonts.join(", ")} — the implementation MUST load them (@fontsource/<family> import or fonts.googleapis <link> in the document entry); do not leave font-family referencing unloaded families`,
+          ]
+        : []),
     ].slice(0, 32),
     mockPath: `.slopcontrol/design-loops/${opts.loopId}/v${opts.version}/mock.html`,
     scope: { ...scope, source: "accept" },
     // Theme contract only authoritative when theme_modes is in this implement delta.
     theme: inScope.includes("theme_modes") ? theme : undefined,
     elements: elements.length ? elements : undefined,
+    componentStyles: componentStyles.length ? componentStyles : undefined,
     capabilityGaps: capabilityGaps.length ? capabilityGaps : undefined,
     evolveDirective,
     selections: selections.length ? selections : undefined,
@@ -534,6 +643,113 @@ export function readPhaseDesignPack(
   } catch {
     return null;
   }
+}
+
+export type DesignPackComponentStyle = {
+  elementId: string;
+  version: number;
+  cssPath: string;
+  css: string;
+};
+
+/** Load the component-scoped CSS referenced by a pack's componentStyles. */
+export function readDesignPackComponentStyles(
+  projectRoot: string,
+  pack: DesignPack | null | undefined,
+): DesignPackComponentStyle[] {
+  if (!pack?.componentStyles?.length) return [];
+  const out: DesignPackComponentStyle[] = [];
+  for (const entry of pack.componentStyles) {
+    try {
+      const path = join(projectRoot, entry.cssPath);
+      if (!existsSync(path)) continue;
+      const css = readFileSync(path, "utf-8").trim();
+      if (css) out.push({ ...entry, css });
+    } catch {
+      /* component styles best-effort */
+    }
+  }
+  return out;
+}
+
+/** Selector class names declared in a component styles.css, roots first. */
+export function componentStyleClassNames(css: string): string[] {
+  return [
+    ...new Set(
+      [...(css ?? "").matchAll(/\.([a-zA-Z][\w-]*)/g)].map((m) => m[1]!),
+    ),
+  ].sort((a, b) => a.length - b.length);
+}
+
+/**
+ * Collect implementation-side evidence for the post-implementation honor
+ * judge: files under src/packages/apps/web that mention any of the mock's
+ * class names (capped excerpts), plus a little product CSS for token context.
+ */
+export function collectImplementationStyleEvidence(opts: {
+  root: string;
+  classes: string[];
+  maxFiles?: number;
+  maxCharsPerFile?: number;
+}): string {
+  const maxFiles = opts.maxFiles ?? 6;
+  const maxChars = opts.maxCharsPerFile ?? 1_200;
+  const needles = [...new Set(opts.classes)].filter(Boolean).slice(0, 24);
+  const roots = ["src", "packages", "apps", "web"]
+    .map((r) => join(opts.root, r))
+    .filter((d) => existsSync(d));
+  const hits: string[] = [];
+  const cssFiles: string[] = [];
+  const seen = new Set<string>();
+  const walk = (dir: string, depth: number): void => {
+    if (depth > 6 || hits.length >= maxFiles) return;
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      if (hits.length >= maxFiles) return;
+      if (name.startsWith(".") || name === "node_modules" || name === "dist") {
+        continue;
+      }
+      const abs = join(dir, name);
+      try {
+        if (/\.(?:tsx?|jsx?|css)$/.test(name)) {
+          if (seen.has(abs)) continue;
+          seen.add(abs);
+          const text = readFileSync(abs, "utf-8");
+          if (name.endsWith(".css")) cssFiles.push(abs);
+          const hit = needles.find((n) => text.includes(n));
+          if (hit) {
+            const idx = text.indexOf(hit);
+            const start = Math.max(0, idx - 200);
+            hits.push(
+              `--- ${relative(opts.root, abs)} (match: ${hit}) ---\n${text.slice(start, start + maxChars)}`,
+            );
+          }
+        } else if (!name.includes(".")) {
+          walk(abs, depth + 1);
+        }
+      } catch {
+        /* ignore unreadable entries */
+      }
+    }
+  };
+  for (const r of roots) walk(r, 0);
+  // Always include some product CSS so the judge sees token definitions.
+  for (const cssPath of cssFiles.slice(0, 2)) {
+    try {
+      const text = readFileSync(cssPath, "utf-8");
+      hits.push(
+        `--- ${relative(opts.root, cssPath)} (css) ---\n${text.slice(0, maxChars)}`,
+      );
+    } catch {
+      /* ignore */
+    }
+  }
+  return hits.join("\n\n");
 }
 
 /** Copy loop DESIGN_PACK.json into phase design/; rewrite logo paths to phase assets. */
@@ -595,6 +811,7 @@ export function copyDesignPackToPhase(opts: {
 /** Prompt block for research / draft / develop (conceptual model + pack). */
 export function formatDesignPackPromptBlock(
   pack: DesignPack | null | undefined,
+  opts?: { projectRoot?: string },
 ): string {
   if (!pack) return "";
   const themeInScope = pack.inScope.includes("theme_modes");
@@ -672,6 +889,41 @@ export function formatDesignPackPromptBlock(
   if (pack.typography.length) {
     lines.push("### typography");
     for (const t of pack.typography) lines.push(`- ${t}`);
+    lines.push("");
+  }
+  if (pack.fonts?.length) {
+    lines.push(
+      "### fonts (declared but NOT loaded by the mock — the app MUST load them)",
+    );
+    for (const f of pack.fonts) lines.push(`- ${f}`);
+    lines.push(
+      "- Load via @fontsource/<family> import or a fonts.googleapis <link> in the document entry (index.html / root layout).",
+    );
+    lines.push("");
+  }
+  const componentStyles = opts?.projectRoot
+    ? readDesignPackComponentStyles(opts.projectRoot, pack)
+    : [];
+  if (componentStyles.length) {
+    lines.push(
+      "### element styles (verbatim from accepted mock — port these; do NOT approximate with generic utility classes)",
+    );
+    for (const s of componentStyles) {
+      lines.push(
+        `- ${s.elementId}@${s.version}: \`${s.cssPath}\``,
+        "```css",
+        s.css.slice(0, 3_000),
+        "```",
+      );
+    }
+    lines.push("");
+  } else if (pack.componentStyles?.length) {
+    lines.push(
+      "### element styles (verbatim from accepted mock — port these; do NOT approximate with generic utility classes)",
+    );
+    for (const s of pack.componentStyles) {
+      lines.push(`- ${s.elementId}@${s.version}: \`${s.cssPath}\``);
+    }
     lines.push("");
   }
   if (pack.shell.length) {
