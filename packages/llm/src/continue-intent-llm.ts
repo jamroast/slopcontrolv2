@@ -11,7 +11,7 @@ export const CONTINUE_INTENT_SYSTEM_PROMPT = `You classify a design-loop start b
 CRITICAL: Output ONLY a single JSON object. No prose, no markdown fences, no apology, no "we are asking" narration — JSON object only.
 
 Return ONLY a JSON object with these fields:
-- scope: one of "assets_only" | "nav_align" | "logo_invent" | "adopt_theme" | "sections" | "full_revise"
+- scope: one of "review" | "assets_only" | "nav_align" | "logo_invent" | "adopt_theme" | "sections" | "full_revise"
 - targets: string[] — subset of ["hero","copy","nav","logo","palette","tokens","typography","shell","layout","tasting-room","landing","dashboard","chat","settings","lockups"] the operator wants changed
 - wantsAssetEdit: boolean — true when icon pack / alpha / transparency / cut-out / resize image edits are requested on an EXISTING asset
 - assetOps: string[] — ordered recipe subset of ["make_transparent","circular_mask","derive_icon_pack","resize_image"]. Empty when no media edit. Order: transparent → circular_mask → icon pack when several apply.
@@ -51,6 +51,7 @@ Rules:
 - "centre/center the menubar over page content" / "same width as the contents on the page" / "logo and menu left align, sign-in and theme right align" → targets include "shell" and "layout", navAlign=false, designScope={kind:"shell", focus:"menubar"}. This is chrome layout (applied_shell), not navAlign. Pure left/right slot layout without naming a sibling does NOT require adoptChrome.
 - "I like the current look" / "keep the hero" / "do not change layout" → preserveChrome=true. "do not change hero" is NOT a request to change hero.
 - scope picks the dominant intent: full_revise only for explicit redesign/start-over; nav_align for menu sync; assets_only when only media edits requested (never when inventLogo); logo_invent/adopt_theme when that dominates; otherwise sections. Fresh "create a landing + dashboard mock" without theme/reuse cues → full_revise or sections with landing+dashboard targets.
+- REVIEW IS NOT A REVISION: "review the design", "does it meet the requirements", "check the mock", "any issues?", "what do you think of v3", "audit the changes" → scope=review, targets=[], all other change flags false. A review requests analysis ONLY — the mock must NOT be regenerated. When the message mixes review with a change ask ("review and tighten the sidebar"), the change dominates → sections with targets.
 - When inventLogo, adoptTheme, adoptChrome, or reuseProjectDesign is true, prefer preserveChrome=false. Fingerprint drift must not veto an intentional theme/logo/chrome redesign.
 - "only/just the chat form|composer|bubble" → designScope={kind:"component", focus:"chat.composer", preserve:["chrome","palette","logo","nav","shell"]}.
 - "dark and light / theme toggle" without full redesign → designScope={kind:"shell", focus:"theme", preserve:["logo","content"]}.

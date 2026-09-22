@@ -4496,8 +4496,9 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
     let notes: string;
     let usedScaffold: boolean;
     let reply: string;
+    let noChange: boolean | undefined;
     try {
-      ({ html, notes, usedScaffold, reply } = await orchestrator.designLoopGenerate({
+      ({ html, notes, usedScaffold, reply, noChange } = await orchestrator.designLoopGenerate({
         project,
         loopId: working.id,
         brief: working.brief,
@@ -4545,6 +4546,44 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
       throw genErr;
     }
     if (!stream) liveTurns.complete(bound.turnId, "done");
+    if (noChange) {
+      // Review-only turn — the mock was not regenerated. Skip the version
+      // write + META bump; respond with the current state for review.
+      const reviewReply =
+        reply || notes || "Review-only turn — mock unchanged.";
+      const reviewMessages = designChat.finalizeAssistant(reviewReply, {
+        version: working.currentVersion,
+      });
+      const freshReview = readDesignLoopMeta(project.rootPath, working.id) ?? working;
+      const reviewSiteInv =
+        readLiveSiteInventory(project.rootPath, freshReview.id) ??
+        buildLiveSiteInventory(project.rootPath);
+      const reviewPayload = {
+        loop: freshReview,
+        loopId: freshReview.id,
+        version: freshReview.currentVersion,
+        baseVersion,
+        html: rewriteDesignLoopAssetUrls(html, {
+          projectId: project.id,
+          loopId: freshReview.id,
+        }),
+        notes,
+        reply: reviewReply,
+        messages: reviewMessages,
+        usedScaffold,
+        noChange: true,
+        siteInventory: summarizeLiveSiteInventory(reviewSiteInv),
+        transcript: readDesignLoopTranscript(project.rootPath, working.id),
+        versions: buildDesignLoopVersionTree(project.rootPath, working.id),
+        next: "Review the current mock; name the changes you want, then design_loop_continue.",
+      };
+      if (stream) {
+        bound.completeDone(reviewPayload);
+        return;
+      }
+      res.json(reviewPayload);
+      return;
+    }
     writeDesignLoopVersion({
       projectRoot: project.rootPath,
       loopId: working.id,

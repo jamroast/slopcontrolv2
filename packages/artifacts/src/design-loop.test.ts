@@ -30,6 +30,7 @@ import {
   readPhaseDesignAcceptance,
   reopenDesignLoopForIterate,
   formatDesignLoopReviseBlock,
+  clipMockHtmlStructureAware,
   formatPhaseBoundMockPromptBlock,
   resolveDesignLoopGenerateFallback,
   rewriteDesignLoopAssetUrls,
@@ -414,6 +415,57 @@ describe("design-loop", () => {
     assert.match(block, /palette/);
     assert.match(block, /logo/);
     assert.match(block, /```html/);
+  });
+
+  it("clipMockHtmlStructureAware keeps <style> + <script> complete, elides body middle", () => {
+    const css = `<style>:root { --env-split-max: 1120px; }\n${".x{}\n".repeat(400)}.app-env--with-pane { grid-template-columns: 1fr 1fr; }</style>`;
+    const body = `<body>${"<div class='card'>body content</div>\n".repeat(400)}`;
+    const js = `<script>${"console.log('x');\n".repeat(200)}</script></body></html>`;
+    const html = `<!DOCTYPE html><html><head>${css}</head>${body}${js}`;
+    const budget = 20_000;
+    assert.ok(html.length > budget);
+    const clipped = clipMockHtmlStructureAware(html, budget);
+    // Full CSS survives — including rules near the end of the style block.
+    assert.ok(clipped.includes(".app-env--with-pane { grid-template-columns: 1fr 1fr; }"));
+    // Full JS survives.
+    assert.ok(clipped.includes("</script></body></html>"));
+    // Body was elided with a marker.
+    assert.match(clipped, /elided \d+ chars of body markup/);
+    assert.ok(clipped.length <= budget + 200); // marker overhead slack
+  });
+
+  it("clipMockHtmlStructureAware keeps CSS+JS even when they exceed the budget", () => {
+    const css = `<style>${".y{}\n".repeat(2000)}</style>`;
+    const js = `<script>console.log('end')</script></body></html>`;
+    const html = `<!DOCTYPE html><html><head>${css}</head><body><div>hi</div>${js}`;
+    const clipped = clipMockHtmlStructureAware(html, 1_000);
+    assert.ok(clipped.includes("console.log('end')"));
+    assert.ok(clipped.includes("</style>"));
+    assert.match(clipped, /elided \d+ chars of body markup/);
+  });
+
+  it("clipMockHtmlStructureAware passes through mocks under the budget", () => {
+    const html = `<!DOCTYPE html><html><head><style>:root{--a:1}</style></head><body>hi</body></html>`;
+    assert.equal(clipMockHtmlStructureAware(html, 96_000), html);
+  });
+
+  it("formatDesignLoopReviseBlock default budget fits a 34k mock uncut", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-revise-budget-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({ projectId: "p1", brief: "x" });
+    writeDesignLoopMeta(root, meta);
+    // Mirror the jamauth v2 regression: critical rule at ~16.1k chars.
+    const pad = ".pad{}\n".repeat(2_200);
+    const html = `<!DOCTYPE html><html><head><style>:root{--env-split-max:1120px}${pad}.app-env--with-pane{grid-template-columns:1fr 1fr}</style></head><body>${"<div>row</div>".repeat(800)}</body></html>`;
+    assert.ok(html.length > 16_000);
+    const block = formatDesignLoopReviseBlock({
+      projectRoot: root,
+      projectId: "p1",
+      loopId: meta.id,
+      previousHtml: html,
+    });
+    assert.ok(block.includes(".app-env--with-pane{grid-template-columns:1fr 1fr}"));
+    assert.ok(!block.includes("chars of body markup"));
   });
 
   it("formatPhaseBoundMockPromptBlock cites design/mock.html", () => {

@@ -609,7 +609,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   plan_loop_promote:
     "Bind accepted plan to a new phase and start research (returns runId). Pass loopId (or omit latched). After research reaches in_review, use advance_run with that runId — plan_loop_promote does not start development.",
   design_loop_continue:
-    "Revise the design-loop mock from operator visual feedback (new version). Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first). Notification-driven when a live turn is active — do not poll design_loop_get.",
+    "Revise the design-loop mock from operator visual feedback (new version). NOT for reviews — when the operator asks to review/audit/check the mock, use design_loop_get and analyze it yourself (a review message here is classified scope=review and returns the mock unchanged). Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first). Notification-driven when a live turn is active — do not poll design_loop_get.",
   design_loop_retry:
     "Regenerate the current design-loop version in place after a timeout/scaffold failure (no version bump). Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first).",
   design_loop_start:

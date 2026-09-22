@@ -3658,6 +3658,8 @@ ${message.trim()}`;
     usedScaffold: boolean;
     /** Operator-facing chat reply (not the HTML dump). */
     reply: string;
+    /** True for review-only turns — caller must NOT write a new version. */
+    noChange?: boolean;
   }> {
     const { project, loopId, brief, message, previousHtml, version } = input;
     ensureSlopcontrolDir(project.rootPath);
@@ -3669,10 +3671,12 @@ ${message.trim()}`;
       notes: string;
       usedScaffold: boolean;
       reply?: string;
+      noChange?: boolean;
     }) => ({
       html: opts.html,
       notes: opts.notes,
       usedScaffold: opts.usedScaffold,
+      ...(opts.noChange ? { noChange: true as const } : {}),
       reply:
         (opts.reply ?? opts.notes).trim() ||
         `Design loop v${version} updated.`,
@@ -3687,7 +3691,8 @@ ${message.trim()}`;
       const startFallback: ContinueIntent =
         !fallbackOnce.adoptTheme &&
         !fallbackOnce.reuseProjectDesign &&
-        fallbackOnce.scope === "sections" &&
+        (fallbackOnce.scope === "sections" ||
+          fallbackOnce.scope === "review") &&
         fallbackOnce.targets.length === 0
           ? {
               ...CONTINUE_INTENT_DEFAULT,
@@ -3732,6 +3737,27 @@ ${message.trim()}`;
         });
         continueIntent = isContinue ? fallbackOnce : startFallback;
       }
+    }
+
+    // Review-only continue: the operator asked for analysis, not a revision
+    // ("review the design", "does it meet requirements"). Do NOT regenerate —
+    // return the current mock unchanged; the caller skips the version bump.
+    // (A review once auto-bumped a new version whose regenerate saw a
+    // truncated prior mock and rebuilt the missing half from stale memory.)
+    if (isContinue && continueIntent.scope === "review") {
+      const prior =
+        previousHtml?.trim() ||
+        readDesignLoopMockHtml(project.rootPath, loopId, version - 1) ||
+        "";
+      return finishDesign({
+        html: prior,
+        notes: "Review-only request — mock unchanged.",
+        usedScaffold: false,
+        reply:
+          "Review-only request — the mock was not regenerated and no new version was created. " +
+          "Review the current mock, then tell me the specific changes you want.",
+        noChange: true,
+      });
     }
 
     // Conceptual model scope from structured intent (no chat regex classify).
@@ -4164,7 +4190,7 @@ ${message.trim()}`;
           projectId: project.id,
           loopId,
           previousHtml: workingPreviousHtml,
-          maxHtmlChars: 16_000,
+          maxHtmlChars: 96_000,
         })
       : "(no previous mock — create v1)";
     const selectionsBlock = formatDesignLoopSelectionsPromptBlock({

@@ -196,6 +196,11 @@ export function mockDriftIssueSeverity(
   // Default for element_invented kept hard for non-pinned callers; pinned
   // theme-toggle path passes severity "soft" explicitly.
   if (code === "element_invented") return "hard";
+  // nav_changed only fires when the intent did NOT target nav (mayTouchNav
+  // false) and pure reorders are already excluded — so a label-set change is
+  // never intentional. Hard-reject: warn-and-keep once let a regenerated
+  // mock silently swap a frozen menubar's labels.
+  if (code === "nav_changed") return "hard";
   if (opts.preserveChrome || opts.assetsOnly || opts.navAlign) return "hard";
   return "soft";
 }

@@ -220,3 +220,34 @@ describe("continue-intent-llm facet overrides", () => {
     assert.deepEqual(intent.replaceDesignFacets, []);
   });
 });
+
+describe("continue-intent-llm review scope", () => {
+  it("system prompt documents the review (no-regeneration) scope", () => {
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes('"review"'));
+    assert.ok(
+      CONTINUE_INTENT_SYSTEM_PROMPT.includes("REVIEW IS NOT A REVISION"),
+    );
+    assert.ok(CONTINUE_INTENT_SYSTEM_PROMPT.includes("scope=review"));
+  });
+
+  it("schema accepts scope review and normalize passes it through", () => {
+    const intent = normalizeContinueIntentStructured(
+      ContinueIntentSchema.parse({
+        scope: "review",
+        targets: [],
+        wantsAssetEdit: false,
+        assetOps: [],
+        inventLogo: false,
+        adoptTheme: false,
+        reuseProjectDesign: false,
+        freshDesign: false,
+        replaceDesignFacets: [],
+        adoptChrome: false,
+        navAlign: false,
+        preserveChrome: false,
+        notes: "review only",
+      }),
+    );
+    assert.equal(intent.scope, "review");
+  });
+});

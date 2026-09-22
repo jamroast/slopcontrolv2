@@ -123,6 +123,53 @@ describe("design-loop-continue", () => {
     assert.ok(intent.targets.includes("palette"));
   });
 
+  it("fallbackContinueIntentFromText classifies a review-only ask as review", () => {
+    // Verbatim message that once regenerated (and regressed) a mock.
+    const intent = fallbackContinueIntentFromText(
+      "Please review the design changes that have been generated to see if they meet that requirements",
+    );
+    assert.equal(intent.scope, "review");
+    assert.equal(intent.targets.length, 0);
+  });
+
+  it("fallbackContinueIntentFromText: review + change ask is not review", () => {
+    const intent = fallbackContinueIntentFromText(
+      "Review the mock and tighten the sidebar spacing",
+    );
+    assert.notEqual(intent.scope, "review");
+  });
+
+  it("detectMockDrift: untargeted nav_changed is hard drift", () => {
+    const prev = `<ul class="topbar-nav"><li><a>Dashboard</a></li><li><a>Applications</a></li><li><a>OIDC Discovery</a></li></ul>
+<div class="dashboard-shell"></div>`;
+    const next = `<ul class="topbar-nav"><li><a>Dashboard</a></li><li><a>Applications</a></li><li><a>Docs</a></li></ul>
+<div class="dashboard-shell"></div>`;
+    const issues = detectMockDrift({
+      previousHtml: prev,
+      nextHtml: next,
+      intent: ContinueIntentSchema.parse({
+        scope: "sections",
+        targets: [],
+        wantsAssetEdit: false,
+        assetOps: [],
+        inventLogo: false,
+        inventLogoCount: 1,
+        adoptTheme: false,
+        reuseProjectDesign: false,
+        freshDesign: false,
+        replaceDesignFacets: [],
+        adoptChrome: false,
+        navAlign: false,
+        preserveChrome: false,
+        notes: "",
+      }),
+    });
+    const nav = issues.find((i) => i.code === "nav_changed");
+    assert.ok(nav);
+    assert.equal(nav!.severity, "hard");
+    assert.ok(hardMockDriftIssues(issues).some((i) => i.code === "nav_changed"));
+  });
+
   it("detectMockDrift allows logo swap when inventLogo intent", () => {
     const prev = `<!DOCTYPE html><html><style>:root{--brand-orange:#E8430A;--bg:#000;--fg:#fff;--sf:#111;--bd:#222;--radius-md:8px;--font-body:Inter;--fs-body:1rem;}</style>
 <img src=".slopcontrol/design-loops/L/assets/jam-light-mark-v1-alpha.png">

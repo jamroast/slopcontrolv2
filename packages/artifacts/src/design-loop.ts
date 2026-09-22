@@ -743,7 +743,7 @@ export function formatDesignLoopReviseBlock(opts: {
 }): string {
   const html = opts.previousHtml.trim();
   if (!html) return "(no previous mock — create v1)";
-  const maxHtml = opts.maxHtmlChars ?? 16_000;
+  const maxHtml = opts.maxHtmlChars ?? 96_000;
   const tokens = extractTokensCssFromHtml(html);
   const features = extractFeaturesFromMockHtml(html);
   const assets = listDesignLoopAssets(
@@ -772,15 +772,51 @@ export function formatDesignLoopReviseBlock(opts: {
     for (const f of features) parts.push(`- ${f.id}: ${f.label}`);
     parts.push("");
   }
-  const clipped =
-    html.length <= maxHtml
-      ? html
-      : `${html.slice(0, maxHtml)}\n\n…[truncated previous mock: ${html.length} chars total; keep tokens/assets/sections above]`;
-  parts.push("### HTML (may be truncated — preserve structure below the fold)");
+  const clipped = clipMockHtmlStructureAware(html, maxHtml);
+  parts.push(
+    "### HTML (CSS + JS always complete — only body markup may be elided; preserve structure below the fold)",
+  );
   parts.push("```html");
   parts.push(clipped);
   parts.push("```");
   return parts.join("\n");
+}
+
+/**
+ * Structure-aware mock clipping. The <style> and <script> blocks are the
+ * densest contract in a mock (tokens, layout rules, interactions) — a naive
+ * head-truncate once cut mid-rule at `.app-env--with-pane {` and the agent
+ * rebuilt the missing 60% from stale memory, regressing the layout. Always
+ * keep CSS + JS complete; elide only body markup (middle-out) when over
+ * budget. When CSS+JS alone exceed the budget, keep them anyway — sending
+ * complete code matters more than the char cap.
+ */
+export function clipMockHtmlStructureAware(
+  html: string,
+  maxHtml: number,
+): string {
+  if (html.length <= maxHtml) return html;
+  const styleEnd = html.search(/<\/style\s*>/i);
+  const scriptMatch = /<script[\s>]/i.exec(html);
+  if (styleEnd < 0 || !scriptMatch || scriptMatch.index < styleEnd) {
+    // No recognizable style/script structure — fall back to a head clip.
+    return `${html.slice(0, maxHtml)}\n\n…[truncated previous mock: ${html.length} chars total; keep tokens/assets/sections above]`;
+  }
+  const head = html.slice(0, styleEnd + "</style>".length);
+  const tail = html.slice(scriptMatch.index);
+  const middle = html.slice(head.length, scriptMatch.index);
+  const marker = (elided: number) =>
+    `\n\n…[elided ${elided} chars of body markup — full CSS above, JS below; see section outline]…\n\n`;
+  const budget = maxHtml - head.length - tail.length - marker(0).length - 8;
+  if (budget <= 0) {
+    return `${head}${marker(middle.length)}${tail}`;
+  }
+  if (middle.length <= budget) {
+    return html;
+  }
+  const headShare = Math.floor(budget * 0.6);
+  const tailShare = budget - headShare;
+  return `${head}${middle.slice(0, headShare)}${marker(middle.length - budget)}${middle.slice(middle.length - tailShare)}${tail}`;
 }
 
 /**

@@ -973,7 +973,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "design_loop_continue",
       description:
-        "Revise a design-loop mock from operator feedback (new version). Works on open loops, and also reopens accepted/implemented loops so you can iterate (e.g. v2) without starting a new loop. Pass baseVersion to fork from a specific active version (default: tip). On usedScaffold/timeout, call design_loop_retry. Does not edit product code — accept + implement_design to re-bind.",
+        "Revise a design-loop mock from operator feedback (new version). NOT for reviews — a review/audit request is classified scope=review and returns the mock unchanged (no version bump); use design_loop_get to fetch the mock and review it yourself. Works on open loops, and also reopens accepted/implemented loops so you can iterate (e.g. v2) without starting a new loop. Pass baseVersion to fork from a specific active version (default: tip). On usedScaffold/timeout, call design_loop_retry. Does not edit product code — accept + implement_design to re-bind.",
       inputSchema: {
         type: "object",
         properties: {

@@ -9,6 +9,7 @@
 import { z } from "zod";
 
 export const ContinueIntentScopeSchema = z.enum([
+  "review",
   "assets_only",
   "nav_align",
   "logo_invent",
@@ -379,8 +380,23 @@ export function fallbackContinueIntentFromText(text: string): ContinueIntent {
       t,
     );
 
+  // Review/audit asks ("review the design", "does it meet requirements") are
+  // NOT revisions — no regeneration. Review verb must lead; an imperative
+  // change verb anywhere ("review and tighten the sidebar") flips it back.
+  // "changes" as a noun ("review the design changes") must not count.
+  const reviewLead =
+    /^\s*(?:please\s+)?(?:review|audit|assess|evaluate|check|inspect|critique|look\s+over|go\s+over)\b/i.test(
+      t,
+    );
+  const changeImperative =
+    /\b(?:change|update|revise|redo|rewrite|fix|modify|adjust|tweak|improve|add|remove|replace|swap|regenerate|restyle|redesign|tighten|rework|polish|refine)\b/i.test(
+      t,
+    );
+  const wantsReview = reviewLead && !changeImperative;
+
   let scope: ContinueIntentScope = "sections";
-  if (wantsFull && !preserveChrome && !navAlign && !reuseProjectDesign)
+  if (wantsReview) scope = "review";
+  else if (wantsFull && !preserveChrome && !navAlign && !reuseProjectDesign)
     scope = "full_revise";
   else if (navAlign && !inventLogo && !menubarContentAlign) scope = "nav_align";
   else if (inventLogo && !adoptTheme && !reuseProjectDesign && targets.size <= 1)
