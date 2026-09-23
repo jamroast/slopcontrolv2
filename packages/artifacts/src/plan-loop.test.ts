@@ -16,8 +16,10 @@ import {
   defaultPlanScope,
   extractPlanDocument,
   failurePlanDocument,
+  formatPlanLoopReviseBlock,
   isPlanLoopFailureOrScaffoldDocument,
   PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR,
+  planDocumentSuspiciousShrink,
   scaffoldPlanDocument,
   seedPlanLoopAcceptance,
   summarizePlanLoopProgress,
@@ -109,6 +111,48 @@ describe("plan-loop", () => {
     const plan = extractPlanDocument(raw);
     assert.ok(plan);
     assert.match(plan!, /## Goal/);
+  });
+
+  it("formatPlanLoopReviseBlock default cap fits a 13k plan uncut", () => {
+    // Regression: the old 12k cap cut a 13,081-char plan mid-Risks and hid
+    // Handoff notes entirely — the model then abbreviated what it couldn't see.
+    const body = "- bullet with some text to pad the line out\n".repeat(300);
+    const plan = `# Plan — x\n\n## Goal\n\nG\n\n## Approach\n\n${body}\n## Handoff notes\n\n- deps: @x/y@1.0.0\n`;
+    assert.ok(plan.length > 12_000);
+    const block = formatPlanLoopReviseBlock({ previousPlan: plan });
+    assert.ok(block.includes("## Handoff notes"));
+    assert.ok(block.includes("- deps: @x/y@1.0.0"));
+    assert.ok(!block.includes("[truncated prior PLAN.md]"));
+  });
+
+  it("planDocumentSuspiciousShrink flags a gutted surgical continue", () => {
+    // 78-line prior → 37-line incoming (the jamauth v3→v4 regression).
+    const prior = `# Plan\n\n## Goal\n\nG\n${"- line\n".repeat(72)}`;
+    const incoming = `# Plan\n\n## Goal\n\nG\n${"- line\n".repeat(31)}`;
+    const res = planDocumentSuspiciousShrink({ incoming, prior });
+    assert.equal(res.shrunk, true);
+    assert.ok(res.lineRatio < 0.6);
+    assert.ok(res.byteRatio < 0.6);
+  });
+
+  it("planDocumentSuspiciousShrink passes normal edits and tiny priors", () => {
+    const prior = `# Plan\n\n## Goal\n\nG\n${"- line\n".repeat(72)}`;
+    const edited = `# Plan\n\n## Goal\n\nG\n${"- line\n".repeat(70)}- new line\n- another\n`;
+    assert.equal(
+      planDocumentSuspiciousShrink({ incoming: edited, prior }).shrunk,
+      false,
+    );
+    // Tiny priors are noisy — never guard them.
+    const tiny = "# Plan\n\n## Goal\n\nG\n";
+    assert.equal(
+      planDocumentSuspiciousShrink({ incoming: "# Plan\n", prior: tiny }).shrunk,
+      false,
+    );
+    // Missing sides never flag.
+    assert.equal(
+      planDocumentSuspiciousShrink({ incoming: "", prior }).shrunk,
+      false,
+    );
   });
 
   it("accept writes PLAN_PACK; bind copies to phase", () => {

@@ -1176,7 +1176,10 @@ export function formatPlanLoopReviseBlock(opts: {
   previousPlan: string;
   maxChars?: number;
 }): string {
-  const max = opts.maxChars ?? 12_000;
+  // Plans are cheap text — a 12k cap once cut a 13k plan mid-Risks and hid
+  // Handoff notes entirely; the model abbreviated what it couldn't see and
+  // the section-level merge landed a gutted plan. 64k fits real plans.
+  const max = opts.maxChars ?? 64_000;
   const plan = opts.previousPlan.trim();
   const clipped =
     plan.length <= max
@@ -1189,6 +1192,29 @@ export function formatPlanLoopReviseBlock(opts: {
     clipped,
     "```",
   ].join("\n");
+}
+
+/**
+ * Detect a suspicious plan shrink on a surgical continue: the incoming plan
+ * is dramatically smaller than the prior (both line- and byte-wise). A
+ * sections/clarify_only revision should never gut the document — a >40%
+ * reduction means the model abbreviated content it couldn't fully see and
+ * the section-level merge cannot restore per-item losses.
+ */
+export function planDocumentSuspiciousShrink(opts: {
+  incoming: string;
+  prior?: string | null;
+}): { shrunk: boolean; lineRatio: number; byteRatio: number } {
+  const prior = (opts.prior ?? "").trim();
+  const incoming = (opts.incoming ?? "").trim();
+  if (!prior || !incoming) return { shrunk: false, lineRatio: 1, byteRatio: 1 };
+  const priorLines = prior.split("\n").length;
+  const incomingLines = incoming.split("\n").length;
+  const lineRatio = incomingLines / priorLines;
+  const byteRatio = incoming.length / prior.length;
+  // Tiny plans are noisy — only guard substantive documents.
+  if (priorLines < 30) return { shrunk: false, lineRatio, byteRatio };
+  return { shrunk: lineRatio < 0.6 && byteRatio < 0.6, lineRatio, byteRatio };
 }
 
 export function resolvePlanLoopGenerateFallback(opts: {

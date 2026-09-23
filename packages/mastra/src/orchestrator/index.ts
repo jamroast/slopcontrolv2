@@ -240,6 +240,7 @@ import {
   validatePlanDocument,
   mergePlanDocumentSections,
   planDocumentWorthMerging,
+  planDocumentSuspiciousShrink,
   resolvePlanLoopGenerateFallback,
   scaffoldPlanDocument,
   failurePlanDocument,
@@ -5443,6 +5444,38 @@ End with PLAN_COMPLETE.`;
         notes: `Scaffold — incomplete plan sections`,
         usedScaffold: true,
       });
+    }
+
+    // Shrink guard: a surgical continue must not gut the plan. The revise
+    // block once truncated the prior plan mid-section; the model abbreviated
+    // what it couldn't see and the section-level merge + H2 validation let
+    // the gutted plan pass (v3 78 lines → v4 37 lines on jamauth).
+    const shrinkGuardedScope =
+      continueIntent.scope === "sections" ||
+      continueIntent.scope === "clarify_only";
+    if (isContinue && shrinkGuardedScope && previousPlan?.trim()) {
+      const shrink = planDocumentSuspiciousShrink({
+        incoming: plan,
+        prior: previousPlan,
+      });
+      if (shrink.shrunk) {
+        slog.warn("plan-loop", "rejecting shrunken plan; keeping prior", {
+          loopId,
+          version,
+          lineRatio: shrink.lineRatio.toFixed(2),
+          byteRatio: shrink.byteRatio.toFixed(2),
+          scope: continueIntent.scope,
+        });
+        return finishPlan({
+          plan: previousPlan.trim(),
+          notes:
+            `Rejected shrunken plan (${Math.round(shrink.lineRatio * 100)}% of prior lines, ` +
+            `${Math.round(shrink.byteRatio * 100)}% of prior bytes) on a ${continueIntent.scope} ` +
+            `continue; kept prior. The model likely could not see the full prior plan — ` +
+            `retry, or re-run with baseVersion pointing at an intact version.`,
+          usedScaffold: true,
+        });
+      }
     }
 
     const chatProse = raw
