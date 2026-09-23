@@ -830,6 +830,18 @@ function clipPromptSection(label: string, text: string, maxChars: number): strin
   return `${body.slice(0, maxChars)}\n\n…[truncated ${label}: ${body.length} chars total; read_file \`.slopcontrol/${label}\` if you need more]`;
 }
 
+/**
+ * Excerpt budget for tool-less JSON judge/classifier calls that must validate
+ * a document's contents (section presence, intent alignment). Unlike agent
+ * prompts, judges cannot read_file past a clip — head-truncation here causes
+ * false-negative "section missing" verdicts and leg-retry loops (observed
+ * 2026-09-23: the research gate failed a complete 21.8k RESEARCH.md whose
+ * Automated Checks section began at char ~17.5k, past the old 16k clip, and
+ * burned 10 minutes of regen turns + judge retries before failing the run).
+ * 96k covers realistic RESEARCH/PHASE docs within cloud judges' contexts.
+ */
+const JUDGE_DOC_EXCERPT_MAX_CHARS = 96_000;
+
 /** Media tools from structured ContinueIntent (no chat regex). */
 function designLoopNeedsMediaTools(intent: ContinueIntent): boolean {
   return (
@@ -5659,7 +5671,7 @@ ${message.trim()}`;
                 researchExcerpt: clipPromptSection(
                   "RESEARCH.md",
                   researchDoc,
-                  16_000,
+                  JUDGE_DOC_EXCERPT_MAX_CHARS,
                 ),
               }),
             (v) => v.gaps,
@@ -5673,7 +5685,7 @@ ${message.trim()}`;
                       researchExcerpt: clipPromptSection(
                         "RESEARCH.md",
                         researchDoc,
-                        16_000,
+                        JUDGE_DOC_EXCERPT_MAX_CHARS,
                       ),
                     })
                 : undefined,
@@ -6538,7 +6550,11 @@ Phase id: ${phase.id}`;
     log(project, run, "--- Drafting PHASE.md ---");
 
     const research = readResearch(project.rootPath, phase.id);
-    const researchExcerpt = clipPromptSection("RESEARCH.md", research, 8_000);
+    const researchExcerpt = clipPromptSection(
+      "RESEARCH.md",
+      research,
+      JUDGE_DOC_EXCERPT_MAX_CHARS,
+    );
     const blueprint = readBlueprint(project.rootPath);
     const config = readProjectConfig(project.rootPath);
     const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
@@ -7401,11 +7417,15 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
               phaseQualityJudge({
                 intentBlock,
                 phaseDescription: phase.description,
-                researchExcerpt: clipPromptSection("RESEARCH.md", research, 16_000),
+                researchExcerpt: clipPromptSection(
+                  "RESEARCH.md",
+                  research,
+                  JUDGE_DOC_EXCERPT_MAX_CHARS,
+                ),
                 phaseDocExcerpt: clipPromptSection(
                   "PHASE.md",
                   phaseDocForQuality,
-                  16_000,
+                  JUDGE_DOC_EXCERPT_MAX_CHARS,
                 ),
               }),
             (v) => v.gaps,
@@ -7419,12 +7439,12 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
                       researchExcerpt: clipPromptSection(
                         "RESEARCH.md",
                         research,
-                        16_000,
+                        JUDGE_DOC_EXCERPT_MAX_CHARS,
                       ),
                       phaseDocExcerpt: clipPromptSection(
                         "PHASE.md",
                         phaseDocForQuality,
-                        16_000,
+                        JUDGE_DOC_EXCERPT_MAX_CHARS,
                       ),
                     })
                 : undefined,
@@ -7648,7 +7668,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           researchExcerpt: clipPromptSection(
             "RESEARCH.md",
             researchForIntent,
-            8_000,
+            JUDGE_DOC_EXCERPT_MAX_CHARS,
           ),
         },
       );
@@ -8134,7 +8154,11 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       phaseDoc,
       intent,
       {
-        researchExcerpt: clipPromptSection("RESEARCH.md", research, 8_000),
+        researchExcerpt: clipPromptSection(
+          "RESEARCH.md",
+          research,
+          JUDGE_DOC_EXCERPT_MAX_CHARS,
+        ),
       },
     );
     for (const warning of intentAlign.warnings) {
@@ -8424,8 +8448,16 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         endpoint,
         modelId,
         feedback,
-        researchExcerpt: clipPromptSection("RESEARCH.md", research, 4_000),
-        phaseExcerpt: clipPromptSection("PHASE.md", phaseDoc, 4_000),
+        researchExcerpt: clipPromptSection(
+          "RESEARCH.md",
+          research,
+          JUDGE_DOC_EXCERPT_MAX_CHARS,
+        ),
+        phaseExcerpt: clipPromptSection(
+          "PHASE.md",
+          phaseDoc,
+          JUDGE_DOC_EXCERPT_MAX_CHARS,
+        ),
         timeoutMs: 90_000,
       });
       return { targets: result.targets, intent: result.intent === true };

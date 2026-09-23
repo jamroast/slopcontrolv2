@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
 import {
   CHAT_JSON_DEFAULT_TIMEOUT_MS,
+  CHAT_JSON_SERVER_RETRY_MAX_MS,
   extractChatMessageText,
   isChatJsonTimeoutError,
   isRetryableChatJsonError,
+  isServerSideChatJsonError,
+  serverRetryDelayMs,
   stripJsonFence,
   chatJson,
 } from "./json-chat.js";
@@ -113,7 +116,41 @@ describe("json-chat helpers", () => {
       isRetryableChatJsonError("JSON chat timed out after 90000ms"),
       true,
     );
-    assert.equal(isRetryableChatJsonError("JSON chat failed (500): boom"), false);
+  });
+
+  it("isRetryableChatJsonError covers transient 5xx/429 server errors", () => {
+    // Hosted providers (e.g. ollama.com) return 500 under load — these must be
+    // retryable so a transient blip does not burn a judge attempt instantly.
+    assert.equal(isRetryableChatJsonError("JSON chat failed (500): boom"), true);
+    assert.equal(isRetryableChatJsonError("JSON chat failed (502): bad gateway"), true);
+    assert.equal(isRetryableChatJsonError("JSON chat failed (503): overloaded"), true);
+    assert.equal(isRetryableChatJsonError("JSON chat failed (429): slow down"), true);
+    assert.equal(isServerSideChatJsonError("JSON chat failed (500): boom"), true);
+    assert.equal(isServerSideChatJsonError("JSON chat failed (429): slow down"), true);
+    // 4xx client errors are deterministic — never retried.
+    for (const status of [400, 401, 403, 404, 422]) {
+      const msg = `JSON chat failed (${status}): nope`;
+      assert.equal(isRetryableChatJsonError(msg), false, msg);
+      assert.equal(isServerSideChatJsonError(msg), false, msg);
+    }
+    // Parse/empty-content failures are retryable but not server-side (no backoff).
+    assert.equal(isServerSideChatJsonError("JSON chat parse failed: x"), false);
+    assert.equal(isServerSideChatJsonError("JSON chat returned empty content"), false);
+  });
+
+  it("serverRetryDelayMs backs off exponentially and caps", () => {
+    const d1 = serverRetryDelayMs(1);
+    const d2 = serverRetryDelayMs(2);
+    const d3 = serverRetryDelayMs(3);
+    const d10 = serverRetryDelayMs(10);
+    assert.ok(d1 >= 2_000 && d1 < 3_000, `d1=${d1}`);
+    assert.ok(d2 >= 4_000 && d2 < 5_000, `d2=${d2}`);
+    assert.ok(d3 >= 8_000 && d3 < 9_000, `d3=${d3}`);
+    assert.ok(
+      d10 >= CHAT_JSON_SERVER_RETRY_MAX_MS &&
+        d10 < CHAT_JSON_SERVER_RETRY_MAX_MS + 1_000,
+      `d10=${d10}`,
+    );
   });
 
   it("isRetryableChatJsonError covers transient network/fetch failures", () => {
@@ -200,6 +237,81 @@ describe("chatJson empty-content retry", () => {
           }),
         /empty content/,
       );
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("retries HTTP 500 with backoff then succeeds", async () => {
+    let calls = 0;
+    const fetchMock = mock.method(globalThis, "fetch", async () => {
+      calls += 1;
+      if (calls < 3) {
+        return new Response("Internal Server Error", { status: 500 });
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"ok":true,"gaps":[]}' } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    const delays: number[] = [];
+    try {
+      const endpoint: LlmEndpoint = {
+        id: "test",
+        label: "test",
+        baseUrl: "http://example.test/v1",
+        apiType: "openai-chat",
+        modelId: "test-model",
+        capabilities: { chat: true, vision: false, imageGen: false },
+      };
+      const result = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        emptyContentRetries: 3,
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+      });
+      assert.equal(calls, 3);
+      assert.deepEqual(result.parsed, { ok: true, gaps: [] });
+      // Two retries, each preceded by a backoff sleep.
+      assert.equal(delays.length, 2);
+      assert.ok(delays[0]! >= 2_000, `first delay ${delays[0]}`);
+      assert.ok(delays[1]! >= 4_000, `second delay ${delays[1]}`);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("does not retry deterministic 4xx errors", async () => {
+    let calls = 0;
+    const fetchMock = mock.method(globalThis, "fetch", async () => {
+      calls += 1;
+      return new Response("quota exceeded", { status: 403 });
+    });
+    try {
+      const endpoint: LlmEndpoint = {
+        id: "test",
+        label: "test",
+        baseUrl: "http://example.test/v1",
+        apiType: "openai-chat",
+        modelId: "test-model",
+        capabilities: { chat: true, vision: false, imageGen: false },
+      };
+      await assert.rejects(
+        () =>
+          chatJson({
+            endpoint,
+            system: "sys",
+            user: "user",
+            sleep: async () => {},
+          }),
+        /JSON chat failed \(403\)/,
+      );
+      assert.equal(calls, 1);
     } finally {
       fetchMock.mock.restore();
     }
@@ -352,6 +464,7 @@ describe("chatJson empty-content retry", () => {
         user: "user",
         timeoutMs: 90_000,
         emptyContentRetries: 1,
+        sleep: async () => {},
       });
       assert.equal(calls, 2);
       assert.equal((result.parsed as { scope: string }).scope, "assets_only");
@@ -383,6 +496,7 @@ describe("chatJson empty-content retry", () => {
             user: "user",
             timeoutMs: 90_000,
             emptyContentRetries: 1,
+            sleep: async () => {},
           }),
         /JSON chat timed out after 90000ms/,
       );

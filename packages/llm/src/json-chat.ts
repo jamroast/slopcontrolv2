@@ -30,6 +30,8 @@ export interface ChatJsonOptions {
    * outputs should raise this well above the 1024 default.
    */
   maxTokens?: number;
+  /** Test hook: override the sleep used for server-error retry backoff. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface ChatJsonResult {
@@ -157,14 +159,40 @@ export function isChatJsonTimeoutError(
   );
 }
 
-export function isRetryableChatJsonError(message: string, err?: unknown): boolean {
+/**
+ * True for transient server-side failures — HTTP 5xx, 429 rate-limit, and
+ * network/connectivity errors — where retrying after a backoff delay is
+ * worthwhile (e.g. hosted providers returning 500 under load). 4xx client
+ * errors are deterministic and stay non-retryable.
+ */
+export function isServerSideChatJsonError(message: string): boolean {
   return (
-    /empty content|parse failed/i.test(message) ||
-    isChatJsonTimeoutError(err, message) ||
+    /JSON chat failed \((?:5\d\d|429)\)/i.test(message) ||
     /fetch failed|ECONNRESET|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|getaddrinfo|socket hang up|network error|connect timeout|UND_ERR_CONNECT_TIMEOUT/i.test(
       message,
     )
   );
+}
+
+export function isRetryableChatJsonError(message: string, err?: unknown): boolean {
+  return (
+    /empty content|parse failed/i.test(message) ||
+    isChatJsonTimeoutError(err, message) ||
+    isServerSideChatJsonError(message)
+  );
+}
+
+/** Base delay for server-side retries; doubles per attempt (capped) plus jitter. */
+export const CHAT_JSON_SERVER_RETRY_BASE_MS = 2_000;
+export const CHAT_JSON_SERVER_RETRY_MAX_MS = 15_000;
+
+/** Exponential backoff with up to 1s jitter: ~2s, ~4s, ~8s, then capped ~15s. */
+export function serverRetryDelayMs(attempt: number): number {
+  const exp = Math.min(
+    CHAT_JSON_SERVER_RETRY_MAX_MS,
+    CHAT_JSON_SERVER_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1),
+  );
+  return exp + Math.floor(Math.random() * 1_000);
 }
 
 function timeoutError(timeoutMs: number, attempt: number, maxAttempts: number): Error {
@@ -197,6 +225,9 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
   const timeoutMs =
     opts.timeoutMs ?? endpoint.timeoutMs ?? CHAT_JSON_DEFAULT_TIMEOUT_MS;
   const maxAttempts = 1 + Math.max(0, opts.emptyContentRetries ?? 2);
+  const sleep =
+    opts.sleep ??
+    ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -262,12 +293,19 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
     } catch (err) {
       if (isChatJsonTimeoutError(err)) {
         lastError = timeoutError(timeoutMs, attempt, maxAttempts);
-        if (attempt < maxAttempts) continue;
+        if (attempt < maxAttempts) {
+          // Timeouts usually mean an overloaded server — back off, don't hammer.
+          await sleep(serverRetryDelayMs(attempt));
+          continue;
+        }
         throw lastError;
       }
       const e = err instanceof Error ? err : new Error(String(err));
       lastError = e;
       if (attempt < maxAttempts && isRetryableChatJsonError(e.message, e)) {
+        if (isServerSideChatJsonError(e.message)) {
+          await sleep(serverRetryDelayMs(attempt));
+        }
         continue;
       }
       throw e;
