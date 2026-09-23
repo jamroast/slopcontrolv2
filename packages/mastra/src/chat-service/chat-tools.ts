@@ -291,6 +291,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
       loopId: optionalId,
       message: z.string().min(1),
       projectId: optionalProject,
+      baseVersion: z.number().int().positive().optional(),
     })
     .passthrough(),
   design_loop_retry: z
@@ -306,6 +307,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
       loopId: z.string().min(1),
       message: z.string().min(1),
       projectId: optionalProject,
+      baseVersion: z.number().int().positive().optional(),
     })
     .passthrough(),
   plan_loop_start: z.object({
@@ -601,7 +603,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   plan_loop_start:
     "Start a multi-turn plan loop (structured PLAN.md). Requires brief — pass the operator's planning words in brief. Optional investigateTool: auto|mastra|pi. Thorough vs quick intent is LLM-classified. You'll be notified via live_settled when the turn completes — do not poll plan_loop_get.",
   plan_loop_continue:
-    "Revise a plan loop from operator feedback. Pass loopId (or omit latched) and message. Notification-driven — do not poll plan_loop_get while running.",
+    "Revise a plan loop from operator feedback. Pass loopId (or omit latched) and message. Pass baseVersion to fork from a specific earlier version (default: tip) — ESSENTIAL when the tip is truncated/regressed: pass the last intact version as a NUMBER parameter (e.g. baseVersion 3), do not just write it in message prose. Notification-driven — do not poll plan_loop_get while running.",
   plan_loop_acceptance:
     "Save acceptance checklist ticks (goal, scope, approach, areas, success, risks) before freezing the plan. Pass loopId (or omit latched) and acceptedFeatureIds or features[]. Does not accept the plan by itself.",
   plan_loop_accept:
@@ -609,7 +611,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   plan_loop_promote:
     "Bind accepted plan to a new phase and start research (returns runId). Pass loopId (or omit latched). After research reaches in_review, use advance_run with that runId — plan_loop_promote does not start development.",
   design_loop_continue:
-    "Revise the design-loop mock from operator visual feedback (new version). NOT for reviews — when the operator asks to review/audit/check the mock, use design_loop_get and analyze it yourself (a review message here is classified scope=review and returns the mock unchanged). Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first). Notification-driven when a live turn is active — do not poll design_loop_get.",
+    "Revise the design-loop mock from operator visual feedback (new version). NOT for reviews — when the operator asks to review/audit/check the mock, use design_loop_get and analyze it yourself (a review message here is classified scope=review and returns the mock unchanged). Pass baseVersion to fork from a specific earlier version (default: tip) — ESSENTIAL when the tip is regressed/truncated: pass the last intact version, e.g. baseVersion 2. Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first). Notification-driven when a live turn is active — do not poll design_loop_get.",
   design_loop_retry:
     "Regenerate the current design-loop version in place after a timeout/scaffold failure (no version bump). Pass loopId, or omit to use this chat's latched design loop. Global chat: always pass projectId, and pass loopId when more than one loop is open (list_design_loops first).",
   design_loop_start:

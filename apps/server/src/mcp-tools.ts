@@ -1783,7 +1783,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "plan_loop_continue",
       description:
-        "Revise a plan-loop PLAN.md from operator feedback (new version). Reopens accepted/promoted loops. message optional when plan loop CHAT.json has user feedback since the current version — server auto-composes. Use this (not plan_loop_get) when the operator wants the plan updated.",
+        "Revise a plan-loop PLAN.md from operator feedback (new version). Reopens accepted/promoted loops. message optional when plan loop CHAT.json has user feedback since the current version — server auto-composes. Pass baseVersion to fork from a specific earlier version (default: tip) — essential when the tip is truncated/regressed: pass the last intact version. Use this (not plan_loop_get) when the operator wants the plan updated.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1794,7 +1794,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             description:
               "Operator revision feedback. Omit to synthesize from plan loop CHAT.json.",
           },
-          baseVersion: { type: "number" },
+          baseVersion: {
+            type: "number",
+            description:
+              "Version to revise from (default: tip / currentVersion). Pass the last intact version when the tip is truncated or regressed.",
+          },
         },
         required: ["projectId", "loopId"],
       },
