@@ -5795,8 +5795,75 @@ app.post("/npm-registry/publish", async (req, res) => {
       packageDir,
       stdout: result.stdout.slice(0, 2_000),
       registryUrl: result.meta.url,
+      mirror: result.mirror,
       packages: listNpmRegistryPackages(defaultDataDir()),
     });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+/**
+ * Mirror-only publish: push an already-built package directory to the hosted
+ * upstream (GitHub Packages) WITHOUT touching the local registry — backfills
+ * packages published before mirroring was configured, at their current
+ * version (no bump). Pass packageDir OR projectId+packagePath.
+ */
+app.post("/npm-registry/mirror", async (req, res) => {
+  const body = (req.body ?? {}) as {
+    packageDir?: string;
+    projectId?: string;
+    packagePath?: string;
+  };
+  let packageDir = body.packageDir?.trim() ?? "";
+  if (!packageDir && body.projectId?.trim()) {
+    const project = store.getProject(body.projectId.trim());
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    try {
+      const { resolvePublishPackageDir } = await import("./npm-registry.js");
+      packageDir = resolvePublishPackageDir({
+        projectRoot: project.rootPath,
+        packagePath: body.packagePath,
+      });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : String(err),
+        hint: "Pass packageDir (absolute) or projectId + packagePath (e.g. packages/service-token)",
+      });
+      return;
+    }
+  }
+  if (!packageDir || !existsSync(packageDir)) {
+    res.status(400).json({
+      error: "packageDir must be an existing directory",
+      hint: "Pass packageDir (absolute) or projectId + packagePath relative to the project root",
+    });
+    return;
+  }
+  try {
+    const { resolveNpmRegistryMirror, mirrorPackageToUpstream } = await import(
+      "@slopcontrol/artifacts"
+    );
+    const resolved = resolveNpmRegistryMirror(defaultDataDir());
+    if (resolved.status !== "ready") {
+      res.status(400).json({
+        error:
+          resolved.status === "invalid"
+            ? resolved.reason
+            : "npm registry mirror is not configured — create ~/.slopcontrol/npm-registry-mirror.json",
+      });
+      return;
+    }
+    const result = await mirrorPackageToUpstream({
+      packageDir,
+      mirror: resolved.config,
+    });
+    res.status(result.mirrored ? 200 : 422).json({ ok: result.mirrored, ...result });
   } catch (err) {
     res.status(500).json({
       error: err instanceof Error ? err.message : String(err),
@@ -5837,6 +5904,7 @@ app.post("/projects/:id/design-elements/:elementId/publish-npm", async (req, res
       packageName: prepared.packageName,
       packageVersion: prepared.packageVersion,
       registryUrl: published.meta.url,
+      mirror: published.mirror,
       stdout: published.stdout.slice(0, 1_500),
       next: `On consumers: npm_registry_ensure_rc then pnpm add ${prepared.packageName}@${prepared.packageVersion}`,
     });

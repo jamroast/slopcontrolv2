@@ -12,6 +12,7 @@ import {
   findRegisteredConsumers,
   isNpmRegistryDisabled,
   listNpmRegistryPackages,
+  mirrorAfterLocalPublish,
   npmRegistryConfigPath,
   propagateLibraryVersion,
   readNpmRegistryMeta,
@@ -27,6 +28,7 @@ import {
   bumpWorkspacePackageVersion,
   readWorkspacePackageJson,
   resolveWorkspacePackageDir,
+  type MirrorPublishResult,
   type NpmRegistryMeta,
   type PropagationResult,
 } from "@slopcontrol/artifacts";
@@ -291,7 +293,12 @@ export async function publishToNpmRegistry(opts: {
   dataDir: string;
   packageDir: string;
   tag?: string;
-}): Promise<{ ok: true; stdout: string; meta: NpmRegistryMeta }> {
+}): Promise<{
+  ok: true;
+  stdout: string;
+  meta: NpmRegistryMeta;
+  mirror: MirrorPublishResult | null;
+}> {
   const meta = await startNpmRegistry(opts.dataDir);
   const registry = meta.url.endsWith("/") ? meta.url.slice(0, -1) : meta.url;
   const args = [
@@ -335,7 +342,13 @@ export async function publishToNpmRegistry(opts: {
       ),
     );
   }
-  return { ok: true, stdout: result.stdout, meta };
+  // Mirror to the hosted upstream (GitHub Packages) when configured — this is
+  // what off-machine builds (Vercel, cloud CI) resolve private scopes from.
+  const mirror = await mirrorAfterLocalPublish({
+    dataDir: opts.dataDir,
+    packageDir: opts.packageDir,
+  });
+  return { ok: true, stdout: result.stdout, meta, mirror };
 }
 
 export type LibraryPublishStep = {
@@ -353,6 +366,8 @@ export type LibraryPublishReport = {
   toolchainKind: string;
   steps: LibraryPublishStep[];
   propagation?: PropagationResult[];
+  /** Upstream mirror (GitHub Packages) outcome — null when not configured. */
+  mirror?: MirrorPublishResult | null;
   meta: NpmRegistryMeta;
 };
 
@@ -490,6 +505,14 @@ export async function publishLibraryToRegistry(opts: {
     );
   }
 
+  // 3a. Mirror to the hosted upstream (GitHub Packages) when configured, so
+  // off-machine builds (Vercel, cloud CI) can resolve the private scope.
+  const mirror = await mirrorAfterLocalPublish({
+    dataDir: opts.dataDir,
+    packageDir: opts.packageDir,
+    runner,
+  });
+
   // 3b. Commit the version bump (package.json + lockfiles) so git stays in
   // step with the registry; an uncommitted bump leaves the tree dirty, which
   // breaks the next bump and drifts git away from the published version.
@@ -566,6 +589,7 @@ export async function publishLibraryToRegistry(opts: {
     toolchainKind: spec.kind,
     steps,
     propagation,
+    mirror,
     meta,
   };
 }
@@ -655,6 +679,8 @@ export type WorkspacePackagePublishReport = {
   packageDir: string;
   steps: WorkspacePackagePublishStep[];
   propagation?: PropagationResult[];
+  /** Upstream mirror (GitHub Packages) outcome — null when not configured. */
+  mirror?: MirrorPublishResult | null;
   meta: NpmRegistryMeta;
 };
 
@@ -763,9 +789,11 @@ export async function publishWorkspacePackageToRegistry(opts: {
   });
 
   let publishStdout = "";
+  let mirror: MirrorPublishResult | null = null;
   try {
     const pub = await publishToNpmRegistry({ dataDir: opts.dataDir, packageDir });
     publishStdout = pub.stdout;
+    mirror = pub.mirror;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!REPUBLISH_CONFLICT_RE.test(msg)) throw err;
@@ -780,6 +808,7 @@ export async function publishWorkspacePackageToRegistry(opts: {
     });
     const pub = await publishToNpmRegistry({ dataDir: opts.dataDir, packageDir });
     publishStdout = pub.stdout;
+    mirror = pub.mirror;
   }
 
   steps.push({
@@ -857,6 +886,7 @@ export async function publishWorkspacePackageToRegistry(opts: {
     packageDir,
     steps,
     propagation,
+    mirror,
     meta,
   };
 }

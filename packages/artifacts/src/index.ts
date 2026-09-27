@@ -87,6 +87,7 @@ export * from "./continue-intent.js";
 export * from "./design-share.js";
 export * from "./design-element.js";
 export * from "./npm-registry.js";
+export * from "./npm-registry-mirror.js";
 export * from "./build-toolchain.js";
 export * from "./css-tokens.js";
 export * from "./test-services.js";
