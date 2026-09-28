@@ -67,6 +67,7 @@ Classes:
 
 Rules:
 - Never recommend switching product models to free-tier IDs; tests should use llmTestProfile=local/fixture instead.
+- Empty output is evidence of a SILENT check mismatch (grep -q / test / [ ] found no match and printed nothing), never of an external cause: when the Output section is empty, do NOT invent network, auth, quota, or service stories — none are evidenced. Classify empty-output non-zero exits as "process" with codingAgentShouldFix: true and confidence "low"; the summary must state the check failed silently and name what the command compares, not a cause absent from the output.
 - codingAgentShouldFix: true for "process" (broken check) and "product"; false for "infra", "env", "model" — those need an operator or harness change.
 - harnessRecoverable: true when the failure can be fixed by changing the harness environment — installing deps, starting a missing service/container, fixing a port or hostname binding — WITHOUT touching product code. true for infra like a stopped database the harness can start; false when only the operator can fix it (missing API key, entitlement) or the fix is product code.
 - audience mirrors that: "coding" when the coding agent should fix it, "operator" otherwise.
@@ -138,6 +139,44 @@ export function parseVerifyFailureLlmPayload(parsed: unknown): VerifyFailureLlmR
   });
 }
 
+/**
+ * Silent-failure re-route (deterministic, post-parse). A check that exits
+ * non-zero with NO output is almost always a silent `grep -q` / `test`
+ * mismatch — there is no evidence for any external cause. Without this guard
+ * the router LLM hallucinates infra/auth stories from the command text alone
+ * (observed 2026-09-28: an env-fragile .npmrc-generation grep check — broken
+ * by the verify env overlay injecting the loopback registry URL — was
+ * misdiagnosed as a GitHub Packages auth rejection, class=infra /
+ * audience=operator / codingAgentShouldFix=false, which parked the run at
+ * blocked and suppressed the coding retry that repairs such checks).
+ * Re-route to the coding agent, which can reproduce the check locally and
+ * fix what it actually compares. Genuine infra failures nearly always print
+ * something (curl/docker/npm error text), so empty output is a safe signal.
+ */
+export function rerouteSilentCheckFailure(
+  result: VerifyFailureLlmResult,
+  opts: { output?: string; exitCode?: number | null },
+): VerifyFailureLlmResult {
+  const outputIsEmpty = (opts.output ?? "").trim().length === 0;
+  if (!outputIsEmpty) return result;
+  const operatorOnly =
+    result.class === "infra" ||
+    result.class === "env" ||
+    result.class === "model" ||
+    result.audience === "operator";
+  if (!operatorOnly) return result;
+  return {
+    ...result,
+    class: "process",
+    audience: "coding",
+    codingAgentShouldFix: true,
+    harnessRecoverable: false,
+    confidence: "low",
+    summary: `Check exited ${opts.exitCode ?? "non-zero"} with no output — silent grep/test mismatch (no evidence for an external cause). Reproduce the check locally, inspect what it compared, and repair the check or the code.`,
+    operatorActions: [],
+  };
+}
+
 export async function classifyVerifyFailureViaLlm(
   opts: ClassifyVerifyFailureViaLlmOptions,
 ): Promise<VerifyFailureLlmResult> {
@@ -159,5 +198,8 @@ export async function classifyVerifyFailureViaLlm(
       .filter((line) => line !== "")
       .join("\n"),
   });
-  return parseVerifyFailureLlmPayload(parsed);
+  return rerouteSilentCheckFailure(parseVerifyFailureLlmPayload(parsed), {
+    output: opts.output,
+    exitCode: opts.exitCode,
+  });
 }

@@ -1,108 +1,97 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  VERIFY_FAILURE_SYSTEM_PROMPT,
-  VerifyFailureClassSchema,
-  VerifyFailureLlmSchema,
   parseVerifyFailureLlmPayload,
+  rerouteSilentCheckFailure,
+  type VerifyFailureLlmResult,
 } from "./verify-failure-llm.js";
 
-describe("verify-failure-llm", () => {
-  it("system prompt carries the classification rules", () => {
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /"infra"/);
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /"product"/);
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /"process"/);
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /"model"/);
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /"env"/);
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /"unknown"/);
+function baseResult(
+  overrides: Partial<VerifyFailureLlmResult> = {},
+): VerifyFailureLlmResult {
+  return {
+    class: "infra",
+    confidence: "medium",
+    summary: "hallucinated auth story",
+    tags: ["auth"],
+    codingAgentShouldFix: false,
+    audience: "operator",
+    operatorActions: ["Set a real token"],
+    ...overrides,
+  };
+}
+
+describe("rerouteSilentCheckFailure", () => {
+  it("re-routes empty-output infra/operator misdiagnoses to the coding agent", () => {
+    // Observed 2026-09-28: an env-fragile grep check (exit 1, empty output)
+    // was misdiagnosed as a GitHub Packages auth rejection, parking the run.
+    const out = rerouteSilentCheckFailure(baseResult(), {
+      output: "",
+      exitCode: 1,
+    });
+    assert.equal(out.class, "process");
+    assert.equal(out.audience, "coding");
+    assert.equal(out.codingAgentShouldFix, true);
+    assert.equal(out.confidence, "low");
+    assert.deepEqual(out.operatorActions, []);
+    assert.match(out.summary, /no output/i);
   });
 
-  it("system prompt forbids free-tier model switching and scopes operator actions", () => {
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /Never recommend switching product models to free-tier IDs/);
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /only when audience is "operator"/);
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /llmTestProfile=local/);
+  it("treats whitespace-only output as empty", () => {
+    const out = rerouteSilentCheckFailure(baseResult(), {
+      output: "  \n  ",
+      exitCode: 1,
+    });
+    assert.equal(out.class, "process");
+    assert.equal(out.codingAgentShouldFix, true);
   });
 
-  it("system prompt treats signals as ground truth", () => {
-    assert.match(VERIFY_FAILURE_SYSTEM_PROMPT, /ground truth/);
-  });
-
-  it("class schema enumerates the failure classes", () => {
-    for (const cls of ["infra", "product", "process", "model", "env", "unknown"]) {
-      assert.equal(VerifyFailureClassSchema.parse(cls), cls);
+  it("re-routes env/model classes too when output is empty", () => {
+    for (const cls of ["env", "model"] as const) {
+      const out = rerouteSilentCheckFailure(baseResult({ class: cls }), {
+        output: "",
+        exitCode: 1,
+      });
+      assert.equal(out.class, "process", cls);
+      assert.equal(out.audience, "coding");
     }
-    assert.throws(() => VerifyFailureClassSchema.parse("network"));
   });
 
-  it("parses a well-formed payload", () => {
-    const result = VerifyFailureLlmSchema.parse({
-      class: "infra",
-      confidence: "high",
-      summary: "Postgres connection refused on localhost:5432.",
-      tags: ["db", "connection-refused"],
-      codingAgentShouldFix: false,
-      audience: "operator",
-      operatorActions: ["Start the database container."],
-      lesson: "Start the DB container before db steps.",
+  it("leaves evidence-backed infra diagnoses untouched", () => {
+    const input = baseResult({ summary: "connect ECONNREFUSED 127.0.0.1:5432" });
+    const out = rerouteSilentCheckFailure(input, {
+      output: "npm error code ECONNREFUSED\nnpm error connect ECONNREFUSED 127.0.0.1:5432",
+      exitCode: 1,
     });
-    assert.equal(result.class, "infra");
-    assert.equal(result.audience, "operator");
-    assert.deepEqual(result.operatorActions, ["Start the database container."]);
-    assert.equal(result.lesson, "Start the DB container before db steps.");
+    assert.deepEqual(out, input);
   });
 
-  it("coerces bad confidence to low and missing arrays to []", () => {
-    const result = parseVerifyFailureLlmPayload({
-      class: "process",
-      confidence: "very-high",
-      summary: "Check started a long-lived dev server and hit the wall-clock timeout.",
-      codingAgentShouldFix: true,
-      audience: "coding",
-    });
-    assert.equal(result.confidence, "low");
-    assert.deepEqual(result.tags, []);
-    assert.deepEqual(result.operatorActions, []);
-    assert.equal(result.lesson, undefined);
-  });
-
-  it("coerces unknown class to unknown and derives shouldFix from audience", () => {
-    const result = parseVerifyFailureLlmPayload({
-      class: "cosmic-rays",
-      summary: "Something failed.",
-      audience: "operator",
-    });
-    assert.equal(result.class, "unknown");
-    assert.equal(result.codingAgentShouldFix, false);
-
-    const coding = parseVerifyFailureLlmPayload({
+  it("leaves silent product/process failures routed to coding untouched", () => {
+    const input = baseResult({
       class: "product",
-      summary: "Assertion failed in auth.test.ts.",
       audience: "coding",
+      codingAgentShouldFix: true,
+      operatorActions: [],
     });
-    assert.equal(coding.codingAgentShouldFix, true);
+    const out = rerouteSilentCheckFailure(input, { output: "", exitCode: 1 });
+    assert.deepEqual(out, input);
   });
 
-  it("falls back to a default summary on missing/empty summary", () => {
-    const result = parseVerifyFailureLlmPayload({ class: "infra", summary: "   " });
-    assert.equal(result.summary, "Verification failed (unclassified).");
+  it("re-routes operator audience even when the class is ambiguous", () => {
+    const out = rerouteSilentCheckFailure(
+      baseResult({ class: "unknown" }),
+      { output: "", exitCode: 1 },
+    );
+    assert.equal(out.class, "process");
+    assert.equal(out.audience, "coding");
   });
+});
 
-  it("filters non-string tags and blank operator actions", () => {
-    const result = parseVerifyFailureLlmPayload({
-      class: "env",
-      summary: "OLLAMA_API_KEY missing.",
-      audience: "operator",
-      tags: ["missing-env", 42, null, "ollama"],
-      operatorActions: ["Set OLLAMA_API_KEY.", "  ", 7],
-    });
-    assert.deepEqual(result.tags, ["missing-env", "ollama"]);
-    assert.deepEqual(result.operatorActions, ["Set OLLAMA_API_KEY."]);
-  });
-
-  it("handles a non-object payload", () => {
-    const result = parseVerifyFailureLlmPayload("not json");
-    assert.equal(result.class, "unknown");
-    assert.equal(result.audience, "coding");
-    assert.equal(result.codingAgentShouldFix, true);
+describe("parseVerifyFailureLlmPayload", () => {
+  it("defaults messy payloads to coding-routed unknown", () => {
+    const out = parseVerifyFailureLlmPayload({});
+    assert.equal(out.class, "unknown");
+    assert.equal(out.audience, "coding");
+    assert.equal(out.codingAgentShouldFix, true);
   });
 });
