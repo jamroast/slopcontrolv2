@@ -63,6 +63,58 @@ describe("DesignTool", () => {
     }
   });
 
+  it("retries without size when the images API rejects it with a 400", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-designtool-retry-"));
+    const originalFetch = globalThis.fetch;
+    const seenBodies: Array<Record<string, unknown>> = [];
+    // 1x1 transparent PNG
+    const pngB64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+      seenBodies.push(JSON.parse(init?.body ?? "{}"));
+      if (seenBodies.length === 1) {
+        return new Response(
+          JSON.stringify({ error: { message: "invalid argument" } }),
+          { status: 400 },
+        );
+      }
+      return new Response(
+        JSON.stringify({ data: [{ b64_json: pngB64 }] }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    try {
+      const tool = new OllamaImagesDesignTool();
+      const outPath = join(dir, "logo.png");
+      const result = await tool.generateImage({
+        prompt: "circular coffee logo mark",
+        outPath,
+        width: 512,
+        height: 512,
+        logoFailClosed: true,
+        endpoint: {
+          id: "test-images",
+          label: "test",
+          baseUrl: "https://example.invalid/v1",
+          apiType: "openai-images",
+          modelId: "test-image-model",
+          capabilities: { chat: false, vision: false, imageGen: true },
+        },
+      });
+      assert.equal(result.skipped, undefined);
+      assert.equal(result.format, "png");
+      assert.ok(result.bytes > 0);
+      assert.ok(existsSync(outPath));
+      // First attempt carried the requested size; the retry omitted it.
+      assert.equal(seenBodies.length, 2);
+      assert.equal(seenBodies[0]?.size, "512x512");
+      assert.equal("size" in (seenBodies[1] ?? {}), false);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("getDesignTool returns ollama-images by default", () => {
     assert.equal(getDesignTool().id, "ollama-images");
     assert.equal(getDesignTool("ollama-images").id, "ollama-images");

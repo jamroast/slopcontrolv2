@@ -155,18 +155,29 @@ export class OllamaImagesDesignTool implements DesignTool {
     const apiKey = endpoint.apiKey?.trim();
     if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
-    try {
-      const res = await fetch(url, {
+    // Some OpenAI-images-compatible providers (e.g. OpenRouter-routed Gemini
+    // image models) reject the `size` param outright or only accept specific
+    // sizes — on a 400, retry once without `size` before falling back.
+    const postImages = (includeSize: boolean) =>
+      fetch(url, {
         method: "POST",
         headers,
         body: JSON.stringify({
           model: modelId,
           prompt: opts.prompt,
           n: 1,
-          size: `${opts.width ?? 512}x${opts.height ?? 512}`,
+          ...(includeSize
+            ? { size: `${opts.width ?? 1024}x${opts.height ?? 1024}` }
+            : {}),
           response_format: "b64_json",
         }),
       });
+
+    try {
+      let res = await postImages(true);
+      if (res.status === 400) {
+        res = await postImages(false);
+      }
 
       if (!res.ok) {
         const body = await res.text().catch(() => "");

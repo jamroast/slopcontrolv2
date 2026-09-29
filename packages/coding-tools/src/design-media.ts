@@ -140,8 +140,8 @@ export async function generateDesignImage(
     outPath: out.absolutePath,
     endpoint: opts.endpoint,
     modelId: opts.modelId,
-    width: opts.width ?? 512,
-    height: opts.height ?? 512,
+    width: opts.width ?? 1024,
+    height: opts.height ?? 1024,
     logoFailClosed: true,
   });
 
