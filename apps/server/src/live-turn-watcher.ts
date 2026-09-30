@@ -44,6 +44,11 @@ export function resolveLiveWatcherConfig(): LiveWatcherConfig {
       // ask turns run a no-tools judge pass whose model can be slow to first
       // token; give it a longer stall budget than the global 90s default.
       ask: envInt("SLOPCONTROL_LIVE_STALL_MS_ASK", 180_000),
+      // design_loop turns author large HTML/SVG mocks in one streaming pass;
+      // a slow-to-first-token model (e.g. deepseek via ollama-cloud) can
+      // exceed the 90s default before emitting anything (observed as a
+      // watcher_stall with partialChars 0 on a 32KB-prompt logo turn).
+      design_loop: envInt("SLOPCONTROL_LIVE_STALL_MS_DESIGN_LOOP", 240_000),
     },
     repeatToolLimit: envInt("SLOPCONTROL_LIVE_REPEAT_TOOL", 5),
     thrashToolLimit: envInt("SLOPCONTROL_LIVE_THRASH_TOOLS", 16),
