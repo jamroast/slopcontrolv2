@@ -766,7 +766,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "get_phase_status",
       description:
-        "Phase status + design completeness (needed/complete/hasUiSpec) + latest failure diagnosis / operator suggestions + handoff summary for a project phase.",
+        "Phase status + design completeness (needed/complete/hasUiSpec) + latest failure diagnosis / operator suggestions + handoff summary for a project phase. phase.description is the original ask brief frozen at creation (never reflects review revisions); the live success criteria is phase.success_criteria parsed from PHASE.md on disk — verify review revisions against it or get_run.phase_doc, never description.",
       inputSchema: {
         type: "object",
         properties: {

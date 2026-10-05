@@ -1741,6 +1741,21 @@ export function extractAutomatedChecks(phaseDoc: string): string[] {
   return extractCheckCells(phaseDoc).map((c) => c.body);
 }
 
+/**
+ * Extract the `## Success Criteria` section body from PHASE.md — the LIVE
+ * contract. Review revisions rewrite this section on disk, while the store's
+ * phase.description stays frozen at phase creation, so status/verification
+ * paths must read the criteria from here (via this helper), never from the
+ * stored description. Returns "" when the section is absent.
+ */
+export function extractPhaseSuccessCriteria(phaseDoc: string): string {
+  const heading = /^##\s+Success Criteria\s*$/im.exec(phaseDoc);
+  if (!heading) return "";
+  const rest = phaseDoc.slice(heading.index + heading[0].length);
+  const next = /^##\s+/im.exec(rest);
+  return (next ? rest.slice(0, next.index) : rest).trim();
+}
+
 const SECRET_PROBE_RE =
   /\b(curl|wget|httpie|fetch)\b[\s\S]{0,200}\b(Authorization|Bearer|API_KEY|OLLAMA_API_KEY|\$\{?OLLAMA)/i;
 

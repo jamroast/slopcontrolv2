@@ -21,6 +21,7 @@ import {
   resetProjectToPhaseZero,
   synthesizeBlueprintFromInventory,
   extractAutomatedChecks,
+  extractPhaseSuccessCriteria,
   validateBlueprintDocument,
   validatePhaseDocForDev,
   verifyDatabaseArtifacts,
@@ -334,6 +335,45 @@ None.
     assert.equal(gate.ok, false);
     assert.ok(gate.issues.some((i) => /Automated Checks/i.test(i)));
     assert.deepEqual(extractAutomatedChecks(doc), []);
+  });
+
+  it("extractPhaseSuccessCriteria reads the live section, stops at the next heading", () => {
+    const doc = [
+      "# Phase 138 — Docs site",
+      "",
+      "## Scope",
+      "",
+      "In scope things.",
+      "",
+      "## Success Criteria",
+      "",
+      "1. `/docs` resolves in the SPA before the OIDC catch-all.",
+      "2. Every page cites its source file.",
+      "",
+      "## Automated Checks",
+      "",
+      "```bash",
+      "pnpm test",
+      "```",
+      "",
+    ].join("\n");
+    assert.equal(
+      extractPhaseSuccessCriteria(doc),
+      "1. `/docs` resolves in the SPA before the OIDC catch-all.\n2. Every page cites its source file.",
+    );
+  });
+
+  it("extractPhaseSuccessCriteria returns empty when the section is absent or empty", () => {
+    assert.equal(extractPhaseSuccessCriteria("# Phase\n\n## Scope\n\nx\n"), "");
+    assert.equal(
+      extractPhaseSuccessCriteria("# Phase\n\n## Success Criteria\n\n## Scope\n\nx\n"),
+      "",
+    );
+    // Case-insensitive heading match.
+    assert.equal(
+      extractPhaseSuccessCriteria("# P\n\n## success criteria\n\n- a\n"),
+      "- a",
+    );
   });
 
   it("rejects secret-bearing Automated Checks and planner preamble", () => {

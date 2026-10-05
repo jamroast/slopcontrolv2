@@ -6,6 +6,7 @@ import cors from "cors";
 import express from "express";
 import {
   readPhaseDoc,
+  extractPhaseSuccessCriteria,
   readResearch,
   researchLooksSolid,
   readRunLog,
@@ -7191,6 +7192,14 @@ app.get("/projects/:projectId/phases/:phaseId/status", (req, res) => {
   const needsDesign = phaseNeedsDesign(project.rootPath, phase.id, config);
   const designComplete = isDesignComplete(project.rootPath, phase.id);
   const uiSpec = readUiSpec(project.rootPath, phase.id);
+  // The store's phase.description is the original ask brief, frozen at phase
+  // creation — review revisions rewrite PHASE.md on disk and NEVER sync back
+  // here. Agents verifying a revision against `description` see stale
+  // criteria forever (the jamauth phase-138 loop). Expose the live contract.
+  const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+  const liveSuccessCriteria = phaseDoc
+    ? extractPhaseSuccessCriteria(phaseDoc)
+    : "";
   res.json({
     projectId: project.id,
     phase: {
@@ -7198,6 +7207,10 @@ app.get("/projects/:projectId/phases/:phaseId/status", (req, res) => {
       status: phase.status,
       description: phase.description,
       dependsOn: phase.dependsOn ?? [],
+      success_criteria: liveSuccessCriteria || null,
+      contract_note: liveSuccessCriteria
+        ? "phase.description is the original ask brief frozen at phase creation — it never reflects review revisions. phase.success_criteria is the live contract parsed from PHASE.md on disk. Verify review revisions against success_criteria (or get_run.phase_doc), never against description."
+        : undefined,
     },
     design: {
       needed: needsDesign,

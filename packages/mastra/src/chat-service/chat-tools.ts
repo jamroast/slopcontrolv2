@@ -583,7 +583,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   get_run_steps:
     "Structured verify steps for one run. Requires runId.",
   get_phase_status:
-    "Status and diagnosis for one phase. Requires phaseId.",
+    "Status and diagnosis for one phase. Requires phaseId. phase.description is the original ask brief frozen at creation — it NEVER reflects review revisions; verify revised success criteria via phase.success_criteria (live from PHASE.md) or get_run.phase_doc, not description.",
   list_runs:
     "List runs for the project (id, stage, phase). Call this before get_run.",
   list_phases:
