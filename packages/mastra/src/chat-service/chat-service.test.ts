@@ -1564,6 +1564,18 @@ describe("chat tool input schemas", () => {
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.design_loop_get!.parse({ loopId: "d1" }));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({ loopId: "l1" }));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({}));
+    assert.ok(
+      CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({ loopId: "l1", offset: 12_000 }),
+    );
+    assert.ok(
+      CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({ offset: 4_000, limit: 8_000 }),
+    );
+    assert.throws(() =>
+      CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({ offset: -1 }),
+    );
+    assert.throws(() =>
+      CHAT_TOOL_INPUT_SCHEMA.plan_loop_get!.parse({ limit: 0 }),
+    );
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.plan_loop_accept!.parse({}));
     assert.throws(() => CHAT_TOOL_INPUT_SCHEMA.ask!.parse({}));
     assert.ok(CHAT_TOOL_INPUT_SCHEMA.ask!.parse({ message: "why is this broken?" }));
@@ -1838,6 +1850,31 @@ describe("chat dispatch result shaping", () => {
     const shaped = compactChatToolPayload(envelope, "design_loop_get");
     assert.match(shaped, /loopId: loop-1/);
     assert.match(shaped, /Wire UserPill onClick/);
+  });
+
+  it("gives plan_loop_get a real plan budget instead of the 1.2k notes squeeze", () => {
+    const longNotes = "operating contract ".repeat(30); // > 200 chars of notes
+    const planBody = "# PLAN\n\n" + "phase detail line\n".repeat(600); // ~11k chars
+    const envelope = [
+      "loopId: loop-1",
+      "status: open",
+      `notes: ${longNotes}`,
+      "---",
+      planBody,
+    ].join("\n");
+    const shaped = compactChatToolPayload(envelope, "plan_loop_get");
+    // Well past the old 1,200-char squeeze and the generic 4,000 cap.
+    assert.ok(
+      shaped.length > 6_000,
+      `expected a real plan budget, got ${shaped.length} chars`,
+    );
+    assert.match(shaped, /notes: operating contract/);
+    // Same envelope under a generic tool stays squeezed small.
+    const generic = compactChatToolPayload(envelope, "get_run");
+    assert.ok(
+      generic.length < shaped.length,
+      `generic tool should be squeezed harder (${generic.length} vs ${shaped.length})`,
+    );
   });
 
   it("buildConfirmedTurnPrefix tells the operator turn to use the result", () => {

@@ -2875,10 +2875,25 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
         ? meta.currentVersion
         : meta.acceptedVersion ?? meta.currentVersion;
   const includePlan = req.query.includePlan !== "false";
-  const plan =
+  const fullPlan =
     includePlan && Number.isFinite(version) && version > 0
       ? readPlanLoopPlanMd(project.rootPath, meta.id, version)
       : null;
+  // Paging for chat/MCP consumers: PLAN.md regularly exceeds the chat tool
+  // result budget, so agents read it in slices instead of seeing a silent
+  // front-clip (the "clipped at Approach → Phase A" complaint).
+  const planOffset = Math.max(
+    0,
+    Math.floor(Number(req.query.planOffset ?? 0) || 0),
+  );
+  const planLimitRaw = Math.floor(Number(req.query.planLimit ?? 0) || 0);
+  const planLimit = planLimitRaw > 0 ? Math.min(planLimitRaw, 64_000) : 0;
+  const plan =
+    fullPlan && (planOffset > 0 || planLimit > 0)
+      ? planLimit > 0
+        ? fullPlan.slice(planOffset, planOffset + planLimit)
+        : fullPlan.slice(planOffset)
+      : fullPlan;
   const notes =
     Number.isFinite(version) && version > 0
       ? readPlanLoopNotes(project.rootPath, meta.id, version)
@@ -2888,7 +2903,7 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
       ? readPlanLoopVersionMeta(project.rootPath, meta.id, version)
       : null;
   let acceptance = readPlanLoopAcceptance(project.rootPath, meta.id);
-  if (!acceptance && plan?.trim() && Number.isFinite(version) && version > 0) {
+  if (!acceptance && fullPlan?.trim() && Number.isFinite(version) && version > 0) {
     acceptance = seedPlanLoopAcceptance({
       projectRoot: project.rootPath,
       loopId: meta.id,
@@ -2901,7 +2916,7 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
   const progress = summarizePlanLoopProgress({
     meta,
     acceptance,
-    hasPlan: Boolean(plan?.trim()),
+    hasPlan: Boolean(fullPlan?.trim()),
   });
   const revisionRequired =
     meta.status === "open" &&
@@ -2912,6 +2927,8 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
     loopId: meta.id,
     version: Number.isFinite(version) ? version : null,
     plan,
+    planTotalChars: fullPlan?.length ?? 0,
+    planOffset: plan ? planOffset : 0,
     notes,
     transcript: readPlanLoopTranscript(project.rootPath, meta.id),
     messages: readLoopChatMessages(project.rootPath, "plan", meta.id),

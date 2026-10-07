@@ -151,6 +151,8 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
       loopId?: string;
       version?: number;
       plan?: string;
+      planTotalChars?: number;
+      planOffset?: number;
       notes?: string;
       transcript?: string;
       error?: string;
@@ -186,6 +188,15 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
       typeof parsed.plan === "string" && parsed.plan.trim()
         ? parsed.plan
         : null;
+    const planTotalChars =
+      typeof parsed.planTotalChars === "number" ? parsed.planTotalChars : null;
+    const planOffset =
+      typeof parsed.planOffset === "number" ? parsed.planOffset : 0;
+    const planEnd = plan ? planOffset + plan.length : 0;
+    const planContinuation =
+      plan && planTotalChars !== null && planEnd < planTotalChars
+        ? `plan_slice: chars ${planOffset}..${planEnd} of ${planTotalChars} — call plan_loop_get with offset ${planEnd} for the next chunk (repeat until offset ${planTotalChars})`
+        : null;
     return [
       `loopId: ${loopId}`,
       `status: ${parsed.loop?.status ?? "open"}`,
@@ -200,6 +211,7 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
         ? `blockers: ${parsed.blockers.join("; ")}`
         : null,
       parsed.notes ? `notes: ${parsed.notes}` : null,
+      planContinuation,
       "---",
       plan ? `\`\`\`markdown\n${plan}\n\`\`\`` : body,
     ]
@@ -1806,7 +1818,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "plan_loop_get",
       description:
-        "Read plan-loop status and PLAN.md (does NOT revise). When revisionRequired is true, call plan_loop_continue next. Pass includePlan=false for meta-only.",
+        "Read plan-loop status and PLAN.md (does NOT revise). When revisionRequired is true, call plan_loop_continue next. Pass includePlan=false for meta-only. Long plans page: pass offset (char index) + optional limit; the response's planTotalChars tells you how much remains — keep reading with offset until you have the full plan.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1814,6 +1826,8 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           loopId: { type: "string" },
           version: { type: "number" },
           includePlan: { type: "boolean" },
+          offset: { type: "number" },
+          limit: { type: "number" },
         },
         required: ["projectId", "loopId"],
       },
@@ -3397,6 +3411,12 @@ export async function dispatchSlopcontrolTool(
           qs.set("version", String(args.version));
         }
         if (args.includePlan === false) qs.set("includePlan", "false");
+        if (typeof args.offset === "number" && args.offset > 0) {
+          qs.set("planOffset", String(Math.floor(args.offset)));
+        }
+        if (typeof args.limit === "number" && args.limit > 0) {
+          qs.set("planLimit", String(Math.floor(args.limit)));
+        }
         const q = qs.toString() ? `?${qs}` : "";
         const res = await fetch(
           `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}${q}`,

@@ -238,6 +238,10 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
   plan_loop_get: z.object({
     loopId: optionalId,
     projectId: optionalProject,
+    /** Char offset into PLAN.md for paging long plans (from a plan_slice hint). */
+    offset: z.number().int().nonnegative().optional(),
+    /** Max chars of PLAN.md to return (default: server/tool budget). */
+    limit: z.number().int().positive().optional(),
   }),
   ask: z.object({
     message: z.string().min(1),
@@ -599,7 +603,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   design_loop_get:
     "One design loop. Pass loopId, or omit to use this chat's latched design loop (from design_loop_start/continue). Read-only status — when the operator gives visual feedback, call design_loop_continue (not design_loop_get). Do not poll while a design live turn is active. Use notes; do not paste HTML into the operator reply.",
   plan_loop_get:
-    "One plan loop. Pass loopId, or omit to use this chat's latched plan loop (from plan_loop_start/continue). Returns nextStep and blockers. Read-only status check — when the operator wants to revise the plan, call plan_loop_continue (not plan_loop_get). Do not poll while a plan_loop live turn is active — wait for live_settled.",
+    "One plan loop. Pass loopId, or omit to use this chat's latched plan loop (from plan_loop_start/continue). Returns nextStep and blockers. Read-only status check — when the operator wants to revise the plan, call plan_loop_continue (not plan_loop_get). Do not poll while a plan_loop live turn is active — wait for live_settled. Long plans may be sliced: a 'plan_slice: chars X..Y of Z' line means more plan remains — call again with offset=Y to fetch the next chunk (optional limit controls chunk size). Always read the whole plan before judging or accepting it.",
   plan_loop_start:
     "Start a multi-turn plan loop (structured PLAN.md). Requires brief — pass the operator's planning words in brief. Optional investigateTool: auto|mastra|pi. Thorough vs quick intent is LLM-classified. You'll be notified via live_settled when the turn completes — do not poll plan_loop_get.",
   plan_loop_continue:
@@ -719,6 +723,12 @@ function previewArgs(args: Record<string, unknown>): string {
 export const CHAT_TOOL_RESULT_MAX_CHARS = 4_000;
 /** Ask judge replies are long; a 4k clip made chat loop "continue the unclipped results". */
 export const CHAT_ASK_TOOL_RESULT_MAX_CHARS = 16_000;
+/**
+ * plan_loop_get returns PLAN.md — the artifact the operator asks the agent to
+ * review before accept. The generic 4k cap front-clipped it mid-Approach;
+ * give it a real budget plus offset/limit paging for anything longer.
+ */
+export const CHAT_PLAN_TOOL_RESULT_MAX_CHARS = 12_000;
 
 function clipChatToolText(
   text: string,
@@ -879,7 +889,9 @@ export function compactChatToolPayload(raw: string, toolName?: string): string {
   const max =
     toolName === "ask"
       ? CHAT_ASK_TOOL_RESULT_MAX_CHARS
-      : CHAT_TOOL_RESULT_MAX_CHARS;
+      : toolName === "plan_loop_get"
+        ? CHAT_PLAN_TOOL_RESULT_MAX_CHARS
+        : CHAT_TOOL_RESULT_MAX_CHARS;
 
   const envelope = splitMcpEnvelope(trimmed);
   if (envelope) {
@@ -888,10 +900,14 @@ export function compactChatToolPayload(raw: string, toolName?: string): string {
     if (!body) return header;
     const notesHit = /^notes:\s*(.+)$/m.exec(header);
     const notesLen = notesHit?.[1]?.length ?? 0;
+    // plan_loop_get: never squeeze the plan body for long notes — the plan is
+    // the payload the operator asked the agent to review.
     const bodyBudget =
-      notesLen >= 200
-        ? Math.min(1_200, max)
-        : max - header.length - 16;
+      toolName === "plan_loop_get"
+        ? max - header.length - 16
+        : notesLen >= 200
+          ? Math.min(1_200, max)
+          : max - header.length - 16;
     return `${header}\n---\n${clipText(body, Math.max(400, bodyBudget))}`;
   }
 
@@ -1133,7 +1149,9 @@ export function formatChatDispatchResult(
   const max =
     toolName === "ask"
       ? CHAT_ASK_TOOL_RESULT_MAX_CHARS
-      : CHAT_TOOL_RESULT_MAX_CHARS;
+      : toolName === "plan_loop_get"
+        ? CHAT_PLAN_TOOL_RESULT_MAX_CHARS
+        : CHAT_TOOL_RESULT_MAX_CHARS;
   return clipChatToolText(prefixed, max);
 }
 
