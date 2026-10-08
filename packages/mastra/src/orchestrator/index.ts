@@ -5771,17 +5771,43 @@ ${message.trim()}`;
     const intentBlock = formatChangeIntentPromptBlock(intent);
     const researchPath = `.slopcontrol/phases/${input.phase.id}/RESEARCH.md`;
     const researchDate = new Date().toISOString().slice(0, 10);
-    const retryPrompt = researchQualityRetryPrompt({
-      intentBlock,
-      description: clipPromptSection(
-        "change-request",
-        input.description,
-        4_000,
-      ),
-      researchPath,
-      researchDate,
-      judgeFeedback: input.feedback,
+    // Regenerate with full context (blueprint/roadmap/learnings/knowledge),
+    // not the condensed rewrite prompt, so a both-fault self-heal research
+    // re-run is as strong as a fresh startResearch run.
+    const blueprint = readBlueprint(input.project.rootPath);
+    const roadmap = readRoadmap(input.project.rootPath);
+    const learningsBlock = loadLearningsPromptBlock(input.project.rootPath, {
+      phaseDescription: input.description,
     });
+    const projectKnowledge = await recallProjectKnowledge({
+      memory: this.ctx.memory,
+      projectId: input.project.id,
+    });
+    const knowledgeBlock = projectKnowledge.trim()
+      ? `## Project knowledge (accumulated across phases)\n${projectKnowledge}`
+      : "";
+    const retryPrompt = `Regenerate the FULL RESEARCH.md from scratch — do not merely patch the prior doc. Fix these gaps:
+${input.feedback}
+
+${intentBlock}
+
+Existing blueprint (excerpt — full file at .slopcontrol/BLUEPRINT.md; prefer Live decisions):
+${clipBlueprintForPrompt(blueprint || "", 6_000)}
+
+Roadmap (excerpt — full file at .slopcontrol/ROADMAP.md):
+${clipPromptSection("ROADMAP.md", roadmap || "", 2_000)}
+${learningsBlock ? `\n${learningsBlock}` : ""}${knowledgeBlock ? `\n${knowledgeBlock}` : ""}
+Research the project at ${input.project.rootPath}.
+Use tools sparingly, then write RESEARCH.md via write_file to ${researchPath} AND return the same markdown in your final response (start with #).
+Use Date: ${researchDate} near the top (authoritative).
+End with RESEARCH_COMPLETE.
+Do NOT only chat about investigating — the response body / written file must be the RESEARCH.md document.
+Obey Change Intent uiMount over older contradictory Blueprint Deltas.
+Obey prior learnings (especially infra blockers): do not propose coding-agent work to bring up missing local services.
+
+Change request:
+${clipPromptSection("change-request", input.description, 4_000)}
+Phase id: ${input.phase.id}`;
     log(
       input.project,
       input.run,
@@ -5856,6 +5882,7 @@ ${message.trim()}`;
     let faultLeg: PlanningFaultLeg = "none";
     let priorGateFingerprints: string[] = [];
     let intentReclassified = false;
+    let priorJudgeIssues: string[] = [];
 
     for (let round = 0; round < MAX_PLANNING_SELF_HEAL_ROUNDS; round++) {
       if (round > 0) {
@@ -5865,6 +5892,8 @@ ${message.trim()}`;
           `--- Planning self-heal round ${round + 1}/${MAX_PLANNING_SELF_HEAL_ROUNDS} (faultLeg=${faultLeg}) ---`,
         );
         deleteRunDiagnosis(project.rootPath, run.id, phase.id);
+
+        priorJudgeIssues = [...this.planningGateOutcome.issues];
 
         if (faultLeg === "research" || faultLeg === "both") {
           onStage?.("researching");
@@ -5916,6 +5945,7 @@ ${message.trim()}`;
         listProjects,
         deferFailureDiagnosis: round < MAX_PLANNING_SELF_HEAL_ROUNDS - 1,
         selfHealRound: round,
+        priorJudgeIssues,
       });
 
       if (stage === "in_review") return "in_review";
@@ -6544,8 +6574,17 @@ Phase id: ${phase.id}`;
     /** When true, gate failures set planningGateOutcome without persisting diagnosis. */
     deferFailureDiagnosis?: boolean;
     selfHealRound?: number;
+    /** Prior self-heal round's judge gaps, injected into the re-draft prompt. */
+    priorJudgeIssues?: string[];
   }): Promise<RunStage> {
-    const { project, phase, run, onStage, deferFailureDiagnosis } = input;
+    const {
+      project,
+      phase,
+      run,
+      onStage,
+      deferFailureDiagnosis,
+      priorJudgeIssues,
+    } = input;
     onStage?.("drafting");
     log(project, run, "--- Drafting PHASE.md ---");
 
@@ -6745,6 +6784,14 @@ Specification phase (changeKind=specification):
 `
         : "";
 
+    const priorFeedbackBlock = priorJudgeIssues?.length
+      ? formatJudgeFeedbackBlock({
+          title:
+            "Prior PHASE.md draft was rejected by the quality judge — address every gap below in the rewritten draft",
+          gaps: priorJudgeIssues,
+        }) + "\n"
+      : "";
+
     const buildDraftPrompt = (slim: boolean) => {
       const pack = slim ? "" : adjacentPack ? `${adjacentPack}\n` : "";
       const blueprintClip = slim ? 2_500 : 6_000;
@@ -6755,7 +6802,7 @@ Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 
 ${intentBlock}
-${draftAcceptanceNote}${designRoutingNote}${specRoutingNote}${infraSmokeNote}${draftAntiAuditThemeNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
+${priorFeedbackBlock}${draftAcceptanceNote}${designRoutingNote}${specRoutingNote}${infraSmokeNote}${draftAntiAuditThemeNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
 Do NOT reuse or retitle a prior phase plan (e.g. host.docker.internal / extra_hosts)
 unless RESEARCH explicitly asks for that work. If RESEARCH is about model naming /
 :cloud passthrough / model-resolver, the PHASE must plan that — not networking.
