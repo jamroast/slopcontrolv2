@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "slopcontrol": {
+      "url": "http://127.0.0.1:3020/mcp",
+      "description": "SlopControl project/phase/design-loop orchestration and run control"
+    }
+  }
+}
