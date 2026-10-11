@@ -20,6 +20,7 @@ import {
   buildChatTaskDescription,
   listDesignLoops,
   listPlanLoops,
+  listMarketingLoops,
   readDesignLoopMeta,
   loopChatUserFeedbackSinceVersion,
   readLoopChatMessages,
@@ -115,6 +116,7 @@ import {
   isPlanLoopOpen,
   parseLoopIdFromDispatch,
   parsePlanLoopStatusFromDispatch,
+  MARKETING_LOOP_ID_TOOLS,
   PLAN_LOOP_ID_DEPENDENT_TOOLS,
   type PlanResumeLatch,
   type PlanTurnDecision,
@@ -274,6 +276,7 @@ export class ChatService {
   private readonly askLatches = new Map<string, AskResumeLatch>();
   /** Last plan loop this conversation started or continued. */
   private readonly planLatches = new Map<string, PlanResumeLatch>();
+  private readonly marketingLatches = new Map<string, PlanResumeLatch>();
   private readonly designLatches = new Map<string, DesignResumeLatch>();
   /** Operator utterance for the in-flight sendMessage (ask routing). */
   private turnOperatorMessage = "";
@@ -400,6 +403,7 @@ export class ChatService {
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
     this.planLatches.delete(id);
+    this.marketingLatches.delete(id);
     this.designLatches.delete(id);
     this.awaitedRuns.delete(id);
     this.awaitedLiveTurns.delete(id);
@@ -430,6 +434,7 @@ export class ChatService {
     this.clearProceedLatchesForConversation(id);
     this.askLatches.delete(id);
     this.planLatches.delete(id);
+    this.marketingLatches.delete(id);
     this.designLatches.delete(id);
     this.awaitedRuns.delete(id);
     this.awaitedLiveTurns.delete(id);
@@ -519,6 +524,7 @@ export class ChatService {
       this.clearProceedLatchesForConversation(c.id);
       this.askLatches.delete(c.id);
       this.planLatches.delete(c.id);
+      this.marketingLatches.delete(c.id);
       this.designLatches.delete(c.id);
       this.awaitedRuns.delete(c.id);
       this.awaitedLiveTurns.delete(c.id);
@@ -828,9 +834,14 @@ export class ChatService {
       },
     });
 
+    // Record the envelope header (status/version/verdict/nextStep) only — the
+    // fenced doc body dump must not land in chat history as a "user" message;
+    // the settled doc stays fetchable via the loop's *_get tool.
+    const envelopeHeader = resultText.split(/\n\s*---\s*\n/)[0]?.trim() ?? "";
+    const notifyBody = (envelopeHeader || resultText).slice(0, 1_500);
     const notify = isError
-      ? `[live turn ${tool} FAILED]\n${resultText.slice(0, 3_000)}`
-      : `[live turn ${tool} settled]\n${resultText.slice(0, 3_000)}`;
+      ? `[live turn ${tool} FAILED]\n${notifyBody}`
+      : `[live turn ${tool} settled]\n${notifyBody}`;
     const existing = this.notificationQueue.get(conversation.id) ?? [];
     existing.push(notify);
     this.notificationQueue.set(conversation.id, existing);
@@ -2292,7 +2303,11 @@ export class ChatService {
 
     if (nextName === "ask") {
       nextArgs = await this.routeAskArgs(conversation, nextArgs);
-    } else if (nextName === "plan_loop_start" || nextName === "design_loop_start") {
+    } else if (
+      nextName === "plan_loop_start" ||
+      nextName === "design_loop_start" ||
+      nextName === "marketing_loop_start"
+    ) {
       nextArgs = backfillLoopStartBrief(
         nextArgs,
         this.turnOperatorMessage.trim(),
@@ -2405,6 +2420,46 @@ export class ChatService {
           ],
         };
       }
+    } else if (nextName === "marketing_loop_continue") {
+      nextArgs = this.fillMarketingLoopId(conversation, nextArgs);
+      nextArgs = backfillLoopContinueMessage(
+        nextArgs,
+        this.turnOperatorMessage.trim(),
+      );
+      const message =
+        typeof nextArgs.message === "string" ? nextArgs.message.trim() : "";
+      if (!message) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "marketing_loop_continue requires message — pass the operator's revision feedback in message.",
+            },
+          ],
+        };
+      }
+    } else if (MARKETING_LOOP_ID_TOOLS.has(nextName)) {
+      nextArgs = this.fillMarketingLoopId(conversation, nextArgs);
+      if (nextName === "marketing_loop_accept" && nextArgs.acceptAllFeatures !== true) {
+        const ticks = nextArgs.acceptedFeatureIds;
+        if (!Array.isArray(ticks) || ticks.length === 0) {
+          nextArgs = { ...nextArgs, acceptAllFeatures: true };
+        }
+      }
+      const filled =
+        typeof nextArgs.loopId === "string" ? nextArgs.loopId.trim() : "";
+      if (!filled) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "No loopId: this chat has no latched marketing loop. Call marketing_loop_start first or pass loopId.",
+            },
+          ],
+        };
+      }
     } else if (PLAN_LOOP_ID_DEPENDENT_TOOLS.has(nextName)) {
       nextArgs = this.fillLoopIdFromLatch(
         conversation.id,
@@ -2481,6 +2536,7 @@ export class ChatService {
     if (!result.isError) {
       this.rememberAskFromDispatch(conversation, nextName, nextArgs, result);
       this.rememberPlanFromDispatch(conversation, nextName, nextArgs, result);
+      this.rememberMarketingFromDispatch(conversation, nextName, nextArgs, result);
       this.rememberDesignFromDispatch(conversation, nextName, nextArgs, result);
     }
     return result;
@@ -2636,6 +2692,80 @@ export class ChatService {
       title,
       lastUserLine: this.turnOperatorMessage.trim() || undefined,
       status: status || "open",
+    });
+  }
+
+  private fillMarketingLoopId(
+    conversation: ChatConversation,
+    args: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const existing = typeof args.loopId === "string" ? args.loopId.trim() : "";
+    if (existing) return args;
+    const projectId =
+      conversation.projectId ??
+      (typeof args.projectId === "string" ? args.projectId.trim() : undefined);
+    const mem = this.marketingLatches.get(conversation.id);
+    if (mem?.loopId) return { ...args, loopId: mem.loopId };
+    if (!projectId) return args;
+    const project = this.deps.context.getProject(projectId);
+    if (!project) return args;
+    const open = listMarketingLoops(project.rootPath).filter(
+      (loop) => !loop.status || loop.status === "open",
+    );
+    if (open.length !== 1) return args;
+    return { ...args, loopId: open[0]!.id };
+  }
+
+  private rememberMarketingFromDispatch(
+    conversation: ChatConversation,
+    name: string,
+    args: Record<string, unknown>,
+    result: ChatToolResult,
+  ): void {
+    const raw = result.content.map((c) => c.text).join("\n");
+    if (name === "marketing_loop_promote") {
+      this.marketingLatches.delete(conversation.id);
+      return;
+    }
+    if (
+      name !== "marketing_loop_start" &&
+      name !== "marketing_loop_continue" &&
+      name !== "marketing_loop_accept" &&
+      name !== "marketing_loop_get"
+    ) {
+      return;
+    }
+    const loopId =
+      parseLoopIdFromDispatch(raw) ||
+      (typeof args.loopId === "string" ? args.loopId.trim() : "");
+    if (!loopId) return;
+    let currentVersion = this.marketingLatches.get(conversation.id)?.currentVersion;
+    try {
+      const parsed = JSON.parse(raw) as {
+        version?: number;
+        loop?: { currentVersion?: number; status?: string };
+      };
+      if (typeof parsed.version === "number") currentVersion = parsed.version;
+      else if (typeof parsed.loop?.currentVersion === "number") {
+        currentVersion = parsed.loop.currentVersion;
+      }
+      this.marketingLatches.set(conversation.id, {
+        loopId,
+        status: parsed.loop?.status,
+        currentVersion,
+        title:
+          typeof args.brief === "string"
+            ? args.brief.trim().split("\n")[0]?.slice(0, 80)
+            : this.marketingLatches.get(conversation.id)?.title,
+      });
+      return;
+    } catch {
+      /* envelope */
+    }
+    this.marketingLatches.set(conversation.id, {
+      loopId,
+      currentVersion,
+      title: this.marketingLatches.get(conversation.id)?.title,
     });
   }
 

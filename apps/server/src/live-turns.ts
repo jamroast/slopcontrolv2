@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 
-export type LiveTurnKind = "ask" | "agent" | "design_loop" | "plan_loop";
+export type LiveTurnKind = "ask" | "agent" | "design_loop" | "plan_loop" | "marketing_loop";
 
 export type LiveTurnStatus =
   | "running"

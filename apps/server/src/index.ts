@@ -189,6 +189,7 @@ import {
   workingStubFromBound,
 } from "./live-turn-http.js";
 import { createLoopChatTurn } from "./loop-chat-http.js";
+import { registerMarketingLoopRoutes } from "./marketing-loop-routes.js";
 import { liveTurns } from "./live-turns.js";
 import { startLiveTurnWatcher } from "./live-turn-watcher.js";
 import {
@@ -9089,6 +9090,14 @@ app.get("/chats/awaited-runs", (_req, res) => {
       .status(500)
       .json({ error: err instanceof Error ? err.message : String(err) });
   }
+});
+
+registerMarketingLoopRoutes(app, {
+  store,
+  activeRuns,
+  abortControllers,
+  touchRunStage,
+  updatePhaseStatus,
 });
 
 app.listen(PORT, () => {

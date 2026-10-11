@@ -104,6 +104,7 @@ export * from "./workspace-package.js";
 export * from "./cross-project-catalog.js";
 export * from "./sibling-code-refs.js";
 export * from "./plan-loop.js";
+export * from "./marketing-loop.js";
 export * from "./plan-pack.js";
 export * from "./plan-continue-intent.js";
 export * from "./loop-chat.js";

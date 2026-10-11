@@ -21,14 +21,19 @@ export type LoopChatMessage = {
   meta?: LoopChatMessageMeta;
 };
 
-export type LoopChatKind = "design" | "plan";
+export type LoopChatKind = "design" | "plan" | "marketing";
 
 function loopDir(
   projectRoot: string,
   kind: LoopChatKind,
   loopId: string,
 ): string {
-  const folder = kind === "design" ? "design-loops" : "plan-loops";
+  const folder =
+    kind === "design"
+      ? "design-loops"
+      : kind === "marketing"
+        ? "marketing-loops"
+        : "plan-loops";
   return join(projectRoot, ".slopcontrol", folder, loopId);
 }
 
@@ -92,7 +97,12 @@ function formatTranscript(
   loopId: string,
   messages: LoopChatMessage[],
 ): string {
-  const title = kind === "design" ? "Design loop" : "Plan loop";
+  const title =
+    kind === "design"
+      ? "Design loop"
+      : kind === "marketing"
+        ? "Marketing loop"
+        : "Plan loop";
   const lines = [`# ${title} — ${loopId}`, "", "## Transcript", ""];
   for (const m of messages) {
     const label = m.role === "user" ? "User" : "Assistant";

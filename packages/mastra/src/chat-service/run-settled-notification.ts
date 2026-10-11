@@ -157,11 +157,46 @@ export function buildRunSettledNotification(
   return `[Run ${run.id} reached ${run.stage}. ${buildRunSettledGuidance(run, ctx)}]`;
 }
 
-/** Operator-facing brief for memory + SSE (no LLM re-synthesis). */
+/**
+ * Operator-facing brief for memory + SSE (no LLM re-synthesis).
+ *
+ * Shapes:
+ * - Fully bracketed ("[Run x reached in_review. …]") → strip the wrapper.
+ * - Bracketed prefix with a body ("[operator CONFIRMED x] …", "[tool error] …",
+ *   "[live turn interrupted] …") → the remainder is the operator text.
+ * - Live-turn settled/FAILED ("[live turn x settled]\n<envelope>\n---\n<fenced
+ *   body dump>") → a concise header summary (status/version/verdict/nextStep);
+ *   the fenced doc body must never become the assistant reply — the settled doc
+ *   stays fetchable via the loop's *_get tool.
+ */
 export function formatRunNotificationBrief(note: string): string {
   const trimmed = note.trim();
+  if (!trimmed) return trimmed;
+  // Live-turn settled/FAILED: "[live turn x settled]\n<envelope header>\n---\n
+  // <fenced doc dump>". Brief = the header summary — never the doc body (the
+  // doc stays fetchable via the loop's *_get tool).
+  const liveNote = /^\[live turn (\S+) (settled|FAILED)\]\s*([\s\S]*)$/.exec(
+    trimmed,
+  );
+  if (liveNote) {
+    const [, tool, outcome, rest0] = liveNote;
+    const rest = (rest0 ?? "").trim();
+    const header = (rest.split(/\n\s*---/)[0] ?? "").trim();
+    const summary = header
+      .split("\n")
+      .map((line) => line.trim().replace(/^ERROR:\s*/i, ""))
+      .filter((line) => line && !line.startsWith("loopId: "))
+      .join("; ")
+      .slice(0, 600);
+    if (outcome === "FAILED") {
+      return `${tool} failed${summary ? `: ${summary}` : ""}`;
+    }
+    return summary ? `${tool} complete — ${summary}` : `${tool} complete.`;
+  }
   if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
     return trimmed.slice(1, -1).trim();
   }
-  return trimmed;
+  const match = /^\[([^\]]+)\]\s*([\s\S]*)$/.exec(trimmed);
+  if (!match) return trimmed;
+  return (match[2] ?? "").trim() || (match[1] ?? "");
 }

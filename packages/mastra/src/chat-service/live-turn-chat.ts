@@ -4,6 +4,8 @@ import type { AwaitedLiveTurn } from "@slopcontrol/types";
 export const LIVE_TURN_ASYNC_TOOLS = new Set([
   "plan_loop_start",
   "plan_loop_continue",
+  "marketing_loop_start",
+  "marketing_loop_continue",
   "design_loop_start",
   "design_loop_continue",
 ]);
@@ -29,6 +31,9 @@ export function liveTurnKindForTool(tool: string): LiveTurnKind | null {
   if (tool === "plan_loop_start" || tool === "plan_loop_continue") {
     return "plan_loop";
   }
+  if (tool === "marketing_loop_start" || tool === "marketing_loop_continue") {
+    return "marketing_loop";
+  }
   if (tool === "design_loop_start" || tool === "design_loop_continue") {
     return "design_loop";
   }
@@ -41,7 +46,11 @@ export function sessionIdFromLiveTurnArgs(
   tool: string,
   args: Record<string, unknown>,
 ): string | undefined {
-  if (tool === "plan_loop_continue" || tool === "design_loop_continue") {
+  if (
+    tool === "plan_loop_continue" ||
+    tool === "design_loop_continue" ||
+    tool === "marketing_loop_continue"
+  ) {
     const loopId = typeof args.loopId === "string" ? args.loopId.trim() : "";
     return loopId || undefined;
   }
@@ -80,6 +89,12 @@ export function backfillLoopContinueMessage(
 }
 
 export function liveTurnStartedMessage(tool: string): string {
+  if (tool.startsWith("marketing_loop")) {
+    return (
+      "Marketing loop turn started. You'll be notified when MARKETING.md is ready — " +
+      "do not poll marketing_loop_get."
+    );
+  }
   if (tool.startsWith("plan_loop")) {
     return (
       "Plan loop turn started. Progress arrives via live_progress events; " +

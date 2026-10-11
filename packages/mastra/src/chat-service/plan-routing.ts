@@ -7,6 +7,14 @@ export type PlanResumeLatch = {
   currentVersion?: number;
 };
 
+export const MARKETING_LOOP_ID_TOOLS = new Set([
+  "marketing_loop_get",
+  "marketing_loop_continue",
+  "marketing_loop_acceptance",
+  "marketing_loop_accept",
+  "marketing_loop_promote",
+]);
+
 export const PLAN_LOOP_ID_DEPENDENT_TOOLS = new Set([
   "plan_loop_get",
   "plan_loop_continue",

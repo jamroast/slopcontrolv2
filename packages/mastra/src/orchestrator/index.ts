@@ -315,6 +315,11 @@ import {
   judgeResearchEngagementViaLlm,
   judgeResearchQualityViaLlm,
   judgePhaseDocQualityViaLlm,
+  judgeMarketingQualityViaLlm,
+  classifyMarketingStartIntentViaLlm,
+  classifyMarketingContinueIntentViaLlm,
+  MARKETING_START_INTENT_DEFAULT,
+  MARKETING_CONTINUE_INTENT_FALLBACK,
   type PhaseDocQualityVerdict,
   judgeNarrationOnlyViaLlm,
   buildElementHonorSnippets,
@@ -327,6 +332,7 @@ import {
   ensureChangeIntentAsync,
   previewChangeIntentAsync,
 } from "./change-intent-async.js";
+import { runMarketingLoopGenerate } from "./marketing-generate.js";
 import {
   formatJudgeFeedbackBlock,
   isPlanningJudgeInfraIssue,
@@ -670,6 +676,18 @@ export interface DesignLoopGenerateInput {
   ) => { id: string; name: string; rootPath: string } | undefined;
   /** SlopControl data dir for global shared-elements registry (B). */
   dataDir?: string;
+  onProgress?: LiveProgressCallback;
+  abortSignal?: AbortSignal;
+}
+
+export interface MarketingLoopGenerateInput {
+  project: Project;
+  loopId: string;
+  brief: string;
+  message?: string;
+  previousDoc?: string;
+  previousVerdict?: import("@slopcontrol/artifacts").MarketingQualityVerdict | null;
+  version: number;
   onProgress?: LiveProgressCallback;
   abortSignal?: AbortSignal;
 }
@@ -5052,6 +5070,140 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
   /**
    * Generate or revise a plan-loop PLAN.md (no product / phase writes).
    */
+  async marketingLoopGenerate(input: MarketingLoopGenerateInput) {
+    const classifyWithRetry = async <T>(
+      run: () => Promise<T>,
+      fallback: T,
+      label: string,
+    ): Promise<T> => {
+      try {
+        return await run();
+      } catch (err) {
+        slog.warn("marketing-loop", `${label} failed; retrying once`, {
+          loopId: input.loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        try {
+          return await run();
+        } catch (retryErr) {
+          slog.warn("marketing-loop", `${label} retry failed; using fallback`, {
+            loopId: input.loopId,
+            error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+          });
+          return fallback;
+        }
+      }
+    };
+    return runMarketingLoopGenerate(
+      {
+        loopId: input.loopId,
+        brief: input.brief,
+        message: input.message,
+        previousDoc: input.previousDoc,
+        previousVerdict: input.previousVerdict,
+        version: input.version,
+        projectRoot: input.project.rootPath,
+        onProgress: input.onProgress,
+      },
+      {
+        classifyStart: (brief) =>
+          classifyWithRetry(async () => {
+            const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
+              "classification",
+            );
+            return classifyMarketingStartIntentViaLlm({
+              endpoint,
+              modelId,
+              brief,
+              timeoutMs: 90_000,
+            });
+          }, MARKETING_START_INTENT_DEFAULT, "start intent"),
+        classifyContinue: (message, brief) =>
+          classifyWithRetry(async () => {
+            const { endpoint, modelId } = this.ctx.registry.resolveEndpointForRole(
+              "classification",
+            );
+            return classifyMarketingContinueIntentViaLlm({
+              endpoint,
+              modelId,
+              message,
+              brief,
+              timeoutMs: 90_000,
+            });
+          }, MARKETING_CONTINUE_INTENT_FALLBACK, "continue intent"),
+        runTurn: async (opts) => {
+          const agent =
+            opts.role === "judge"
+              ? this.ctx.agents.judgeAgent
+              : this.ctx.agents.planLoopAgent;
+          const live = await runAgentLiveTurn(
+            agent,
+            opts.prompt,
+            input.project.id,
+            opts.sessionId,
+            {
+              maxSteps: opts.maxSteps,
+              timeoutMs: opts.timeoutMs,
+              onProgress: input.onProgress,
+              abortSignal: input.abortSignal,
+              synthesizeIfNarration: false,
+              statusLabel: `marketing ${opts.role}`,
+            },
+          );
+          return live.reply;
+        },
+        judgeQuality: async (doc, findings) => {
+          const ep = resolvePlanningJudgeEndpoint(this.ctx.registry);
+          if (!ep) {
+            return {
+              judgeInfraFailed: true,
+              verdict: {
+                ok: false,
+                gaps: ["MARKETING quality judge unbound"],
+                suggestedFixes: [],
+                evidenceFaults: [],
+                draftFaults: ["MARKETING quality judge unbound"],
+                judgeInfraFailed: true,
+              },
+            };
+          }
+          const fallback = resolvePlanningJudgeFallback(this.ctx.registry);
+          const judged = await callPlanningJudgeWithInfraRetry(
+            () =>
+              judgeMarketingQualityViaLlm({
+                endpoint: ep.endpoint,
+                modelId: ep.modelId,
+                brief: input.brief,
+                findings,
+                doc,
+              }),
+            (v) => v.gaps,
+            undefined,
+            {
+              fallbackCall: fallback
+                ? () =>
+                    judgeMarketingQualityViaLlm({
+                      endpoint: fallback.endpoint,
+                      modelId: fallback.modelId,
+                      brief: input.brief,
+                      findings,
+                      doc,
+                    })
+                : undefined,
+            },
+          );
+          return {
+            judgeInfraFailed: judged.judgeInfraFailed,
+            verdict: {
+              ...judged.result,
+              judgeInfraFailed: judged.judgeInfraFailed,
+            },
+          };
+        },
+      },
+    );
+  }
+
   async planLoopGenerate(input: PlanLoopGenerateInput): Promise<{
     plan: string;
     notes: string;

@@ -402,7 +402,7 @@ export type AwaitedRun = z.infer<typeof AwaitedRunSchema>;
 
 export const AwaitedLiveTurnSchema = z.object({
   turnId: z.string().optional(),
-  kind: z.enum(["ask", "agent", "design_loop", "plan_loop"]),
+  kind: z.enum(["ask", "agent", "design_loop", "plan_loop", "marketing_loop"]),
   sessionId: z.string().optional(),
   projectId: z.string().min(1),
   startedAt: z.string().datetime(),

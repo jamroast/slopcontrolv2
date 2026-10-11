@@ -47,6 +47,8 @@ export const CHAT_FREE_TOOLS: ReadonlySet<string> = new Set([
   "design_loop_site_inventory",
   "list_plan_loops",
   "plan_loop_get",
+  "list_marketing_loops",
+  "marketing_loop_get",
   "plan_loop_versions",
   "list_design_elements",
   "list_cross_project_deps",
@@ -121,6 +123,11 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   "plan_loop_promote",
   "plan_loop_retry",
   "plan_loop_discard",
+  "marketing_loop_start",
+  "marketing_loop_continue",
+  "marketing_loop_acceptance",
+  "marketing_loop_accept",
+  "marketing_loop_promote",
   // registry / libraries / build process
   "npm_registry_start",
   "npm_registry_stop",
@@ -235,6 +242,12 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     loopId: optionalId,
     projectId: optionalProject,
   }),
+  marketing_loop_get: z.object({
+    loopId: optionalId,
+    projectId: optionalProject,
+    offset: z.number().int().nonnegative().optional(),
+    limit: z.number().int().positive().optional(),
+  }),
   plan_loop_get: z.object({
     loopId: optionalId,
     projectId: optionalProject,
@@ -314,6 +327,35 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
       baseVersion: z.number().int().positive().optional(),
     })
     .passthrough(),
+  marketing_loop_start: z.object({
+    brief: z.string().min(1),
+    projectId: optionalProject,
+  }),
+  marketing_loop_continue: z
+    .object({
+      loopId: optionalId,
+      message: z.string().min(1),
+      projectId: optionalProject,
+      baseVersion: z.number().int().positive().optional(),
+    })
+    .passthrough(),
+  marketing_loop_acceptance: z.object({
+    loopId: optionalId,
+    acceptedFeatureIds: z.array(z.string().min(1)).optional(),
+    projectId: optionalProject,
+  }),
+  marketing_loop_accept: z.object({
+    loopId: optionalId,
+    version: z.number().int().positive().optional(),
+    acceptedFeatureIds: z.array(z.string().min(1)).optional(),
+    acceptAllFeatures: z.boolean().optional(),
+    projectId: optionalProject,
+  }),
+  marketing_loop_promote: z.object({
+    loopId: optionalId,
+    startResearch: z.boolean().optional(),
+    projectId: optionalProject,
+  }),
   plan_loop_start: z.object({
     brief: z.string().min(1),
     askId: optionalId,
@@ -486,7 +528,7 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
     })
     .passthrough(),
   stop_session: z.object({
-    kind: z.enum(["ask", "agent", "design_loop", "plan_loop"]),
+    kind: z.enum(["ask", "agent", "design_loop", "plan_loop", "marketing_loop"]),
     id: z.string().min(1),
     projectId: optionalProject,
   }),
@@ -602,6 +644,20 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "One agent session. Requires agentId from list_agents. Returns latest messages, not the full history dump.",
   design_loop_get:
     "One design loop. Pass loopId, or omit to use this chat's latched design loop (from design_loop_start/continue). Read-only status — when the operator gives visual feedback, call design_loop_continue (not design_loop_get). Do not poll while a design live turn is active. Use notes; do not paste HTML into the operator reply.",
+  list_marketing_loops:
+    "List marketing release loops for a project. Use before marketing_loop_get when loopId is unknown.",
+  marketing_loop_get:
+    "Read a marketing release loop: status, verdict, and MARKETING.md. Omit loopId to use this chat's latched loop. When docTotalChars is larger than the returned doc, call again with offset. Do not poll while a marketing_loop live turn is active.",
+  marketing_loop_start:
+    "Start a marketing release loop (MARKETING.md: audience, competitors, claims, landing narrative, tracks). Requires brief — the operator's launch request. Use this instead of plan_loop_start or start_change when the operator wants to take the product to market or the landing loses to competitors. Notification-driven — do not poll marketing_loop_get.",
+  marketing_loop_continue:
+    "Revise MARKETING.md from operator feedback. Pass loopId or omit the latched loop, plus message. A sections continue must not drop existing claims or tracks. Pass baseVersion when the tip was truncated.",
+  marketing_loop_acceptance:
+    "Tick marketing acceptance items (audience, competitors, positioning, claims, landing, tracks). Does not accept by itself.",
+  marketing_loop_accept:
+    "Freeze a judge-clean MARKETING.md. Refuses scaffolds and gap or forbidden claims that lack tracks. On confirm with no ticks, the full checklist is accepted.",
+  marketing_loop_promote:
+    "After accept: open a design loop for the landing, create product-gap phases, and record the landing implementation as pending. Returns designLoopId, phaseIds, and pendingLanding. Then design_loop_continue on designLoopId — the first mock is a placeholder.",
   plan_loop_get:
     "One plan loop. Pass loopId, or omit to use this chat's latched plan loop (from plan_loop_start/continue). Returns nextStep and blockers. Read-only status check — when the operator wants to revise the plan, call plan_loop_continue (not plan_loop_get). Do not poll while a plan_loop live turn is active — wait for live_settled. Long plans may be sliced: a 'plan_slice: chars X..Y of Z' line means more plan remains — call again with offset=Y to fetch the next chunk (optional limit controls chunk size). Always read the whole plan before judging or accepting it.",
   plan_loop_start:
@@ -682,7 +738,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   design_element_resync:
     "Re-sync an element's on-disk src/ (project library, latest or given version) into the project's element-library package — regenerates the components barrel WITHOUT re-publishing the element or needing its content. Use to repair generated files (e.g. a broken barrel) after a SlopControl generator fix. Requires elementId. When the result reports changedFiles, republish the library package with project_workspace_package_publish to propagate.",
   stop_session:
-    "Interrupt a live ask/agent/design_loop/plan_loop turn. Requires kind and id.",
+    "Interrupt a live ask/agent/design_loop/plan_loop/marketing_loop turn. Requires kind and id.",
   web_search:
     "Search the public web (Ollama Cloud when OLLAMA_API_KEY is set, else Exa when EXA_API_KEY is set). Use for current vendor docs, model catalogs, API differences. Prefer repo tools first; cite returned URLs.",
   fetch_url:
@@ -889,7 +945,7 @@ export function compactChatToolPayload(raw: string, toolName?: string): string {
   const max =
     toolName === "ask"
       ? CHAT_ASK_TOOL_RESULT_MAX_CHARS
-      : toolName === "plan_loop_get"
+      : toolName === "plan_loop_get" || toolName === "marketing_loop_get"
         ? CHAT_PLAN_TOOL_RESULT_MAX_CHARS
         : CHAT_TOOL_RESULT_MAX_CHARS;
 
@@ -903,7 +959,7 @@ export function compactChatToolPayload(raw: string, toolName?: string): string {
     // plan_loop_get: never squeeze the plan body for long notes — the plan is
     // the payload the operator asked the agent to review.
     const bodyBudget =
-      toolName === "plan_loop_get"
+      toolName === "plan_loop_get" || toolName === "marketing_loop_get"
         ? max - header.length - 16
         : notesLen >= 200
           ? Math.min(1_200, max)
@@ -1149,7 +1205,7 @@ export function formatChatDispatchResult(
   const max =
     toolName === "ask"
       ? CHAT_ASK_TOOL_RESULT_MAX_CHARS
-      : toolName === "plan_loop_get"
+      : toolName === "plan_loop_get" || toolName === "marketing_loop_get"
         ? CHAT_PLAN_TOOL_RESULT_MAX_CHARS
         : CHAT_TOOL_RESULT_MAX_CHARS;
   return clipChatToolText(prefixed, max);

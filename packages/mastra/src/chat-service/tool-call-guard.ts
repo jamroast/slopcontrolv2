@@ -41,7 +41,9 @@ export function createToolCallGuard(
   return {
     check(tool, args) {
       if (
-        (tool === "plan_loop_get" || tool === "design_loop_get") &&
+        (tool === "plan_loop_get" ||
+          tool === "design_loop_get" ||
+          tool === "marketing_loop_get") &&
         opts.hasActiveLiveTurn?.(
           typeof args.loopId === "string" ? args.loopId : undefined,
         )

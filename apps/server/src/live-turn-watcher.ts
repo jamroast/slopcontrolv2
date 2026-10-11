@@ -49,6 +49,7 @@ export function resolveLiveWatcherConfig(): LiveWatcherConfig {
       // exceed the 90s default before emitting anything (observed as a
       // watcher_stall with partialChars 0 on a 32KB-prompt logo turn).
       design_loop: envInt("SLOPCONTROL_LIVE_STALL_MS_DESIGN_LOOP", 240_000),
+      marketing_loop: envInt("SLOPCONTROL_LIVE_STALL_MS_MARKETING_LOOP", 240_000),
     },
     repeatToolLimit: envInt("SLOPCONTROL_LIVE_REPEAT_TOOL", 5),
     thrashToolLimit: envInt("SLOPCONTROL_LIVE_THRASH_TOOLS", 16),

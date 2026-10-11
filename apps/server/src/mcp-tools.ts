@@ -222,6 +222,65 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
   }
 }
 
+export function formatMarketingLoopMcpEnvelope(body: string, ok: boolean): string {
+  try {
+    const parsed = JSON.parse(body) as {
+      loop?: { status?: string };
+      loopId?: string;
+      version?: number;
+      doc?: string;
+      docTotalChars?: number;
+      docOffset?: number;
+      notes?: string;
+      nextStep?: string;
+      designLoopId?: string;
+      phaseIds?: string[];
+      pendingLanding?: unknown;
+      verdict?: { ok?: boolean; gaps?: string[] };
+      error?: string;
+    };
+    if (!ok) {
+      return [
+        parsed.loopId ? `loopId: ${parsed.loopId}` : null,
+        parsed.error ? `error: ${parsed.error}` : body.slice(0, 500),
+        "---",
+        body,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    }
+    const doc = typeof parsed.doc === "string" ? parsed.doc : "";
+    const total =
+      typeof parsed.docTotalChars === "number" ? parsed.docTotalChars : doc.length;
+    const offset = typeof parsed.docOffset === "number" ? parsed.docOffset : 0;
+    const end = offset + doc.length;
+    const slice =
+      doc && end < total
+        ? `doc_slice: chars ${offset}..${end} of ${total} — call marketing_loop_get with offset ${end}`
+        : null;
+    const header = [
+      `loopId: ${parsed.loopId ?? ""}`,
+      parsed.loop?.status ? `status: ${parsed.loop.status}` : null,
+      parsed.version !== undefined ? `version: ${parsed.version}` : null,
+      parsed.verdict
+        ? `verdict: ok=${parsed.verdict.ok} gaps=${parsed.verdict.gaps?.length ?? 0}`
+        : null,
+      parsed.nextStep ? `nextStep: ${parsed.nextStep}` : null,
+      parsed.designLoopId ? `designLoopId: ${parsed.designLoopId}` : null,
+      parsed.phaseIds?.length ? `phaseIds: ${parsed.phaseIds.join(",")}` : null,
+      parsed.pendingLanding ? `pendingLanding: ${JSON.stringify(parsed.pendingLanding)}` : null,
+      parsed.notes ? `notes: ${parsed.notes}` : null,
+      slice,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    if (!doc) return `${header}\n---\n${body}`;
+    return `${header}\n---\n\`\`\`markdown\n${doc}\n\`\`\``;
+  } catch {
+    return body;
+  }
+}
+
 export function formatDesignLoopMcpEnvelope(body: string, ok: boolean): string {
   try {
     const parsed = JSON.parse(body) as {
@@ -1816,6 +1875,102 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "list_marketing_loops",
+      description: "List marketing release loops for a project.",
+      inputSchema: {
+        type: "object",
+        properties: { projectId: { type: "string" } },
+        required: ["projectId"],
+      },
+    },
+    {
+      name: "marketing_loop_start",
+      description:
+        "Start a marketing release loop (MARKETING.md). Use for a launch or a landing that loses to competitors — not plan_loop_start. Requires brief.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          brief: { type: "string" },
+        },
+        required: ["projectId", "brief"],
+      },
+    },
+    {
+      name: "marketing_loop_continue",
+      description:
+        "Revise MARKETING.md. Pass message. Optional baseVersion when the tip was truncated.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          message: { type: "string" },
+          baseVersion: { type: "number" },
+        },
+        required: ["projectId", "loopId", "message"],
+      },
+    },
+    {
+      name: "marketing_loop_get",
+      description:
+        "Read marketing-loop status, verdict, and MARKETING.md. Long docs page: pass offset and optional limit. docTotalChars tells you how much remains.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: { type: "number" },
+          offset: { type: "number" },
+          limit: { type: "number" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "marketing_loop_acceptance",
+      description: "Tick marketing acceptance items without freezing the loop.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          acceptedFeatureIds: { type: "array", items: { type: "string" } },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "marketing_loop_accept",
+      description:
+        "Freeze a judge-clean MARKETING.md. Refuses scaffolds and claims without tracks. acceptAllFeatures ticks the full checklist.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          version: { type: "number" },
+          acceptedFeatureIds: { type: "array", items: { type: "string" } },
+          acceptAllFeatures: { type: "boolean" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "marketing_loop_promote",
+      description:
+        "Open a design loop for the landing, create product-gap phases, and record the landing track as pending. Returns designLoopId, phaseIds, pendingLanding.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          startResearch: { type: "boolean" },
+        },
+        required: ["projectId", "loopId"],
+      },
+    },
+    {
       name: "plan_loop_get",
       description:
         "Read plan-loop status and PLAN.md (does NOT revise). When revisionRequired is true, call plan_loop_continue next. Pass includePlan=false for meta-only. Long plans page: pass offset (char index) + optional limit; the response's planTotalChars tells you how much remains — keep reading with offset until you have the full plan.",
@@ -2134,7 +2289,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           projectId: { type: "string" },
           kind: {
             type: "string",
-            enum: ["ask", "agent", "design_loop", "plan_loop"],
+            enum: ["ask", "agent", "design_loop", "plan_loop", "marketing_loop"],
           },
           id: {
             type: "string",
@@ -3570,6 +3725,109 @@ export async function dispatchSlopcontrolTool(
       });
     }
 
+    if (name === "list_marketing_loops") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/marketing-loops`,
+        );
+        const body = await res.text();
+        return { content: [{ type: "text", text: body }], isError: !res.ok };
+      });
+    }
+
+    if (name === "marketing_loop_start" || name === "marketing_loop_continue") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const path =
+          name === "marketing_loop_start"
+            ? `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/marketing-loops?stream=1`
+            : `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/marketing-loops/${encodeURIComponent(loopId)}/continue?stream=1`;
+        const res = await fetch(path, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "text/event-stream",
+          },
+          body: JSON.stringify({
+            brief: args.brief,
+            message: args.message,
+            baseVersion: args.baseVersion,
+          }),
+        });
+        const consumed = await consumeLiveTurnSse(
+          sendLog,
+          "marketing_loop",
+          res.body,
+        );
+        const text = consumed.done
+          ? formatMarketingLoopMcpEnvelope(JSON.stringify(consumed.done), consumed.ok)
+          : (consumed.errorText ?? "marketing loop turn failed");
+        return { content: [{ type: "text", text }], isError: !consumed.ok };
+      });
+    }
+
+    if (name === "marketing_loop_get") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const qs = new URLSearchParams();
+        if (typeof args.version === "number") qs.set("version", String(args.version));
+        if (typeof args.offset === "number" && args.offset > 0) {
+          qs.set("offset", String(Math.floor(args.offset)));
+        }
+        if (typeof args.limit === "number" && args.limit > 0) {
+          qs.set("limit", String(Math.floor(args.limit)));
+        }
+        const q = qs.toString() ? `?${qs}` : "";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/marketing-loops/${encodeURIComponent(loopId)}${q}`,
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: formatMarketingLoopMcpEnvelope(body, res.ok) }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (
+      name === "marketing_loop_acceptance" ||
+      name === "marketing_loop_accept" ||
+      name === "marketing_loop_promote"
+    ) {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const loopId = String(args.loopId ?? "");
+        const action =
+          name === "marketing_loop_acceptance"
+            ? "acceptance"
+            : name === "marketing_loop_accept"
+              ? "accept"
+              : "promote";
+        const method = name === "marketing_loop_acceptance" ? "PUT" : "POST";
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/marketing-loops/${encodeURIComponent(loopId)}/${action}`,
+          {
+            method,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              acceptedFeatureIds: args.acceptedFeatureIds,
+              acceptAllFeatures: args.acceptAllFeatures,
+              version: args.version,
+              startResearch: args.startResearch,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: formatMarketingLoopMcpEnvelope(body, res.ok) }],
+          isError: !res.ok,
+        };
+      });
+    }
+
     if (name === "list_plan_loops") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -4897,6 +5155,7 @@ export async function dispatchSlopcontrolTool(
           agent: `/projects/${encodeURIComponent(projectId)}/agents/${encodeURIComponent(id)}/stop`,
           design_loop: `/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(id)}/stop`,
           plan_loop: `/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(id)}/stop`,
+          marketing_loop: `/projects/${encodeURIComponent(projectId)}/marketing-loops/${encodeURIComponent(id)}/stop`,
         };
         const path = pathByKind[kind];
         if (!path) {
@@ -4904,7 +5163,7 @@ export async function dispatchSlopcontrolTool(
             content: [
               {
                 type: "text",
-                text: `error: kind must be ask|agent|design_loop|plan_loop`,
+                text: `error: kind must be ask|agent|design_loop|plan_loop|marketing_loop`,
               },
             ],
             isError: true,
