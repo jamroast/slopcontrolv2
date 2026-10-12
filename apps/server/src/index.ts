@@ -7210,10 +7210,11 @@ app.get("/projects/:projectId/phases/:phaseId/status", (req, res) => {
   const needsDesign = phaseNeedsDesign(project.rootPath, phase.id, config);
   const designComplete = isDesignComplete(project.rootPath, phase.id);
   const uiSpec = readUiSpec(project.rootPath, phase.id);
-  // The store's phase.description is the original ask brief, frozen at phase
-  // creation — review revisions rewrite PHASE.md on disk and NEVER sync back
-  // here. Agents verifying a revision against `description` see stale
-  // criteria forever (the jamauth phase-138 loop). Expose the live contract.
+  // phase.description tracks the intent contract: it starts as the original
+  // ask brief and is synced when a request_changes revision changes what the
+  // phase delivers. PHASE.md on disk stays the live EXECUTION contract —
+  // criteria/checks can change without an intent change, so verify against
+  // success_criteria parsed from PHASE.md, not description alone.
   const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
   const liveSuccessCriteria = phaseDoc
     ? extractPhaseSuccessCriteria(phaseDoc)
@@ -7227,7 +7228,7 @@ app.get("/projects/:projectId/phases/:phaseId/status", (req, res) => {
       dependsOn: phase.dependsOn ?? [],
       success_criteria: liveSuccessCriteria || null,
       contract_note: liveSuccessCriteria
-        ? "phase.description is the original ask brief frozen at phase creation — it never reflects review revisions. phase.success_criteria is the live contract parsed from PHASE.md on disk. Verify review revisions against success_criteria (or get_run.phase_doc), never against description."
+        ? "phase.description is the intent contract: the original ask brief, synced when a review revision changes what the phase delivers. phase.success_criteria is the live execution contract parsed from PHASE.md on disk — verify against success_criteria (or get_run.phase_doc)."
         : undefined,
     },
     design: {

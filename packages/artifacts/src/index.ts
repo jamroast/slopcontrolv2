@@ -1743,11 +1743,12 @@ export function extractAutomatedChecks(phaseDoc: string): string[] {
 }
 
 /**
- * Extract the `## Success Criteria` section body from PHASE.md — the LIVE
- * contract. Review revisions rewrite this section on disk, while the store's
- * phase.description stays frozen at phase creation, so status/verification
- * paths must read the criteria from here (via this helper), never from the
- * stored description. Returns "" when the section is absent.
+ * Extract the `## Success Criteria` section body from PHASE.md — the live
+ * execution contract. The store's phase.description tracks the intent
+ * contract (synced when a review revision changes what the phase delivers),
+ * but criteria/checks can change without an intent change, so status and
+ * verification paths must read the criteria from here (via this helper),
+ * never from the stored description. Returns "" when the section is absent.
  */
 export function extractPhaseSuccessCriteria(phaseDoc: string): string {
   const heading = /^##\s+Success Criteria\s*$/im.exec(phaseDoc);
