@@ -58,6 +58,8 @@ import {
   reopenDesignLoopForIterate,
   listDesignLoops,
   bindAcceptedDesignLoopToPhase,
+  markDesignLoopShipped,
+  unbindUnshippedDesignLoop,
   seedDesignLoopAcceptanceFromHtml,
   readDesignLoopAcceptance,
   writeDesignLoopAcceptance,
@@ -189,7 +191,11 @@ import {
   workingStubFromBound,
 } from "./live-turn-http.js";
 import { createLoopChatTurn } from "./loop-chat-http.js";
-import { registerMarketingLoopRoutes } from "./marketing-loop-routes.js";
+import {
+  advanceMarketingReleaseOnPhaseComplete,
+  materializeMarketingLandingPhases,
+  registerMarketingLoopRoutes,
+} from "./marketing-loop-routes.js";
 import { liveTurns } from "./live-turns.js";
 import { startLiveTurnWatcher } from "./live-turn-watcher.js";
 import {
@@ -406,6 +412,19 @@ function updatePhaseStatus(phaseId: string, status: string): void {
   phase.status = status as typeof phase.status;
   phase.updatedAt = new Date().toISOString();
   store.updatePhase(phase);
+  if (status === "complete") {
+    advanceMarketingReleaseOnPhaseComplete(
+      { store, activeRuns, abortControllers, touchRunStage, updatePhaseStatus },
+      phase,
+    );
+    const project = store.getProject(phase.projectId);
+    if (project) {
+      markDesignLoopShipped({
+        projectRoot: project.rootPath,
+        phaseId,
+      });
+    }
+  }
 }
 
 /** True when a phase was split into narrower phases and is no longer active. */
@@ -5088,6 +5107,11 @@ app.post("/projects/:id/design-loops/:loopId/accept", (req, res) => {
           : ""
       }`,
     );
+    const marketingLandingPhaseIds = materializeMarketingLandingPhases(
+      { store, activeRuns, abortControllers, touchRunStage, updatePhaseStatus },
+      project,
+      accepted.id,
+    );
     const acceptPack = readDesignLoopPack(project.rootPath, accepted.id);
     const evolveDirective = acceptPack?.evolveDirective?.trim();
     const hasComposeGap = (acceptPack?.capabilityGaps ?? []).some((g) =>
@@ -5102,6 +5126,7 @@ app.post("/projects/:id/design-loops/:loopId/accept", (req, res) => {
         : {}),
       loopId: accepted.id,
       version: accepted.acceptedVersion,
+      marketingLandingPhaseIds,
       html,
       acceptance,
       designPack: acceptPack,
@@ -6133,49 +6158,56 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
     return;
   }
 
-  // When linked phase is complete (or missing), create a new phase so research
-  // can replan from the acceptance checklist. Explicit phaseId forces rebind.
-  // Also create a new phase after a prior implement on this loop: rebinding the
-  // incomplete prior phase only refreshes design/ artifacts and skips research
-  // (JamPress stuck at design_complete with stale RESEARCH/PHASE).
+  // A finished or discarded phase cannot be reused. An in-flight implement
+  // stays the same phase until development completes, so a retry is not an
+  // extension.
   if (
     !phaseIdOverride &&
     phase &&
-    (phase.status === "complete" ||
-      meta.lastImplementedVersion != null ||
-      (meta.lastImplementedFeatureIds?.length ?? 0) > 0)
+    (phase.status === "complete" || phase.status === "superseded")
   ) {
     phase = undefined;
   }
 
+  const shipped = Boolean(
+    meta.lastImplementedVersion != null ||
+      (meta.lastImplementedFeatureIds?.length ?? 0) > 0,
+  );
+  const acceptance = readDesignLoopAcceptance(project.rootPath, meta.id);
+  const acceptedIds =
+    acceptance?.features.filter((f) => f.accepted).map((f) => f.id) ?? [];
+  const { inScope } = resolveDesignImplementInScope({
+    acceptedFeatureIds: acceptedIds,
+    lastImplementedFeatureIds: meta.lastImplementedFeatureIds,
+  });
+  const version = meta.acceptedVersion ?? meta.currentVersion;
+  const request = readDesignLoopRequest(project.rootPath, meta.id, version);
+  const description = phaseDescriptionFromDesignAccept({
+    request,
+    briefFallback: meta.brief,
+    inScopeIds: inScope,
+    features: acceptance?.features,
+    isExtensionImplement: shipped,
+  });
+
   const createdPhase = !phase;
   if (!phase) {
-    const acceptance = readDesignLoopAcceptance(project.rootPath, meta.id);
-    const acceptedIds =
-      acceptance?.features.filter((f) => f.accepted).map((f) => f.id) ?? [];
-    const { inScope } = resolveDesignImplementInScope({
-      acceptedFeatureIds: acceptedIds,
-      lastImplementedFeatureIds: meta.lastImplementedFeatureIds,
-    });
-    const version = meta.acceptedVersion ?? meta.currentVersion;
-    const request = readDesignLoopRequest(project.rootPath, meta.id, version);
-    const isExtensionImplement = Boolean(
-      meta.lastImplementedVersion != null ||
-        (meta.lastImplementedFeatureIds?.length ?? 0) > 0,
-    );
-    const description = phaseDescriptionFromDesignAccept({
-      request,
-      briefFallback: meta.brief,
-      inScopeIds: inScope,
-      features: acceptance?.features,
-      isExtensionImplement,
-    });
     phase = store.createPhase({
       projectId: project.id,
       description,
       rootPath: project.rootPath,
       dependsOn,
     });
+  } else if (phase.status === "developing" || phase.status === "designing") {
+    res.status(409).json({
+      error:
+        "Phase is still in development. Wait for it to finish or discard_run before starting another implement.",
+    });
+    return;
+  } else if (phase.description !== description) {
+    phase.description = description;
+    phase.updatedAt = new Date().toISOString();
+    store.updatePhase(phase);
   }
 
   try {
@@ -6186,8 +6218,18 @@ app.post("/projects/:id/design-loops/:loopId/implement", async (req, res) => {
     });
     // DESIGN_COMPLETE is in design/STATUS.md from bind. Only stamp phase status
     // when we are not about to run research (which owns draft → review → accepted).
-    const willResearch = startResearch && createdPhase;
-    if (!willResearch) {
+    const retryResearch =
+      !createdPhase &&
+      startResearch &&
+      (phase.status === "interrupted" ||
+        phase.status === "blocked" ||
+        phase.status === "draft");
+    const willResearch = (startResearch && createdPhase) || retryResearch;
+    if (
+      !willResearch &&
+      phase.status !== "in_review" &&
+      phase.status !== "accepted"
+    ) {
       writePhaseStatus(project.rootPath, phase.id, "design_complete");
       updatePhaseStatus(phase.id, "design_complete");
     }
@@ -7771,6 +7813,7 @@ app.post("/runs", async (req, res) => {
           revisionOutcome,
           phaseValidationIssues: validation.issues,
         });
+        const descriptionBefore = phase.description;
         const result = await orchestrator.submitReview({
           project,
           phase,
@@ -7778,6 +7821,13 @@ app.post("/runs", async (req, res) => {
           decision: "request_changes",
           feedback,
         });
+        if (
+          (result.description ?? phase.description) !== descriptionBefore
+        ) {
+          phase.description = result.description ?? phase.description;
+          phase.updatedAt = new Date().toISOString();
+          store.updatePhase(phase);
+        }
         touchRunStage(run.id, result.stage);
         updatePhaseStatus(phase.id, "in_review");
       });
@@ -8028,6 +8078,39 @@ app.post("/runs", async (req, res) => {
       }
       touchRunStage(action.runId, "interrupted");
       res.json({ ok: true, stage: "interrupted" });
+      return;
+    }
+
+    if (action.action === "discard_run") {
+      const run = store.getRun(action.runId);
+      if (!run) {
+        res.status(404).json({ error: "Run not found" });
+        return;
+      }
+      const phase = store.getPhase(run.phaseId);
+      if (phase?.status === "complete") {
+        res.status(409).json({
+          error:
+            "Phase already shipped — discard_run applies before development completes",
+        });
+        return;
+      }
+      abortControllers.get(action.runId)?.abort();
+      activeRuns.delete(action.runId);
+      developLock.release(run.projectId, run.id);
+      touchRunStage(action.runId, "interrupted");
+      const project = store.getProject(run.projectId);
+      const unbound = project
+        ? unbindUnshippedDesignLoop(project.rootPath, run.phaseId)
+        : [];
+      if (phase) updatePhaseStatus(phase.id, "superseded");
+      res.json({
+        ok: true,
+        stage: "interrupted",
+        phaseStatus: "superseded",
+        unboundLoopIds: unbound.map((loop) => loop.id),
+        ...(action.reason ? { reason: action.reason } : {}),
+      });
       return;
     }
 

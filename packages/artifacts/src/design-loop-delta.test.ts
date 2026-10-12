@@ -6,6 +6,8 @@ import { afterEach, describe, it } from "node:test";
 import {
   acceptDesignLoop,
   bindAcceptedDesignLoopToPhase,
+  markDesignLoopShipped,
+  unbindUnshippedDesignLoop,
   createDesignLoopMeta,
   formatAcceptancePromptBlock,
   mergeAcceptanceFeatures,
@@ -167,6 +169,17 @@ describe("design-loop delta scope (V2 full → V5 logo extension)", () => {
     assert.equal(invent.focus, "logo");
   });
 
+  it("phaseDescriptionFromDesignAccept keeps the loop brief on a first implement", () => {
+    const desc = phaseDescriptionFromDesignAccept({
+      request: "Section edit only. Do not redraw the page.",
+      briefFallback: "Design the landing page for this marketing release.",
+      inScopeIds: ["screen_landing"],
+      features: [{ id: "screen_landing", label: "Screen — landing", accepted: true }],
+    });
+    assert.match(desc, /Design the landing page/);
+    assert.doesNotMatch(desc, /Do not redraw/);
+  });
+
   it("phaseDescriptionFromDesignAccept prefers request + delta for extensions", () => {
     const desc = phaseDescriptionFromDesignAccept({
       request: "Generate 4 more circular icon alternatives for the mark",
@@ -243,9 +256,16 @@ describe("design-loop delta scope (V2 full → V5 logo extension)", () => {
     });
     assert.ok(boundV2.inScope.includes("theme_modes"));
     assert.ok(boundV2.inScope.includes("screen_landing"));
+    const afterBind = readDesignLoopMeta(root, meta.id)!;
+    assert.equal(afterBind.status, "accepted");
+    assert.equal(afterBind.lastImplementedVersion, undefined);
+    const shippedV2 = markDesignLoopShipped({
+      projectRoot: root,
+      phaseId: "58-full",
+    });
+    assert.equal(shippedV2?.lastImplementedVersion, 2);
+    assert.ok(shippedV2?.lastImplementedFeatureIds?.includes("theme_modes"));
     const afterV2 = readDesignLoopMeta(root, meta.id)!;
-    assert.equal(afterV2.lastImplementedVersion, 2);
-    assert.ok(afterV2.lastImplementedFeatureIds?.includes("theme_modes"));
 
     // Reopen + logo continue scope
     writeDesignLoopMeta(root, {
@@ -401,9 +421,71 @@ describe("design-loop delta scope (V2 full → V5 logo extension)", () => {
     const loopPack = readDesignLoopPack(root, meta.id);
     assert.ok(loopPack);
     assert.equal(packHasThemeModes(loopPack), false);
-    const metaAfter = readDesignLoopMeta(root, meta.id)!;
+    const metaAfterBind = readDesignLoopMeta(root, meta.id)!;
+    assert.equal(metaAfterBind.lastImplementedVersion, 2);
+    assert.equal(metaAfterBind.phaseId, "59-logo");
+    const metaAfter = markDesignLoopShipped({
+      projectRoot: root,
+      phaseId: "59-logo",
+    })!;
     assert.equal(metaAfter.lastImplementedVersion, 5);
+    assert.equal(metaAfter.shippedPhaseId, "59-logo");
     assert.ok(metaAfter.lastImplementedFeatureIds?.includes("theme_modes"));
+    const unbound = unbindUnshippedDesignLoop(root, "59-logo");
+    assert.equal(unbound.length, 0);
+  });
+
+  it("discarding an unshipped implement returns the loop to accepted", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-unbind-"));
+    roots.push(root);
+    const meta = createDesignLoopMeta({
+      projectId: "p1",
+      brief: "Design the landing page for this product",
+    });
+    writeDesignLoopMeta(root, meta);
+    writeDesignLoopVersion({
+      projectRoot: root,
+      loopId: meta.id,
+      version: 1,
+      html: DUAL_THEME_HTML,
+      notes: "v1",
+      request: "Section edit only. Do not redraw the page.",
+      usedScaffold: false,
+      parentVersion: null,
+    });
+    writeDesignLoopMeta(root, {
+      ...readDesignLoopMeta(root, meta.id)!,
+      currentVersion: 1,
+    });
+    writeDesignLoopAcceptance(root, meta.id, {
+      version: 1,
+      features: [
+        { id: "screen_landing", label: "Landing", accepted: true },
+      ],
+      acceptedAt: new Date().toISOString(),
+    });
+    acceptDesignLoop(root, meta.id, 1, {
+      acceptedFeatureIds: ["screen_landing"],
+    });
+    mkdirSync(join(root, ".slopcontrol", "phases", "phase-a"), {
+      recursive: true,
+    });
+    bindAcceptedDesignLoopToPhase({
+      projectRoot: root,
+      loopId: meta.id,
+      phaseId: "phase-a",
+    });
+    writeDesignLoopMeta(root, {
+      ...readDesignLoopMeta(root, meta.id)!,
+      status: "implemented",
+      lastImplementedVersion: 1,
+      lastImplementedFeatureIds: ["screen_landing"],
+    });
+    const unbound = unbindUnshippedDesignLoop(root, "phase-a");
+    assert.equal(unbound.length, 1);
+    assert.equal(unbound[0]?.status, "accepted");
+    assert.equal(unbound[0]?.phaseId, undefined);
+    assert.equal(unbound[0]?.lastImplementedVersion, undefined);
   });
 
   it("packHasThemeModes requires theme_modes in inScope", () => {

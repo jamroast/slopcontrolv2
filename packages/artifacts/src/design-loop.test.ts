@@ -16,6 +16,7 @@ import {
   designMockHtmlIsComplete,
   appendDesignLoopTranscript,
   bindAcceptedDesignLoopToPhase,
+  markDesignLoopShipped,
   createDesignLoopMeta,
   designLoopAssetsDir,
   extractFeaturesFromMockHtml,
@@ -136,7 +137,8 @@ describe("design-loop", () => {
       loopId: meta.id,
       phaseId: "01-look",
     });
-    assert.equal(bound.meta.status, "implemented");
+    assert.equal(bound.meta.status, "accepted");
+    assert.equal(bound.meta.lastImplementedVersion, undefined);
     assert.equal(bound.meta.phaseId, "01-look");
     assert.ok(
       existsSync(
@@ -153,6 +155,13 @@ describe("design-loop", () => {
     assert.match(uiSpec, /applied_shell/);
     assert.match(uiSpec, /IN SCOPE \(applied_shell\)/);
 
+    const shipped = markDesignLoopShipped({
+      projectRoot: root,
+      phaseId: "01-look",
+    });
+    assert.equal(shipped?.status, "implemented");
+    assert.equal(shipped?.lastImplementedVersion, 1);
+    assert.equal(shipped?.shippedPhaseId, "01-look");
     const again = readDesignLoopMeta(root, meta.id);
     assert.equal(again?.status, "implemented");
 

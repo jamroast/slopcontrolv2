@@ -228,6 +228,18 @@ describe("@slopcontrol/types", () => {
       ),
       true,
     );
+    const discarded = {
+      ...phases[0]!,
+      id: "00-discarded",
+      status: "superseded" as const,
+    };
+    assert.equal(
+      phaseDependenciesSatisfied(
+        { id: "02-b", dependsOn: ["00-discarded"] },
+        [discarded, phases[1]!],
+      ),
+      true,
+    );
   });
 
   it("records stage timing transitions", () => {

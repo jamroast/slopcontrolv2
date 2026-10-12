@@ -714,6 +714,61 @@ test("brand carry: non-accepted loops and pin-less loops yield nothing", () => {
   }
 });
 
+test("brand carry: accepted logo pin survives a later pin-less implemented loop", () => {
+  const root = tmpRoot("brand-reopened");
+  try {
+    writeDesignLoopMeta(root, {
+      id: "loop-mark",
+      projectId: "proj-1",
+      brief: "brand mark",
+      status: "open",
+      currentVersion: 5,
+      acceptedVersion: 3,
+      lastImplementedVersion: 3,
+      createdAt: "2026-09-29T00:00:00.000Z",
+      updatedAt: "2026-09-30T18:43:17.000Z",
+    });
+    const markAssets = designLoopAssetsDir(root, "loop-mark");
+    mkdirSync(markAssets, { recursive: true });
+    writeFileSync(join(markAssets, "concept-a.png"), Buffer.from([0x89, 0x50]));
+    replaceDesignLoopSelections({
+      projectRoot: root,
+      loopId: "loop-mark",
+      selections: [
+        {
+          slot: "logo",
+          conceptId: "concept-a",
+          label: "concept-a.png",
+          asset: "concept-a.png",
+          pinnedAt: "2026-09-30T18:20:49.000Z",
+        },
+      ],
+    });
+
+    writeDesignLoopMeta(root, {
+      id: "loop-dashboard",
+      projectId: "proj-1",
+      brief: "dashboard",
+      status: "implemented",
+      currentVersion: 5,
+      acceptedVersion: 5,
+      createdAt: "2026-09-22T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+    });
+    const dashAssets = designLoopAssetsDir(root, "loop-dashboard");
+    mkdirSync(dashAssets, { recursive: true });
+    writeFileSync(join(dashAssets, "logo.svg"), "<svg></svg>");
+
+    const brand = pickProjectBrandAssets(root);
+    assert.ok(brand);
+    assert.equal(brand!.sourceLoopId, "loop-mark");
+    assert.equal(brand!.logoAsset, "concept-a.png");
+    assert.equal(brand!.version, 3);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("brand carry: import never overwrites an existing logo pin", () => {
   const root = tmpRoot("brand-keep-pin");
   try {

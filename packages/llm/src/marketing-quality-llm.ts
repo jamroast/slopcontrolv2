@@ -33,12 +33,13 @@ Schema:
 - draftFaults: string[] — gaps because MARKETING.md ignored evidence it already had
 
 Check ALL of:
-1. Required sections are substantive, not stubs: Audience, Competitors, Positioning, Claims, Landing narrative, Tracks, Risks and open questions, Handoff notes.
+1. Required sections are substantive, not stubs: Audience, Competitors, Positioning, Existing design, Claims, Landing narrative, Tracks, Risks and open questions, Handoff notes.
 2. Every claim line is exactly one of proven, gap, or forbidden.
 3. A proven claim is backed by a quoted product behavior in the findings or the doc. Confident wording is not proof.
 4. A gap claim names the product change. A forbidden claim must not be repeated in the landing narrative.
 5. Every gap and forbidden claim id appears on a track. A design track exists for the landing. A product track exists for each gap cluster.
 6. Competitor statements cite a source URL that appears in the findings.
+7. When the findings include an EXISTING DESIGN BASIS that lists logo files or shared element ids, the Existing design section names those files and ids, and the design track says the landing mock embeds them. Inventing a new logo, lettermark, or replacement menubar, theme control, or sign-in is a draft fault.
 
 Verdict rules:
 - ok=true only when the doc can be accepted without inventing proof.

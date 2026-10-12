@@ -95,6 +95,7 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   "retry_root_verify",
   "retry_draft",
   "rerun_research",
+  "discard_run",
   "stop_session",
   "agent",
   "merge_phase",
@@ -527,6 +528,13 @@ export const CHAT_TOOL_INPUT_SCHEMA: Record<string, z.ZodType> = {
       projectId: optionalProject,
     })
     .passthrough(),
+  discard_run: z
+    .object({
+      runId: z.string().min(1),
+      reason: optionalString,
+      projectId: optionalProject,
+    })
+    .passthrough(),
   stop_session: z.object({
     kind: z.enum(["ask", "agent", "design_loop", "plan_loop", "marketing_loop"]),
     id: z.string().min(1),
@@ -629,7 +637,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   get_run_steps:
     "Structured verify steps for one run. Requires runId.",
   get_phase_status:
-    "Status and diagnosis for one phase. Requires phaseId. phase.description is the original ask brief frozen at creation — it NEVER reflects review revisions; verify revised success criteria via phase.success_criteria (live from PHASE.md) or get_run.phase_doc, not description.",
+    "Status and diagnosis for one phase. Requires phaseId. A request_changes revision that changes what the phase delivers updates phase.description to the revised intent contract. PHASE.md remains the execution contract (phase.success_criteria / get_run.phase_doc).",
   list_runs:
     "List runs for the project (id, stage, phase). Call this before get_run.",
   list_phases:
@@ -647,7 +655,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   list_marketing_loops:
     "List marketing release loops for a project. Use before marketing_loop_get when loopId is unknown.",
   marketing_loop_get:
-    "Read a marketing release loop: status, verdict, and MARKETING.md. Omit loopId to use this chat's latched loop. When docTotalChars is larger than the returned doc, call again with offset. Do not poll while a marketing_loop live turn is active.",
+    "Read a marketing release loop: status, verdict, MARKETING.md, and after promote the schedule (readyPhaseIds, designReady, pendingLanding, nextStep). Start work only for readyPhaseIds. design_loop_continue composes the landing from the published elements and pinned logo seeded into the design loop. Omit loopId to use this chat's latched loop. When docTotalChars is larger than the returned doc, call again with offset. Do not poll while a marketing_loop live turn is active.",
   marketing_loop_start:
     "Start a marketing release loop (MARKETING.md: audience, competitors, claims, landing narrative, tracks). Requires brief — the operator's launch request. Use this instead of plan_loop_start or start_change when the operator wants to take the product to market or the landing loses to competitors. Notification-driven — do not poll marketing_loop_get.",
   marketing_loop_continue:
@@ -657,7 +665,7 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
   marketing_loop_accept:
     "Freeze a judge-clean MARKETING.md. Refuses scaffolds and gap or forbidden claims that lack tracks. On confirm with no ticks, the full checklist is accepted.",
   marketing_loop_promote:
-    "After accept: open a design loop for the landing, create product-gap phases, and record the landing implementation as pending. Returns designLoopId, phaseIds, and pendingLanding. Then design_loop_continue on designLoopId — the first mock is a placeholder.",
+    "After accept: open the landing design loop and create phases in track-dependency order. Returns designLoopId, phaseIds, readyPhaseIds, designReady, and pendingLanding. Research starts only for readyPhaseIds. The design loop is seeded with published landing elements and the pinned logo; design_loop_continue composes the landing from those (the first mock is a placeholder). Landing implementation stays pending until that design is accepted.",
   plan_loop_get:
     "One plan loop. Pass loopId, or omit to use this chat's latched plan loop (from plan_loop_start/continue). Returns nextStep and blockers. Read-only status check — when the operator wants to revise the plan, call plan_loop_continue (not plan_loop_get). Do not poll while a plan_loop live turn is active — wait for live_settled. Long plans may be sliced: a 'plan_slice: chars X..Y of Z' line means more plan remains — call again with offset=Y to fetch the next chunk (optional limit controls chunk size). Always read the whole plan before judging or accepting it.",
   plan_loop_start:
@@ -709,6 +717,8 @@ const CHAT_TOOL_DESCRIPTION: Record<string, string> = {
     "Re-run PHASE.md draft when stage is failed or interrupted and RESEARCH.md is solid. Requires runId. NOT for in_review — use submit_review(request_changes) to fix PHASE.md validation or content, then approve.",
   rerun_research:
     "Re-run research for a failed planning run (greenfield — always runs the research agent, bypassing the solid-RESEARCH skip). Requires runId.",
+  discard_run:
+    "Tombstone a phase that should not ship. Supersedes the phase, interrupts the run, and returns a design loop that had not finished development to accepted. Refuses a phase that already completed. Requires runId.",
   promote_ask:
     "Promote an ask into a phase. Pass askId, or omit to promote this chat's latched ask.",
   design_library_publish:

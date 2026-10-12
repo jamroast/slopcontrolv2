@@ -28,18 +28,28 @@ export type DesignLoopMeta = {
   brief: string;
   status: DesignLoopStatus;
   phaseId?: string;
+  /**
+   * Phase whose development finished. Distinct from phaseId, which may point
+   * at an in-flight implement that has not shipped.
+   */
+  shippedPhaseId?: string;
   askId?: string;
   currentVersion: number;
   acceptedVersion?: number;
   /**
-   * Features shipped via the last successful implement_design bind.
-   * Used so a logo-only extension accept does not re-open prior screens/theme.
+   * Features whose development finished. A bind that only starts research
+   * does not set this — a retry stays a first implement until then.
    */
   lastImplementedVersion?: number;
   lastImplementedFeatureIds?: string[];
   lastError?: DesignLoopLastError;
   /** Dynamic conceptual-model scope frame (product / shell / screen / component / flow). */
   scope?: import("./design-conceptual-model.js").DesignScope;
+  /**
+   * Marketing surface: compose the mock from published landing elements
+   * and the pinned logo instead of revising an older screen.
+   */
+  composeFromLibrary?: boolean;
   /** Operator-supplied reason when status === "abandoned". */
   abandonReason?: string;
   abandonedAt?: string;
@@ -454,12 +464,9 @@ export function phaseDescriptionFromDesignAccept(opts: {
     ];
     return parts.join("\n").slice(0, 4_000);
   }
-  if (request && request !== brief) {
-    return [request.slice(0, 800), "", brief.slice(0, 1_200)]
-      .join("\n")
-      .slice(0, 4_000);
-  }
-  return brief.slice(0, 4_000);
+  // A later continue note (copy tweak, "do not redraw") is already in the
+  // accepted mock. The implementation task is the loop brief.
+  return (brief || request).slice(0, 4_000);
 }
 
 /** Merge proposed features with prior ticks (preserve accepted when id matches). */
@@ -1885,15 +1892,23 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     /* elements optional */
   }
 
-  const shippedIds = [
-    ...new Set([...(meta.lastImplementedFeatureIds ?? []), ...inScope]),
-  ];
+  // Loops bound before shippedPhaseId existed recorded the ship only as
+  // status=implemented. Remember that phase before this bind replaces phaseId.
+  const legacyShippedPhaseId =
+    !meta.shippedPhaseId &&
+    meta.status === "implemented" &&
+    meta.lastImplementedVersion != null &&
+    meta.phaseId &&
+    meta.phaseId !== opts.phaseId
+      ? meta.phaseId
+      : undefined;
   const next: DesignLoopMeta = {
     ...meta,
-    status: "implemented",
+    // Starting research is not a ship. status stays accepted until
+    // markDesignLoopShipped, and stays implemented when a prior ship exists.
+    status: meta.status === "implemented" ? "implemented" : "accepted",
     phaseId: opts.phaseId,
-    lastImplementedVersion: version,
-    lastImplementedFeatureIds: shippedIds,
+    shippedPhaseId: meta.shippedPhaseId ?? legacyShippedPhaseId,
     updatedAt: new Date().toISOString(),
   };
   writeDesignLoopMeta(opts.projectRoot, next);
@@ -1906,4 +1921,78 @@ export function bindAcceptedDesignLoopToPhase(opts: {
     inScope,
     alreadyApplied,
   };
+}
+
+/**
+ * Development of the bound phase finished. This is the only writer of
+ * lastImplementedVersion / shippedPhaseId.
+ */
+export function markDesignLoopShipped(opts: {
+  projectRoot: string;
+  phaseId: string;
+}): DesignLoopMeta | null {
+  const loops = listDesignLoops(opts.projectRoot).filter(
+    (loop) => loop.phaseId === opts.phaseId && loop.status !== "abandoned",
+  );
+  let last: DesignLoopMeta | null = null;
+  for (const meta of loops) {
+    if (meta.shippedPhaseId === opts.phaseId && meta.status === "implemented") {
+      last = meta;
+      continue;
+    }
+    const version = meta.acceptedVersion ?? meta.currentVersion;
+    const acceptance = readDesignLoopAcceptance(opts.projectRoot, meta.id);
+    const acceptedIds =
+      acceptance?.features.filter((f) => f.accepted).map((f) => f.id) ?? [];
+    const { inScope } = resolveDesignImplementInScope({
+      acceptedFeatureIds: acceptedIds,
+      lastImplementedFeatureIds: meta.lastImplementedFeatureIds,
+    });
+    const shippedIds = [
+      ...new Set([...(meta.lastImplementedFeatureIds ?? []), ...inScope]),
+    ];
+    const next: DesignLoopMeta = {
+      ...meta,
+      status: "implemented",
+      phaseId: opts.phaseId,
+      shippedPhaseId: opts.phaseId,
+      lastImplementedVersion: version,
+      lastImplementedFeatureIds: shippedIds,
+      updatedAt: new Date().toISOString(),
+    };
+    writeDesignLoopMeta(opts.projectRoot, next);
+    last = next;
+  }
+  return last;
+}
+
+/**
+ * A discarded implement did not ship. Point the loop back at the last shipped
+ * phase, or return it to accepted when nothing has shipped.
+ * A legacy bind that stamped lastImplemented* before development finished is
+ * cleared so the retry is a first implement.
+ */
+export function unbindUnshippedDesignLoop(
+  projectRoot: string,
+  phaseId: string,
+): DesignLoopMeta[] {
+  const updated: DesignLoopMeta[] = [];
+  for (const meta of listDesignLoops(projectRoot)) {
+    if (meta.phaseId !== phaseId) continue;
+    if (meta.shippedPhaseId === phaseId) continue;
+    const priorShipped = Boolean(meta.shippedPhaseId);
+    const next: DesignLoopMeta = {
+      ...meta,
+      phaseId: priorShipped ? meta.shippedPhaseId : undefined,
+      status: priorShipped ? "implemented" : "accepted",
+      updatedAt: new Date().toISOString(),
+    };
+    if (!priorShipped) {
+      next.lastImplementedVersion = undefined;
+      next.lastImplementedFeatureIds = undefined;
+    }
+    writeDesignLoopMeta(projectRoot, next);
+    updated.push(next);
+  }
+  return updated;
 }

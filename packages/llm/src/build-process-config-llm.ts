@@ -72,7 +72,7 @@ Registry env contract (EXACT — do not reinterpret):
 
 CRITICAL pnpm/npm .npmrc constraint: pnpm does NOT expand environment variables in registry/proxy/auth lines of a PROJECT-level .npmrc (committed files are untrusted; env expansion there is ignored with a warning). Therefore:
 - Committed project .npmrc: use the LITERAL loopback registry, e.g. '@acme:registry=http://127.0.0.1:4873/' (a loopback URL is not a secret). No '\${...}' env references in registry/auth lines.
-- Dockerfile: generate the container .npmrc from build ARGs at build time, e.g. RUN printf '@acme:registry=%s\n//%s/:_authToken=%s\n' "$SLOPCONTROL_NPM_REGISTRY_DOCKER_URL" "$SLOPCONTROL_NPM_REGISTRY_DOCKER_AUTH_HOST" "$SLOPCONTROL_NPM_REGISTRY_TOKEN" > .npmrc (omit the auth line when the registry allows anonymous publish).
+- Dockerfile: generate the container .npmrc from build ARGs at build time as ONE physical RUN line. A line that does not end with a trailing backslash is a new Dockerfile instruction; printf, if, else, and fi are not instructions and the build fails to parse. Put the optional-token branch on that same line, e.g. RUN if [ -n "$SLOPCONTROL_NPM_REGISTRY_TOKEN" ]; then printf '@acme:registry=%s\\n//%s/:_authToken=%s\\n' "$SLOPCONTROL_NPM_REGISTRY_DOCKER_URL" "$SLOPCONTROL_NPM_REGISTRY_DOCKER_AUTH_HOST" "$SLOPCONTROL_NPM_REGISTRY_TOKEN" > .npmrc; else printf '@acme:registry=%s\\n' "$SLOPCONTROL_NPM_REGISTRY_DOCKER_URL" > .npmrc; fi
 - CI: generate .npmrc the same way in a workflow step from secrets before install/publish.
 - The local SlopControl registry grants $all access+publish on its private scopes, so auth lines are OPTIONAL locally; keep the token contract for when the registry is hardened or remote.
 `;

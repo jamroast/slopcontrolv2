@@ -22,7 +22,7 @@ Meaning:
 - "research": feedback is about research conclusions, evidence, root-cause hypotheses, or sections that live in RESEARCH.md (e.g. "fold into research", "the auth section in research", "blueprint deltas in research").
 - "phase": feedback is about the execution contract — Scope, File Changes, Automated Checks, Blueprint Deltas, Success Criteria — which live in PHASE.md.
 - "both": feedback touches research conclusions AND the phase contract, or is ambiguous. When in doubt, choose "both" (revising both is never wrong).
-- intent: true when feedback asks to edit INTENT.json metadata — the change intent's title, goal, uiMount, mustNot list, researchNote, or other intent fields (e.g. "drop the stale mustNot entries", "dedupe researchNote", "change the goal", "the intent says X"). INTENT.json is a separate metadata file from RESEARCH.md/PHASE.md; set intent=true when the feedback names it or asks to edit intent fields.
+- intent: true when feedback changes what the phase must deliver or must not do — including a retracted prohibition, a route or file the phase should use, or a goal change — even when the operator does not name INTENT.json. Also true when feedback explicitly edits title, goal, uiMount, mustNot, or researchNote. False when feedback only changes automated checks, file-edit mechanics, or research evidence.
 
 You are given the feedback plus short excerpts of both docs. Judge by content, not by which filename the operator happened to mention.`;
 

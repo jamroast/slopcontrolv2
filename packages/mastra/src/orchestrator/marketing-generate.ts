@@ -28,7 +28,9 @@ export type MarketingGenerateInput = {
   brief: string;
   message?: string;
   previousDoc?: string;
+  previousFindings?: string;
   previousVerdict?: MarketingQualityVerdict | null;
+  existingDesignBasis?: string;
   version: number;
   projectRoot: string;
   onProgress?: (event: { type: "status"; summary: string }) => void;
@@ -59,6 +61,19 @@ export type MarketingGenerateDeps = {
   ) => Promise<{ verdict: MarketingQualityVerdict; judgeInfraFailed: boolean }>;
 };
 
+/** Keep sources already fetched when a continue investigates a narrower question. */
+export function combineMarketingFindings(prior: string | undefined, current: string): string {
+  const next = current.trim();
+  const prev = prior?.trim() ?? "";
+  if (!prev) return next;
+  const priorKept =
+    prev.length > 7_000 ? `…(earlier findings clipped)\n${prev.slice(-7_000)}` : prev;
+  const block = `PRIOR FINDINGS (sources already fetched stay in force; drop a source only when the operator asked to remove it):\n${priorKept}`;
+  if (!next) return block;
+  if (next.includes(prev)) return next;
+  return `${block}\n\n${next}`;
+}
+
 function clip(text: string, max: number): string {
   const trimmed = text.trim();
   if (trimmed.length <= max) return trimmed;
@@ -76,6 +91,7 @@ export function buildMarketingDraftPrompt(opts: {
   previousDoc?: string;
   retryBlock?: string;
   scopeNote?: string;
+  existingDesignBasis?: string;
 }): string {
   const prior = opts.previousDoc?.trim()
     ? `Previous MARKETING.md (revise this — do not start from scratch unless the scope is full_revise):\n\n\`\`\`markdown\n${clip(opts.previousDoc, 64_000)}\n\`\`\``
@@ -87,7 +103,8 @@ Brief:
 ${clip(opts.brief, 3_000)}
 
 ${opts.message?.trim() ? `Operator feedback:\n${clip(opts.message, 3_000)}\n` : ""}
-${opts.findings.trim() ? `INVESTIGATION FINDINGS (authoritative — do not invent competitor facts beyond these):\n${clip(opts.findings, 8_000)}\n` : ""}
+${opts.existingDesignBasis?.trim() ? `EXISTING DESIGN BASIS (the release extends this visual system):\n${clip(opts.existingDesignBasis, 6_000)}\n` : ""}
+${opts.findings.trim() ? `INVESTIGATION FINDINGS (authoritative — do not invent competitor facts beyond these):\n${clip(opts.findings, 12_000)}\n` : ""}
 ${opts.retryBlock ? `${opts.retryBlock}\n` : ""}
 ${prior}
 
@@ -233,6 +250,9 @@ ${input.message?.trim() ? `\nOperator feedback:\n${clip(input.message, 2_000)}` 
 1. Find the current landing page in the repo and quote what it actually says.
 2. Use web_search and fetch_url for competitor landings named by the operator, or the closest public competitors if none are named. Cite each URL.
 3. List what those landings do that this one does not.
+4. Confirm the existing design basis below. Quote the logo filenames and shared element ids that are actually in the project. Do not propose a new logo or a replacement component set.
+
+${input.existingDesignBasis?.trim() ? `${clip(input.existingDesignBasis, 6_000)}\n` : ""}
 
 Return findings only. End with FINDINGS_COMPLETE.`,
     });
@@ -252,6 +272,12 @@ ${clip(investigated, 12_000)}`,
     });
     findings = judged.trim() || investigated.trim();
   }
+  findings = combineMarketingFindings(input.previousFindings, findings);
+  if (input.existingDesignBasis?.trim()) {
+    findings = findings.trim()
+      ? `${input.existingDesignBasis.trim()}\n\n${findings.trim()}`
+      : input.existingDesignBasis.trim();
+  }
 
   const draftOnce = async (retryBlock?: string) => {
     input.onProgress?.({ type: "status", summary: "marketing drafting" });
@@ -268,6 +294,7 @@ ${clip(investigated, 12_000)}`,
         findings,
         previousDoc: input.previousDoc,
         retryBlock,
+        existingDesignBasis: input.existingDesignBasis,
         scopeNote: continueScope
           ? `Continue scope: ${continueScope}. sections and clarify_only must not drop existing claims or tracks.`
           : "",

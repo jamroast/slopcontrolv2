@@ -26,7 +26,8 @@ Meaning:
 - A bullet is "applied" if the revised document reflects it (even partially, in spirit).
 - A bullet is "missing" only if it is substantive and genuinely absent.
 - If the document is byte-identical to the original, a bullet is "applied" only if the original ALREADY satisfied it (e.g. "confirm env keys are present" when they already are). Otherwise it is "missing".
-- Ignore trivial wording differences; judge intent, not exact phrasing.`;
+- Ignore trivial wording differences; judge intent, not exact phrasing.
+- When the document is INTENT.json, only goal, rawDescription, and mustNot are in scope. A bullet about automated checks, file edits, or research evidence is applied when those intent fields do not need to change. A bullet that changes what the phase delivers, or retracts a prohibition, is missing if rawDescription or mustNot still states the old contract.`;
 
 export interface JudgeDocRevisionOptions {
   endpoint: LlmEndpoint;

@@ -16,7 +16,7 @@ import { randomUUID } from "node:crypto";
 
 const SLOP_DIR = ".slopcontrol";
 
-export type MarketingLoopStatus = "open" | "accepted" | "promoted";
+export type MarketingLoopStatus = "open" | "accepted" | "promoted" | "abandoned";
 
 export type MarketingClaimStatus = "proven" | "gap" | "forbidden";
 
@@ -94,6 +94,31 @@ export type MarketingPack = {
   handoff: string;
 };
 
+export type MarketingReleasePhase = {
+  trackId: string;
+  phaseId: string;
+  role: "product" | "content";
+  dependsOnTrackIds: string[];
+};
+
+export type MarketingReleaseSurface = {
+  trackId: string;
+  dependsOnTrackIds: string[];
+};
+
+export type MarketingReleaseLanding = {
+  trackId: string;
+  brief: string;
+  dependsOnTrackIds: string[];
+  phaseId?: string;
+};
+
+export type MarketingReleaseSchedule = {
+  phases: MarketingReleasePhase[];
+  surfaceTracks: MarketingReleaseSurface[];
+  landingTracks: MarketingReleaseLanding[];
+};
+
 export type MarketingReleaseManifest = {
   loopId: string;
   version: number;
@@ -105,13 +130,146 @@ export type MarketingReleaseManifest = {
     dependsOnTrackIds: string[];
     dependsOnPhaseIds: string[];
   } | null;
+  schedule?: MarketingReleaseSchedule;
   promotedAt: string;
 };
+
+export type MarketingSchedulePlan = {
+  phases: Array<{
+    trackId: string;
+    role: "product" | "content";
+    brief: string;
+    dependsOnTrackIds: string[];
+  }>;
+  surfaceTracks: Array<{
+    trackId: string;
+    brief: string;
+    dependsOnTrackIds: string[];
+  }>;
+  landingTracks: Array<{
+    trackId: string;
+    brief: string;
+    dependsOnTrackIds: string[];
+  }>;
+};
+
+/**
+ * Turn pack tracks into an execution graph.
+ * A design track that another design track depends on is content work (a phase).
+ * Remaining design tracks are the landing mock. A product track that depends on
+ * that mock is landing implementation and stays pending until the mock is accepted.
+ * Dependencies that point at a missing track are dropped. Landing and surface
+ * tracks are not phase dependencies.
+ */
+export function scheduleMarketingRelease(pack: MarketingPack): MarketingSchedulePlan {
+  const byId = new Map(pack.tracks.map((track) => [track.id, track]));
+  const designDependedByDesign = new Set<string>();
+  for (const track of pack.tracks) {
+    if (track.kind !== "design") continue;
+    for (const depId of track.dependsOn) {
+      const dep = byId.get(depId);
+      if (dep?.kind === "design") designDependedByDesign.add(dep.id);
+    }
+  }
+  const surfaceIds = new Set(
+    pack.tracks
+      .filter((track) => track.kind === "design" && !designDependedByDesign.has(track.id))
+      .map((track) => track.id),
+  );
+  const landingIds = new Set<string>();
+  for (const track of pack.tracks) {
+    if (track.kind === "landing") landingIds.add(track.id);
+    if (
+      track.kind === "product" &&
+      track.dependsOn.some((id) => surfaceIds.has(id))
+    ) {
+      landingIds.add(track.id);
+    }
+  }
+  const phaseTracks = pack.tracks.filter((track) => {
+    if (landingIds.has(track.id) || surfaceIds.has(track.id)) return false;
+    return track.kind === "product" || track.kind === "design";
+  });
+  const phaseIds = new Set(phaseTracks.map((track) => track.id));
+  const phaseDeps = (track: MarketingTrack) =>
+    track.dependsOn.filter((id) => phaseIds.has(id));
+  return {
+    phases: phaseTracks.map((track) => ({
+      trackId: track.id,
+      role: track.kind === "design" ? "content" : "product",
+      brief: track.brief,
+      dependsOnTrackIds: phaseDeps(track),
+    })),
+    surfaceTracks: pack.tracks
+      .filter((track) => surfaceIds.has(track.id))
+      .map((track) => ({
+        trackId: track.id,
+        brief: track.brief,
+        dependsOnTrackIds: phaseDeps(track),
+      })),
+    landingTracks: pack.tracks
+      .filter((track) => landingIds.has(track.id))
+      .map((track) => ({
+        trackId: track.id,
+        brief: track.brief,
+        dependsOnTrackIds: phaseDeps(track),
+      })),
+  };
+}
+
+export function marketingScheduleView(opts: {
+  schedule: MarketingReleaseSchedule;
+  phaseStatusById: ReadonlyMap<string, string>;
+  designAccepted: boolean;
+  designLoopId?: string;
+}): {
+  designReady: boolean;
+  readyPhaseIds: string[];
+  pendingLanding: MarketingReleaseLanding[];
+  nextStep: string;
+} {
+  const statusOf = (phaseId: string) => opts.phaseStatusById.get(phaseId);
+  const depsComplete = (trackIds: string[]) =>
+    trackIds.every((trackId) => {
+      const row = opts.schedule.phases.find((phase) => phase.trackId === trackId);
+      return row ? statusOf(row.phaseId) === "complete" : false;
+    });
+  const readyPhaseIds = opts.schedule.phases
+    .filter((phase) => {
+      const status = statusOf(phase.phaseId);
+      if (status !== "draft" && status !== "blocked" && status !== "interrupted") {
+        return false;
+      }
+      return depsComplete(phase.dependsOnTrackIds);
+    })
+    .map((phase) => phase.phaseId);
+  const designReady =
+    !opts.designAccepted &&
+    opts.schedule.surfaceTracks.every((track) => depsComplete(track.dependsOnTrackIds));
+  const inReview = opts.schedule.phases
+    .filter((phase) => statusOf(phase.phaseId) === "in_review")
+    .map((phase) => phase.phaseId);
+  const pendingLanding = opts.schedule.landingTracks.filter((track) => !track.phaseId);
+  const designContinue = `design_loop_continue on ${opts.designLoopId ?? "the design loop"} to compose the landing from the project's published elements and pinned logo. Do not accept the placeholder.`;
+  const nextStep = inReview.length
+    ? `Phases ${inReview.join(", ")} are in_review. Wait for the operator and advance_run those runs. Do not start later phases. ${designContinue}`
+    : !opts.schedule.phases.length && designReady
+    ? designContinue
+    : readyPhaseIds.length
+      ? `Start only ready phases ${readyPhaseIds.join(", ")}. Do not start phases that still have unmet dependencies. ${designContinue}`
+      : designReady
+        ? designContinue
+        : pendingLanding.length && opts.designAccepted
+          ? "Design is accepted. Landing phases should now exist — start only those whose dependencies are complete."
+          : `Marketing release is in progress. Start only readyPhaseIds. ${designContinue}`;
+  return { designReady, readyPhaseIds, pendingLanding, nextStep };
+}
 
 export const MARKETING_REQUIRED_SECTIONS = [
   "Audience",
   "Competitors",
   "Positioning",
+  "Existing design",
   "Claims",
   "Landing narrative",
   "Tracks",
@@ -444,6 +602,34 @@ export function readMarketingDoc(
   return readFileSync(path, "utf-8");
 }
 
+export function readMarketingFindings(
+  projectRoot: string,
+  loopId: string,
+  version: number,
+): string | null {
+  const path = join(
+    marketingLoopVersionDir(projectRoot, loopId, version),
+    "FINDINGS.md",
+  );
+  if (!existsSync(path)) return null;
+  return readFileSync(path, "utf-8");
+}
+
+/** Longest findings through `throughVersion`, so a narrow continue cannot drop earlier fetches. */
+export function readRichestMarketingFindings(
+  projectRoot: string,
+  loopId: string,
+  throughVersion: number,
+): string | null {
+  let best: string | null = null;
+  const last = Math.max(0, Math.floor(throughVersion));
+  for (let version = 1; version <= last; version++) {
+    const text = readMarketingFindings(projectRoot, loopId, version);
+    if (text && text.trim().length > (best?.trim().length ?? 0)) best = text;
+  }
+  return best;
+}
+
 export function readMarketingVerdict(
   projectRoot: string,
   loopId: string,
@@ -711,6 +897,9 @@ export function acceptMarketingLoop(
 ): MarketingLoopMeta {
   const meta = readMarketingLoopMeta(projectRoot, loopId);
   if (!meta) throw new Error(`Marketing loop not found: ${loopId}`);
+  if (meta.status === "abandoned") {
+    throw new Error(`Marketing loop was discarded: ${loopId}`);
+  }
   if (meta.status === "promoted") {
     throw new Error(
       `Marketing loop already promoted: ${loopId}. Call marketing_loop_continue to reopen, then accept again.`,
@@ -767,9 +956,28 @@ export function reopenMarketingLoop(
   const meta = readMarketingLoopMeta(projectRoot, loopId);
   if (!meta) throw new Error(`Marketing loop not found: ${loopId}`);
   if (meta.status === "open") return meta;
+  if (meta.status === "abandoned") {
+    throw new Error(`Marketing loop was discarded: ${loopId}`);
+  }
   const next: MarketingLoopMeta = {
     ...meta,
     status: "open",
+    updatedAt: new Date().toISOString(),
+  };
+  writeMarketingLoopMeta(projectRoot, next);
+  return next;
+}
+
+export function abandonMarketingLoop(
+  projectRoot: string,
+  loopId: string,
+): MarketingLoopMeta {
+  const meta = readMarketingLoopMeta(projectRoot, loopId);
+  if (!meta) throw new Error(`Marketing loop not found: ${loopId}`);
+  if (meta.status === "abandoned") return meta;
+  const next: MarketingLoopMeta = {
+    ...meta,
+    status: "abandoned",
     updatedAt: new Date().toISOString(),
   };
   writeMarketingLoopMeta(projectRoot, next);
@@ -793,6 +1001,12 @@ export function summarizeMarketingLoopProgress(meta: MarketingLoopMeta): {
       blockers: [],
     };
   }
+  if (meta.status === "abandoned") {
+    return {
+      nextStep: "This marketing loop was discarded. Start a new marketing loop.",
+      blockers: ["Discarded"],
+    };
+  }
   if (meta.status === "accepted") {
     return {
       nextStep: "marketing_loop_promote to open the design loop and product-gap phases",
@@ -801,13 +1015,21 @@ export function summarizeMarketingLoopProgress(meta: MarketingLoopMeta): {
   }
   return {
     nextStep:
-      "Design loop and product-gap phases are recorded on the release. Continue those tracks; the landing phase waits on design accept.",
+      "marketing_loop_get returns the release schedule. Start only readyPhaseIds. design_loop_continue composes the landing from the published elements and pinned logo seeded into the design loop. Landing implementation stays pending until that design is accepted.",
     blockers: [],
   };
 }
 
-export function designBriefFromPack(pack: MarketingPack): string {
-  const designTracks = pack.tracks.filter((t) => t.kind === "design");
+export function designBriefFromPack(
+  pack: MarketingPack,
+  surfaceTrackIds?: string[],
+  existingDesignBasis?: string,
+): string {
+  const designTracks = pack.tracks.filter((t) => {
+    if (t.kind !== "design") return false;
+    if (!surfaceTrackIds) return true;
+    return surfaceTrackIds.includes(t.id);
+  });
   return [
     "Design the landing page for this marketing release.",
     "",
@@ -826,6 +1048,12 @@ export function designBriefFromPack(pack: MarketingPack): string {
     designTracks.length
       ? `Design track: ${designTracks.map((t) => t.brief).join(" ")}`
       : "Design track: one landing composition covering the narrative sections.",
+    "",
+    existingDesignBasis?.trim()
+      ? existingDesignBasis.trim()
+      : "No existing design basis was recorded.",
+    "",
+    "Compose the landing from that existing design basis. Embed the shared elements and the pinned logo. Do not invent a new mark or a replacement menubar, theme control, or sign-in. Do not revise an older dashboard into this page.",
   ].join("\n");
 }
 
@@ -866,6 +1094,10 @@ Tracks lines (one per track, exact shape):
 - track: <id> | design | <brief> | claims: <id,id> | depends:
 - track: <id> | product | <brief> | claims: <id> | depends:
 - track: <id> | landing | <brief> | claims: <id,id> | depends: <track-id,track-id>
+
+Kind rules: design is only the landing/marketing-surface mock. Docs, glossary, install, and dashboard work are product. landing is the landing-page implementation and must depend on the design track. A track lists every track that must finish first. Do not mark a docs or dashboard change as design.
+
+Existing design: when the existing design basis lists logo files or shared element ids, this section names each of them, and the design track brief says the landing mock embeds those elements and the pinned logo. Do not propose a new mark or a replacement component set.
 
 Every gap and forbidden claim id must appear in some track's claims list.
 The landing narrative must not repeat a forbidden claim's statement.

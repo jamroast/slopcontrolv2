@@ -9,6 +9,7 @@
 import {
   applyBuildProcessChanges,
   collectBuildProcessEvidence,
+  repairManagedDockerfiles,
   readBuildProcessEvidence,
   readProjectConfig,
   renderCiWorkflowYaml,
@@ -196,6 +197,12 @@ export async function configureProjectBuildProcess(opts: {
       }
     }
   }
+
+  const repairedDocker = repairManagedDockerfiles({
+    projectRoot: opts.projectRoot,
+    toolchain: result.toolchain,
+  });
+  results.push(...repairedDocker.results);
 
   const commandRuns: Array<{ command: string[]; code: number; durationMs: number }> = [];
   if (opts.runCommands !== false) {

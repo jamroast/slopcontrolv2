@@ -980,9 +980,11 @@ export function formatProjectPriorDesignPromptBlock(
 }
 
 /**
- * Brand assets = PINNED, asset-bearing selections from the latest
- * accepted/implemented loop. Strict by design: unpinned files in a loop's
- * assets dir never travel, and loops that were never accepted are invisible.
+ * Brand assets = pinned selections that were accepted for the project.
+ * The logo is the most recently pinned logo on any loop that was accepted or
+ * implemented, including a loop later reopened by a continue. A newer
+ * implemented loop with no logo pin does not hide that mark. Unpinned files
+ * never travel, and a loop that was never accepted stays invisible.
  * Brand identity is not opt-in reuse — it inherits by default.
  */
 export type ProjectBrandAssets = {
@@ -994,12 +996,20 @@ export type ProjectBrandAssets = {
   logoAsset?: string;
 };
 
-export function pickProjectBrandAssets(
+function loopCarriesAcceptedWork(loop: DesignLoopMeta): boolean {
+  if (loop.status === "abandoned") return false;
+  return (
+    loop.status === "accepted" ||
+    loop.status === "implemented" ||
+    typeof loop.acceptedVersion === "number" ||
+    typeof loop.lastImplementedVersion === "number"
+  );
+}
+
+function brandPinsFromLoop(
   projectRoot: string,
-  opts?: { excludeLoopId?: string },
+  loop: DesignLoopMeta,
 ): ProjectBrandAssets | null {
-  const loop = pickPriorLoop(projectRoot, opts?.excludeLoopId);
-  if (!loop) return null;
   const assetsDir = designLoopAssetsDir(projectRoot, loop.id);
   const selections = getDesignLoopSelections(loop);
   const seen = new Set<string>();
@@ -1015,10 +1025,33 @@ export function pickProjectBrandAssets(
   if (!seen.size) return null;
   return {
     sourceLoopId: loop.id,
-    version: loop.acceptedVersion ?? loop.currentVersion,
+    version: loop.acceptedVersion ?? loop.lastImplementedVersion ?? loop.currentVersion,
     assets: [...seen].sort(),
     logoAsset,
   };
+}
+
+export function pickProjectBrandAssets(
+  projectRoot: string,
+  opts?: { excludeLoopId?: string },
+): ProjectBrandAssets | null {
+  const exclude = opts?.excludeLoopId;
+  const loops = listDesignLoops(projectRoot).filter((loop) => loop.id !== exclude);
+  const withLogo = loops
+    .filter(loopCarriesAcceptedWork)
+    .map((loop) => {
+      const brand = brandPinsFromLoop(projectRoot, loop);
+      const pinnedAt =
+        getDesignLoopSelections(loop).find((sel) => sel.slot === "logo" && sel.asset)
+          ?.pinnedAt ?? "";
+      return brand?.logoAsset ? { brand, pinnedAt } : null;
+    })
+    .filter((hit): hit is { brand: ProjectBrandAssets; pinnedAt: string } => hit !== null)
+    .sort((a, b) => b.pinnedAt.localeCompare(a.pinnedAt));
+  if (withLogo[0]) return withLogo[0].brand;
+
+  const latest = pickPriorLoop(projectRoot, exclude);
+  return latest ? brandPinsFromLoop(projectRoot, latest) : null;
 }
 
 export type ImportedProjectBrandAssets = {

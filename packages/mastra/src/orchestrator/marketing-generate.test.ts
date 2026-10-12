@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildMarketingDraftPrompt,
+  combineMarketingFindings,
   finalizeMarketingDraft,
 } from "./marketing-generate.js";
 
@@ -31,5 +32,13 @@ describe("marketing draft gates", () => {
     });
     assert.equal(result.usedScaffold, true);
     assert.equal(result.doc, prior);
+  });
+
+  it("keeps already-fetched sources ahead of a narrower continue", () => {
+    const prior = `${"x".repeat(8_000)}\nFETCHED https://workos.com/mcp HTTP 200`;
+    const combined = combineMarketingFindings(prior, "Landing hero confirmed.");
+    assert.match(combined, /workos\.com\/mcp/);
+    assert.ok(combined.indexOf("workos.com/mcp") < combined.indexOf("Landing hero"));
+    assert.equal(combineMarketingFindings(undefined, "only new"), "only new");
   });
 });

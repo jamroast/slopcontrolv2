@@ -10,6 +10,8 @@ import {
   buildProcessEvidencePath,
   collectBuildProcessEvidence,
   readBuildProcessEvidence,
+  repairDockerfileRunShell,
+  repairManagedDockerfiles,
   writeBuildProcessEvidence,
 } from "./build-process-config.js";
 import {
@@ -391,6 +393,79 @@ describe("BUILD_PROCESS.json evidence", () => {
       assert.equal(back.toolchain?.kind, "node-pnpm");
       assert.deepEqual(back.gaps, ["docker ARG missing"]);
       assert.ok(buildProcessEvidencePath(root).endsWith("BUILD_PROCESS.json"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("repairDockerfileRunShell", () => {
+  const broken = [
+    "FROM node:22-slim AS builder",
+    "ARG SLOPCONTROL_NPM_REGISTRY_TOKEN=",
+    "RUN if [ -n \"$SLOPCONTROL_NPM_REGISTRY_TOKEN\" ]; then \\",
+    "if [ -n \"$SLOPCONTROL_NPM_REGISTRY_TOKEN\" ]; then",
+    "  printf '@acme:registry=%s\\n//%s/:_authToken=%s\\n' \"$SLOPCONTROL_NPM_REGISTRY_DOCKER_URL\" \"$SLOPCONTROL_NPM_REGISTRY_DOCKER_AUTH_HOST\" \"$SLOPCONTROL_NPM_REGISTRY_TOKEN\" > .npmrc",
+    "else",
+    "  printf '@acme:registry=%s\\n' \"$SLOPCONTROL_NPM_REGISTRY_DOCKER_URL\" > .npmrc",
+    "fi",
+    "fi",
+    "",
+    "RUN corepack enable && pnpm install --frozen-lockfile",
+    "COPY . .",
+    "",
+  ].join("\n");
+
+  it("collapses an uncontinued npmrc RUN into one instruction", () => {
+    const out = repairDockerfileRunShell(broken);
+    const lines = out.split("\n");
+    assert.equal(
+      lines.filter((l) => /printf|^\s*if |^else|^fi/.test(l) && !l.startsWith("RUN ")).length,
+      0,
+    );
+    const run = lines.find((l) => l.startsWith("RUN if "));
+    assert.ok(run);
+    assert.match(run, /^RUN if \[ -n "\$SLOPCONTROL_NPM_REGISTRY_TOKEN" \]; then printf /);
+    assert.match(run, /; else printf /);
+    assert.match(run, /; fi$/);
+    assert.equal((run.match(/\bif\b/g) ?? []).length, 1);
+    assert.equal((run.match(/\bfi\b/g) ?? []).length, 1);
+    assert.match(out, /RUN corepack enable && pnpm install --frozen-lockfile/);
+    assert.match(out, /COPY \. \./);
+    assert.equal(repairDockerfileRunShell(out), out);
+  });
+
+  it("leaves a properly continued RUN unchanged", () => {
+    const ok = [
+      "FROM node:22-alpine AS deps",
+      "RUN --mount=type=cache,id=pnpm,target=/pnpm/store \\",
+      "    pnpm install --frozen-lockfile",
+      "",
+    ].join("\n");
+    assert.equal(repairDockerfileRunShell(ok), ok);
+  });
+
+  it("repairs a Dockerfile on disk through the apply allowlist", () => {
+    const root = tmp("docker-repair");
+    try {
+      writeFileSync(join(root, "Dockerfile"), broken, "utf-8");
+      const { results } = repairManagedDockerfiles({
+        projectRoot: root,
+        toolchain: PNPM_SPEC,
+      });
+      assert.equal(results[0]?.applied, true);
+      assert.match(results[0]?.detail ?? "", /repaired RUN continuations/);
+      const out = readFileSync(join(root, "Dockerfile"), "utf-8");
+      assert.match(out, /^RUN if \[ -n "\$SLOPCONTROL_NPM_REGISTRY_TOKEN" \]; then printf /m);
+      assert.equal(
+        out.split("\n").some((l) => l.trim() === "printf" || l.trim().startsWith("printf ")),
+        false,
+      );
+      const again = repairManagedDockerfiles({
+        projectRoot: root,
+        toolchain: PNPM_SPEC,
+      });
+      assert.equal(again.results.length, 0);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

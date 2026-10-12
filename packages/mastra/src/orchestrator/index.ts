@@ -89,6 +89,11 @@ import {
   phaseHasUsableLogo,
   readChangeIntent,
   writeChangeIntent,
+  collectProjectCapabilities,
+  dropMustNotEntries,
+  dropMustNotLinesFromPhaseDoc,
+  formatProjectCapabilitiesPrompt,
+  mustNotCandidatesFromPhaseDoc,
   ensureTestServices,
   phaseDocAlignsWithChangeIntentAsync,
   type IntentAlignmentJudgeFn,
@@ -204,6 +209,9 @@ import {
   importProjectPriorDesignIntoLoop,
   pickProjectBrandAssets,
   importProjectBrandAssetsIntoLoop,
+  collectMarketingDesignBasis,
+  formatMarketingDesignBasisBlock,
+  seedMarketingDesignLoop,
   readProjectBrandAssetsImport,
   formatBrandAssetsPromptBlock,
   readProjectPriorDesignImport,
@@ -308,6 +316,7 @@ import {
   classifyVerifyFailureViaLlm,
   classifyHostVerifyEnvViaLlm,
   classifyRevisionTargetsViaLlm,
+  classifyCapabilityContradictionsViaLlm,
   judgeDocRevisionViaLlm,
   classifyAskInvestigateEngineViaLlm,
   judgeClaimProofViaLlm,
@@ -686,8 +695,11 @@ export interface MarketingLoopGenerateInput {
   brief: string;
   message?: string;
   previousDoc?: string;
+  previousFindings?: string;
   previousVerdict?: import("@slopcontrol/artifacts").MarketingQualityVerdict | null;
   version: number;
+  listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+  dataDir?: string;
   onProgress?: LiveProgressCallback;
   abortSignal?: AbortSignal;
 }
@@ -742,6 +754,8 @@ export interface SubmitReviewResult {
   revision?: RevisionOutcome;
   /** Human-readable rejection reason when approve is refused (surfaced to the agent). */
   reason?: string;
+  /** Revised phase contract when review moved rawDescription with the phase file. */
+  description?: string;
 }
 
 export interface OpenProjectResult {
@@ -3770,6 +3784,20 @@ ${message.trim()}`;
       }
     }
 
+    const marketingPlaceholder = /Landing placeholder opened by marketing loop/i.test(
+      previousHtml ?? "",
+    );
+    const composeFromLibrary =
+      readDesignLoopMeta(project.rootPath, loopId)?.composeFromLibrary === true;
+    if (composeFromLibrary && marketingPlaceholder) {
+      continueIntent = {
+        ...continueIntent,
+        scope: "full_revise",
+        preserveChrome: false,
+        inventLogo: false,
+      };
+    }
+
     // Review-only continue: the operator asked for analysis, not a revision
     // ("review the design", "does it meet requirements"). Do NOT regenerate —
     // return the current mock unchanged; the caller skips the version bump.
@@ -3914,6 +3942,22 @@ ${message.trim()}`;
     // implemented loop seed every fresh loop (strict — pins only, accepted
     // loops only). The intent's replaceDesignFacets carve out the logo pin
     // ("new logo") and/or non-logo graphics ("new graphics").
+    if (composeFromLibrary) {
+      try {
+        seedMarketingDesignLoop({
+          projectRoot: project.rootPath,
+          loopId,
+          projectId: project.id,
+          dataDir: input.dataDir ?? this.ctx.dataDir,
+          listProjects: input.listProjects,
+        });
+      } catch (err) {
+        slog.warn("design-loop", "marketing design seed failed", {
+          loopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     let brandAssetsImport = readProjectBrandAssetsImport(
       project.rootPath,
       loopId,
@@ -3947,7 +3991,8 @@ ${message.trim()}`;
     const brandAssetsBlock = formatBrandAssetsPromptBlock(brandAssetsImport);
 
     // Deterministic icon-pack derive + patch before any agent rewrite.
-    let workingPreviousHtml = previousHtml;
+    let workingPreviousHtml =
+      composeFromLibrary && marketingPlaceholder ? "" : previousHtml;
     // Same-project prior design (theme tokens + mock + logos) inherits BY
     // DEFAULT on fresh loops — operators should not have to ask. Overrides:
     // freshDesign (clean slate) skips it entirely; replaceDesignFacets carve
@@ -4004,6 +4049,7 @@ ${message.trim()}`;
       priorDesignImport = null;
     }
     if (
+      !composeFromLibrary &&
       !workingPreviousHtml?.trim() &&
       priorDesignImport?.mockHtml?.trim()
     ) {
@@ -4537,8 +4583,9 @@ ${message.trim()}`;
     const inventCount = continueIntent.inventLogo
       ? Math.max(1, Math.min(12, continueIntent.inventLogoCount ?? 1))
       : 1;
-    const htmlReturnRule =
-      continueIntent.scope === "assets_only" || continueIntent.scope === "nav_align"
+    const htmlReturnRule = composeFromLibrary
+      ? "Return a short rationale then a complete self-contained HTML document in a ```html fence. Embed every SHARED ELEMENTS snippet and the pinned logo file. Do not invent a replacement menubar, theme control, sign-in, or logo. Do not revise an older dashboard into this page."
+      : continueIntent.scope === "assets_only" || continueIntent.scope === "nav_align"
         ? "Prefer MOCK_ASSETS_ONLY (no full HTML). If you return HTML, keep prior mock; only asset src / icon-pack / LIVE SITE nav updates."
         : continueIntent.inventLogo && inventCount > 1
           ? `Return a complete HTML document based on the prior mock — call generate_image (inventNew=true) exactly ${inventCount} times with distinct styles/filenames; embed a logo-card / Concept grid of all ${inventCount} variants; do NOT pin_logo. Nav must match LIVE SITE.`
@@ -4598,6 +4645,8 @@ ${needsEdit
     ? `Operator asked for ${inventCount} NEW logo variants. Call generate_image with inventNew=true exactly ${inventCount} times (distinct styles/filenames), embed a logo-card / Concept grid of all of them, and do NOT pin_logo — operator will choose later.`
     : continueIntent.inventLogo
     ? "Operator asked for a NEW logo. Call generate_image with inventNew=true, embed the new relativePath, then pin_logo that filename. Do not reuse the superseded pin."
+    : composeFromLibrary
+      ? "This marketing landing composes from SHARED ELEMENTS and the pinned logo already in this loop. Reuse the existing palette. Do not invent a new brand system and do not turn an older dashboard mock into the page."
     : priorDesignImport || brandAssetsImport?.assets.length
       ? "This loop inherits the project's current design (PRIOR DESIGN / BRAND ASSETS above — no express reuse ask needed). Prefer those tokens/logos and revise from the prior mock — do not invent a new brand system. Replace ONLY what the operator's intent carved out."
       : "When inventing a new mark, call generate_image with inventNew=true if a logo was previously pinned. For stock photos use search_images / import_image. For look critique use review_look."}
@@ -5094,13 +5143,22 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         }
       }
     };
+    const designBasis = formatMarketingDesignBasisBlock(
+      collectMarketingDesignBasis({
+        projectRoot: input.project.rootPath,
+        dataDir: input.dataDir ?? this.ctx.dataDir,
+        listProjects: input.listProjects,
+      }),
+    );
     return runMarketingLoopGenerate(
       {
         loopId: input.loopId,
         brief: input.brief,
         message: input.message,
         previousDoc: input.previousDoc,
+        previousFindings: input.previousFindings,
         previousVerdict: input.previousVerdict,
+        existingDesignBasis: designBasis,
         version: input.version,
         projectRoot: input.project.rootPath,
         onProgress: input.onProgress,
@@ -6372,6 +6430,9 @@ ${planContractBlock}
       : planContractBlock
         ? `\n${planContractBlock}\n`
         : "";
+    const capabilityNote = formatProjectCapabilitiesPrompt(
+      collectProjectCapabilities(project.rootPath),
+    );
     const designAcceptance = readPhaseDesignAcceptance(
       project.rootPath,
       phase.id,
@@ -6466,7 +6527,7 @@ ${themeResearchNote}${elementsResearchNote}${crossDepResearchPack ? `\n${crossDe
 ${clipPromptSection("change-request", description, 4_000)}
 
 ${intentBlock}
-${planResearchNote}${acceptanceResearchNote}${adjacentPack ? `${adjacentPack}\n` : ""}${siblingBrandPack ? `${siblingBrandPack}\n` : ""}Phase id: ${phase.id}
+${planResearchNote}${capabilityNote ? `\n${capabilityNote}\n` : ""}${acceptanceResearchNote}${adjacentPack ? `${adjacentPack}\n` : ""}${siblingBrandPack ? `${siblingBrandPack}\n` : ""}Phase id: ${phase.id}
 ${engagementHonesty}${brandResearchNote}${antiAuditThemeNote}
 Existing blueprint (excerpt — full file at .slopcontrol/BLUEPRINT.md; prefer Live decisions):
 ${clipBlueprintForPrompt(blueprint || "", 6_000)}
@@ -6912,17 +6973,21 @@ ${draftPhasePack.elements
       message: phase.description,
       listProjects: input.listProjects,
     });
+    const draftCapabilityNote = formatProjectCapabilitiesPrompt(
+      collectProjectCapabilities(project.rootPath),
+    );
     const draftAcceptanceNote = draftAcceptance?.features?.some((f) => f.accepted)
       ? `
 ${draftAcceptanceBlock}
 CRITICAL: Scope, File Changes, Success Criteria, and Automated Checks MUST cover every IN SCOPE feature above.
 Do NOT plan OUT OF SCOPE features. Unticked items are mustNot for this phase.
+Do NOT forbid a route or file listed under PROJECT CAPABILITIES — the product already serves it. A mustNot that contradicts an existing route or file is removed before review.
 Do NOT claim theme/shell delivery (ThemeToggle, menubar chrome, day/night modes) in Scope or Success Criteria unless the acceptance above ticks theme_modes / applied_shell — PRESERVE mentions belong in mustNot, not in claims. Claiming out-of-scope theme work forces unprovable mount/visibility checks and the gate will reject the draft.
 File Changes must reference DESIGN_PACK logos/tokens/scope/theme and \`.slopcontrol/phases/${phase.id}/design/mock.html\` — do not invent a competing mark.
-${draftPlanNote}${draftThemeNote}${draftElementsNote}${draftCrossDepPack ? `\n${draftCrossDepPack}\n` : ""}${draftPackBlock ? `\n${draftPackBlock}\n` : ""}${draftBoundMock ? `\n${draftBoundMock}\n` : ""}
+${draftCapabilityNote ? `\n${draftCapabilityNote}\n` : ""}${draftPlanNote}${draftThemeNote}${draftElementsNote}${draftCrossDepPack ? `\n${draftCrossDepPack}\n` : ""}${draftPackBlock ? `\n${draftPackBlock}\n` : ""}${draftBoundMock ? `\n${draftBoundMock}\n` : ""}
 `
-      : [draftPlanNote, draftPackBlock, draftBoundMock, draftCrossDepPack].filter(Boolean).join("\n\n")
-        ? `\n${draftPlanNote}${draftThemeNote}${draftElementsNote}${[draftCrossDepPack, draftPackBlock, draftBoundMock].filter(Boolean).join("\n\n")}\n`
+      : [draftCapabilityNote, draftPlanNote, draftPackBlock, draftBoundMock, draftCrossDepPack].filter(Boolean).join("\n\n")
+        ? `\n${draftCapabilityNote ? `${draftCapabilityNote}\n` : ""}${draftPlanNote}${draftThemeNote}${draftElementsNote}${[draftCrossDepPack, draftPackBlock, draftBoundMock].filter(Boolean).join("\n\n")}\n`
         : draftCrossDepPack
           ? `\n${draftCrossDepPack}\n`
             : "";
@@ -7462,7 +7527,20 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
       }
     }
 
-    const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+    const capability = await this.dropContradictedMustNots({
+      project,
+      phase,
+      run,
+    });
+    if (capability.failed) {
+      return recoverableDraftFail(capability.failed, {
+        title: "Draft rejected: capability check",
+        kind: "capability-contradiction",
+        faultLeg: "draft",
+        judgeInfraFailed: true,
+      });
+    }
+    const phaseDoc = capability.phaseDoc;
     const gate = validatePhaseDocForDev(phaseDoc, {
       projectRoot: project.rootPath,
       phaseId: phase.id,
@@ -8247,7 +8325,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       });
     }
 
-    if (reviseIntent) {
+    if (reviseIntent || revisionState.phase?.ok) {
       const intentRev = await this.reviseIntentDoc({
         project,
         phase,
@@ -8292,6 +8370,15 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         run,
         `--- INTENT revision applied (${intentVerdict.reason}) ---`,
       );
+      const revisedContract = intentRev.intent.rawDescription.trim();
+      if (revisedContract && revisedContract !== phase.description.trim()) {
+        phase.description = revisedContract;
+        log(
+          project,
+          run,
+          "--- Phase description synced to the revised intent contract ---",
+        );
+      }
       revisionState.intent = buildRevisionArtifactOutcome({
         artifact: "intent",
         attempted: true,
@@ -8305,6 +8392,69 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     return await finish();
   }
 
+  /**
+   * Drop mustNot / out-of-scope lines that forbid a route or file the project
+   * already serves. Classification is LLM; applying the drop is exact-string.
+   * A judge error fails closed.
+   */
+  private async dropContradictedMustNots(input: {
+    project: Project;
+    phase: Phase;
+    run: Run;
+  }): Promise<{ phaseDoc: string; failed?: string }> {
+    const phaseDoc = readPhaseDoc(input.project.rootPath, input.phase.id);
+    const intent = readChangeIntent(input.project.rootPath, input.phase.id);
+    const candidates = [
+      ...new Set([
+        ...(intent?.mustNot ?? []),
+        ...mustNotCandidatesFromPhaseDoc(phaseDoc),
+      ]),
+    ];
+    if (!candidates.length) return { phaseDoc };
+    const capabilities = collectProjectCapabilities(input.project.rootPath);
+    if (!capabilities.routes.length && !capabilities.files.length) {
+      return { phaseDoc };
+    }
+    try {
+      const { endpoint, modelId } =
+        this.ctx.registry.resolveEndpointForRole("classification");
+      const judged = await classifyCapabilityContradictionsViaLlm({
+        endpoint,
+        modelId,
+        mustNot: candidates,
+        routes: capabilities.routes,
+        files: capabilities.files,
+      });
+      const allowed = new Set(candidates);
+      const drop = judged.contradictions
+        .map((row) => row.mustNot.trim())
+        .filter((item) => allowed.has(item));
+      if (!drop.length) return { phaseDoc };
+      if (intent) {
+        writeChangeIntent(input.project.rootPath, input.phase.id, {
+          ...intent,
+          mustNot: dropMustNotEntries(intent.mustNot, drop),
+        });
+      }
+      const nextDoc = dropMustNotLinesFromPhaseDoc(phaseDoc, drop);
+      if (nextDoc !== phaseDoc) {
+        writePhaseDoc(input.project.rootPath, input.phase.id, nextDoc);
+      }
+      log(
+        input.project,
+        input.run,
+        `--- Dropped prohibitions that contradict existing capabilities ---\n${drop.map((item) => `- ${item}`).join("\n")}`,
+      );
+      return { phaseDoc: nextDoc };
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return {
+        phaseDoc,
+        failed: `Capability check could not be verified (${detail})`,
+      };
+    }
+  }
+
   private async validatePlanningArtifactsForReview(input: {
     project: Project;
     phase: Phase;
@@ -8313,7 +8463,15 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     intent: ChangeIntent;
   }): Promise<{ ok: boolean; issues: string[] }> {
     const { project, phase, run, research, intent } = input;
-    const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
+    const capability = await this.dropContradictedMustNots({
+      project,
+      phase,
+      run,
+    });
+    if (capability.failed) {
+      return { ok: false, issues: [capability.failed] };
+    }
+    const phaseDoc = capability.phaseDoc;
     const gate = validatePhaseDocForDev(phaseDoc, {
       projectRoot: project.rootPath,
       phaseId: phase.id,
@@ -8626,11 +8784,12 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         stage: "in_review",
         revision: outcome,
         reason: settle.issues.join("; "),
+        description: phase.description,
       };
     }
 
     writePhaseStatus(project.rootPath, phase.id, "in_review");
-    return { stage: "in_review", revision: outcome };
+    return { stage: "in_review", revision: outcome, description: phase.description };
   }
 
   /** Classify which artifact(s) review feedback should revise. LLM on the
@@ -8847,15 +9006,19 @@ ${clipPromptSection("RESEARCH.md", research, 6_000)}`;
     const { project, phase, run, feedback, intent } = input;
     const priorIntent = intent;
     const intentPath = `.slopcontrol/phases/${phase.id}/INTENT.json`;
+    const phaseDoc = readPhaseDoc(project.rootPath, phase.id);
     const prompt = `Revise INTENT.json based on this review feedback:\n${feedback ?? ""}
 
 INTENT.json is the change-intent metadata (title, goal, uiMount, mustNot, researchNote, etc.). Apply surgical edits:
-- Do NOT return unchanged content.
-- Preserve fields not mentioned in the feedback.
-- Drop stale mustNot entries and dedupe researchNote when the feedback asks.
-- Keep the operator's goal/rawDescription verbatim unless the feedback explicitly asks to change them.
+- Preserve fields the feedback does not change.
+- When the feedback changes what this phase must deliver or must not do, rewrite goal and rawDescription so they state that revised contract. Remove mustNot entries the feedback retracts. A retracted prohibition must not remain in rawDescription.
+- When the feedback does not change the contract, keep goal and rawDescription, but still remove any mustNot or rawDescription sentence that contradicts the revised PHASE.md.
+- Automated checks and file-edit mechanics stay in PHASE.md. Do not copy them into INTENT.
 - Output ONLY a single JSON object (no prose, no markdown fences) that is the full revised INTENT.json.
 If you use write_file, write ONLY to ${intentPath}.
+
+Revised PHASE.md (the execution contract):
+${clipPromptSection("PHASE.md", phaseDoc, 6_000)}
 
 Current INTENT.json:
 ${JSON.stringify(intent, null, 2)}`;

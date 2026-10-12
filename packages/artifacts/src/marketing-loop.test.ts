@@ -11,6 +11,8 @@ import {
   listMarketingVersions,
   marketingClaimTrackIssues,
   marketingDocumentSuspiciousShrink,
+  marketingScheduleView,
+  scheduleMarketingRelease,
   seedMarketingAcceptance,
   validateMarketingDocument,
   writeMarketingLoopMeta,
@@ -41,6 +43,11 @@ Competitor A leads with a product screenshot and a single proof point. Source: h
 ## Positioning
 
 Hosted login that the operator can see working on the first screen.
+
+## Existing design
+
+- logo: logo.svg
+- element: menubar from the component library this project already depends on
 
 ## Claims
 
@@ -237,6 +244,57 @@ describe("marketing loop artifacts", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("keeps content design work behind its dependencies and holds landing code", () => {
+    const plan = scheduleMarketingRelease({
+      version: 1,
+      audience: "Builders",
+      competitors: "https://example.com",
+      positioning: "Plain language first",
+      claims: [],
+      landingNarrative: "Home states the outcome.",
+      risks: "",
+      handoff: "",
+      tracks: [
+        { id: "t1", kind: "product", brief: "Publish the install command", claimIds: [], dependsOn: [] },
+        { id: "t2", kind: "design", brief: "Write the glossary", claimIds: [], dependsOn: ["t1"] },
+        { id: "t3", kind: "design", brief: "Compose the landing mock", claimIds: [], dependsOn: ["t1", "t2"] },
+        { id: "t4", kind: "product", brief: "Implement the landing page", claimIds: [], dependsOn: ["t3"] },
+        { id: "t5", kind: "product", brief: "Align the account section", claimIds: [], dependsOn: ["t2"] },
+      ],
+    });
+    assert.deepEqual(
+      plan.phases.map((phase) => phase.trackId),
+      ["t1", "t2", "t5"],
+    );
+    assert.deepEqual(plan.phases.find((phase) => phase.trackId === "t2")?.dependsOnTrackIds, ["t1"]);
+    assert.deepEqual(plan.phases.find((phase) => phase.trackId === "t5")?.dependsOnTrackIds, ["t2"]);
+    assert.deepEqual(plan.surfaceTracks.map((track) => track.trackId), ["t3"]);
+    assert.deepEqual(plan.surfaceTracks[0]?.dependsOnTrackIds, ["t1", "t2"]);
+    assert.deepEqual(plan.landingTracks.map((track) => track.trackId), ["t4"]);
+    const view = marketingScheduleView({
+      schedule: {
+        phases: plan.phases.map((phase) => ({
+          ...phase,
+          phaseId: `phase-${phase.trackId}`,
+        })),
+        surfaceTracks: plan.surfaceTracks.map((track) => ({
+          trackId: track.trackId,
+          dependsOnTrackIds: track.dependsOnTrackIds,
+        })),
+        landingTracks: plan.landingTracks,
+      },
+      phaseStatusById: new Map([
+        ["phase-t1", "draft"],
+        ["phase-t2", "draft"],
+        ["phase-t5", "draft"],
+      ]),
+      designAccepted: false,
+      designLoopId: "design-1",
+    });
+    assert.deepEqual(view.readyPhaseIds, ["phase-t1"]);
+    assert.equal(view.designReady, false);
   });
 
   it("puts gaps and suggested fixes in the retry block", () => {

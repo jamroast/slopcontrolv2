@@ -465,7 +465,9 @@ export function unmetPhaseDependencies(
       unmet.push({ id: depId, status: "missing" });
       continue;
     }
-    if (dep.status !== "complete") {
+    // A superseded phase will never complete (split or discard). It does not
+    // block dependents.
+    if (dep.status !== "complete" && dep.status !== "superseded") {
       unmet.push({ id: depId, status: dep.status });
     }
   }
@@ -890,6 +892,11 @@ export const RunActionSchema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("stop_run"),
     runId: z.string(),
+  }),
+  z.object({
+    action: z.literal("discard_run"),
+    runId: z.string(),
+    reason: z.string().optional(),
   }),
   z.object({
     action: z.literal("retry_development"),

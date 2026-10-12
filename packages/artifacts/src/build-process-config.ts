@@ -316,12 +316,173 @@ function setDotPath(target: Record<string, unknown>, dotPath: string, value: unk
   cur[keys[keys.length - 1]!] = value;
 }
 
+const DOCKER_INSTRUCTION =
+  /^(?:FROM|COPY|RUN|ARG|WORKDIR|ENV|EXPOSE|CMD|ENTRYPOINT|USER|LABEL|ADD|VOLUME|HEALTHCHECK|SHELL|STOPSIGNAL|ONBUILD)\b/;
+
+function isDockerfilePath(rel: string): boolean {
+  const normalized = rel.replace(/\\/g, "/").replace(/^\.\//, "");
+  return /(?:^|\/)Dockerfile(?:\..*)?$/.test(normalized);
+}
+
+function isDockerInstruction(line: string): boolean {
+  if (/^\s/.test(line)) return false;
+  return DOCKER_INSTRUCTION.test(line.trim());
+}
+
+function dockerfileShellBody(line: string): string {
+  return line
+    .trim()
+    .replace(/\\\s*$/, "")
+    .trim()
+    .replace(/^RUN\s+/, "");
+}
+
+/**
+ * A Dockerfile RUN is one instruction. A trailing `\` continues it; the next
+ * physical line is otherwise a new instruction. Shell written as `if` /
+ * `printf` / `else` / `fi` without those continuations fails the build with
+ * "unknown instruction". Collapse that broken block into a single RUN.
+ * A RUN whose every non-final line already ends in `\` is left unchanged.
+ */
+export function repairDockerfileRunShell(content: string): string {
+  const lines = content.split("\n");
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (!isDockerInstruction(line) || !/^RUN\b/.test(line.trim())) {
+      out.push(line);
+      continue;
+    }
+    const block = [line];
+    let broken = !/\\\s*$/.test(line);
+    let j = i + 1;
+    while (j < lines.length) {
+      const next = lines[j]!;
+      const prev = block[block.length - 1]!;
+      const prevContinued = /\\\s*$/.test(prev);
+      const trimmed = next.trim();
+      if (trimmed.startsWith("#")) break;
+      if (trimmed === "") {
+        if (!broken) break;
+        let k = j;
+        while (k < lines.length && lines[k]!.trim() === "") k++;
+        if (k >= lines.length || isDockerInstruction(lines[k]!)) break;
+        j++;
+        continue;
+      }
+      if (prevContinued) {
+        block.push(next);
+        if (!/\\\s*$/.test(next)) broken = false;
+        else broken = block.some((l, idx) => idx < block.length - 1 && !/\\\s*$/.test(l));
+        j++;
+        continue;
+      }
+      if (isDockerInstruction(next)) break;
+      broken = true;
+      block.push(next);
+      j++;
+    }
+    const needsRepair = block.some(
+      (l, idx) => idx < block.length - 1 && !/\\\s*$/.test(l),
+    );
+    out.push(needsRepair ? collapseBrokenRun(block) : line);
+    if (!needsRepair) {
+      for (let k = 1; k < block.length; k++) out.push(block[k]!);
+    }
+    i = j - 1;
+  }
+  const repaired = out.join("\n");
+  for (const raw of repaired.split("\n")) {
+    if (/^(?:printf|if|else|elif|fi|then)\b/.test(raw.trim()) && !/^\s/.test(raw)) {
+      throw new Error(
+        "Dockerfile still has a shell line Docker would parse as an instruction",
+      );
+    }
+  }
+  return repaired;
+}
+
+function collapseBrokenRun(block: string[]): string {
+  const unique: string[] = [];
+  for (const line of block) {
+    const body = dockerfileShellBody(line);
+    const prev = unique[unique.length - 1];
+    if (prev && dockerfileShellBody(prev) === body) continue;
+    unique.push(line);
+  }
+  const parts = unique.map((line, idx) => {
+    const body = dockerfileShellBody(line);
+    return idx === 0 ? `RUN ${body}` : body;
+  });
+  return joinDockerfileShell(parts);
+}
+
+const SHELL_OPEN = /(?:;|&&|\|\||\bthen|\belse|\bdo|\{)\s*$/;
+const SHELL_KEYWORD = /^(?:else|elif|fi|done|then)\b/;
+
+function joinDockerfileShell(parts: string[]): string {
+  let script = parts[0] ?? "RUN true";
+  for (let i = 1; i < parts.length; i++) {
+    const next = parts[i]!;
+    const prev = script.trimEnd();
+    if (SHELL_KEYWORD.test(next)) {
+      script += SHELL_OPEN.test(prev) ? ` ${next}` : `; ${next}`;
+    } else if (SHELL_OPEN.test(prev)) {
+      script += ` ${next}`;
+    } else {
+      script += `; ${next}`;
+    }
+  }
+  return script;
+}
+
+/**
+ * Rewrite Dockerfile* at the project root when a RUN's shell was split into
+ * instructions. Writes only through the build-process allowlist.
+ */
+export function repairManagedDockerfiles(opts: {
+  projectRoot: string;
+  toolchain: BuildToolchainSpec;
+}): { results: AppliedChange[] } {
+  if (!existsSync(opts.projectRoot)) return { results: [] };
+  const names = readdirSync(opts.projectRoot).filter((name) =>
+    isDockerfilePath(name),
+  );
+  const changes: BuildProcessConfigChange[] = [];
+  for (const name of names) {
+    const abs = join(opts.projectRoot, name);
+    if (!statSync(abs).isFile()) continue;
+    const prior = readFileSync(abs, "utf-8");
+    const next = repairDockerfileRunShell(prior);
+    if (next === prior) continue;
+    changes.push({
+      op: "write_file",
+      path: name,
+      content: prior,
+      rationale:
+        "Dockerfile RUN shell was split into lines Docker parses as instructions",
+    });
+  }
+  if (!changes.length) return { results: [] };
+  return {
+    results: applyBuildProcessChanges({
+      projectRoot: opts.projectRoot,
+      changes,
+      toolchain: opts.toolchain,
+    }).results,
+  };
+}
+
 function applyWriteFile(projectRoot: string, change: Extract<BuildProcessConfigChange, { op: "write_file" }>): string {
   const abs = assertPathAllowed(projectRoot, change.path);
-  assertNoDuplicateYamlKeys(change.content, change.path);
+  const content = isDockerfilePath(change.path)
+    ? repairDockerfileRunShell(change.content)
+    : change.content;
+  assertNoDuplicateYamlKeys(content, change.path);
   mkdirSync(join(abs, ".."), { recursive: true });
-  writeFileSync(abs, change.content, "utf-8");
-  return `wrote ${change.path} (${change.content.length} chars)`;
+  writeFileSync(abs, content, "utf-8");
+  const repaired = content !== change.content ? "; repaired RUN continuations" : "";
+  return `wrote ${change.path} (${content.length} chars${repaired})`;
 }
 
 /**
@@ -397,7 +558,10 @@ function applyReplaceSection(
   const abs = assertPathAllowed(projectRoot, change.path);
   const block = `${change.markerStart}\n${change.content.trimEnd()}\n${change.markerEnd}\n`;
   const prior = existsSync(abs) ? readFileSync(abs, "utf-8") : "";
-  const next = replaceSectionLineAnchored(prior, change, block);
+  const spliced = replaceSectionLineAnchored(prior, change, block);
+  const next = isDockerfilePath(change.path)
+    ? repairDockerfileRunShell(spliced)
+    : spliced;
   assertNoDuplicateYamlKeys(next, change.path);
   mkdirSync(join(abs, ".."), { recursive: true });
   writeFileSync(abs, next, "utf-8");

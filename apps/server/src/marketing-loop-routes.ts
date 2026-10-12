@@ -8,22 +8,31 @@ import { join } from "node:path";
 import type { Express, Request, Response } from "express";
 import { log, type RunStage } from "@slopcontrol/types";
 import {
+  abandonDesignLoop,
+  abandonMarketingLoop,
   acceptMarketingLoop,
   appendRunLog,
+  collectMarketingDesignBasis,
   createDesignLoopMeta,
   createMarketingLoopMeta,
   designBriefFromPack,
+  formatMarketingDesignBasisBlock,
+  seedMarketingDesignLoop,
   listMarketingLoops,
   listMarketingVersions,
+  marketingScheduleView,
   productPhaseDescription,
+  readDesignLoopMeta,
   readMarketingAcceptance,
   readMarketingDoc,
   readMarketingLoopMeta,
+  readRichestMarketingFindings,
   readMarketingPack,
   readMarketingRelease,
   readMarketingVerdict,
   readLoopChatMessages,
   reopenMarketingLoop,
+  scheduleMarketingRelease,
   seedMarketingAcceptance,
   summarizeMarketingLoopProgress,
   writeDesignLoopMeta,
@@ -76,6 +85,88 @@ function sliceDoc(
   return { doc: full, total: full.length, offset: 0 };
 }
 
+const TERMINAL_RUN_STAGES = new Set(["complete", "failed", "interrupted"]);
+
+function existingDesignBasisBlock(
+  store: SlopStore,
+  projectRoot: string,
+): string {
+  return formatMarketingDesignBasisBlock(
+    collectMarketingDesignBasis({
+      projectRoot,
+      dataDir: defaultDataDir(),
+      listProjects: () =>
+        store.listProjects().map((project) => ({
+          id: project.id,
+          name: project.name,
+          rootPath: project.rootPath,
+        })),
+    }),
+  );
+}
+
+function phaseIdsForTracks(
+  trackIds: string[],
+  trackToPhase: Map<string, string>,
+): string[] {
+  return trackIds
+    .map((id) => trackToPhase.get(id))
+    .filter((id): id is string => Boolean(id));
+}
+
+function interruptPhaseRuns(
+  deps: MarketingRouteDeps,
+  projectId: string,
+  phaseId: string,
+): void {
+  for (const run of deps.store.listRuns(projectId)) {
+    if (run.phaseId !== phaseId) continue;
+    if (TERMINAL_RUN_STAGES.has(run.stage)) continue;
+    deps.abortControllers.get(run.id)?.abort();
+    deps.activeRuns.delete(run.id);
+    deps.abortControllers.delete(run.id);
+    deps.touchRunStage(run.id, "interrupted");
+  }
+}
+
+function startReadyMarketingPhases(
+  deps: MarketingRouteDeps,
+  project: NonNullable<ReturnType<SlopStore["getProject"]>>,
+  phaseIds: string[],
+): string[] {
+  const runIds: string[] = [];
+  for (const phaseId of phaseIds) {
+    const phase = deps.store.getPhase(phaseId);
+    if (!phase || (phase.dependsOn?.length ?? 0) > 0) {
+      const unmet = (phase?.dependsOn ?? []).some((id) => {
+        const dep = deps.store.getPhase(id);
+        return !dep || dep.status !== "complete";
+      });
+      if (!phase || unmet) continue;
+    }
+    const open = deps.store.listRuns(project.id).find(
+      (run) =>
+        run.phaseId === phase.id &&
+        (run.stage === "researching" || run.stage === "drafting" || run.stage === "idle"),
+    );
+    if (open && deps.activeRuns.has(open.id)) continue;
+    if (
+      !open &&
+      phase.status !== "draft" &&
+      phase.status !== "blocked" &&
+      phase.status !== "interrupted"
+    ) {
+      continue;
+    }
+    const run =
+      open ??
+      deps.store.createRun({ phaseId: phase.id, projectId: project.id });
+    runIds.push(run.id);
+    startProductResearch(deps, project, phase, run);
+  }
+  return runIds;
+}
+
 export function registerMarketingLoopRoutes(
   app: Express,
   deps: MarketingRouteDeps,
@@ -114,7 +205,12 @@ export function registerMarketingLoopRoutes(
       ? readMarketingDoc(project.rootPath, meta.id, version)
       : null;
     const sliced = sliceDoc(full, req.query.offset, req.query.limit);
+    const release = readMarketingRelease(project.rootPath, meta.id);
     const progress = summarizeMarketingLoopProgress(meta);
+    const scheduleView =
+      meta.status === "promoted"
+        ? scheduleViewForProject(deps, project, release)
+        : null;
     res.json({
       loop: meta,
       loopId: meta.id,
@@ -128,10 +224,12 @@ export function registerMarketingLoopRoutes(
           : null,
       acceptance: readMarketingAcceptance(project.rootPath, meta.id),
       pack: readMarketingPack(project.rootPath, meta.id),
-      release: readMarketingRelease(project.rootPath, meta.id),
+      release,
       messages: readLoopChatMessages(project.rootPath, "marketing", meta.id),
       versions: listMarketingVersions(project.rootPath, meta.id),
-      nextStep: progress.nextStep,
+      nextStep: scheduleView?.nextStep ?? progress.nextStep,
+      designReady: scheduleView?.designReady ?? false,
+      readyPhaseIds: scheduleView?.readyPhaseIds ?? [],
       blockers: progress.blockers,
     });
   });
@@ -170,6 +268,13 @@ export function registerMarketingLoopRoutes(
       res.status(404).json({ error: "Marketing loop not found" });
       return;
     }
+    if (meta.status === "abandoned") {
+      res.status(409).json({
+        error: "Marketing loop was discarded. Start a new marketing loop.",
+        loopId: meta.id,
+      });
+      return;
+    }
     if (meta.status !== "open") {
       meta = reopenMarketingLoop(project.rootPath, meta.id);
     }
@@ -190,12 +295,15 @@ export function registerMarketingLoopRoutes(
       return;
     }
     const previousDoc = readMarketingDoc(project.rootPath, meta.id, base) ?? undefined;
+    const previousFindings =
+      readRichestMarketingFindings(project.rootPath, meta.id, base) ?? undefined;
     const previousVerdict = readMarketingVerdict(project.rootPath, meta.id, base);
     await runGenerate(req, res, deps, project, meta, {
       version: meta.currentVersion + 1,
       brief: meta.brief,
       message,
       previousDoc,
+      previousFindings,
       previousVerdict,
       parentVersion: base,
     });
@@ -329,7 +437,13 @@ export function registerMarketingLoopRoutes(
       res.status(409).json({ error: "MARKETING_PACK.json missing", loopId: meta.id });
       return;
     }
-    const designBrief = designBriefFromPack(pack);
+    const plan = scheduleMarketingRelease(pack);
+    const designBasis = existingDesignBasisBlock(store, project.rootPath);
+    const designBrief = designBriefFromPack(
+      pack,
+      plan.surfaceTracks.map((track) => track.trackId),
+      designBasis,
+    );
     const design = createDesignLoopMeta({
       projectId: project.id,
       brief: designBrief,
@@ -345,34 +459,48 @@ export function registerMarketingLoopRoutes(
       usedScaffold: true,
       parentVersion: null,
     });
+    const seeded = seedMarketingDesignLoop({
+      projectRoot: project.rootPath,
+      loopId: design.id,
+      projectId: project.id,
+      dataDir: defaultDataDir(),
+      listProjects: () =>
+        store.listProjects().map((item) => ({
+          id: item.id,
+          name: item.name,
+          rootPath: item.rootPath,
+        })),
+    });
+    log.info("marketing-loop", "seeded design loop from existing artifacts", {
+      loopId: meta.id,
+      designLoopId: design.id,
+      elements: seeded.importedElementIds,
+      logos: seeded.basis.logos.map((logo) => logo.name),
+    });
 
-    const productTracks = pack.tracks.filter((t) => t.kind === "product");
     const trackToPhase = new Map<string, string>();
-    const created: Array<{ trackId: string; phaseId: string; dependsOn: string[] }> = [];
-    for (const track of productTracks) {
+    for (const row of plan.phases) {
       const phase = store.createPhase({
         projectId: project.id,
-        description: productPhaseDescription(pack, track),
+        description: productPhaseDescription(
+          pack,
+          pack.tracks.find((track) => track.id === row.trackId)!,
+        ),
         rootPath: project.rootPath,
+        dependsOn: phaseIdsForTracks(row.dependsOnTrackIds, trackToPhase),
       });
-      trackToPhase.set(track.id, phase.id);
-      created.push({
-        trackId: track.id,
-        phaseId: phase.id,
-        dependsOn: track.dependsOn,
+      trackToPhase.set(row.trackId, phase.id);
+    }
+    for (const row of plan.phases) {
+      const phase = store.getPhase(trackToPhase.get(row.trackId)!);
+      if (!phase) continue;
+      store.updatePhase({
+        ...phase,
+        dependsOn: phaseIdsForTracks(row.dependsOnTrackIds, trackToPhase),
       });
     }
-    for (const row of created) {
-      const dependsOn = row.dependsOn
-        .map((id) => trackToPhase.get(id))
-        .filter((id): id is string => Boolean(id));
-      if (!dependsOn.length) continue;
-      const phase = store.getPhase(row.phaseId);
-      if (phase) store.updatePhase({ ...phase, dependsOn });
-    }
-
-    const landing = pack.tracks.find((t) => t.kind === "landing") ?? null;
-    const phaseIds = created.map((row) => row.phaseId);
+    const phaseIds = plan.phases.map((row) => trackToPhase.get(row.trackId)!);
+    const landing = plan.landingTracks[0] ?? null;
     const manifest: MarketingReleaseManifest = {
       loopId: meta.id,
       version,
@@ -382,12 +510,23 @@ export function registerMarketingLoopRoutes(
       pendingLanding: landing
         ? {
             brief: landing.brief,
-            dependsOnTrackIds: landing.dependsOn,
-            dependsOnPhaseIds: landing.dependsOn
-              .map((id) => trackToPhase.get(id))
-              .filter((id): id is string => Boolean(id)),
+            dependsOnTrackIds: landing.dependsOnTrackIds,
+            dependsOnPhaseIds: phaseIdsForTracks(landing.dependsOnTrackIds, trackToPhase),
           }
         : null,
+      schedule: {
+        phases: plan.phases.map((row) => ({
+          trackId: row.trackId,
+          phaseId: trackToPhase.get(row.trackId)!,
+          role: row.role,
+          dependsOnTrackIds: row.dependsOnTrackIds,
+        })),
+        surfaceTracks: plan.surfaceTracks.map((track) => ({
+          trackId: track.trackId,
+          dependsOnTrackIds: track.dependsOnTrackIds,
+        })),
+        landingTracks: plan.landingTracks,
+      },
       promotedAt: new Date().toISOString(),
     };
     writeMarketingRelease(project.rootPath, meta.id, manifest);
@@ -401,16 +540,10 @@ export function registerMarketingLoopRoutes(
     writeMarketingLoopMeta(project.rootPath, promoted);
 
     const startResearch = req.body?.startResearch !== false;
-    const runIds: string[] = [];
-    if (startResearch) {
-      for (const row of created) {
-        const phase = store.getPhase(row.phaseId);
-        if (!phase || (phase.dependsOn?.length ?? 0) > 0) continue;
-        const run = store.createRun({ phaseId: phase.id, projectId: project.id });
-        runIds.push(run.id);
-        startProductResearch(deps, project, phase, run);
-      }
-    }
+    const runIds = startResearch
+      ? startReadyMarketingPhases(deps, project, phaseIds)
+      : [];
+    const view = scheduleViewForProject(deps, project, manifest);
 
     res.status(202).json({
       loop: promoted,
@@ -420,10 +553,358 @@ export function registerMarketingLoopRoutes(
       pendingLanding: manifest.pendingLanding,
       runIds,
       release: manifest,
-      nextStep:
-        "design_loop_continue on designLoopId to replace the landing placeholder. Unblocked product-gap phases are researching when startResearch is not false. The landing implementation phase stays pending until that design is accepted.",
+      ...view,
     });
   });
+
+  app.post("/projects/:id/marketing-loops/:loopId/align", (req, res) => {
+    const project = store.getProject(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    try {
+      const result = alignPromotedMarketingLoop(deps, project, req.params.loopId);
+      res.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = /not found/i.test(message) ? 404 : 409;
+      res.status(status).json({ error: message });
+    }
+  });
+
+  app.post("/projects/:id/marketing-loops/:loopId/abandon", (req, res) => {
+    const project = store.getProject(req.params.id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    const meta = readMarketingLoopMeta(project.rootPath, req.params.loopId);
+    if (!meta || meta.projectId !== project.id) {
+      res.status(404).json({ error: "Marketing loop not found" });
+      return;
+    }
+    const abandoned = abandonMarketingLoop(project.rootPath, meta.id);
+    let designLoopId: string | null = null;
+    if (meta.designLoopId) {
+      try {
+        const design = abandonDesignLoop({
+          projectRoot: project.rootPath,
+          loopId: meta.designLoopId,
+          reason: "Marketing loop discarded",
+        });
+        designLoopId = design.id;
+      } catch (err) {
+        log.warn("marketing-loop", "design loop abandon skipped", {
+          loopId: meta.id,
+          designLoopId: meta.designLoopId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    const supersededPhaseIds: string[] = [];
+    for (const phaseId of meta.phaseIds ?? []) {
+      const phase = store.getPhase(phaseId);
+      if (!phase || phase.status === "complete" || phase.status === "superseded") {
+        continue;
+      }
+      interruptPhaseRuns(deps, project.id, phaseId);
+      deps.updatePhaseStatus(phaseId, "superseded");
+      supersededPhaseIds.push(phaseId);
+    }
+    res.json({
+      loop: abandoned,
+      loopId: abandoned.id,
+      designLoopId,
+      supersededPhaseIds,
+    });
+  });
+}
+
+function releaseScheduleView(
+  projectRoot: string,
+  manifest: MarketingReleaseManifest | null,
+): {
+  designReady: boolean;
+  readyPhaseIds: string[];
+  nextStep: string;
+} {
+  if (!manifest?.schedule) {
+    return {
+      designReady: false,
+      readyPhaseIds: [],
+      nextStep: summarizeMarketingLoopProgress({
+        id: manifest?.loopId ?? "",
+        projectId: "",
+        brief: "",
+        status: "promoted",
+        currentVersion: manifest?.version ?? 1,
+        createdAt: "",
+        updatedAt: "",
+      }).nextStep,
+    };
+  }
+  const phaseStatusById = new Map<string, string>();
+  for (const row of manifest.schedule.phases) {
+    phaseStatusById.set(row.phaseId, "draft");
+  }
+  const design = manifest.designLoopId
+    ? readDesignLoopMeta(projectRoot, manifest.designLoopId)
+    : null;
+  return marketingScheduleView({
+    schedule: manifest.schedule,
+    phaseStatusById,
+    designAccepted: design?.status === "accepted",
+    designLoopId: manifest.designLoopId,
+  });
+}
+
+function scheduleViewForProject(
+  deps: MarketingRouteDeps,
+  project: NonNullable<ReturnType<SlopStore["getProject"]>>,
+  manifest: MarketingReleaseManifest | null,
+) {
+  if (!manifest?.schedule) return releaseScheduleView(project.rootPath, manifest);
+  const phaseStatusById = new Map(
+    manifest.schedule.phases.map((row) => {
+      const phase = deps.store.getPhase(row.phaseId);
+      return [row.phaseId, phase?.status ?? "missing"] as const;
+    }),
+  );
+  const design = manifest.designLoopId
+    ? readDesignLoopMeta(project.rootPath, manifest.designLoopId)
+    : null;
+  return marketingScheduleView({
+    schedule: manifest.schedule,
+    phaseStatusById,
+    designAccepted: design?.status === "accepted",
+    designLoopId: manifest.designLoopId,
+  });
+}
+
+function alignPromotedMarketingLoop(
+  deps: MarketingRouteDeps,
+  project: NonNullable<ReturnType<SlopStore["getProject"]>>,
+  loopId: string,
+) {
+  const meta = readMarketingLoopMeta(project.rootPath, loopId);
+  if (!meta || meta.projectId !== project.id) {
+    throw new Error("Marketing loop not found");
+  }
+  if (meta.status !== "promoted") {
+    throw new Error("Accept and promote the marketing loop before align");
+  }
+  const pack = readMarketingPack(project.rootPath, meta.id);
+  const release = readMarketingRelease(project.rootPath, meta.id);
+  if (!pack || !release) throw new Error("MARKETING_PACK.json or RELEASE.json missing");
+  const plan = scheduleMarketingRelease(pack);
+  const trackToPhase = new Map<string, string>();
+  if (release.schedule) {
+    for (const row of release.schedule.phases) trackToPhase.set(row.trackId, row.phaseId);
+  } else {
+    const productTracks = pack.tracks.filter((track) => track.kind === "product");
+    productTracks.forEach((track, index) => {
+      const phaseId = release.phaseIds[index];
+      if (phaseId) trackToPhase.set(track.id, phaseId);
+    });
+  }
+  const planned = new Set(plan.phases.map((row) => row.trackId));
+  for (const [trackId, phaseId] of [...trackToPhase]) {
+    if (planned.has(trackId)) continue;
+    interruptPhaseRuns(deps, project.id, phaseId);
+    const phase = deps.store.getPhase(phaseId);
+    if (phase && phase.status !== "superseded") {
+      deps.updatePhaseStatus(phaseId, "superseded");
+    }
+    trackToPhase.delete(trackId);
+  }
+  for (const row of plan.phases) {
+    const existingId = trackToPhase.get(row.trackId);
+    const existing = existingId ? deps.store.getPhase(existingId) : undefined;
+    const dependsOn = phaseIdsForTracks(row.dependsOnTrackIds, trackToPhase);
+    const unmet = dependsOn.some((id) => deps.store.getPhase(id)?.status !== "complete");
+    const premature =
+      existing &&
+      unmet &&
+      existing.status !== "draft" &&
+      existing.status !== "blocked" &&
+      existing.status !== "interrupted" &&
+      existing.status !== "superseded";
+    if (!existing || existing.status === "superseded" || premature) {
+      if (existing && existing.status !== "superseded") {
+        interruptPhaseRuns(deps, project.id, existing.id);
+        deps.updatePhaseStatus(existing.id, "superseded");
+      }
+      const created = deps.store.createPhase({
+        projectId: project.id,
+        description: productPhaseDescription(
+          pack,
+          pack.tracks.find((track) => track.id === row.trackId) ?? {
+            id: row.trackId,
+            kind: "product",
+            brief: row.brief,
+            claimIds: [],
+            dependsOn: row.dependsOnTrackIds,
+          },
+        ),
+        rootPath: project.rootPath,
+        dependsOn,
+      });
+      trackToPhase.set(row.trackId, created.id);
+      continue;
+    }
+    deps.store.updatePhase({ ...existing, dependsOn });
+    trackToPhase.set(row.trackId, existing.id);
+  }
+  const phaseIds = plan.phases.map((row) => trackToPhase.get(row.trackId)!);
+  const designBasis = existingDesignBasisBlock(deps.store, project.rootPath);
+  const designBrief = designBriefFromPack(
+    pack,
+    plan.surfaceTracks.map((track) => track.trackId),
+    designBasis,
+  );
+  if (release.designLoopId) {
+    const design = readDesignLoopMeta(project.rootPath, release.designLoopId);
+    if (design && design.status !== "abandoned") {
+      writeDesignLoopMeta(project.rootPath, {
+        ...design,
+        brief: designBrief,
+        updatedAt: new Date().toISOString(),
+      });
+      seedMarketingDesignLoop({
+        projectRoot: project.rootPath,
+        loopId: design.id,
+        projectId: project.id,
+        dataDir: defaultDataDir(),
+        listProjects: () =>
+          deps.store.listProjects().map((item) => ({
+            id: item.id,
+            name: item.name,
+            rootPath: item.rootPath,
+          })),
+      });
+    }
+  }
+  const landing = plan.landingTracks[0] ?? null;
+  const manifest: MarketingReleaseManifest = {
+    ...release,
+    designBrief,
+    phaseIds,
+    pendingLanding: landing
+      ? {
+          brief: landing.brief,
+          dependsOnTrackIds: landing.dependsOnTrackIds,
+          dependsOnPhaseIds: phaseIdsForTracks(landing.dependsOnTrackIds, trackToPhase),
+        }
+      : null,
+    schedule: {
+      phases: plan.phases.map((row) => ({
+        trackId: row.trackId,
+        phaseId: trackToPhase.get(row.trackId)!,
+        role: row.role,
+        dependsOnTrackIds: row.dependsOnTrackIds,
+      })),
+      surfaceTracks: plan.surfaceTracks.map((track) => ({
+        trackId: track.trackId,
+        dependsOnTrackIds: track.dependsOnTrackIds,
+      })),
+      landingTracks: plan.landingTracks.map((track) => ({
+        ...track,
+        phaseId: release.schedule?.landingTracks.find((row) => row.trackId === track.trackId)
+          ?.phaseId,
+      })),
+    },
+  };
+  writeMarketingRelease(project.rootPath, meta.id, manifest);
+  const promoted = {
+    ...meta,
+    phaseIds,
+    updatedAt: new Date().toISOString(),
+  };
+  writeMarketingLoopMeta(project.rootPath, promoted);
+  const runIds = startReadyMarketingPhases(deps, project, phaseIds);
+  return {
+    loop: promoted,
+    loopId: meta.id,
+    designLoopId: manifest.designLoopId ?? null,
+    phaseIds,
+    pendingLanding: manifest.pendingLanding,
+    runIds,
+    release: manifest,
+    supersededPhaseIds: release.phaseIds.filter((id) => !phaseIds.includes(id)),
+    ...scheduleViewForProject(deps, project, manifest),
+  };
+}
+
+export function advanceMarketingReleaseOnPhaseComplete(
+  deps: MarketingRouteDeps,
+  phase: NonNullable<ReturnType<SlopStore["getPhase"]>>,
+): void {
+  const project = deps.store.getProject(phase.projectId);
+  if (!project) return;
+  for (const meta of listMarketingLoops(project.rootPath)) {
+    if (meta.status !== "promoted" || meta.projectId !== project.id) continue;
+    const release = readMarketingRelease(project.rootPath, meta.id);
+    if (!release?.schedule?.phases.some((row) => row.phaseId === phase.id)) continue;
+    const view = scheduleViewForProject(deps, project, release);
+    startReadyMarketingPhases(deps, project, view.readyPhaseIds);
+  }
+}
+
+export function materializeMarketingLandingPhases(
+  deps: MarketingRouteDeps,
+  project: NonNullable<ReturnType<SlopStore["getProject"]>>,
+  designLoopId: string,
+): string[] {
+  const created: string[] = [];
+  for (const meta of listMarketingLoops(project.rootPath)) {
+    if (meta.projectId !== project.id || meta.designLoopId !== designLoopId) continue;
+    const release = readMarketingRelease(project.rootPath, meta.id);
+    const pack = readMarketingPack(project.rootPath, meta.id);
+    if (!release?.schedule || !pack) continue;
+    const design = readDesignLoopMeta(project.rootPath, designLoopId);
+    if (design?.status !== "accepted") continue;
+    const trackToPhase = new Map(
+      release.schedule.phases.map((row) => [row.trackId, row.phaseId]),
+    );
+    const landingTracks = release.schedule.landingTracks.map((track) => {
+      if (track.phaseId && deps.store.getPhase(track.phaseId)) return track;
+      const phase = deps.store.createPhase({
+        projectId: project.id,
+        description: productPhaseDescription(
+          pack,
+          pack.tracks.find((row) => row.id === track.trackId) ?? {
+            id: track.trackId,
+            kind: "landing",
+            brief: track.brief,
+            claimIds: [],
+            dependsOn: track.dependsOnTrackIds,
+          },
+        ),
+        rootPath: project.rootPath,
+        dependsOn: phaseIdsForTracks(track.dependsOnTrackIds, trackToPhase),
+      });
+      created.push(phase.id);
+      return { ...track, phaseId: phase.id };
+    });
+    const phaseIds = [
+      ...release.schedule.phases.map((row) => row.phaseId),
+      ...landingTracks.map((track) => track.phaseId).filter((id): id is string => Boolean(id)),
+    ];
+    const manifest: MarketingReleaseManifest = {
+      ...release,
+      phaseIds,
+      schedule: { ...release.schedule, landingTracks },
+    };
+    writeMarketingRelease(project.rootPath, meta.id, manifest);
+    writeMarketingLoopMeta(project.rootPath, {
+      ...meta,
+      phaseIds,
+      updatedAt: new Date().toISOString(),
+    });
+    startReadyMarketingPhases(deps, project, created);
+  }
+  return created;
 }
 
 function startProductResearch(
@@ -485,6 +966,7 @@ async function runGenerate(
     brief: string;
     message?: string;
     previousDoc?: string;
+    previousFindings?: string;
     previousVerdict?: ReturnType<typeof readMarketingVerdict>;
     parentVersion: number | null;
   },
@@ -515,8 +997,16 @@ async function runGenerate(
         brief: turn.brief,
         message: turn.message,
         previousDoc: turn.previousDoc,
+        previousFindings: turn.previousFindings,
         previousVerdict: turn.previousVerdict,
         version: turn.version,
+        dataDir: defaultDataDir(),
+        listProjects: () =>
+          deps.store.listProjects().map((item) => ({
+            id: item.id,
+            name: item.name,
+            rootPath: item.rootPath,
+          })),
         abortSignal: bound.signal,
         onProgress: chat.onProgress,
       });

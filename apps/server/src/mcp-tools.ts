@@ -236,6 +236,8 @@ export function formatMarketingLoopMcpEnvelope(body: string, ok: boolean): strin
       designLoopId?: string;
       phaseIds?: string[];
       pendingLanding?: unknown;
+      designReady?: boolean;
+      readyPhaseIds?: string[];
       verdict?: { ok?: boolean; gaps?: string[] };
       error?: string;
     };
@@ -268,6 +270,8 @@ export function formatMarketingLoopMcpEnvelope(body: string, ok: boolean): strin
       parsed.nextStep ? `nextStep: ${parsed.nextStep}` : null,
       parsed.designLoopId ? `designLoopId: ${parsed.designLoopId}` : null,
       parsed.phaseIds?.length ? `phaseIds: ${parsed.phaseIds.join(",")}` : null,
+      parsed.designReady !== undefined ? `designReady: ${parsed.designReady}` : null,
+      parsed.readyPhaseIds?.length ? `readyPhaseIds: ${parsed.readyPhaseIds.join(",")}` : null,
       parsed.pendingLanding ? `pendingLanding: ${JSON.stringify(parsed.pendingLanding)}` : null,
       parsed.notes ? `notes: ${parsed.notes}` : null,
       slice,
@@ -837,7 +841,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "get_phase_status",
       description:
-        "Phase status + design completeness (needed/complete/hasUiSpec) + latest failure diagnosis / operator suggestions + handoff summary for a project phase. phase.description is the original ask brief frozen at creation (never reflects review revisions); the live success criteria is phase.success_criteria parsed from PHASE.md on disk — verify review revisions against it or get_run.phase_doc, never description.",
+        "Phase status + design completeness (needed/complete/hasUiSpec) + latest failure diagnosis / operator suggestions + handoff summary for a project phase. A request_changes revision that changes what the phase delivers updates phase.description to the revised intent contract. PHASE.md remains the execution contract (phase.success_criteria / get_run.phase_doc).",
       inputSchema: {
         type: "object",
         properties: {
@@ -997,6 +1001,19 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
         type: "object",
         properties: {
           runId: { type: "string" },
+        },
+        required: ["runId"],
+      },
+    },
+    {
+      name: "discard_run",
+      description:
+        "Tombstone a phase that should not ship. Supersedes the phase, interrupts the run, and returns a design loop that had not finished development to accepted. Refuses a completed phase.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          runId: { type: "string" },
+          reason: { type: "string" },
         },
         required: ["runId"],
       },
@@ -1959,7 +1976,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "marketing_loop_promote",
       description:
-        "Open a design loop for the landing, create product-gap phases, and record the landing track as pending. Returns designLoopId, phaseIds, pendingLanding.",
+        "Open the landing design loop and create phases in track-dependency order. Returns designLoopId, phaseIds, readyPhaseIds, designReady, and pendingLanding. Research starts only for readyPhaseIds. The design loop is seeded with the project's published landing elements and pinned logo; continue it to compose the landing from those. Landing implementation stays pending until that design is accepted.",
       inputSchema: {
         type: "object",
         properties: {
@@ -3055,6 +3072,28 @@ export async function dispatchSlopcontrolTool(
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action: "rerun_research", runId }),
+        });
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "discard_run") {
+      return wrap(async () => {
+        const runId = String(args.runId ?? "");
+        const reason =
+          typeof args.reason === "string" ? args.reason : undefined;
+        const res = await fetch(`${SERVER_URL}/runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "discard_run",
+            runId,
+            ...(reason ? { reason } : {}),
+          }),
         });
         const body = await res.text();
         return {
