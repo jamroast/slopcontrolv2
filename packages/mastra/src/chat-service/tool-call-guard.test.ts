@@ -21,7 +21,7 @@ describe("formatRunNotificationBrief", () => {
       "nextStep: marketing_loop_continue to revise, or marketing_loop_accept when the judge has passed",
       "---",
       "```markdown",
-      "# MARKETING.md — jamauth (v2)",
+      "# MARKETING.md — acme-auth (v2)",
       "",
       "## Audience",
       "...full document body that must not be echoed...",
