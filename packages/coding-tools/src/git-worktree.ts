@@ -34,6 +34,15 @@ export const DEFAULT_WORKTREE_SYNC_PATHS = [
   ".env.test",
   ".env.development.local",
   ".env.test.local",
+] as const;
+
+/**
+ * Production-target env files are synced only on explicit request
+ * (config.worktreeSyncPaths) or envIncludeProduction — never by default, so
+ * production secrets/placeholders cannot leak into phase worktrees.
+ */
+export const PRODUCTION_WORKTREE_SYNC_PATHS = [
+  ".env.production",
   ".env.production.local",
 ] as const;
 
@@ -49,10 +58,15 @@ export function syncLocalFilesToWorktree(opts: {
   projectRoot: string;
   worktreePath: string;
   relativePaths?: string[];
+  /** Append production-target env files to the default sync list. */
+  includeProductionEnv?: boolean;
 }): string[] {
   const paths = opts.relativePaths?.length
     ? opts.relativePaths
-    : [...DEFAULT_WORKTREE_SYNC_PATHS];
+    : [
+        ...DEFAULT_WORKTREE_SYNC_PATHS,
+        ...(opts.includeProductionEnv ? PRODUCTION_WORKTREE_SYNC_PATHS : []),
+      ];
   const synced: string[] = [];
 
   for (const rel of paths) {
@@ -821,6 +835,8 @@ export function ensurePhaseWorktree(opts: {
   dataDir?: string;
   /** Extra/override relative paths to sync from project root (env files, etc.) */
   syncPaths?: string[];
+  /** Sync production-target env files into the worktree as well (default off). */
+  includeProductionEnv?: boolean;
 }): WorktreeResult {
   const dataDir = opts.dataDir ?? join(homedir(), ".slopcontrol");
   const worktreePath = join(
@@ -847,6 +863,7 @@ export function ensurePhaseWorktree(opts: {
       projectRoot: opts.projectRoot,
       worktreePath,
       relativePaths: opts.syncPaths,
+      includeProductionEnv: opts.includeProductionEnv,
     });
     const phaseSynced = syncPhaseArtifactsToWorktree({
       projectRoot: opts.projectRoot,

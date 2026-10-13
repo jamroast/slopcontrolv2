@@ -725,8 +725,14 @@ export const ProjectConfigSchema = z.object({
       ".env.test",
       ".env.development.local",
       ".env.test.local",
-      ".env.production.local",
     ]),
+  /**
+   * Load production-target dotenv files (.env.production, .env.production.local)
+   * into test/develop/verify env AND sync them into phase worktrees. Default
+   * false — a production file must never hijack local test credentials. Only
+   * enable for explicit production-parity work.
+   */
+  envIncludeProduction: z.boolean().optional(),
   /**
    * LLM test harness profile for verify / Automated Checks.
    * - local: point tests at local Ollama (or pipeline URL via process.env)

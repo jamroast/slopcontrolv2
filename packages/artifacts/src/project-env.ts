@@ -14,8 +14,22 @@ export const PROJECT_ENV_FILE_STACK = [
   ".env.test",
   ".env.development.local",
   ".env.test.local",
+] as const;
+
+/**
+ * Production-target dotenv files. Excluded from test/develop/verify env by
+ * default — a production DATABASE_URL (or redaction placeholder) must never
+ * hijack local verification. Loaded only when config.envIncludeProduction is
+ * true, and then appended last (strongest) for parity.
+ */
+export const PROJECT_ENV_PRODUCTION_FILE_STACK = [
+  ".env.production",
   ".env.production.local",
 ] as const;
+
+export function isProductionEnvFile(path: string): boolean {
+  return (PROJECT_ENV_PRODUCTION_FILE_STACK as readonly string[]).includes(path);
+}
 
 /** Generated file written into worktrees so dotenv-from-cwd apps see resolved env. */
 export const WORKTREE_RESOLVED_ENV_FILE = ".env.slopcontrol";
@@ -57,6 +71,7 @@ export function resolveProjectEnv(opts: {
     | "envPassthroughPrefixes"
     | "llmModelMap"
     | "llmTestEnvFile"
+    | "envIncludeProduction"
   >;
   processEnv?: NodeJS.ProcessEnv;
 }): ResolvedProjectEnv {
@@ -65,14 +80,17 @@ export function resolveProjectEnv(opts: {
   const fromFiles: string[] = [];
   const env: Record<string, string> = {};
 
+  const includeProduction = opts.config.envIncludeProduction === true;
   const fileStack = [
     ...PROJECT_ENV_FILE_STACK,
+    ...(includeProduction ? PROJECT_ENV_PRODUCTION_FILE_STACK : []),
     ...(opts.config.worktreeSyncPaths ?? []).filter(
       (p) => !PROJECT_ENV_FILE_STACK.includes(p as (typeof PROJECT_ENV_FILE_STACK)[number]),
     ),
   ];
   // Dedupe preserving order
   const seenFiles = new Set<string>();
+  const skippedProduction: string[] = [];
   for (const rel of fileStack) {
     if (seenFiles.has(rel)) continue;
     seenFiles.add(rel);
@@ -81,6 +99,20 @@ export function resolveProjectEnv(opts: {
     if (Object.keys(parsed).length === 0) continue;
     Object.assign(env, parsed);
     fromFiles.push(rel);
+  }
+  // Production files only load on explicit opt-in; record when they were
+  // present but skipped so verify failures mention the exclusion.
+  if (!includeProduction) {
+    for (const rel of PROJECT_ENV_PRODUCTION_FILE_STACK) {
+      if (seenFiles.has(rel)) continue;
+      const parsed = loadDotEnvFile(join(opts.projectRoot, rel));
+      if (Object.keys(parsed).length > 0) skippedProduction.push(rel);
+    }
+  }
+  if (skippedProduction.length > 0) {
+    notes.push(
+      `skipped production env file(s): ${skippedProduction.join(", ")} (envIncludeProduction off)`,
+    );
   }
 
   const fromProcess: string[] = [];

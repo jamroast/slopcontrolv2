@@ -9085,6 +9085,7 @@ ${JSON.stringify(intent, null, 2)}`;
         phaseId: phase.id,
         dataDir: this.ctx.dataDir,
         syncPaths: config.worktreeSyncPaths,
+      includeProductionEnv: config.envIncludeProduction === true,
       });
       return {
         stage: "design_complete",
@@ -9103,6 +9104,7 @@ ${JSON.stringify(intent, null, 2)}`;
       phaseId: phase.id,
       dataDir: this.ctx.dataDir,
       syncPaths: config.worktreeSyncPaths,
+      includeProductionEnv: config.envIncludeProduction === true,
     });
     log(
       project,
@@ -9510,6 +9512,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       phaseId: phase.id,
       dataDir: this.ctx.dataDir,
       syncPaths: config.worktreeSyncPaths,
+      includeProductionEnv: config.envIncludeProduction === true,
     });
     log(
       project,
@@ -10084,6 +10087,7 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
           projectRoot: project.rootPath,
           worktreePath: worktree.path,
           relativePaths: config.worktreeSyncPaths,
+          includeProductionEnv: config.envIncludeProduction === true,
         });
         const projectEnv = resolveProjectEnv({
           projectRoot: project.rootPath,
@@ -11903,6 +11907,7 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
       phaseId: phase.id,
       dataDir: this.ctx.dataDir,
       syncPaths: config.worktreeSyncPaths,
+      includeProductionEnv: config.envIncludeProduction === true,
     });
     log(
       project,
@@ -12090,6 +12095,7 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
       phaseId: phase.id,
       dataDir: this.ctx.dataDir,
       syncPaths: config.worktreeSyncPaths,
+      includeProductionEnv: config.envIncludeProduction === true,
     });
     log(
       project,

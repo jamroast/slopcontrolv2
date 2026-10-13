@@ -91,4 +91,59 @@ describe("resolveProjectEnv", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("excludes production env files by default (production cannot hijack local verify)", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-proj-prod-off-"));
+    try {
+      writeFileSync(
+        join(root, ".env"),
+        "DATABASE_URL=postgres://localhost:5430/app\n",
+      );
+      writeFileSync(
+        join(root, ".env.production.local"),
+        "DATABASE_URL=postgres://prod-host/app\nPROD_ONLY=1\n",
+      );
+      const resolved = resolveProjectEnv({
+        projectRoot: root,
+        config: ProjectConfigSchema.parse({}),
+        processEnv: {},
+      });
+      assert.equal(resolved.env.DATABASE_URL, "postgres://localhost:5430/app");
+      assert.equal(resolved.env.PROD_ONLY, undefined);
+      assert.ok(!resolved.fromFiles.includes(".env.production.local"));
+      assert.ok(
+        resolved.notes.some((n) => n.includes("skipped production env file")),
+        "skipping an existing production file must be surfaced in notes",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("includes production env files on envIncludeProduction opt-in (last-wins parity)", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-proj-prod-on-"));
+    try {
+      writeFileSync(
+        join(root, ".env"),
+        "DATABASE_URL=postgres://localhost:5430/app\n",
+      );
+      writeFileSync(
+        join(root, ".env.production.local"),
+        "DATABASE_URL=postgres://prod-host/app\nPROD_ONLY=1\n",
+      );
+      const resolved = resolveProjectEnv({
+        projectRoot: root,
+        config: ProjectConfigSchema.parse({ envIncludeProduction: true }),
+        processEnv: {},
+      });
+      assert.equal(resolved.env.DATABASE_URL, "postgres://prod-host/app");
+      assert.equal(resolved.env.PROD_ONLY, "1");
+      assert.ok(resolved.fromFiles.includes(".env.production.local"));
+      assert.ok(
+        !resolved.notes.some((n) => n.includes("skipped production env file")),
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

@@ -1056,6 +1056,37 @@ None.
     }
   });
 
+  it("never syncs production env files into worktrees by default", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-env-prod-off-"));
+    const wt = mkdtempSync(join(tmpdir(), "slop-wt-prod-off-"));
+    try {
+      writeFileSync(join(root, ".env"), "A=1\n");
+      writeFileSync(
+        join(root, ".env.production.local"),
+        "DATABASE_URL=postgres://prod-host/app\n",
+      );
+      const synced = syncLocalFilesToWorktree({
+        projectRoot: root,
+        worktreePath: wt,
+      });
+      assert.ok(synced.includes(".env"));
+      assert.ok(!synced.includes(".env.production.local"));
+      assert.ok(!existsSync(join(wt, ".env.production.local")));
+
+      // Explicit operator listing still copies it.
+      const explicit = syncLocalFilesToWorktree({
+        projectRoot: root,
+        worktreePath: wt,
+        relativePaths: [".env.production.local"],
+      });
+      assert.deepEqual(explicit, [".env.production.local"]);
+      assert.ok(existsSync(join(wt, ".env.production.local")));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
   it("pushes worktree .env.docker to root when comment no longer has :cloud", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-env-push-"));
     const wt = mkdtempSync(join(tmpdir(), "slop-wt-push-"));
