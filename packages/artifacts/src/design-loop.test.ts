@@ -16,6 +16,7 @@ import {
   designMockHtmlIsComplete,
   appendDesignLoopTranscript,
   bindAcceptedDesignLoopToPhase,
+  designLoopReadyForResearchRelaunch,
   markDesignLoopShipped,
   createDesignLoopMeta,
   designLoopAssetsDir,
@@ -44,6 +45,28 @@ import {
 } from "./design-loop.js";
 
 describe("design-loop", () => {
+  it("relaunch is only valid after implement_design has bound the loop", () => {
+    assert.equal(
+      designLoopReadyForResearchRelaunch({ status: "accepted" }),
+      false,
+    );
+    assert.equal(
+      designLoopReadyForResearchRelaunch({ status: "open" }),
+      false,
+    );
+    assert.equal(
+      designLoopReadyForResearchRelaunch({
+        status: "accepted",
+        phaseId: "01-look",
+      }),
+      true,
+    );
+    assert.equal(
+      designLoopReadyForResearchRelaunch({ status: "implemented" }),
+      true,
+    );
+  });
+
   const roots: string[] = [];
   after(() => {
     for (const r of roots) {

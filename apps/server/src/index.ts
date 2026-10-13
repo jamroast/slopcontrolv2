@@ -58,6 +58,7 @@ import {
   reopenDesignLoopForIterate,
   listDesignLoops,
   bindAcceptedDesignLoopToPhase,
+  designLoopReadyForResearchRelaunch,
   markDesignLoopShipped,
   unbindUnshippedDesignLoop,
   seedDesignLoopAcceptanceFromHtml,
@@ -525,6 +526,11 @@ function startFreshDesignResearchFromLoop(opts: {
   if (meta.status !== "accepted" && meta.status !== "implemented") {
     throw new Error(
       `Design loop must be accepted or implemented before relaunch research (status=${meta.status}). Call design_loop_accept first.`,
+    );
+  }
+  if (!designLoopReadyForResearchRelaunch(meta)) {
+    throw new Error(
+      `relaunch_design_research is only valid after implement_design has bound this loop (status=${meta.status}). Call implement_design.`,
     );
   }
 
@@ -6422,11 +6428,12 @@ app.post(
       });
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
-      res.status(400).json({
+      const needsImplement = errMsg.includes("Call implement_design");
+      res.status(needsImplement ? 409 : 400).json({
         error: errMsg,
         loop: resolved.meta,
         loopId: resolved.meta.id,
-        hint: "design_loop_accept",
+        hint: needsImplement ? "implement_design" : "design_loop_accept",
       });
     }
   },
@@ -6497,11 +6504,12 @@ app.post("/projects/:id/relaunch-design-research", async (req, res) => {
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
-    res.status(400).json({
+    const needsImplement = errMsg.includes("Call implement_design");
+    res.status(needsImplement ? 409 : 400).json({
       error: errMsg,
       loop: resolved.meta,
       loopId: resolved.meta.id,
-      hint: "design_loop_accept",
+      hint: needsImplement ? "implement_design" : "design_loop_accept",
     });
   }
 });

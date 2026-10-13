@@ -1664,6 +1664,18 @@ UI_SPEC_COMPLETE
 }
 
 /**
+ * relaunch_design_research is recovery after implement_design has already
+ * bound the loop. A freshly accepted loop has no phaseId. Implemented loops,
+ * and accepted loops that implement_design already bound, are eligible.
+ */
+export function designLoopReadyForResearchRelaunch(meta: {
+  status: DesignLoopStatus;
+  phaseId?: string;
+}): boolean {
+  return meta.status === "implemented" || Boolean(meta.phaseId);
+}
+
+/**
  * Copy accepted mock into phase design/, write UI-SPEC + tokens, mark DESIGN_COMPLETE.
  * Does not edit product source.
  */

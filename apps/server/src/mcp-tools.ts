@@ -1358,7 +1358,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "relaunch_design_research",
       description:
-        "Recovery: create a new phase from an accepted/implemented design loop, rebind the current mock + DESIGN_PACK + UI-SPEC, and always start research. Use when implement_design only stamped design_complete without a research run (stale RESEARCH/PHASE). Pass loopId and/or phaseId (phaseId resolves via loop.meta.phaseId or design/STATUS.md). Product code still only changes after review → start_development.",
+        "Recovery only after implement_design has already bound this loop (phaseId set, or status implemented). Returns an error when the loop is only accepted — call implement_design instead. Then creates a new phase, rebinds the mock + DESIGN_PACK + UI-SPEC, and starts research. Pass loopId and/or phaseId. Product code still only changes after review → start_development.",
       inputSchema: {
         type: "object",
         properties: {
