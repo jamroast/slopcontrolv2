@@ -81,12 +81,15 @@ export function resolveProjectEnv(opts: {
   const env: Record<string, string> = {};
 
   const includeProduction = opts.config.envIncludeProduction === true;
+  const syncPathExtras = (opts.config.worktreeSyncPaths ?? []).filter(
+    (p) => !PROJECT_ENV_FILE_STACK.includes(p as (typeof PROJECT_ENV_FILE_STACK)[number]),
+  );
   const fileStack = [
     ...PROJECT_ENV_FILE_STACK,
     ...(includeProduction ? PROJECT_ENV_PRODUCTION_FILE_STACK : []),
-    ...(opts.config.worktreeSyncPaths ?? []).filter(
-      (p) => !PROJECT_ENV_FILE_STACK.includes(p as (typeof PROJECT_ENV_FILE_STACK)[number]),
-    ),
+    ...(includeProduction
+      ? syncPathExtras
+      : syncPathExtras.filter((p) => !isProductionEnvFile(p))),
   ];
   // Dedupe preserving order
   const seenFiles = new Set<string>();
@@ -100,10 +103,13 @@ export function resolveProjectEnv(opts: {
     Object.assign(env, parsed);
     fromFiles.push(rel);
   }
-  // Production files only load on explicit opt-in; record when they were
-  // present but skipped so verify failures mention the exclusion.
+  // Production files only load on explicit opt-in — even when a legacy
+  // config explicitly lists them in worktreeSyncPaths; record what was
+  // skipped so verify failures mention the exclusion.
   if (!includeProduction) {
-    for (const rel of PROJECT_ENV_PRODUCTION_FILE_STACK) {
+    const candidates = new Set<string>(PROJECT_ENV_PRODUCTION_FILE_STACK);
+    for (const rel of syncPathExtras) if (isProductionEnvFile(rel)) candidates.add(rel);
+    for (const rel of candidates) {
       if (seenFiles.has(rel)) continue;
       const parsed = loadDotEnvFile(join(opts.projectRoot, rel));
       if (Object.keys(parsed).length > 0) skippedProduction.push(rel);

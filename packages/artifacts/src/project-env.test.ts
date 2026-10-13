@@ -146,4 +146,32 @@ describe("resolveProjectEnv", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("production files listed in worktreeSyncPaths still cannot lift the gate", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-proj-prod-listed-"));
+    try {
+      writeFileSync(
+        join(root, ".env"),
+        "DATABASE_URL=postgres://localhost:5430/app\n",
+      );
+      writeFileSync(
+        join(root, ".env.production.local"),
+        "DATABASE_URL=postgres://prod-host/app\n",
+      );
+      const resolved = resolveProjectEnv({
+        projectRoot: root,
+        config: ProjectConfigSchema.parse({
+          worktreeSyncPaths: [".env", ".env.production.local"],
+        }),
+        processEnv: {},
+      });
+      assert.equal(resolved.env.DATABASE_URL, "postgres://localhost:5430/app");
+      assert.ok(
+        resolved.notes.some((n) => n.includes("skipped production env file")),
+        "explicitly-listed production files are still gated — and the exclusion is noted",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

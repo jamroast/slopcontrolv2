@@ -10844,6 +10844,7 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
                 projectRoot: project.rootPath,
                 worktreePath: worktree.path,
                 relativePaths: config.worktreeSyncPaths,
+                includeProductionEnv: config.envIncludeProduction === true,
               });
               if (pushedEnv.length > 0) {
                 log(

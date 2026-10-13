@@ -16,6 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import {
   isDependencyInstallRoot,
+  isProductionEnvFile,
   normalizeRelativePath,
 } from "@slopcontrol/artifacts";
 
@@ -61,12 +62,17 @@ export function syncLocalFilesToWorktree(opts: {
   /** Append production-target env files to the default sync list. */
   includeProductionEnv?: boolean;
 }): string[] {
-  const paths = opts.relativePaths?.length
+  const basePaths = opts.relativePaths?.length
     ? opts.relativePaths
     : [
         ...DEFAULT_WORKTREE_SYNC_PATHS,
         ...(opts.includeProductionEnv ? PRODUCTION_WORKTREE_SYNC_PATHS : []),
       ];
+  // Production-target env files never sync without envIncludeProduction —
+  // an explicit worktreeSyncPaths listing cannot lift the production gate.
+  const paths = opts.includeProductionEnv
+    ? basePaths
+    : basePaths.filter((p) => !isProductionEnvFile(p));
   const synced: string[] = [];
 
   for (const rel of paths) {
@@ -392,10 +398,15 @@ export function syncLocalFilesFromWorktree(opts: {
   projectRoot: string;
   worktreePath: string;
   relativePaths?: string[];
+  /** Allow pushing production-target env overrides back to root. */
+  includeProductionEnv?: boolean;
 }): string[] {
-  const paths = opts.relativePaths?.length
+  const basePaths = opts.relativePaths?.length
     ? opts.relativePaths
     : [...DEFAULT_WORKTREE_SYNC_PATHS];
+  const paths = opts.includeProductionEnv
+    ? basePaths
+    : basePaths.filter((p) => !isProductionEnvFile(p));
   const synced: string[] = [];
 
   for (const rel of paths) {

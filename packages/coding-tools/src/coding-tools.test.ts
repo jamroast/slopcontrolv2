@@ -1073,11 +1073,21 @@ None.
       assert.ok(!synced.includes(".env.production.local"));
       assert.ok(!existsSync(join(wt, ".env.production.local")));
 
-      // Explicit operator listing still copies it.
+      // Even an explicit worktreeSyncPaths listing cannot lift the gate.
+      const listedOnly = syncLocalFilesToWorktree({
+        projectRoot: root,
+        worktreePath: wt,
+        relativePaths: [".env.production.local"],
+      });
+      assert.deepEqual(listedOnly, []);
+      assert.ok(!existsSync(join(wt, ".env.production.local")));
+
+      // The production flag is the only opt-in.
       const explicit = syncLocalFilesToWorktree({
         projectRoot: root,
         worktreePath: wt,
         relativePaths: [".env.production.local"],
+        includeProductionEnv: true,
       });
       assert.deepEqual(explicit, [".env.production.local"]);
       assert.ok(existsSync(join(wt, ".env.production.local")));
