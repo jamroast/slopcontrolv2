@@ -121,6 +121,13 @@ export function toOpenCodeModel(
   const id = modelId ?? endpoint?.modelId;
   if (!id) return undefined;
 
+  if (
+    endpoint?.provider === "openrouter" ||
+    /openrouter\.ai/i.test(endpoint?.baseUrl ?? "")
+  ) {
+    return { providerID: "openrouter", modelID: id };
+  }
+
   if (id.includes("/")) {
     const [providerID, ...rest] = id.split("/");
     const modelID = stripCloudSuffix(rest.join("/"));

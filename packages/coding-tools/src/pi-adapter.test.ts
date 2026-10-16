@@ -81,6 +81,23 @@ describe("piModelFor", () => {
     assert.equal(model?.id, "custom/claude-sonnet-4-5");
   });
 
+  it("keeps an OpenRouter author/model:floor id intact", () => {
+    const model = piModelFor(
+      {
+        id: "or-deepseek",
+        baseUrl: "https://openrouter.ai/api/v1",
+        provider: "openrouter",
+        apiType: "openai-chat",
+        modelId: "deepseek/deepseek-v4-pro-0813:floor",
+        apiKey: "sk-or-test",
+      },
+      "deepseek/deepseek-v4-pro-0813:floor",
+    );
+    assert.equal(model?.provider, "openrouter");
+    assert.equal(model?.id, "deepseek/deepseek-v4-pro-0813:floor");
+    assert.equal(model?.baseUrl, "https://openrouter.ai/api/v1");
+  });
+
   it("maps local ollama endpoints to the ollama provider", () => {
     const model = piModelFor(LOCAL_ENDPOINT, "ollama/qwen3-coder");
     assert.equal(model?.provider, "ollama");

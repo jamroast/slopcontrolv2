@@ -49,6 +49,23 @@ function git(cwd: string, args: string[]): string {
 }
 
 describe("@slopcontrol/coding-tools", () => {
+  it("keeps OpenRouter slugs on the openrouter provider", () => {
+    const model = toOpenCodeModel(
+      {
+        id: "or-deepseek",
+        baseUrl: "https://openrouter.ai/api/v1",
+        provider: "openrouter",
+        apiType: "openai-chat",
+        modelId: "deepseek/deepseek-v4-pro-0813:floor",
+      },
+      undefined,
+    );
+    assert.deepEqual(model, {
+      providerID: "openrouter",
+      modelID: "deepseek/deepseek-v4-pro-0813:floor",
+    });
+  });
+
   it("maps prefixed model ids to OpenCode provider/model", () => {
     const model = toOpenCodeModel(
       {

@@ -166,6 +166,14 @@ function isLocalOllama(endpoint?: LlmEndpoint): boolean {
   return /:11434/i.test(base);
 }
 
+/** OpenRouter model ids are `author/model[:variant]` and must be sent whole. */
+function isOpenRouterEndpoint(endpoint?: LlmEndpoint): boolean {
+  return (
+    endpoint?.provider === "openrouter" ||
+    /openrouter\.ai/i.test(endpoint?.baseUrl ?? "")
+  );
+}
+
 /**
  * Map an LlmEndpoint (+ modelId) into a pi `Model` object. Pure — the
  * resolver never consults pi's network catalog.
@@ -197,6 +205,29 @@ export function piModelFor(
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 32_000,
       maxTokens: 8192,
+    } as Model<string>;
+  }
+
+  // A `deepseek/…` or `google/…` slug must not be split into that vendor.
+  // OpenRouter expects the full id, including a `:floor` / `:nitro` suffix.
+  if (isOpenRouterEndpoint(endpoint)) {
+    return {
+      id: rawId,
+      name: rawId,
+      api: "openai-completions",
+      provider: "openrouter",
+      baseUrl: endpoint?.baseUrl ?? "https://openrouter.ai/api/v1",
+      reasoning,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 128_000,
+      maxTokens: 16_384,
+      headers: {
+        ...(endpoint?.headers ?? {}),
+        ...(endpoint?.apiKey
+          ? { Authorization: `Bearer ${endpoint.apiKey}` }
+          : {}),
+      },
     } as Model<string>;
   }
 
