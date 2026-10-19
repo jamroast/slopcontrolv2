@@ -91,7 +91,7 @@ describe("design-image-edit", () => {
     assert.ok(data[ci]! > 200);
   });
 
-  it("auto-keys charcoal plate corners (JamPress-style)", async () => {
+  it("auto-keys charcoal plate corners (charcoal plate)", async () => {
     const root = mkdtempSync(join(tmpdir(), "slop-charcoal-"));
     roots.push(root);
     const loopId = "loop-charcoal";
@@ -404,7 +404,7 @@ describe("design-image-edit", () => {
       },
     })
       .png()
-      .toFile(join(dir, "jamroast-ember-monogram-alpha-v7.png"));
+      .toFile(join(dir, "mark-alpha-v7.png"));
 
     // True RGBA
     const rgba = Buffer.alloc(32 * 32 * 4);
@@ -416,18 +416,18 @@ describe("design-image-edit", () => {
     }
     await sharp(rgba, { raw: { width: 32, height: 32, channels: 4 } })
       .png()
-      .toFile(join(dir, "ember-monogram-alpha.png"));
+      .toFile(join(dir, "mark-alpha.png"));
 
     const pack = await deriveIconPackFromAsset({
       projectRoot: root,
       loopId,
-      sourceFilename: "jamroast-ember-monogram-alpha-v7.png",
-      preferredFilename: "ember-monogram-alpha.png",
+      sourceFilename: "mark-alpha-v7.png",
+      preferredFilename: "mark-alpha.png",
       sizes: [16, 32],
       prefix: "icon-v9",
     });
-    assert.equal(pack.sourceFilename, "ember-monogram-alpha.png");
-    assert.equal(pack.redirectedFrom, "jamroast-ember-monogram-alpha-v7.png");
+    assert.equal(pack.sourceFilename, "mark-alpha.png");
+    assert.equal(pack.redirectedFrom, "mark-alpha-v7.png");
     assert.equal(pack.hasAlpha, true);
     const meta = await sharp(join(dir, "icon-v9-32.png")).metadata();
     assert.equal(meta.hasAlpha, true);
@@ -478,5 +478,47 @@ describe("design-image-edit", () => {
     });
     assert.match(out.summaries.join("\n"), /Vectorized/);
     assert.ok(out.results.at(-1)?.relativePath.endsWith(".svg"));
+  });
+
+  it("icon pack source prefers the larger true-RGBA raster when names tie", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-icon-area-"));
+    roots.push(root);
+    const loopId = "loop-icon-area";
+    const dir = join(root, ".slopcontrol", "design-loops", loopId, "assets");
+    mkdirSync(dir, { recursive: true });
+
+    // Requested file claims alpha but is RGB — forces the sibling search.
+    await sharp({
+      create: { width: 16, height: 16, channels: 3, background: { r: 0, g: 0, b: 0 } },
+    })
+      .png()
+      .toFile(join(dir, "brand-fake-alpha.png"));
+
+    // Two true-RGBA candidates with identical naming signals: only area can
+    // break the tie (the bigger raster is the master, not a derived tile).
+    const writeRgba = async (name: string, size: number): Promise<void> => {
+      const px = Buffer.alloc(size * size * 4, 0);
+      for (let i = 0; i < size * size; i++) {
+        px[i * 4] = 0xd9;
+        px[i * 4 + 1] = 0x48;
+        px[i * 4 + 2] = 0x0f;
+        px[i * 4 + 3] = i < size ? 0 : 255;
+      }
+      await sharp(px, { raw: { width: size, height: size, channels: 4 } })
+        .png()
+        .toFile(join(dir, name));
+    };
+    await writeRgba("small-alpha.png", 24);
+    await writeRgba("large-alpha.png", 96);
+
+    const pack = await deriveIconPackFromAsset({
+      projectRoot: root,
+      loopId,
+      sourceFilename: "brand-fake-alpha.png",
+      sizes: [16],
+      prefix: "icon-area",
+    });
+    assert.equal(pack.sourceFilename, "large-alpha.png");
+    assert.equal(pack.redirectedFrom, "brand-fake-alpha.png");
   });
 });

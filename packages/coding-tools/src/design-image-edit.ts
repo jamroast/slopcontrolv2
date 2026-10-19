@@ -21,9 +21,18 @@ function claimsAlphaInName(name: string): boolean {
   return /(?:^|[-_.])alpha(?:[-_.]|$)|transparent|rgba/i.test(name);
 }
 
-async function assetHasAlpha(absolutePath: string): Promise<boolean> {
+async function assetMeta(
+  absolutePath: string,
+): Promise<{ hasAlpha: boolean; area: number }> {
   const meta = await sharp(absolutePath).metadata();
-  return meta.hasAlpha === true;
+  return {
+    hasAlpha: meta.hasAlpha === true,
+    area: (meta.width ?? 0) * (meta.height ?? 0),
+  };
+}
+
+async function assetHasAlpha(absolutePath: string): Promise<boolean> {
+  return (await assetMeta(absolutePath)).hasAlpha;
 }
 
 /**
@@ -64,19 +73,26 @@ export async function resolveIconPackSourceFilename(opts: {
     preferStem?: string,
   ): Promise<{ filename: string; hasAlpha: boolean } | null> => {
     const names = listPngs();
-    const scored: Array<{ filename: string; score: number }> = [];
+    const scored: Array<{ filename: string; score: number; area: number }> = [];
     for (const n of names) {
       const abs = resolve(dir, n);
-      if (!(await assetHasAlpha(abs))) continue;
+      const meta = await assetMeta(abs);
+      if (!meta.hasAlpha) continue;
       let score = 1;
       if (preferStem && n.toLowerCase().includes(preferStem.toLowerCase())) {
         score += 5;
       }
-      if (/ember|monogram/i.test(n)) score += 2;
       if (claimsAlphaInName(n)) score += 1;
-      scored.push({ filename: n, score });
+      scored.push({ filename: n, score, area: meta.area });
     }
-    scored.sort((a, b) => b.score - a.score);
+    // Deterministic: explicit stem match, then alpha-named, then the larger
+    // raster (a master beats a derived tile), then filename order.
+    scored.sort(
+      (a, b) =>
+        b.score - a.score ||
+        b.area - a.area ||
+        a.filename.localeCompare(b.filename),
+    );
     if (!scored[0]) return null;
     return { filename: scored[0].filename, hasAlpha: true };
   };

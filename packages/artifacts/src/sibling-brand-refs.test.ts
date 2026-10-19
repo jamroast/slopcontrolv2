@@ -14,17 +14,17 @@ import {
 describe("sibling brand refs", () => {
   it("extractSiblingProjectPaths finds Projects roots", () => {
     const paths = extractSiblingProjectPaths(
-      "Apply theming from /Users/brettchaldecott/Projects/basic-web-agent/src/app",
+      "Apply theming from /Users/brettchaldecott/Projects/sibling-app/src/app",
     );
     assert.ok(
-      paths.some((p) => p.endsWith("/Projects/basic-web-agent")),
+      paths.some((p) => p.endsWith("/Projects/sibling-app")),
     );
   });
 
   it("buildSiblingBrandRefPack prefers images/logo over reuse stubs", () => {
     const parent = mkdtempSync(join(tmpdir(), "slop-sib-"));
     const crm = join(parent, "crm");
-    const jam = join(parent, "basic-web-agent");
+    const jam = join(parent, "sibling-app");
     try {
       mkdirSync(join(crm, ".slopcontrol"), { recursive: true });
       mkdirSync(join(jam, "public", "images"), { recursive: true });
@@ -35,7 +35,7 @@ describe("sibling brand refs", () => {
         `<svg xmlns="http://www.w3.org/2000/svg"><title>real</title></svg>\n`,
       );
       writeFileSync(
-        join(jam, "public", "brand", "jampress-logo-reuse.svg"),
+        join(jam, "public", "brand", "logo-reuse.svg"),
         `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"><rect width="512" height="512"/><circle cx="256" cy="200" r="72"/><text>Status:** draft</text></svg>\n`,
       );
       writeFileSync(
@@ -44,14 +44,14 @@ describe("sibling brand refs", () => {
       );
       assert.equal(
         isDesignFallbackBrandPath(
-          join(jam, "public", "brand", "jampress-logo-reuse.svg"),
+          join(jam, "public", "brand", "logo-reuse.svg"),
         ),
         true,
       );
       const pack = buildSiblingBrandRefPack({
         projectRoot: crm,
         description: `Apply theming from ${jam} and a new logo`,
-        familySiblingNames: ["basic-web-agent"],
+        familySiblingNames: ["sibling-app"],
       });
       assert.match(pack, /images\/logo\.svg/);
       assert.match(pack, /Non-authoritative fallbacks/);
@@ -65,7 +65,7 @@ describe("sibling brand refs", () => {
       const withExcerpts = buildSiblingBrandRefPack({
         projectRoot: crm,
         description: `Apply theming from ${jam}`,
-        familySiblingNames: ["basic-web-agent"],
+        familySiblingNames: ["sibling-app"],
         includeTokenExcerpts: true,
       });
       assert.match(withExcerpts, /--accent:\s*#E8430A/);
@@ -152,11 +152,11 @@ describe("sibling brand refs", () => {
       mkdirSync(join(root, "public", "images"), { recursive: true });
       writeFileSync(
         join(root, "src", "app", "globals.css"),
-        `:root { --jam-accent: #E8430A; --jam-bg: #0A0A0A; }\n`,
+        `:root { --acme-accent: #E8430A; --jam-bg: #0A0A0A; }\n`,
       );
       writeFileSync(
         join(root, "public", "images", "logo.svg"),
-        `<svg xmlns="http://www.w3.org/2000/svg"><title>JamRoast</title></svg>\n`,
+        `<svg xmlns="http://www.w3.org/2000/svg"><title>Acme</title></svg>\n`,
       );
       writeFileSync(
         join(root, "src", "app", "page.tsx"),
@@ -167,7 +167,7 @@ describe("sibling brand refs", () => {
         includeTokenExcerpts: true,
       });
       assert.match(pack, /This project brand/);
-      assert.match(pack, /--jam-accent/);
+      assert.match(pack, /--acme-accent/);
       assert.match(pack, /images\/logo\.svg/);
       assert.match(pack, /Taste Room/);
     } finally {

@@ -51,9 +51,9 @@ describe("DesignTool", () => {
       const tool = new OllamaImagesDesignTool();
       const outPath = join(dir, "logo.png");
       const result = await tool.generateImage({
-        prompt: "Jam Light wordmark logo",
+        prompt: "Acme Light wordmark logo",
         outPath,
-        brandName: "Jam Light",
+        brandName: "Acme Light",
         logoFailClosed: true,
       });
       assert.equal(result.reason, "logo_requires_designImage");

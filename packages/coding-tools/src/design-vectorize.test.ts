@@ -409,6 +409,40 @@ describe("design-vectorize", { concurrency: 1 }, () => {
     }
   });
 
+  it("kills a hung tracer and reports potrace_timeout", async () => {
+    const projectRoot = root();
+    const dir = join(projectRoot, ".slopcontrol", "design-loops", "loop-1", "assets");
+    await fixtureMark(dir);
+    const stubDir = mkdtempSync(join(tmpdir(), "slop-potrace-hang-"));
+    const stub = join(stubDir, "potrace-hang");
+    // Ignores stdin and never exits — the spawn guard must kill it.
+    writeFileSync(stub, "#!/bin/sh\nexec sleep 60\n", { mode: 0o755 });
+    const prevBin = process.env.SLOPCONTROL_POTRACE_BIN;
+    const prevTimeout = process.env.SLOPCONTROL_POTRACE_TIMEOUT_MS;
+    process.env.SLOPCONTROL_POTRACE_BIN = stub;
+    process.env.SLOPCONTROL_POTRACE_TIMEOUT_MS = "1000";
+    try {
+      await assert.rejects(
+        () =>
+          vectorizeDesignAsset({
+            projectRoot,
+            loopId: "loop-1",
+            sourceFilename: "mark.png",
+            filename: "hung.svg",
+            variants: [],
+            previewSizes: [],
+          }),
+        /potrace_timeout/,
+      );
+    } finally {
+      if (prevBin === undefined) delete process.env.SLOPCONTROL_POTRACE_BIN;
+      else process.env.SLOPCONTROL_POTRACE_BIN = prevBin;
+      if (prevTimeout === undefined) delete process.env.SLOPCONTROL_POTRACE_TIMEOUT_MS;
+      else process.env.SLOPCONTROL_POTRACE_TIMEOUT_MS = prevTimeout;
+      rmSync(stubDir, { recursive: true, force: true });
+    }
+  });
+
   it("an svg source is validate-only and writes no new svg", async () => {
     const projectRoot = root();
     const dir = join(projectRoot, ".slopcontrol", "design-loops", "loop-1", "assets");

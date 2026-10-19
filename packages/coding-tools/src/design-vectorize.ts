@@ -84,6 +84,7 @@ export class VectorizeError extends Error {
   code:
     | "source_not_found"
     | "potrace_not_found"
+    | "potrace_timeout"
     | "bytes_extension_mismatch"
     | "palette_unreadable"
     | "invalid_params";
@@ -103,6 +104,7 @@ export function vectorizeErrorCode(error: unknown): VectorizeError["code"] | nul
   const msg = error instanceof Error ? error.message : String(error);
   if (msg.startsWith("source_not_found")) return "source_not_found";
   if (msg.startsWith("potrace_not_found")) return "potrace_not_found";
+  if (msg.startsWith("potrace_timeout")) return "potrace_timeout";
   if (msg.startsWith("bytes_extension_mismatch")) return "bytes_extension_mismatch";
   if (msg.startsWith("palette_unreadable")) return "palette_unreadable";
   if (msg.startsWith("invalid_params")) return "invalid_params";
@@ -574,32 +576,61 @@ function tracePbm(
     }
   }
   const pbm = Buffer.concat([Buffer.from(`P4\n${w} ${h}\n`), body]);
+  const timeoutMs = Math.max(
+    1_000,
+    Number(process.env.SLOPCONTROL_POTRACE_TIMEOUT_MS ?? 30_000) || 30_000,
+  );
   return new Promise((resolvePromise, reject) => {
     const child = spawn(bin, ["-b", "svg", "--flat", ...args], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
+    let settled = false;
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    // A hung tracer must not stall a design run; kill and surface a typed error.
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      settle(() =>
+        reject(
+          new VectorizeError(
+            "potrace_timeout",
+            `potrace_timeout: no result after ${timeoutMs}ms`,
+          ),
+        ),
+      );
+    }, timeoutMs);
+    timer.unref?.();
     child.stdout.on("data", (c) => out.push(c as Buffer));
     child.stderr.on("data", (c) => err.push(c as Buffer));
     child.on("error", (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") {
-        reject(new VectorizeError("potrace_not_found", POTRACE_MISSING));
-        return;
-      }
-      reject(error);
+      settle(() => {
+        if (error.code === "ENOENT") {
+          reject(new VectorizeError("potrace_not_found", POTRACE_MISSING));
+          return;
+        }
+        reject(error);
+      });
     });
     child.on("close", (code) => {
-      if (code !== 0) {
-        reject(
-          new Error(
-            `potrace_failed: ${Buffer.concat(err).toString("utf8").slice(0, 200)}`,
-          ),
-        );
-        return;
-      }
-      resolvePromise(Buffer.concat(out).toString("utf8"));
+      settle(() => {
+        if (code !== 0) {
+          reject(
+            new Error(
+              `potrace_failed: ${Buffer.concat(err).toString("utf8").slice(0, 200)}`,
+            ),
+          );
+          return;
+        }
+        resolvePromise(Buffer.concat(out).toString("utf8"));
+      });
     });
+    child.stdin.on("error", () => undefined); // EPIPE after a timeout kill is expected
     child.stdin.write(pbm);
     child.stdin.end();
   });

@@ -17,25 +17,25 @@ import {
 describe("design-loop-continue", () => {
   it("dominantMockLogoAsset prefers mark over icon tiles", () => {
     const html = `
-<img src=".slopcontrol/design-loops/x/assets/ember-monogram-alpha.png">
-<img src=".slopcontrol/design-loops/x/assets/ember-monogram-alpha.png">
+<img src=".slopcontrol/design-loops/x/assets/mark-alpha.png">
+<img src=".slopcontrol/design-loops/x/assets/mark-alpha.png">
 <img src=".slopcontrol/design-loops/x/assets/icon-v7-16.png">
 <img src=".slopcontrol/design-loops/x/assets/icon-v7-32.png">
 `;
-    assert.equal(dominantMockLogoAsset(html), "ember-monogram-alpha.png");
+    assert.equal(dominantMockLogoAsset(html), "mark-alpha.png");
   });
 
   it("detectMockDrift catches hero + logo swap on asset_only", () => {
     const prev = `<!DOCTYPE html><html><style>:root{--brand-orange:#E8430A;--bg:#000;--fg:#fff;--sf:#111;--bd:#222;--radius-md:8px;--font-body:Inter;--fs-body:1rem;}</style>
 <section id="brand"></section><section id="icon-pack"></section><section id="landing"></section>
-<img src=".slopcontrol/design-loops/L/assets/ember-monogram-alpha.png">
-<img src=".slopcontrol/design-loops/L/assets/ember-monogram-alpha.png">
-<img src=".slopcontrol/design-loops/L/assets/ember-monogram-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/mark-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/mark-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/mark-alpha.png">
 <h1>Craft Roasting, Precision Controlled</h1></html>`;
     const next = `<!DOCTYPE html><html><style>:root{--brand-orange:#E8430A;--other:#111;}</style>
 <section id="new"></section>
-<img src=".slopcontrol/design-loops/L/assets/jamroast-ember-monogram-alpha-v7.png">
-<img src=".slopcontrol/design-loops/L/assets/jamroast-ember-monogram-alpha-v7.png">
+<img src=".slopcontrol/design-loops/L/assets/mark-alpha-v7.png">
+<img src=".slopcontrol/design-loops/L/assets/mark-alpha-v7.png">
 <h1>Build agents with warm-craft precision</h1></html>`;
     const issues = detectMockDrift({
       previousHtml: prev,
@@ -51,7 +51,7 @@ describe("design-loop-continue", () => {
         preserveChrome: true,
         notes: "",
       }),
-      pinnedLogoAsset: "ember-monogram-alpha.png",
+      pinnedLogoAsset: "mark-alpha.png",
     });
     assert.ok(issues.some((i) => i.code === "hero_changed"));
     assert.ok(issues.some((i) => i.code === "logo_swapped"));
@@ -115,7 +115,7 @@ describe("design-loop-continue", () => {
 
   it("fallbackContinueIntentFromText detects new logo ask", () => {
     const intent = fallbackContinueIntentFromText(
-      "Pull the JamRoast theming from /Users/x/Projects/burntjam and invent a new symbolic logo",
+      "Pull the Acme theming from /Users/x/Projects/acme-app and invent a new symbolic logo",
     );
     assert.equal(intent.inventLogo, true);
     assert.equal(intent.adoptTheme, true);
@@ -172,13 +172,13 @@ describe("design-loop-continue", () => {
 
   it("detectMockDrift allows logo swap when inventLogo intent", () => {
     const prev = `<!DOCTYPE html><html><style>:root{--brand-orange:#E8430A;--bg:#000;--fg:#fff;--sf:#111;--bd:#222;--radius-md:8px;--font-body:Inter;--fs-body:1rem;}</style>
-<img src=".slopcontrol/design-loops/L/assets/jam-light-mark-v1-alpha.png">
-<img src=".slopcontrol/design-loops/L/assets/jam-light-mark-v1-alpha.png">
-<h1>JamLight CRM</h1></html>`;
+<img src=".slopcontrol/design-loops/L/assets/brand-mark-v1-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/brand-mark-v1-alpha.png">
+<h1>Acme CRM</h1></html>`;
     const next = `<!DOCTYPE html><html><style>:root{--brand-orange:#E8430A;--bg:#000;--fg:#fff;--sf:#111;--bd:#222;--radius-md:8px;--font-body:Inter;--fs-body:1rem;}</style>
-<img src=".slopcontrol/design-loops/L/assets/jamlight-circle-mark-v2-alpha.png">
-<img src=".slopcontrol/design-loops/L/assets/jamlight-circle-mark-v2-alpha.png">
-<h1>JamLight CRM</h1></html>`;
+<img src=".slopcontrol/design-loops/L/assets/brand-circle-mark-v2-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/brand-circle-mark-v2-alpha.png">
+<h1>Acme CRM</h1></html>`;
     const intent = ContinueIntentSchema.parse({
       scope: "logo_invent",
       targets: ["logo"],
@@ -194,7 +194,7 @@ describe("design-loop-continue", () => {
       previousHtml: prev,
       nextHtml: next,
       intent,
-      pinnedLogoAsset: "jam-light-mark-v1-alpha.png",
+      pinnedLogoAsset: "brand-mark-v1-alpha.png",
     });
     assert.ok(!issues.some((i) => i.code === "logo_swapped"));
   });
@@ -223,12 +223,12 @@ describe("design-loop-continue", () => {
   it("detectMockDrift still rejects logo swap on assets_only intent (regression)", () => {
     const prev = `<!DOCTYPE html><html><style>:root{--brand-orange:#E8430A;--bg:#000;--fg:#fff;--sf:#111;--bd:#222;--radius-md:8px;--font-body:Inter;--fs-body:1rem;}</style>
 <section id="brand"></section><section id="icon-pack"></section><section id="landing"></section>
-<img src=".slopcontrol/design-loops/L/assets/ember-monogram-alpha.png">
-<img src=".slopcontrol/design-loops/L/assets/ember-monogram-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/mark-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/mark-alpha.png">
 <h1>Craft Roasting</h1></html>`;
     const next = prev.replaceAll(
-      "ember-monogram-alpha.png",
-      "jamroast-fake-alpha-v2.png",
+      "mark-alpha.png",
+      "fake-alpha-v2.png",
     );
     const intent = ContinueIntentSchema.parse({
       scope: "assets_only",
@@ -245,7 +245,7 @@ describe("design-loop-continue", () => {
       previousHtml: prev,
       nextHtml: next,
       intent,
-      pinnedLogoAsset: "ember-monogram-alpha.png",
+      pinnedLogoAsset: "mark-alpha.png",
     });
     assert.ok(issues.some((i) => i.code === "logo_swapped"));
   });
@@ -271,17 +271,17 @@ describe("design-loop-continue", () => {
     assert.ok(!issues.some((i) => i.code === "hero_changed"));
   });
 
-  it("detectMockDrift: JamRoast theme+logo redesign short-circuits all fingerprint vetoes", () => {
+  it("detectMockDrift: theme+logo redesign short-circuits all fingerprint vetoes", () => {
     const prev = `<!DOCTYPE html><html><style>:root{--old-a:#111;--old-b:#222;--old-c:#333;--old-d:#444;--old-e:#555;--old-f:#666;--old-g:#777;--old-h:#888;}</style>
 <nav><a>Dashboard</a><a>Invoices</a></nav>
-<img src=".slopcontrol/design-loops/L/assets/jam-light-mark-v1-alpha.png">
-<img src=".slopcontrol/design-loops/L/assets/jam-light-mark-v1-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/brand-mark-v1-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/brand-mark-v1-alpha.png">
 <section id="landing" class="dashboard-shell"><aside></aside></section>
 <h1>Invoicing that works as hard as you do</h1></html>`;
     const next = `<!DOCTYPE html><html><style>:root{--brand:#E8430A;--bg:#000;--fg:#fff;--sf:#111;--bd:#222;--radius-md:8px;--font-body:Inter;--fs-body:1rem;}</style>
 <nav><a>Home</a><a>Work</a></nav>
-<img src=".slopcontrol/design-loops/L/assets/jamlight-circle-mark-v2-alpha.png">
-<img src=".slopcontrol/design-loops/L/assets/jamlight-circle-mark-v2-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/brand-circle-mark-v2-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/brand-circle-mark-v2-alpha.png">
 <section id="landing" class="dashboard-shell"><aside></aside></section>
 <h1>Invoicing and CRM, in one ledger.</h1></html>`;
     const intent = ContinueIntentSchema.parse({
@@ -292,13 +292,13 @@ describe("design-loop-continue", () => {
       adoptTheme: true,
       navAlign: false,
       preserveChrome: false,
-      notes: "Pull JamRoast theme and invent a circular JamLight mark",
+      notes: "Pull the sibling theme and invent a circular mark",
     });
     const issues = detectMockDrift({
       previousHtml: prev,
       nextHtml: next,
       intent,
-      pinnedLogoAsset: "jam-light-mark-v1-alpha.png",
+      pinnedLogoAsset: "brand-mark-v1-alpha.png",
     });
     assert.deepEqual(issues, []);
   });
@@ -306,7 +306,7 @@ describe("design-loop-continue", () => {
   it("detectMockDrift still rejects unintended hero change on assets_only", () => {
     const prev = `<!DOCTYPE html><html><style>:root{--brand-orange:#E8430A;--bg:#000;--fg:#fff;--sf:#111;--bd:#222;--radius-md:8px;--font-body:Inter;--fs-body:1rem;}</style>
 <section id="brand"></section><section id="icon-pack"></section><section id="landing"></section>
-<img src=".slopcontrol/design-loops/L/assets/ember-monogram-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/mark-alpha.png">
 <h1>Keep Me</h1></html>`;
     const next = prev.replace("<h1>Keep Me</h1>", "<h1>Changed Hero</h1>");
     const intent = ContinueIntentSchema.parse({
@@ -329,19 +329,19 @@ describe("design-loop-continue", () => {
     assert.ok(hardMockDriftIssues(issues).some((i) => i.code === "hero_changed"));
   });
 
-  it("detectMockDrift: nav reorder alone is not nav_changed (JamLight menubar)", () => {
+  it("detectMockDrift: nav reorder alone is not nav_changed (sibling menubar)", () => {
     const prev = `<!DOCTYPE html><html>
 <header><ul class="topbar-nav">
 <li><a href="#">Dashboard</a></li><li><a href="#">Roasts</a></li>
 <li><a href="#">Inventory</a></li><li><a href="#">Settings</a></li>
 </ul></header>
-<div class="dashboard-shell"></div><h1>JamLight</h1></html>`;
+<div class="dashboard-shell"></div><h1>Acme</h1></html>`;
     const next = `<!DOCTYPE html><html>
 <header><ul class="topbar-nav">
 <li><a href="#">Settings</a></li><li><a href="#">Inventory</a></li>
 <li><a href="#">Roasts</a></li><li><a href="#">Dashboard</a></li>
 </ul></header>
-<div class="dashboard-shell"></div><h1>JamLight</h1></html>`;
+<div class="dashboard-shell"></div><h1>Acme</h1></html>`;
     const intent = ContinueIntentSchema.parse({
       scope: "assets_only",
       targets: [],
@@ -363,9 +363,9 @@ describe("design-loop-continue", () => {
 
   it("detectMockDrift: shell/layout intent allows nav label set changes", () => {
     const prev = `<ul class="topbar-nav"><li><a>Dashboard</a></li><li><a>Roasts</a></li></ul>
-<div class="dashboard-shell"></div><h1>JamLight</h1>`;
+<div class="dashboard-shell"></div><h1>Acme</h1>`;
     const next = `<ul class="topbar-nav"><li><a>Home</a></li><li><a>Chat</a></li></ul>
-<div class="dashboard-shell"></div><h1>JamLight</h1>`;
+<div class="dashboard-shell"></div><h1>Acme</h1>`;
     const intent = ContinueIntentSchema.parse({
       scope: "sections",
       targets: ["shell", "layout"],
@@ -385,7 +385,7 @@ describe("design-loop-continue", () => {
     assert.ok(!issues.some((i) => i.code === "nav_changed"));
   });
 
-  it("detectMockDrift: dashboard continue hero change is soft (JamLight v7 regression)", () => {
+  it("detectMockDrift: dashboard continue hero change is soft (v7 regression)", () => {
     const prev = `<!DOCTYPE html><html>
 <section id="landing" class="hero"><h1>Invoicing and CRM, in one ledger.</h1></section>
 <section id="dashboard" class="dashboard"><h2>Overview</h2></section>
@@ -419,8 +419,8 @@ describe("design-loop-continue", () => {
 
   it("detectMockDrift: assets_only logo swap remains hard", () => {
     const prev = `<!DOCTYPE html><html><style>:root{--a:#1;--b:#2;--c:#3;--d:#4;--e:#5;--f:#6;--g:#7;--h:#8;}</style>
-<img src=".slopcontrol/design-loops/L/assets/jam-light-mark-v1-alpha.png">
-<img src=".slopcontrol/design-loops/L/assets/jam-light-mark-v1-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/brand-mark-v1-alpha.png">
+<img src=".slopcontrol/design-loops/L/assets/brand-mark-v1-alpha.png">
 <section id="landing"><h1>Keep</h1></section></html>`;
     const next = `<!DOCTYPE html><html><style>:root{--a:#1;--b:#2;--c:#3;--d:#4;--e:#5;--f:#6;--g:#7;--h:#8;}</style>
 <img src=".slopcontrol/design-loops/L/assets/other-mark-alpha.png">
@@ -441,7 +441,7 @@ describe("design-loop-continue", () => {
       previousHtml: prev,
       nextHtml: next,
       intent,
-      pinnedLogoAsset: "jam-light-mark-v1-alpha.png",
+      pinnedLogoAsset: "brand-mark-v1-alpha.png",
     });
     assert.ok(issues.some((i) => i.code === "logo_swapped" && i.severity === "hard"));
     assert.ok(hardMockDriftIssues(issues).some((i) => i.code === "logo_swapped"));
@@ -498,40 +498,40 @@ describe("design-loop-continue", () => {
   it("patchMockForAssetContinue swaps fake alpha and icon pack tiles", () => {
     const loopId = "loop-1";
     const prev = `
-<img src=".slopcontrol/design-loops/${loopId}/assets/jamroast-ember-monogram-alpha-v7.png">
-<img src=".slopcontrol/design-loops/${loopId}/assets/ember-monogram-alpha.png">
+<img src=".slopcontrol/design-loops/${loopId}/assets/mark-alpha-v7.png">
+<img src=".slopcontrol/design-loops/${loopId}/assets/mark-alpha.png">
 <img src=".slopcontrol/design-loops/${loopId}/assets/icon-v7-32.png">
 <img src=".slopcontrol/design-loops/${loopId}/assets/icon-v7-512.png">
 `;
     const out = patchMockForAssetContinue({
       previousHtml: prev,
       loopId,
-      primaryLogoAsset: "ember-monogram-alpha.png",
+      primaryLogoAsset: "mark-alpha.png",
       iconPackFiles: [
         { size: 32, filename: "icon-v9-32.png" },
         { size: 512, filename: "icon-v9-512.png" },
       ],
     });
-    assert.match(out, /ember-monogram-alpha\.png/);
-    assert.doesNotMatch(out, /jamroast-ember-monogram-alpha-v7/);
+    assert.match(out, /mark-alpha\.png/);
+    assert.doesNotMatch(out, /mark-alpha-v7/);
     assert.match(out, /icon-v9-32\.png/);
     assert.match(out, /icon-v9-512\.png/);
   });
 
-  it("patchMockForAssetContinue replaces jam-light-mark-v1 with modern primary", () => {
+  it("patchMockForAssetContinue replaces the legacy mark with a modern primary", () => {
     const loopId = "6cfc01ed-36ab-44ae-bb59-b7ea60aef062";
     const prev = `<!DOCTYPE html><html><body>
-<img src=".slopcontrol/design-loops/${loopId}/assets/jam-light-mark-v1-alpha.png">
-<img src=".slopcontrol/design-loops/${loopId}/assets/jam-light-mark-v1-alpha.png">
+<img src=".slopcontrol/design-loops/${loopId}/assets/brand-mark-v1-alpha.png">
+<img src=".slopcontrol/design-loops/${loopId}/assets/brand-mark-v1-alpha.png">
 <img src=".slopcontrol/design-loops/${loopId}/assets/modern-icon-48.png">
 </body></html>`;
     const out = patchMockForAssetContinue({
       previousHtml: prev,
       loopId,
-      primaryLogoAsset: "jamlight-logo-modern-v4-alpha.png",
+      primaryLogoAsset: "brand-logo-modern-v4-alpha.png",
     });
-    assert.match(out, /jamlight-logo-modern-v4-alpha\.png/);
-    assert.doesNotMatch(out, /jam-light-mark-v1-alpha/);
+    assert.match(out, /brand-logo-modern-v4-alpha\.png/);
+    assert.doesNotMatch(out, /brand-mark-v1-alpha/);
     // Icon pack tiles are left alone unless iconPackFiles is provided.
     assert.match(out, /modern-icon-48\.png/);
   });
@@ -539,7 +539,7 @@ describe("design-loop-continue", () => {
   it("sanitizeDesignLoopAgentNotes drops first-person planning prose", () => {
     assert.equal(
       sanitizeDesignLoopAgentNotes(
-        "I'll apply the jamroast-components shared tokens to the landing page.",
+        "I'll apply the shared component tokens to the landing page.",
       ),
       "",
     );
@@ -555,7 +555,7 @@ describe("design-loop-continue", () => {
         "Element honor: honors=true competing=false missingMenubar=false missingToggle=false confidence=high.",
       softDriftNotes: "",
       agentRaw:
-        "I'll apply the jamroast-components shared tokens, menubar shell, theme toggle.",
+        "I'll apply the shared component tokens, menubar shell, theme toggle.",
       version: 8,
     });
     assert.match(notes, /Element honor/);

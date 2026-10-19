@@ -6685,6 +6685,13 @@ app.post("/projects/:id/design-images/vectorize", async (req, res) => {
       return;
     }
   }
+  if (phaseId) {
+    const phase = store.getPhase(phaseId);
+    if (!phase || phase.projectId !== project.id) {
+      res.status(404).json({ error: "Phase not found" });
+      return;
+    }
+  }
   let sourceFilename =
     typeof req.body?.sourceFilename === "string"
       ? req.body.sourceFilename.trim()

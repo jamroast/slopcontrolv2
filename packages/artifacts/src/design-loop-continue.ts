@@ -419,10 +419,7 @@ export function patchMockForAssetContinue(opts: {
         (/icon/i.test(n) && /-\d{2,3}\.png$/i.test(n));
       if (isPackTile) continue;
       const isCompetingMark =
-        /alpha/i.test(n) ||
-        /\bmark\b/i.test(n) ||
-        /logo/i.test(n) ||
-        /ember|monogram|jamroast|jam-?light/i.test(n);
+        /alpha/i.test(n) || /\bmark\b/i.test(n) || /logo/i.test(n);
       if (isCompetingMark) replace.add(n);
     }
     for (const bad of replace) {
