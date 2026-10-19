@@ -3,6 +3,7 @@
  */
 
 import { z } from "zod";
+import type { PlanScope } from "./plan-loop.js";
 
 export const PlanContinueIntentScopeSchema = z.enum([
   "sections",
@@ -108,6 +109,29 @@ export function normalizePlanContinueIntent(
   _text?: string,
 ): PlanContinueIntent {
   return normalizePlanContinueIntentStructured(intent);
+}
+
+/**
+ * Patch conceptual scope from a continue classifier.
+ * Keeps kind and focus. Does not re-derive them from the operator message.
+ */
+export function applyPlanContinueScope(opts: {
+  current: PlanScope;
+  intent: PlanContinueIntent;
+}): PlanScope {
+  let scope = opts.current;
+  const focus = opts.intent.focus?.trim();
+  if (focus) {
+    scope = { ...scope, focus, source: "continue" };
+  }
+  if (opts.intent.preserve?.length) {
+    scope = {
+      ...scope,
+      preserve: opts.intent.preserve,
+      source: "continue",
+    };
+  }
+  return scope;
 }
 
 export function formatPlanContinueIntentPromptBlock(

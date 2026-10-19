@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { isDesignFallbackBrandPath } from "@slopcontrol/artifacts";
 import { OllamaImagesDesignTool, writeSvgFallback, isLogoAssetBrief } from "./design-tool.js";
 import { getDesignTool } from "./registry.js";
 
@@ -21,6 +22,7 @@ describe("DesignTool", () => {
       assert.equal(result.skipped, true);
       assert.ok(existsSync(result.path));
       assert.match(readFileSync(result.path, "utf-8"), /Acme/);
+      assert.equal(isDesignFallbackBrandPath(result.path), true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -109,6 +111,74 @@ describe("DesignTool", () => {
       assert.equal(seenBodies.length, 2);
       assert.equal(seenBodies[0]?.size, "512x512");
       assert.equal("size" in (seenBodies[1] ?? {}), false);
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes sniffed bytes under the matching extension, not the requested .svg", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-designtool-ext-"));
+    const originalFetch = globalThis.fetch;
+    const pngB64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ data: [{ b64_json: pngB64 }] }), {
+        status: 200,
+      })) as typeof fetch;
+    try {
+      const tool = new OllamaImagesDesignTool();
+      const requested = join(dir, "logo.svg");
+      const result = await tool.generateImage({
+        prompt: "mark",
+        outPath: requested,
+        endpoint: {
+          id: "test-images",
+          label: "test",
+          baseUrl: "https://example.invalid/v1",
+          apiType: "openai-images",
+          modelId: "test-image-model",
+          capabilities: { chat: false, vision: false, imageGen: true },
+        },
+      });
+      assert.equal(result.format, "png");
+      assert.ok(result.path.endsWith(".png"));
+      assert.equal(existsSync(requested), false);
+      assert.equal(readFileSync(result.path).subarray(0, 4).toString("hex"), "89504e47");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("sniff wins over a data-URI prefix", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-designtool-sniff-"));
+    const originalFetch = globalThis.fetch;
+    const pngB64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          data: [{ b64_json: `data:image/webp;base64,${pngB64}` }],
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    try {
+      const tool = new OllamaImagesDesignTool();
+      const result = await tool.generateImage({
+        prompt: "mark",
+        outPath: join(dir, "mark.webp"),
+        endpoint: {
+          id: "test-images",
+          label: "test",
+          baseUrl: "https://example.invalid/v1",
+          apiType: "openai-images",
+          modelId: "test-image-model",
+          capabilities: { chat: false, vision: false, imageGen: true },
+        },
+      });
+      assert.equal(result.format, "png");
+      assert.ok(result.path.endsWith(".png"));
     } finally {
       globalThis.fetch = originalFetch;
       rmSync(dir, { recursive: true, force: true });

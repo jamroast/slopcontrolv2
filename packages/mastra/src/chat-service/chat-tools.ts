@@ -115,6 +115,7 @@ export const CHAT_GATED_TOOLS: ReadonlySet<string> = new Set([
   "design_loop_abandon",
   "review_design_loop",
   "generate_design_image",
+  "vectorize_design_image",
   "import_design_image",
   // plan loops
   "plan_loop_start",

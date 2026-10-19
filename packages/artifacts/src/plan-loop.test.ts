@@ -16,17 +16,20 @@ import {
   defaultPlanScope,
   extractPlanDocument,
   failurePlanDocument,
+  formatPlanWroteReply,
   formatPlanLoopReviseBlock,
   isPlanLoopFailureOrScaffoldDocument,
   PLAN_LOOP_SCAFFOLD_ACCEPT_ERROR,
   planDocumentSuspiciousShrink,
   scaffoldPlanDocument,
   seedPlanLoopAcceptance,
+  selectPlanLoopRead,
   summarizePlanLoopProgress,
   validatePlanDocument,
   writePlanLoopMeta,
   writePlanLoopVersion,
 } from "./plan-loop.js";
+import { applyPlanContinueScope } from "./plan-continue-intent.js";
 import {
   compilePlanPackFromAccept,
   formatPlanPackPromptBlock,
@@ -388,6 +391,70 @@ describe("plan-loop", () => {
     assert.notEqual(scope.kind, "bugfix");
     assert.notEqual(scope.focus, "http");
     assert.equal(scope.focus, "provider-config");
+  });
+
+  it("selectPlanLoopRead keeps planTotalChars when the body is omitted", () => {
+    const stored = "# Plan\n\n## Goal\nShip the mark.\n";
+    const hidden = selectPlanLoopRead({
+      storedPlan: stored,
+      includePlan: false,
+    });
+    assert.equal(hidden.plan, null);
+    assert.equal(hidden.planOmitted, true);
+    assert.equal(hidden.planPresent, true);
+    assert.equal(hidden.planTotalChars, stored.length);
+    const missing = selectPlanLoopRead({
+      storedPlan: null,
+      includePlan: false,
+    });
+    assert.equal(missing.planTotalChars, 0);
+    assert.equal(missing.planOmitted, false);
+    assert.equal(missing.planPresent, false);
+  });
+
+  it("formatPlanWroteReply records the written length without pasting the plan", () => {
+    const plan = "# Plan\n\n## Goal\nDo the thing.\n";
+    const reply = formatPlanWroteReply(2, plan, "Summary only.");
+    assert.match(reply, /Wrote PLAN.md v2 \(\d+ chars\)\./);
+    assert.match(reply, /Summary only\./);
+    assert.ok(!reply.includes("## Goal"));
+  });
+
+  it("continue scope keeps kind and focus when the message mentions api and oauth", () => {
+    const current = {
+      kind: "feature" as const,
+      focus: "mcp-parity",
+      preserve: [] as string[],
+      source: "start" as const,
+    };
+    const message =
+      "Rewrite the plan. Cover the /api/admin routes and oauth client rotation.";
+    assert.match(message, /api/);
+    assert.match(message, /oauth/);
+    const kept = applyPlanContinueScope({
+      current,
+      intent: {
+        scope: "full_revise",
+        sections: ["Goal"],
+        needsInvestigation: true,
+        notes: message,
+      },
+    });
+    assert.equal(kept.kind, "feature");
+    assert.equal(kept.focus, "mcp-parity");
+    const patched = applyPlanContinueScope({
+      current,
+      intent: {
+        scope: "full_revise",
+        sections: ["Goal"],
+        focus: "scope-enforcement",
+        needsInvestigation: true,
+        notes: "",
+      },
+    });
+    assert.equal(patched.kind, "feature");
+    assert.equal(patched.focus, "scope-enforcement");
+    assert.equal(patched.source, "continue");
   });
 
 });

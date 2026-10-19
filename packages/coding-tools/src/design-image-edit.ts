@@ -1,31 +1,24 @@
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
-import { basename, relative, resolve, sep } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { basename, resolve } from "node:path";
 import sharp from "sharp";
-import { designLoopAssetsDir } from "./design-media.js";
+import {
+  outPathScoped,
+  resolveScopedAsset,
+  safeBasename,
+  scopeAssetsDir,
+  type AssetScope,
+} from "./asset-scope.js";
 import { assertDesignImageOp } from "./design-image-catalog.js";
+import {
+  readLoopTokenPalette,
+  vectorizeDesignAsset,
+  type VectorizeParams,
+} from "./design-vectorize.js";
+
+export type { AssetScope } from "./asset-scope.js";
 
 function claimsAlphaInName(name: string): boolean {
   return /(?:^|[-_.])alpha(?:[-_.]|$)|transparent|rgba/i.test(name);
-}
-
-/**
- * Asset scope: a design loop (`loopId`) or an arbitrary project-relative dir
- * (`assetsDir`, e.g. a phase design dir during the design stage).
- */
-export type AssetScope = {
-  projectRoot: string;
-  loopId?: string;
-  assetsDir?: string;
-};
-
-function scopeAssetsDir(scope: AssetScope): string {
-  if (scope.assetsDir) {
-    return resolve(resolve(scope.projectRoot), scope.assetsDir);
-  }
-  if (!scope.loopId) {
-    throw new Error("loopId or assetsDir required for design asset op");
-  }
-  return resolve(designLoopAssetsDir(scope.projectRoot, scope.loopId));
 }
 
 async function assetHasAlpha(absolutePath: string): Promise<boolean> {
@@ -148,59 +141,6 @@ export async function resolveIconPackSourceFilename(opts: {
   );
 }
 
-function safeBasename(name: string): string {
-  const base = basename(String(name ?? "").trim());
-  if (!base || base.includes("..") || base !== String(name ?? "").trim()) {
-    throw new Error(`Invalid asset filename: ${name}`);
-  }
-  return base;
-}
-
-function resolveScopedAsset(
-  scope: AssetScope,
-  filename: string,
-): { absolutePath: string; relativePath: string; name: string } {
-  const name = safeBasename(filename);
-  const dir = scopeAssetsDir(scope);
-  mkdirSync(dir, { recursive: true });
-  const absolutePath = resolve(dir, name);
-  if (!absolutePath.startsWith(dir + sep) && absolutePath !== dir) {
-    throw new Error("Invalid asset path");
-  }
-  if (!existsSync(absolutePath)) {
-    throw new Error(`Asset not found: ${name}`);
-  }
-  return {
-    absolutePath,
-    relativePath: relative(resolve(scope.projectRoot), absolutePath).replace(
-      /\\/g,
-      "/",
-    ),
-    name,
-  };
-}
-
-function outPathScoped(
-  scope: AssetScope,
-  filename: string,
-): { absolutePath: string; relativePath: string; name: string } {
-  const name = safeBasename(filename);
-  const dir = scopeAssetsDir(scope);
-  mkdirSync(dir, { recursive: true });
-  const absolutePath = resolve(dir, name);
-  if (!absolutePath.startsWith(dir + sep) && absolutePath !== dir) {
-    throw new Error("Invalid output path");
-  }
-  return {
-    absolutePath,
-    relativePath: relative(resolve(scope.projectRoot), absolutePath).replace(
-      /\\/g,
-      "/",
-    ),
-    name,
-  };
-}
-
 function resolveLoopAsset(
   projectRoot: string,
   loopId: string,
@@ -226,7 +166,9 @@ export type MakeTransparentResult = {
   sourceFilename: string;
   /** True when chroma left corners opaque and circular soft-mask was applied. */
   usedCircularFallback?: boolean;
-  keyRgb?: [number, number, number];
+  /** True when corners were already transparent and the file was copied unchanged. */
+  alreadyTransparent?: boolean;
+  keyRgb?: [number, number, number] | null;
   threshold?: number;
 };
 
@@ -285,19 +227,23 @@ function medianChannel(values: number[]): number {
   return sorted[mid]!;
 }
 
-/** Median RGB of the four corner pixels (and a 1px inward neighbor each). */
+/**
+ * Median RGB of opaque corner pixels (and a 1px inward neighbor each).
+ * Samples with alpha under 250 are ignored. Returns null when fewer than
+ * three opaque samples remain — there is no plate to key.
+ */
 export function sampleCornerKeyRgb(
   px: Buffer,
   width: number,
   height: number,
-): [number, number, number] {
-  const at = (x: number, y: number): [number, number, number] => {
+): [number, number, number] | null {
+  const at = (x: number, y: number): [number, number, number, number] => {
     const i = (y * width + x) * 4;
-    return [px[i]!, px[i + 1]!, px[i + 2]!];
+    return [px[i]!, px[i + 1]!, px[i + 2]!, px[i + 3]!];
   };
   const xs = [0, Math.min(1, width - 1), Math.max(0, width - 2), width - 1];
   const ys = [0, Math.min(1, height - 1), Math.max(0, height - 2), height - 1];
-  const samples: Array<[number, number, number]> = [];
+  const samples: Array<[number, number, number, number]> = [];
   for (const x of new Set(xs)) {
     for (const y of new Set(ys)) {
       if (
@@ -308,12 +254,13 @@ export function sampleCornerKeyRgb(
       }
     }
   }
-  // Always include exact corners
   samples.push(at(0, 0), at(width - 1, 0), at(0, height - 1), at(width - 1, height - 1));
+  const opaque = samples.filter((s) => s[3] >= 250);
+  if (opaque.length < 3) return null;
   return [
-    medianChannel(samples.map((s) => s[0])),
-    medianChannel(samples.map((s) => s[1])),
-    medianChannel(samples.map((s) => s[2])),
+    medianChannel(opaque.map((s) => s[0])),
+    medianChannel(opaque.map((s) => s[1])),
+    medianChannel(opaque.map((s) => s[2])),
   ];
 }
 
@@ -344,16 +291,22 @@ function applyChromaKey(
 ): void {
   const [kr, kg, kb] = keyRgb;
   for (let i = 0; i < px.length; i += 4) {
+    const existing = px[i + 3]!;
+    if (existing === 0) continue;
     const r = px[i]!;
     const g = px[i + 1]!;
     const b = px[i + 2]!;
     const dist = Math.hypot(r - kr, g - kg, b - kb);
+    let next = existing;
     if (dist <= threshold) {
-      px[i + 3] = 0;
+      next = 0;
     } else if (dist < threshold + soft) {
       const t = (dist - threshold) / soft;
-      px[i + 3] = Math.round(255 * t);
+      next = Math.round(255 * t);
+    } else {
+      continue;
     }
+    px[i + 3] = Math.min(existing, next);
   }
 }
 
@@ -453,6 +406,21 @@ export async function makeTransparentDesignAsset(opts: {
   const px = Buffer.from(data);
   const keyRgb =
     opts.keyRgb ?? sampleCornerKeyRgb(px, info.width, info.height);
+  if (!keyRgb) {
+    if (src.absolutePath !== out.absolutePath) {
+      copyFileSync(src.absolutePath, out.absolutePath);
+    }
+    return {
+      relativePath: out.relativePath,
+      absolutePath: out.absolutePath,
+      width: info.width,
+      height: info.height,
+      hasAlpha: true,
+      sourceFilename: src.name,
+      alreadyTransparent: true,
+      keyRgb: null,
+    };
+  }
   const threshold = adaptiveChromaThreshold(keyRgb, opts.threshold);
 
   applyChromaKey(px, keyRgb, threshold, soft);
@@ -695,7 +663,7 @@ export async function deriveIconPackFromAsset(opts: {
 
 /** True when operator text asks for pixel edits, not invention. */
 export function promptLooksLikeImageEdit(text: string): boolean {
-  return /\b(alpha|transparent|transparency|remove\s*background|strip\s*black|chroma|cut\s*out|circular\s*mask|icon\s*pack|favicon|browser\s*pack|resize|trim|pad\s*image|rotate|greyscale|blur|sharpen|tint|crop|extract|flatten|modulate)\b/i.test(
+  return /\b(alpha|transparent|transparency|strip\s*black|chroma|cut\s*out|circular\s*mask|icon\s*pack|favicon|browser\s*pack|resize|trim|pad\s*image|rotate|greyscale|blur|sharpen|tint|crop|extract|flatten|modulate)\b|vectori[sz]e|vectori[sz]ation|\btrace\b|potrace|\bto\s+(?:an?\s+)?svg\b|\bas\s+(?:an?\s+)?svg\b|\bsvg\s+(?:version|copy|master)\b|png\s*(?:→|->|to)\s*svg|convert\b[^.]{0,40}\bsvg\b|remove\s+(?:the\s+|its\s+)?(?:background|bg)\b|background\s+removal/i.test(
     text ?? "",
   );
 }
@@ -738,6 +706,65 @@ export async function applyDesignImageOp(opts: {
   const filename =
     typeof params.filename === "string" ? params.filename : undefined;
 
+  if (op === "vectorize") {
+    const tokensCss =
+      typeof params.tokensCss === "string" ? params.tokensCss : undefined;
+    const palette = Array.isArray(params.palette)
+      ? (params.palette as VectorizeParams["palette"])
+      : undefined;
+    const loopPalette =
+      !tokensCss && !palette?.length
+        ? readLoopTokenPalette(opts.projectRoot, opts.loopId)
+        : [];
+    const result = await vectorizeDesignAsset({
+      projectRoot: opts.projectRoot,
+      loopId: opts.loopId,
+      sourceFilename: opts.sourceFilename,
+      filename,
+      tokensCss,
+      palette: palette?.length ? palette : loopPalette.length ? loopPalette : undefined,
+      maxColors: typeof params.maxColors === "number" ? params.maxColors : undefined,
+      snap:
+        params.snap === "tokens" || params.snap === "tokens+extra"
+          ? params.snap
+          : undefined,
+      colorMap: Array.isArray(params.colorMap)
+        ? (params.colorMap as VectorizeParams["colorMap"])
+        : undefined,
+      dropRegions: Array.isArray(params.dropRegions)
+        ? (params.dropRegions as VectorizeParams["dropRegions"])
+        : undefined,
+      variants: Array.isArray(params.variants)
+        ? (params.variants as number[])
+        : undefined,
+      previewSizes: Array.isArray(params.previewSizes)
+        ? (params.previewSizes as number[])
+        : undefined,
+      variantDrop: Array.isArray(params.variantDrop)
+        ? (params.variantDrop as string[])
+        : undefined,
+      variantThicken: Array.isArray(params.variantThicken)
+        ? (params.variantThicken as string[])
+        : undefined,
+      mats:
+        params.mats && typeof params.mats === "object"
+          ? (params.mats as VectorizeParams["mats"])
+          : undefined,
+    });
+    return {
+      op,
+      relativePath: result.relativePath,
+      absolutePath: result.absolutePath,
+      sourceFilename: result.sourceFilename,
+      summary: result.summary,
+      files: result.files.map((f) => ({
+        filename: f.filename,
+        relativePath: f.relativePath,
+        size: f.size,
+      })),
+    };
+  }
+
   if (op === "make_transparent") {
     const result = await makeTransparentDesignAsset({
       projectRoot: opts.projectRoot,
@@ -757,7 +784,9 @@ export async function applyDesignImageOp(opts: {
       relativePath: result.relativePath,
       absolutePath: result.absolutePath,
       sourceFilename: result.sourceFilename,
-      summary: `Keyed plate → alpha${fallback}: ${result.sourceFilename} → ${basename(result.relativePath)}`,
+      summary: result.alreadyTransparent
+        ? "Already transparent — no plate keyed"
+        : `Keyed plate → alpha${fallback}: ${result.sourceFilename} → ${basename(result.relativePath)}`,
     };
   }
 
@@ -989,6 +1018,10 @@ export async function applyDesignImagePipeline(opts: {
 }> {
   if (!opts.ops.length) {
     throw new Error("applyDesignImagePipeline requires at least one op");
+  }
+  const vectorAt = opts.ops.findIndex((step) => step.op === "vectorize");
+  if (vectorAt >= 0 && vectorAt !== opts.ops.length - 1) {
+    throw new Error("vectorize must be the last op in a pipeline");
   }
   let source = opts.sourceFilename;
   const results: ApplyDesignImageOpResult[] = [];

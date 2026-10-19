@@ -7,6 +7,7 @@ import {
   clearOpenverseTokenCache,
   generateDesignImage,
   importDesignImage,
+  worktreeAssetTarget,
   resolveDesignAssetOutPath,
   resolveServableDesignAsset,
   searchDesignImages,
@@ -41,6 +42,50 @@ describe("design-media", () => {
     roots.push(root);
     assert.equal(resolveServableDesignAsset(root, "../etc/passwd"), null);
     assert.equal(resolveServableDesignAsset(root, "a/b.png"), null);
+  });
+
+  it("worktreeAssetTarget follows the written basename", () => {
+    assert.equal(
+      worktreeAssetTarget("/wt/public/brand/logo.svg", "/p/design/logo.png"),
+      "/wt/public/brand/logo.png",
+    );
+  });
+
+  it("a .svg filename writes a png and a vectorize hint", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-media-svg-"));
+    roots.push(root);
+    const originalFetch = globalThis.fetch;
+    const pngB64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ data: [{ b64_json: pngB64 }] }), {
+        status: 200,
+      })) as typeof fetch;
+    try {
+      const out = await generateDesignImage({
+        projectRoot: root,
+        prompt: "mark",
+        filename: "logo.svg",
+        endpoint: {
+          id: "test-images",
+          label: "test",
+          baseUrl: "https://example.invalid/v1",
+          apiType: "openai-images",
+          modelId: "test-image-model",
+          capabilities: { chat: false, vision: false, imageGen: true },
+        },
+      });
+      assert.equal(out.format, "png");
+      assert.equal(out.requestedSvg, true);
+      assert.match(out.hint ?? "", /vectorize_design_image/);
+      assert.match(out.path, /logo\.png$/);
+      assert.equal(
+        readFileSync(out.path).subarray(0, 4).toString("hex"),
+        "89504e47",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("generateDesignImage hard-fails without endpoint", async () => {

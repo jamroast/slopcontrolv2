@@ -75,6 +75,50 @@ describe("sibling brand refs", () => {
     }
   });
 
+  it("detects placeholder and raster-named svg marks", () => {
+    const dir = mkdtempSync(join(tmpdir(), "slop-fallback-"));
+    try {
+      const legacy = join(dir, "mark.svg");
+      writeFileSync(
+        legacy,
+        `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512"/><circle cx="256" cy="200" r="72"/><text>Brand</text></svg>\n`,
+      );
+      const stamped = join(dir, "stamped.svg");
+      writeFileSync(
+        stamped,
+        `<svg data-slopcontrol-fallback="svg_fallback" viewBox="0 0 8 8"><path d="M0 0"/></svg>\n`,
+      );
+      const draft = join(dir, "draft.svg");
+      writeFileSync(
+        draft,
+        `<svg><rect/><circle/><text>Status:** draft</text></svg>\n`,
+      );
+      const reuse = join(dir, "mark-reuse.svg");
+      writeFileSync(reuse, `<svg><path d="M0 0h1"/></svg>\n`);
+      const raster = join(dir, "logo.svg");
+      writeFileSync(
+        raster,
+        Buffer.from(
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+          "base64",
+        ),
+      );
+      const real = join(dir, "real.svg");
+      writeFileSync(
+        real,
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M2 2h20v20z"/></svg>\n`,
+      );
+      assert.equal(isDesignFallbackBrandPath(legacy), true);
+      assert.equal(isDesignFallbackBrandPath(stamped), true);
+      assert.equal(isDesignFallbackBrandPath(draft), true);
+      assert.equal(isDesignFallbackBrandPath(reuse), true);
+      assert.equal(isDesignFallbackBrandPath(raster), true);
+      assert.equal(isDesignFallbackBrandPath(real), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("excerptCssTokens prefers :root", () => {
     const out = excerptCssTokens(
       "body{}\n:root { --x: 1; }\n.footer{}",

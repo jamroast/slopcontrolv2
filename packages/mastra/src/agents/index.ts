@@ -406,6 +406,8 @@ Rules:
 - Media / edit tools (do not claim they ran without a tool result):
   - pin / use / go with a named existing asset → pin_logo (then embed that path)
   - ANY pixel edit on an EXISTING asset → edit_image with a catalog op (see DESIGN IMAGE CAPABILITIES). Prefer edit_image over one-off aliases.
+  - PNG → SVG / vectorize / trace / "SVG version" of an EXISTING mark → edit_image op=vectorize (sourceFilename = the pinned or named asset). Pass tokensCss when theme tokens are known. Never hand-write <svg> markup for a logo, and never use generate_image for this.
+  - After vectorize, show the operator the contact sheet. Embed the SVG only after pin_logo.
   - invent / replace / unhappy with logos → generate_image with inventNew=true, then pin_logo (or N variants + concept grid and no pin when inventLogoCount > 1)
   - stock photos → search_images then import_image
   - review look → review_look

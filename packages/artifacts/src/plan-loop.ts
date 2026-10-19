@@ -384,6 +384,64 @@ export function writePlanLoopVersion(opts: {
   return { planPath, notesPath, requestPath, metaPath };
 }
 
+/**
+ * Decide what a plan-loop read returns. `planTotalChars` always reflects the
+ * file on disk. `includePlan: false` omits the body but does not pretend the
+ * document is missing.
+ */
+export function selectPlanLoopRead(opts: {
+  storedPlan: string | null;
+  includePlan: boolean;
+  planOffset?: number;
+  planLimit?: number;
+}): {
+  plan: string | null;
+  planTotalChars: number;
+  planPresent: boolean;
+  planOmitted: boolean;
+  planOffset: number;
+} {
+  const stored = opts.storedPlan;
+  const planTotalChars = stored?.length ?? 0;
+  const planPresent = Boolean(stored && stored.trim().length > 0);
+  if (!opts.includePlan) {
+    return {
+      plan: null,
+      planTotalChars,
+      planPresent,
+      planOmitted: planPresent,
+      planOffset: 0,
+    };
+  }
+  const planOffset = Math.max(0, Math.floor(opts.planOffset ?? 0));
+  const planLimitRaw = Math.floor(opts.planLimit ?? 0);
+  const planLimit = planLimitRaw > 0 ? Math.min(planLimitRaw, 64_000) : 0;
+  const plan =
+    stored && (planOffset > 0 || planLimit > 0)
+      ? planLimit > 0
+        ? stored.slice(planOffset, planOffset + planLimit)
+        : stored.slice(planOffset)
+      : stored;
+  return {
+    plan,
+    planTotalChars,
+    planPresent,
+    planOmitted: false,
+    planOffset: plan ? planOffset : 0,
+  };
+}
+
+/** One transcript line so a notes-only reply cannot be read as a missing plan. */
+export function formatPlanWroteReply(
+  version: number,
+  plan: string,
+  reply: string,
+): string {
+  const line = `Wrote PLAN.md v${version} (${plan.length} chars).`;
+  const base = reply.trim();
+  return base ? `${base}\n${line}` : line;
+}
+
 export function readPlanLoopPlanMd(
   projectRoot: string,
   loopId: string,

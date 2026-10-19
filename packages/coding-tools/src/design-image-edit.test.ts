@@ -8,9 +8,12 @@ import {
   alphaOutputFilename,
   circularMaskDesignAsset,
   deriveIconPackFromAsset,
+  applyDesignImagePipeline,
   makeTransparentDesignAsset,
   promptLooksLikeImageEdit,
+  sampleCornerKeyRgb,
 } from "./design-image-edit.js";
+import { potraceAvailability } from "./design-vectorize.js";
 
 describe("design-image-edit", () => {
   const roots: string[] = [];
@@ -260,6 +263,88 @@ describe("design-image-edit", () => {
     assert.equal(promptLooksLikeImageEdit("change to alpha channel"), true);
     assert.equal(promptLooksLikeImageEdit("cut out the circular logo"), true);
     assert.equal(promptLooksLikeImageEdit("invent a new logo mark"), false);
+    assert.equal(promptLooksLikeImageEdit("vectorize the logo"), true);
+    assert.equal(promptLooksLikeImageEdit("trace this png"), true);
+    assert.equal(promptLooksLikeImageEdit("convert the png to svg"), true);
+    assert.equal(promptLooksLikeImageEdit("make an SVG version of the mark"), true);
+    assert.equal(promptLooksLikeImageEdit("remove the background"), true);
+    assert.equal(promptLooksLikeImageEdit("remove its bg"), true);
+    assert.equal(promptLooksLikeImageEdit("invent a new logo for a coffee brand"), false);
+    assert.equal(promptLooksLikeImageEdit("generate a wide hero banner"), false);
+    assert.equal(promptLooksLikeImageEdit("design an icon set from scratch"), false);
+    assert.equal(promptLooksLikeImageEdit("an svg-friendly flat style"), false);
+  });
+
+  it("does not key a disk that is already on a transparent plate", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-alpha-disk-"));
+    roots.push(root);
+    const loopId = "loop-alpha";
+    const dir = join(root, ".slopcontrol", "design-loops", loopId, "assets");
+    mkdirSync(dir, { recursive: true });
+    const size = 48;
+    const raw = Buffer.alloc(size * size * 4, 0);
+    const paint = (rgb: [number, number, number]) => {
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const dx = x - size / 2;
+          const dy = y - size / 2;
+          if (Math.hypot(dx, dy) >= size * 0.28) continue;
+          const i = (y * size + x) * 4;
+          raw[i] = rgb[0];
+          raw[i + 1] = rgb[1];
+          raw[i + 2] = rgb[2];
+          raw[i + 3] = 255;
+        }
+      }
+    };
+    paint([0, 0, 0]);
+    const { data: cornerPx, info: cornerInfo } = await sharp(raw, {
+      raw: { width: size, height: size, channels: 4 },
+    })
+      .ensureAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    assert.equal(sampleCornerKeyRgb(cornerPx, cornerInfo.width, cornerInfo.height), null);
+
+    await sharp(raw, { raw: { width: size, height: size, channels: 4 } })
+      .png()
+      .toFile(join(dir, "mark.png"));
+    const black = await makeTransparentDesignAsset({
+      projectRoot: root,
+      loopId,
+      sourceFilename: "mark.png",
+      filename: "mark-alpha.png",
+    });
+    assert.equal(black.alreadyTransparent, true);
+    const blackRaw = await sharp(black.absolutePath).ensureAlpha().raw().toBuffer({
+      resolveWithObject: true,
+    });
+    const bci =
+      (Math.floor(blackRaw.info.height / 2) * blackRaw.info.width +
+        Math.floor(blackRaw.info.width / 2)) *
+      4;
+    assert.equal(blackRaw.data[bci + 3], 255);
+
+    raw.fill(0);
+    paint([0x11, 0x11, 0x11]);
+    await sharp(raw, { raw: { width: size, height: size, channels: 4 } })
+      .png()
+      .toFile(join(dir, "char.png"));
+    const charcoal = await makeTransparentDesignAsset({
+      projectRoot: root,
+      loopId,
+      sourceFilename: "char.png",
+      filename: "char-alpha.png",
+    });
+    const cRaw = await sharp(charcoal.absolutePath).ensureAlpha().raw().toBuffer({
+      resolveWithObject: true,
+    });
+    const cci =
+      (Math.floor(cRaw.info.height / 2) * cRaw.info.width +
+        Math.floor(cRaw.info.width / 2)) *
+      4;
+    assert.equal(cRaw.data[cci + 3], 255);
+    assert.equal(cRaw.data[cci], 0x11);
   });
 
   it("assetsDir scope: icon pack + alpha derive without a loopId (design stage)", async () => {
@@ -346,5 +431,52 @@ describe("design-image-edit", () => {
     assert.equal(pack.hasAlpha, true);
     const meta = await sharp(join(dir, "icon-v9-32.png")).metadata();
     assert.equal(meta.hasAlpha, true);
+  });
+
+  it("vectorize must be the last pipeline op", async () => {
+    await assert.rejects(
+      () =>
+        applyDesignImagePipeline({
+          projectRoot: "/tmp/unused",
+          loopId: "loop-1",
+          sourceFilename: "mark.png",
+          ops: [
+            { op: "vectorize" },
+            { op: "resize", params: { width: 16 } },
+          ],
+        }),
+      /vectorize must be the last op/,
+    );
+  });
+
+  it("trim then vectorize traces the trimmed raster", async (t) => {
+    if (!potraceAvailability().available) t.skip("potrace not installed");
+    const projectRoot = mkdtempSync(join(tmpdir(), "slop-pipe-"));
+    roots.push(projectRoot);
+    const loopId = "loop-vec";
+    const dir = join(projectRoot, ".slopcontrol", "design-loops", loopId, "assets");
+    mkdirSync(dir, { recursive: true });
+    const size = 48;
+    const raw = Buffer.alloc(size * size * 4, 0);
+    for (let y = 8; y < 40; y++) {
+      for (let x = 8; x < 40; x++) {
+        const i = (y * size + x) * 4;
+        raw[i] = 0xd9;
+        raw[i + 1] = 0x48;
+        raw[i + 2] = 0x0f;
+        raw[i + 3] = 255;
+      }
+    }
+    await sharp(raw, { raw: { width: size, height: size, channels: 4 } })
+      .png()
+      .toFile(join(dir, "mark.png"));
+    const out = await applyDesignImagePipeline({
+      projectRoot,
+      loopId,
+      sourceFilename: "mark.png",
+      ops: [{ op: "trim" }, { op: "vectorize", params: { variants: [], previewSizes: [] } }],
+    });
+    assert.match(out.summaries.join("\n"), /Vectorized/);
+    assert.ok(out.results.at(-1)?.relativePath.endsWith(".svg"));
   });
 });

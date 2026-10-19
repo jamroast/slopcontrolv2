@@ -198,7 +198,8 @@ Real projects may be audited read-only; writing `BLUEPRINT.md` only via `reconci
 - `GET /projects/:id/design-loops/:loopId/assets/:name` — serve a loop asset file (PNG/etc.) for remote preview
 - `POST /projects/:id/design-loops/:loopId/accept` / `implement` / `relaunch-research` / `review`
 - `POST /projects/:id/relaunch-design-research` — same recovery as `relaunch-research`; body `{ loopId? , phaseId? , dependsOn? }`
-- `POST /projects/:id/design-images` — generate raster (`designImage`)
+- `POST /projects/:id/design-images` — generate raster (`designImage`). A `.svg` filename writes `<stem>.png` and returns `requestedSvg: true` plus a hint to vectorize; raster bytes are never stored under an `.svg` name. Pass `vectorize: true` to trace that raster into `<stem>.svg` in the same call.
+- `POST /projects/:id/design-images/vectorize` — trace an existing raster (`loopId` or `phaseId`, `sourceFilename`) into a flat SVG with retraced 16/32 variants, validation, and preview PNGs. Requires the `potrace` CLI (`brew install potrace`, or `SLOPCONTROL_POTRACE_BIN`). An `.svg` source is validate-only. The same op is `edit_image` `op=vectorize` and MCP `vectorize_design_image`.
 - `POST /projects/:id/design-images/search` — Openverse search
 - `POST /projects/:id/design-images/import` — import Openverse id into loop assets
 

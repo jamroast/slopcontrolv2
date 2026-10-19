@@ -153,6 +153,8 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
       plan?: string;
       planTotalChars?: number;
       planOffset?: number;
+      planOmitted?: boolean;
+      planPresent?: boolean;
       notes?: string;
       transcript?: string;
       error?: string;
@@ -193,16 +195,25 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
     const planOffset =
       typeof parsed.planOffset === "number" ? parsed.planOffset : 0;
     const planEnd = plan ? planOffset + plan.length : 0;
+    const planChars =
+      planTotalChars !== null ? planTotalChars : plan ? plan.length : null;
     const planContinuation =
       plan && planTotalChars !== null && planEnd < planTotalChars
         ? `plan_slice: chars ${planOffset}..${planEnd} of ${planTotalChars} — call plan_loop_get with offset ${planEnd} for the next chunk (repeat until offset ${planTotalChars})`
         : null;
+    const planOmitted =
+      parsed.planOmitted === true ||
+      (!plan && planChars !== null && planChars > 0);
     return [
       `loopId: ${loopId}`,
       `status: ${parsed.loop?.status ?? "open"}`,
       parsed.version !== undefined ? `version: ${parsed.version}` : null,
       parsed.phaseId ? `phaseId: ${parsed.phaseId}` : null,
       cmLine,
+      planChars !== null ? `planChars: ${planChars}` : null,
+      planOmitted
+        ? "plan body omitted — call plan_loop_get without includePlan=false to read PLAN.md"
+        : null,
       parsed.usedScaffold ? "usedScaffold: true" : null,
       parsed.hint ? `hint: ${parsed.hint}` : null,
       parsed.next ? `next: ${parsed.next}` : null,
@@ -1990,7 +2001,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "plan_loop_get",
       description:
-        "Read plan-loop status and PLAN.md (does NOT revise). When revisionRequired is true, call plan_loop_continue next. Pass includePlan=false for meta-only. Long plans page: pass offset (char index) + optional limit; the response's planTotalChars tells you how much remains — keep reading with offset until you have the full plan.",
+        "Read plan-loop status and PLAN.md (does NOT revise). When revisionRequired is true, call plan_loop_continue next. The body is included unless you pass includePlan=false (meta-only). planTotalChars is the on-disk length either way: 0 means the file is missing or empty, not that the body was hidden. Long plans page: pass offset (char index) + optional limit; keep reading with offset until you have the full plan.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2131,8 +2142,58 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           filename: { type: "string" },
           width: { type: "number" },
           height: { type: "number" },
+          vectorize: {
+            type: "boolean",
+            description:
+              "When filename ends .svg, generate the raster then trace it to that svg.",
+          },
         },
         required: ["projectId", "prompt"],
+      },
+    },
+    {
+      name: "vectorize_design_image",
+      description:
+        "Trace an existing raster design asset (PNG/WebP/JPEG) into a flat production SVG: palette/tokens.css colours, tight viewBox, retraced 16/32 variants, validation and preview PNGs. Pass an .svg sourceFilename to validate an existing SVG only. Never invents a mark.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          projectId: { type: "string" },
+          loopId: { type: "string" },
+          phaseId: { type: "string" },
+          sourceFilename: { type: "string" },
+          tokensCss: {
+            type: "string",
+            description:
+              "Project-relative tokens.css; :root hex vars become the palette",
+          },
+          palette: { type: "array", items: { type: "string" } },
+          maxColors: { type: "number" },
+          snap: { type: "string", enum: ["tokens", "tokens+extra"] },
+          colorMap: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                from: { type: "string" },
+                to: { type: "string" },
+              },
+            },
+          },
+          dropRegions: { type: "array", items: { type: "object" } },
+          variants: { type: "array", items: { type: "number" } },
+          variantDrop: { type: "array", items: { type: "string" } },
+          variantThicken: { type: "array", items: { type: "string" } },
+          mats: {
+            type: "object",
+            properties: {
+              dark: { type: "string" },
+              light: { type: "string" },
+            },
+          },
+          filename: { type: "string" },
+        },
+        required: ["projectId"],
       },
     },
     {
@@ -4926,6 +4987,41 @@ export async function dispatchSlopcontrolTool(
               filename: args.filename,
               width: args.width,
               height: args.height,
+              vectorize: args.vectorize === true,
+            }),
+          },
+        );
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "vectorize_design_image") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        const res = await fetch(
+          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-images/vectorize`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              loopId: args.loopId,
+              phaseId: args.phaseId,
+              sourceFilename: args.sourceFilename,
+              tokensCss: args.tokensCss,
+              palette: args.palette,
+              maxColors: args.maxColors,
+              snap: args.snap,
+              colorMap: args.colorMap,
+              dropRegions: args.dropRegions,
+              variants: args.variants,
+              variantDrop: args.variantDrop,
+              variantThicken: args.variantThicken,
+              mats: args.mats,
+              filename: args.filename,
             }),
           },
         );

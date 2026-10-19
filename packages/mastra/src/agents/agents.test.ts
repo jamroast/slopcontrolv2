@@ -98,6 +98,12 @@ describe("ask / agent chat tool split", () => {
       assert.ok("pin_logo" in loopTools);
       assert.ok("make_transparent" in loopTools);
       assert.ok("edit_image" in loopTools);
+      const loopInstructions = await designLoop.getInstructions();
+      const loopText =
+        typeof loopInstructions === "string"
+          ? loopInstructions
+          : JSON.stringify(loopInstructions);
+      assert.match(loopText, /op=vectorize/);
       assert.ok("circular_mask" in loopTools);
       assert.ok("derive_icon_pack" in loopTools);
       assert.ok("resize_image" in loopTools);

@@ -5,6 +5,12 @@ import {
   endpointSupportsImageGen,
   resolveEndpointSecrets,
 } from "@slopcontrol/llm";
+import {
+  assertBytesMatchExtension,
+  sniffImageFormat,
+  withExtension,
+  type SniffedFormat,
+} from "./image-format.js";
 
 export interface GenerateImageOptions {
   prompt: string;
@@ -44,7 +50,7 @@ export interface GenerateImageResult {
   bytes: number;
   skipped?: boolean;
   reason?: string;
-  format: "png" | "svg" | "webp" | "jpeg";
+  format: "png" | "svg" | "webp" | "jpeg" | "gif";
 }
 
 export interface DesignTool {
@@ -77,7 +83,8 @@ export function writeSvgFallback(opts: {
     (opts.brandName ?? opts.prompt).trim().slice(0, 48) || "Brand",
   );
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img">
+<!-- slopcontrol:svg_fallback -->
+<svg xmlns="http://www.w3.org/2000/svg" data-slopcontrol-fallback="svg_fallback" width="512" height="512" viewBox="0 0 512 512" role="img">
   <rect width="512" height="512" fill="${escapeXml(bg)}"/>
   <circle cx="256" cy="200" r="72" fill="${escapeXml(accent)}"/>
   <text x="256" y="360" text-anchor="middle" font-family="Georgia, serif" font-size="36" fill="${escapeXml(fg)}">${label}</text>
@@ -95,18 +102,20 @@ export function writeSvgFallback(opts: {
   };
 }
 
-function decodeImagePayload(data: string): { bytes: Buffer; format: GenerateImageResult["format"] } {
-  if (data.startsWith("data:")) {
-    const m = /^data:image\/(png|jpeg|jpg|webp);base64,(.+)$/i.exec(data);
-    if (m?.[2]) {
-      const fmt = (m[1] ?? "png").toLowerCase();
-      return {
-        bytes: Buffer.from(m[2], "base64"),
-        format: fmt === "jpg" || fmt === "jpeg" ? "jpeg" : (fmt as "png" | "webp"),
-      };
-    }
+function formatFromSniff(sniffed: SniffedFormat): GenerateImageResult["format"] {
+  if (sniffed === "jpeg") return "jpeg";
+  if (sniffed === "webp" || sniffed === "gif" || sniffed === "svg" || sniffed === "png") {
+    return sniffed;
   }
-  return { bytes: Buffer.from(data, "base64"), format: "png" };
+  throw new Error("unknown image format");
+}
+
+function decodeImagePayload(data: string): { bytes: Buffer; format: GenerateImageResult["format"] } {
+  const comma = data.startsWith("data:") ? data.indexOf(",") : -1;
+  const payload = comma >= 0 ? data.slice(comma + 1) : data;
+  const bytes = Buffer.from(payload, "base64");
+  const sniffed = sniffImageFormat(bytes);
+  return { bytes, format: formatFromSniff(sniffed) };
 }
 
 export class OllamaImagesDesignTool implements DesignTool {
@@ -214,10 +223,13 @@ export class OllamaImagesDesignTool implements DesignTool {
       }
 
       const decoded = decodeImagePayload(payload);
-      mkdirSync(dirname(opts.outPath), { recursive: true });
-      writeFileSync(opts.outPath, decoded.bytes);
+      const sniffed = sniffImageFormat(decoded.bytes);
+      const outPath = withExtension(opts.outPath, sniffed);
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, decoded.bytes);
+      assertBytesMatchExtension(outPath, decoded.bytes);
       return {
-        path: opts.outPath,
+        path: outPath,
         bytes: decoded.bytes.length,
         format: decoded.format,
       };

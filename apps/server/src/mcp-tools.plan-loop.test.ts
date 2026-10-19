@@ -35,6 +35,23 @@ describe("formatPlanLoopMcpEnvelope plan paging", () => {
     assert.ok(!out.includes("plan_slice:"), out);
   });
 
+  it("prints planChars and tells the caller when the body was omitted", () => {
+    const body = JSON.stringify({
+      loop: { id: "loop-1", status: "open", currentVersion: 2 },
+      loopId: "loop-1",
+      version: 2,
+      plan: null,
+      planTotalChars: 9780,
+      planOmitted: true,
+      notes: "Full-revise plan below.",
+      versions: { tip: 2, versions: [] },
+    });
+    const out = formatPlanLoopMcpEnvelope(body, true);
+    assert.match(out, /planChars: 9780/);
+    assert.match(out, /plan body omitted — call plan_loop_get without includePlan=false/);
+    assert.match(out, /notes: Full-revise plan below\./);
+  });
+
   it("omits the hint for legacy responses without paging fields", () => {
     const body = JSON.stringify({
       loop: { id: "loop-1", status: "open", currentVersion: 1 },

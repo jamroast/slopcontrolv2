@@ -1,3 +1,4 @@
+import { potraceAvailability } from "@slopcontrol/coding-tools";
 import { loadConfig } from "./config.js";
 import { resolveCodingEngine } from "./engines.js";
 import { checkHttpHealth } from "./health.js";
@@ -28,6 +29,12 @@ export async function cmdStatus(cwd: string = process.cwd()): Promise<void> {
     } else {
       console.log("pidfile: (none)");
     }
+    const potrace = potraceAvailability();
+    console.log(
+      potrace.available
+        ? `potrace: available  ${potrace.bin}`
+        : "potrace: missing",
+    );
     console.log("");
 
     if (codingMode === "shared") {

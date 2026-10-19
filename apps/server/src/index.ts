@@ -44,6 +44,7 @@ import {
   createDesignLoopMeta,
   writeDesignLoopMeta,
   readDesignLoopMeta,
+  readDesignLoopSelections,
   appendDesignLoopTranscript,
   writeDesignLoopVersion,
   readDesignLoopMockHtml,
@@ -133,6 +134,8 @@ import {
   appendPlanLoopTranscript,
   writePlanLoopVersion,
   readPlanLoopPlanMd,
+  selectPlanLoopRead,
+  formatPlanWroteReply,
   readPlanLoopNotes,
   readPlanLoopRequest,
   readPlanLoopTranscript,
@@ -174,6 +177,12 @@ import {
   searchDesignImages,
   importDesignImageById,
   resolveServableDesignAsset,
+  sniffImageFormat,
+  extensionAgrees,
+  contentTypeForFormat,
+  potraceAvailability,
+  vectorizeDesignAsset,
+  vectorizeErrorCode,
   reviewDesignLoopLook,
   listCodingTools,
 } from "@slopcontrol/coding-tools";
@@ -1185,6 +1194,7 @@ app.get("/health", async (_req, res) => {
     mastraStorage,
     npmRegistry,
     mcp: { path: "/mcp", transport: "streamable-http" },
+    potrace: potraceAvailability(),
   });
 });
 
@@ -2901,25 +2911,16 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
         ? meta.currentVersion
         : meta.acceptedVersion ?? meta.currentVersion;
   const includePlan = req.query.includePlan !== "false";
-  const fullPlan =
-    includePlan && Number.isFinite(version) && version > 0
+  const storedPlan =
+    Number.isFinite(version) && version > 0
       ? readPlanLoopPlanMd(project.rootPath, meta.id, version)
       : null;
-  // Paging for chat/MCP consumers: PLAN.md regularly exceeds the chat tool
-  // result budget, so agents read it in slices instead of seeing a silent
-  // front-clip (the "clipped at Approach → Phase A" complaint).
-  const planOffset = Math.max(
-    0,
-    Math.floor(Number(req.query.planOffset ?? 0) || 0),
-  );
-  const planLimitRaw = Math.floor(Number(req.query.planLimit ?? 0) || 0);
-  const planLimit = planLimitRaw > 0 ? Math.min(planLimitRaw, 64_000) : 0;
-  const plan =
-    fullPlan && (planOffset > 0 || planLimit > 0)
-      ? planLimit > 0
-        ? fullPlan.slice(planOffset, planOffset + planLimit)
-        : fullPlan.slice(planOffset)
-      : fullPlan;
+  const selected = selectPlanLoopRead({
+    storedPlan,
+    includePlan,
+    planOffset: Number(req.query.planOffset ?? 0) || 0,
+    planLimit: Number(req.query.planLimit ?? 0) || 0,
+  });
   const notes =
     Number.isFinite(version) && version > 0
       ? readPlanLoopNotes(project.rootPath, meta.id, version)
@@ -2929,7 +2930,7 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
       ? readPlanLoopVersionMeta(project.rootPath, meta.id, version)
       : null;
   let acceptance = readPlanLoopAcceptance(project.rootPath, meta.id);
-  if (!acceptance && fullPlan?.trim() && Number.isFinite(version) && version > 0) {
+  if (!acceptance && storedPlan?.trim() && Number.isFinite(version) && version > 0) {
     acceptance = seedPlanLoopAcceptance({
       projectRoot: project.rootPath,
       loopId: meta.id,
@@ -2942,7 +2943,7 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
   const progress = summarizePlanLoopProgress({
     meta,
     acceptance,
-    hasPlan: Boolean(fullPlan?.trim()),
+    hasPlan: selected.planPresent,
   });
   const revisionRequired =
     meta.status === "open" &&
@@ -2952,9 +2953,11 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
     loop: meta,
     loopId: meta.id,
     version: Number.isFinite(version) ? version : null,
-    plan,
-    planTotalChars: fullPlan?.length ?? 0,
-    planOffset: plan ? planOffset : 0,
+    plan: selected.plan,
+    planTotalChars: selected.planTotalChars,
+    planPresent: selected.planPresent,
+    planOmitted: selected.planOmitted,
+    planOffset: selected.planOffset,
     notes,
     transcript: readPlanLoopTranscript(project.rootPath, meta.id),
     messages: readLoopChatMessages(project.rootPath, "plan", meta.id),
@@ -3126,13 +3129,19 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
           ? { version, reason: notes, at: new Date().toISOString() }
           : null,
       ) ?? next;
-    const operatorReply = reply || notes || `Plan loop v${version} updated.`;
+    const operatorReply = formatPlanWroteReply(
+      version,
+      plan,
+      reply || notes || `Plan loop v${version} updated.`,
+    );
     const messages = planChat.finalizeAssistant(operatorReply, { version });
     const planStartPayload = {
       loop: next,
       loopId: next.id,
       version,
       plan,
+      planTotalChars: plan.length,
+      planPresent: plan.trim().length > 0,
       notes,
       reply: operatorReply,
       messages,
@@ -3335,7 +3344,11 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
           ? { version, reason: notes, at: new Date().toISOString() }
           : null,
       ) ?? next;
-    const operatorReply = reply || notes || `Plan loop v${version} updated.`;
+    const operatorReply = formatPlanWroteReply(
+      version,
+      plan,
+      reply || notes || `Plan loop v${version} updated.`,
+    );
     const messages = planChat.finalizeAssistant(operatorReply, { version });
     const planContinuePayload = {
       loop: next,
@@ -3343,6 +3356,8 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
       version,
       baseVersion,
       plan,
+      planTotalChars: plan.length,
+      planPresent: plan.trim().length > 0,
       notes,
       reply: operatorReply,
       messages,
@@ -3772,13 +3787,19 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
           ? { version, reason: notes, at: new Date().toISOString() }
           : null,
       ) ?? meta;
-    const operatorReply = reply || notes || `Plan loop v${version} updated.`;
+    const operatorReply = formatPlanWroteReply(
+      version,
+      plan,
+      reply || notes || `Plan loop v${version} updated.`,
+    );
     const messages = planChat.finalizeAssistant(operatorReply, { version });
     const retryPayload = {
       loop: next,
       loopId: next.id,
       version,
       plan,
+      planTotalChars: plan.length,
+      planPresent: plan.trim().length > 0,
       notes,
       reply: operatorReply,
       messages,
@@ -6618,6 +6639,7 @@ app.post("/projects/:id/design-images", async (req, res) => {
         typeof req.body?.width === "number" ? req.body.width : undefined,
       height:
         typeof req.body?.height === "number" ? req.body.height : undefined,
+      vectorize: req.body?.vectorize === true,
     });
     if (loopId) {
       appendDesignLoopTranscript(
@@ -6633,10 +6655,96 @@ app.post("/projects/:id/design-images", async (req, res) => {
       bytes: result.bytes,
       format: result.format,
       loopId: loopId ?? null,
+      requestedSvg: result.requestedSvg ?? false,
+      hint: result.hint ?? null,
     });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     res.status(400).json({ error: errMsg });
+  }
+});
+
+app.post("/projects/:id/design-images/vectorize", async (req, res) => {
+  const project = store.getProject(req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const loopId =
+    typeof req.body?.loopId === "string" ? req.body.loopId.trim() : "";
+  const phaseId =
+    typeof req.body?.phaseId === "string" ? req.body.phaseId.trim() : "";
+  if ((loopId && phaseId) || (!loopId && !phaseId)) {
+    res.status(400).json({ error: "invalid_params" });
+    return;
+  }
+  if (loopId) {
+    const meta = readDesignLoopMeta(project.rootPath, loopId);
+    if (!meta || meta.projectId !== project.id) {
+      res.status(404).json({ error: "Design loop not found" });
+      return;
+    }
+  }
+  let sourceFilename =
+    typeof req.body?.sourceFilename === "string"
+      ? req.body.sourceFilename.trim()
+      : "";
+  if (!sourceFilename && loopId) {
+    sourceFilename =
+      readDesignLoopSelections(project.rootPath, loopId).find(
+        (s) => s.slot === "logo" && s.asset,
+      )?.asset ?? "";
+  }
+  if (!sourceFilename) {
+    res.status(400).json({ error: "source_not_found" });
+    return;
+  }
+  const body = req.body ?? {};
+  try {
+    const result = await vectorizeDesignAsset({
+      projectRoot: project.rootPath,
+      loopId: loopId || undefined,
+      assetsDir: phaseId
+        ? `.slopcontrol/phases/${phaseId}/design/assets`
+        : undefined,
+      sourceFilename,
+      tokensCss:
+        typeof body.tokensCss === "string" ? body.tokensCss : undefined,
+      palette: Array.isArray(body.palette) ? body.palette : undefined,
+      maxColors: typeof body.maxColors === "number" ? body.maxColors : undefined,
+      snap: body.snap === "tokens" || body.snap === "tokens+extra" ? body.snap : undefined,
+      colorMap: Array.isArray(body.colorMap) ? body.colorMap : undefined,
+      dropRegions: Array.isArray(body.dropRegions) ? body.dropRegions : undefined,
+      variants: Array.isArray(body.variants) ? body.variants : undefined,
+      variantDrop: Array.isArray(body.variantDrop) ? body.variantDrop : undefined,
+      variantThicken: Array.isArray(body.variantThicken)
+        ? body.variantThicken
+        : undefined,
+      mats:
+        body.mats && typeof body.mats === "object" ? body.mats : undefined,
+      filename: typeof body.filename === "string" ? body.filename : undefined,
+    });
+    if (loopId) {
+      appendDesignLoopTranscript(
+        project.rootPath,
+        loopId,
+        "assistant",
+        `Vectorized ${result.sourceFilename} → ${basename(result.relativePath)} (${result.status})`,
+      );
+    }
+    res.status(201).json({
+      status: result.status,
+      relativePath: result.relativePath,
+      files: result.files,
+      report: result.report,
+      ...(loopId ? { loopId } : {}),
+      ...(phaseId ? { phaseId } : {}),
+    });
+  } catch (error) {
+    const code = vectorizeErrorCode(error);
+    res.status(400).json({
+      error: code ?? (error instanceof Error ? error.message : String(error)),
+    });
   }
 });
 
@@ -6749,6 +6857,28 @@ app.post("/projects/:id/design-images/import", async (req, res) => {
   }
 });
 
+function sendDesignAssetFile(
+  res: express.Response,
+  path: string,
+): void {
+  try {
+    const buf = readFileSync(path);
+    const sniffed = sniffImageFormat(buf);
+    if (sniffed !== "unknown" && !extensionAgrees(path, sniffed)) {
+      const type = contentTypeForFormat(sniffed);
+      log.warn(
+        "design-asset",
+        "bytes disagree with extension; serving sniffed type",
+        { path, sniffed },
+      );
+      if (type) res.type(type);
+    }
+  } catch {
+    /* sendFile still attempts the path */
+  }
+  res.sendFile(path);
+}
+
 app.get("/projects/:id/design-images/:name", (req, res) => {
   const project = store.getProject(req.params.id);
   if (!project) {
@@ -6763,7 +6893,7 @@ app.get("/projects/:id/design-images/:name", (req, res) => {
     res.status(404).json({ error: "Asset not found" });
     return;
   }
-  res.sendFile(path);
+  sendDesignAssetFile(res, path);
 });
 
 app.get(
@@ -6788,7 +6918,7 @@ app.get(
       res.status(404).json({ error: "Asset not found" });
       return;
     }
-    res.sendFile(path);
+    sendDesignAssetFile(res, path);
   },
 );
 

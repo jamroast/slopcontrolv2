@@ -106,11 +106,21 @@ export type GenerateDesignImageInput = {
   filename?: string;
   width?: number;
   height?: number;
+  /** When true and the filename is .svg, trace the written raster into that svg. */
+  vectorize?: boolean;
 };
 
 export type GenerateDesignImageOutput = GenerateImageResult & {
   relativePath: string;
+  /** True when the caller asked for a .svg name and a raster was written instead. */
+  requestedSvg?: boolean;
+  hint?: string;
 };
+
+/** Worktree copy target follows the file that was actually written. */
+export function worktreeAssetTarget(wtOut: string, writtenPath: string): string {
+  return join(dirname(wtOut), basename(writtenPath));
+}
 
 /**
  * Operator/MCP/chat-invoked generation — hard-fails without a usable image endpoint
@@ -127,10 +137,14 @@ export async function generateDesignImage(
     );
   }
 
+  const requestedSvg = /\.svg$/i.test(opts.filename ?? "");
+  const filename = requestedSvg
+    ? (opts.filename ?? "").replace(/\.svg$/i, ".png")
+    : opts.filename;
   const out = resolveDesignAssetOutPath({
     projectRoot: opts.projectRoot,
     loopId: opts.loopId,
-    filename: opts.filename,
+    filename,
     ext: "png",
   });
 
@@ -153,12 +167,41 @@ export async function generateDesignImage(
     );
   }
 
+  const stem = basename(opts.filename ?? "asset").replace(/\.svg$/i, "");
+  if (opts.vectorize && requestedSvg) {
+    const { vectorizeDesignAsset } = await import("./design-vectorize.js");
+    const traced = await vectorizeDesignAsset({
+      projectRoot: opts.projectRoot,
+      loopId: opts.loopId,
+      assetsDir: relative(resolve(opts.projectRoot), dirname(result.path)).replace(
+        /\\/g,
+        "/",
+      ),
+      sourceFilename: basename(result.path),
+      filename: `${stem}.svg`,
+    });
+    return {
+      ...result,
+      path: traced.absolutePath,
+      relativePath: traced.relativePath,
+      format: "svg",
+      bytes: traced.files.find((f) => f.kind === "svg")?.size ?? result.bytes,
+      requestedSvg: true,
+      hint: traced.summary,
+    };
+  }
   return {
     ...result,
     relativePath: relative(resolve(opts.projectRoot), result.path).replace(
       /\\/g,
       "/",
     ),
+    ...(requestedSvg
+      ? {
+          requestedSvg: true,
+          hint: `generated a raster; call vectorize_design_image (or edit_image op=vectorize) to make ${stem}.svg`,
+        }
+      : {}),
   };
 }
 

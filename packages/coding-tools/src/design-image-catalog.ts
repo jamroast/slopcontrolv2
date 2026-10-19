@@ -1,10 +1,11 @@
 /**
- * Machine-readable catalog of sharp-backed image ops for design loops.
+ * Machine-readable catalog of sharp/potrace-backed image ops for design loops.
  * The LLM maps operator language onto these ids via edit_image — do not
  * proliferate one-off Mastra tools for each new ask.
  */
 
 export type DesignImageOpId =
+  | "vectorize"
   | "make_transparent"
   | "circular_mask"
   | "resize"
@@ -31,9 +32,27 @@ export type DesignImageCapability = {
   paramsHint: string;
   examples: string[];
   neverFor: string[];
+  engine?: "sharp" | "potrace";
 };
 
 export const DESIGN_IMAGE_CAPABILITIES: readonly DesignImageCapability[] = [
+  {
+    id: "vectorize",
+    title: "Vectorize (PNG → SVG)",
+    description:
+      "Trace an EXISTING raster mark into a flat SVG: quantise colours, snap to the palette/tokens.css, one potrace layer per colour, tight viewBox, retraced 16/32 variants, validation + preview PNGs. Never invents; never hand-writes SVG.",
+    sharpPrimitives: ["ensureAlpha", "raw", "png"],
+    engine: "potrace",
+    paramsHint:
+      "tokensCss?; palette?; maxColors?; snap?: 'tokens'|'tokens+extra'; colorMap?: {from,to}[]; dropRegions?: {x,y,w,h}[]; variants?: number[]; variantDrop?; variantThicken?; mats?: {dark,light}; filename?",
+    examples: [
+      "vectorize the logo",
+      "convert this png to svg",
+      "trace the mark",
+      "make an SVG version",
+    ],
+    neverFor: ["invent a new mark", "photos / gradient art", "wordmark text"],
+  },
   {
     id: "make_transparent",
     title: "Chroma-key / alpha plate",
@@ -216,7 +235,7 @@ export function assertDesignImageOp(id: string): DesignImageOpId {
 /** Inject into design-agent / edit_image tool description. */
 export function formatDesignImageCatalogForLlm(): string {
   const lines = [
-    "DESIGN IMAGE CAPABILITIES (sharp-backed; call edit_image with op id):",
+    "DESIGN IMAGE CAPABILITIES (sharp/potrace-backed; call edit_image with op id):",
     "Map the operator request onto one or more of these. If none fit and inventLogo is false, say so in chat and suggest the closest ops — do not invent via Flux.",
     "",
   ];

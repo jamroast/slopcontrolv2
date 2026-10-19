@@ -7,20 +7,62 @@ const CONSUMED_LOGO_RE =
 const NEXT_IMAGE_LOGO_RE =
   /(?:src):\s*["']([^"']*(?:\/images\/logo[^"']*))["']/gi;
 
+function rasterMagic(buf: Buffer): boolean {
+  if (
+    buf.length >= 8 &&
+    buf[0] === 0x89 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x4e &&
+    buf[3] === 0x47
+  ) {
+    return true;
+  }
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return true;
+  }
+  if (buf.length >= 6) {
+    const sig = buf.subarray(0, 6).toString("ascii");
+    if (sig === "GIF87a" || sig === "GIF89a") return true;
+  }
+  return (
+    buf.length >= 12 &&
+    buf.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buf.subarray(8, 12).toString("ascii") === "WEBP"
+  );
+}
+
 /** SlopControl design fallbacks — never treat as the sibling's real mark. */
 export function isDesignFallbackBrandPath(path: string): boolean {
   const base = basename(path).toLowerCase();
   if (/-reuse\.svg$/i.test(base)) return true;
   try {
-    if (existsSync(path) && statSync(path).size <= 400) {
-      const body = readFileSync(path, "utf-8");
-      if (
-        /<circle\b/i.test(body) &&
-        /<rect\b/i.test(body) &&
-        /Status:\*\*\s*draft/i.test(body)
-      ) {
-        return true;
-      }
+    if (!existsSync(path)) return false;
+    const buf = readFileSync(path);
+    if (/\.svg$/i.test(base) && rasterMagic(buf)) return true;
+    const body = buf.toString("utf-8");
+    if (
+      /data-slopcontrol-fallback/i.test(body) ||
+      /slopcontrol:svg_fallback/i.test(body)
+    ) {
+      return true;
+    }
+    if (
+      buf.length <= 1024 &&
+      /<rect\b/i.test(body) &&
+      /<circle\b/i.test(body) &&
+      /<text\b/i.test(body) &&
+      /viewBox="0 0 512 512"/i.test(body) &&
+      !/<path\b/i.test(body)
+    ) {
+      return true;
+    }
+    if (
+      buf.length <= 400 &&
+      /<circle\b/i.test(body) &&
+      /<rect\b/i.test(body) &&
+      /Status:\*\*\s*draft/i.test(body)
+    ) {
+      return true;
     }
   } catch {
     /* ignore */

@@ -254,6 +254,7 @@ import {
   failurePlanDocument,
   PLAN_CONTINUE_INTENT_DEFAULT,
   PLAN_CONTINUE_INTENT_FALLBACK,
+  applyPlanContinueScope,
   normalizePlanContinueIntentStructured,
   formatPlanContinueIntentPromptBlock,
   buildSiblingInvestigationPack,
@@ -298,7 +299,11 @@ import {
   syncPhaseArtifactsToWorktree,
   syncIgnoredArtifactsFromWorktree,
   deriveIconPackFromAsset,
+  assertBytesMatchExtension,
+  worktreeAssetTarget,
   makeTransparentDesignAsset,
+  vectorizeDesignAsset,
+  vectorizeErrorCode,
   circularMaskDesignAsset,
   CodingSessionAckError,
 } from "@slopcontrol/coding-tools";
@@ -394,7 +399,7 @@ import {
   priorNextActionsFromMemory,
   resolveAgentMemoryOption,
 } from "../supervisor-enrich.js";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import {
   copyFileSync,
   existsSync,
@@ -5424,28 +5429,10 @@ Inline CSS with :root tokens drawn from this project / sibling excerpts when pre
         }
       }
       if (isContinue) {
-        if (
-          continueIntent.scope === "expand_scope" ||
-          continueIntent.scope === "full_revise"
-        ) {
-          scope = defaultPlanScope(message?.trim() || brief, "continue");
-          if (continueIntent.focus) {
-            scope = { ...scope, focus: continueIntent.focus, source: "continue" };
-          }
-        } else if (continueIntent.focus) {
-          scope = {
-            ...scope,
-            focus: continueIntent.focus,
-            preserve: continueIntent.preserve ?? scope.preserve,
-            source: "continue",
-          };
-        } else if (continueIntent.preserve?.length) {
-          scope = {
-            ...scope,
-            preserve: continueIntent.preserve,
-            source: "continue",
-          };
-        }
+        scope = applyPlanContinueScope({
+          current: scope,
+          intent: continueIntent,
+        });
       }
       if (
         !metaNow.scope ||
@@ -9145,6 +9132,7 @@ ${JSON.stringify(intent, null, 2)}`;
 ${mockContractBlock}
 Write UI-SPEC to ${canonicalUiSpecPath} (start with # UI-SPEC).
 Write tokens.css to ${canonicalTokensPath}.
+A .svg filename in ## Assets is produced by vectorizing a raster (the Source column, or a newly generated PNG). Never write SVG markup yourself.
 Include ## Assets table (Name | Filename | Prompt | Source), max 3 assets.
 The ## Assets table lists ONLY assets to produce. Reference/authority assets (pinned marks, files already on disk) belong in prose — never as table rows. If you document existing assets in a table, it MUST NOT use Name/Filename column headers (use e.g. Asset | Path | Status) — only the production table uses Name | Filename | Prompt | Source.
 When no assets are produced, omit the production table entirely — do not emit a placeholder row of dashes.
@@ -9281,7 +9269,10 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     };
 
     const generatedPaths: string[] = [];
+    const previewPaths: string[] = [];
     const logoBlockers: string[] = [];
+    const vectorizeBlockers: string[] = [];
+    const potraceBlockers: string[] = [];
     for (const brief of briefs) {
       if (signal?.aborted) break;
       const phaseOut = join(
@@ -9290,6 +9281,104 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       );
       const wtOut = join(worktree.path, assetDirRel, brief.filename);
       mkdirSync(dirname(wtOut), { recursive: true });
+
+      if (extname(brief.filename).toLowerCase() === ".svg") {
+        const logoBrief = isLogoAssetBrief(brief);
+        const tokensRel = `.slopcontrol/phases/${phase.id}/design/tokens.css`;
+        const tokensCss = existsSync(join(project.rootPath, tokensRel))
+          ? tokensRel
+          : undefined;
+        try {
+          let sourceName = resolveDerivativeSource(brief);
+          if (!sourceName) {
+            const stem = brief.filename.replace(/\.svg$/i, "") || "mark";
+            const pngName = `${stem}.png`;
+            const generated = await designTool.generateImage({
+              prompt: brief.prompt,
+              outPath: join(phaseAssetsAbs, pngName),
+              endpoint: imageBinding?.endpoint,
+              modelId: imageBinding?.modelId,
+              brandName,
+              palette,
+              logoFailClosed: logoBrief,
+            });
+            if (generated.reason === "logo_requires_designImage") {
+              logoBlockers.push(brief.name);
+              log(
+                project,
+                run,
+                `--- Asset ${brief.name}: BLOCKED (logo requires designImage — bind openai-images endpoint, e.g. pull x/flux2-klein; do not accept svg_fallback) ---`,
+              );
+              continue;
+            }
+            sourceName = basename(generated.path);
+            generatedPaths.push(generated.path);
+          }
+          const traced = await vectorizeDesignAsset({
+            projectRoot: project.rootPath,
+            assetsDir: phaseAssetsRel,
+            sourceFilename: sourceName,
+            filename: brief.filename,
+            tokensCss,
+            palette: tokensCss ? undefined : palette,
+          });
+          if (traced.status === "failed") {
+            const failing = traced.report.outputs
+              .flatMap((o) =>
+                o.checks.filter((c) => !c.ok).map((c) => `${o.filename}:${c.id}`),
+              )
+              .join(", ");
+            log(
+              project,
+              run,
+              `--- Asset ${brief.name}: vectorize failed (${failing || traced.status}) ---`,
+            );
+            appendAppendix(
+              project.rootPath,
+              phase.id,
+              `## Design note — vectorize failed\n\n${brief.name}: ${failing || traced.summary}\n`,
+            );
+            if (logoBrief) vectorizeBlockers.push(brief.name);
+          } else {
+            for (const file of traced.files) {
+              if (file.kind === "svg" && file.filename.endsWith(".svg")) {
+                const abs = join(project.rootPath, file.relativePath);
+                copyFileSync(abs, join(worktree.path, assetDirRel, file.filename));
+                generatedPaths.push(file.relativePath);
+              } else if (file.kind === "preview" || file.kind === "sheet") {
+                previewPaths.push(file.relativePath);
+              }
+            }
+            log(project, run, `--- Asset ${brief.name}: ${traced.summary} ---`);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (vectorizeErrorCode(error) === "potrace_not_found" || message.includes("potrace_not_found")) {
+            if (logoBrief) {
+              potraceBlockers.push(brief.name);
+              log(
+                project,
+                run,
+                `--- Asset ${brief.name}: BLOCKED (potrace_not_found: install with "brew install potrace" or set SLOPCONTROL_POTRACE_BIN) ---`,
+              );
+            } else {
+              log(
+                project,
+                run,
+                `--- Asset ${brief.name}: potrace_not_found — skipped (non-blocking) ---`,
+              );
+            }
+          } else {
+            log(
+              project,
+              run,
+              `--- Asset ${brief.name}: vectorize failed — skipped (${logoBrief ? "blocking" : "non-blocking"}): ${message} ---`,
+            );
+            if (logoBrief) vectorizeBlockers.push(brief.name);
+          }
+        }
+        continue;
+      }
 
       if (isDerivativeAssetBrief(brief)) {
         const sourceName = resolveDerivativeSource(brief);
@@ -9366,11 +9455,9 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       }
 
       generatedPaths.push(result.path);
-      const wtTarget =
-        result.format === "svg"
-          ? wtOut.replace(/\.(png|webp|jpe?g)$/i, ".svg")
-          : wtOut;
+      const wtTarget = worktreeAssetTarget(wtOut, result.path);
       try {
+        assertBytesMatchExtension(result.path, readFileSync(result.path));
         mkdirSync(dirname(wtTarget), { recursive: true });
         copyFileSync(result.path, wtTarget);
       } catch (error) {
@@ -9387,14 +9474,27 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
       );
     }
 
-    if (logoBlockers.length > 0) {
+    if (previewPaths.length > 0) {
+      log(
+        project,
+        run,
+        `--- Vectorize previews (${previewPaths.length}): ${previewPaths.join(", ")} ---`,
+      );
+    }
+
+    const markBlockers = [
+      ...logoBlockers,
+      ...vectorizeBlockers,
+      ...potraceBlockers,
+    ];
+    if (markBlockers.length > 0) {
       // Fail soft whenever the project already has a usable mark (pinned
       // selection or brand asset on disk): an unbound generative model must
       // not kill a phase whose logo already exists. Fail closed only when
       // there is no mark anywhere — a genuine new-identity phase.
       const hasUsableLogo = phaseHasUsableLogo(project.rootPath, phase.id);
       if (hasUsableLogo) {
-        const note = `Skipping generative logo brief(s) [${logoBlockers.join(", ")}]: no designImage role bound, and the pinned/existing mark is authoritative for this phase.`;
+        const note = `Skipping logo brief(s) [${markBlockers.join(", ")}]: the pinned/existing mark is authoritative for this phase.`;
         log(project, run, `--- ${note} ---`);
         appendAppendix(
           project.rootPath,
@@ -9402,12 +9502,25 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
           `## Design note — generative logo skipped\n\n${note}\n`,
         );
       } else {
-        const msg = `Design cannot complete: logo/mark asset(s) [${logoBlockers.join(", ")}] require a bound designImage role (openai-images). Pull e.g. x/flux2-klein, add ollama-image endpoint, bind roles.designImage. svg_fallback is not accepted for logos.`;
-        log(project, run, `ERROR: ${msg}`);
+        const msg = [
+          logoBlockers.length
+            ? `logo/mark asset(s) [${logoBlockers.join(", ")}] require a bound designImage role (openai-images). Pull e.g. x/flux2-klein, add ollama-image endpoint, bind roles.designImage. svg_fallback is not accepted for logos.`
+            : "",
+          potraceBlockers.length
+            ? `logo/mark asset(s) [${potraceBlockers.join(", ")}] need potrace. Install with "brew install potrace" or set SLOPCONTROL_POTRACE_BIN.`
+            : "",
+          vectorizeBlockers.length
+            ? `logo/mark asset(s) [${vectorizeBlockers.join(", ")}] failed vectorize validation.`
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const full = `Design cannot complete: ${msg}`;
+        log(project, run, `ERROR: ${full}`);
         appendAppendix(
           project.rootPath,
           phase.id,
-          `## Design blocked — designImage required\n\n${msg}\n`,
+          `## Design blocked — logo asset\n\n${full}\n`,
         );
         writePhaseStatus(project.rootPath, phase.id, "accepted");
         return {

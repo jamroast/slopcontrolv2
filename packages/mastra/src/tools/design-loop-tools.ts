@@ -81,7 +81,7 @@ export function createDesignLoopMediaTools(
           return {
             ok: false,
             error:
-              "This looks like an image EDIT. Use edit_image with a catalog op (make_transparent, circular_mask, derive_icon_pack, resize, …) on the existing/pinned asset — do not generate_image.",
+              "This looks like an image EDIT. Use edit_image with a catalog op (vectorize, make_transparent, circular_mask, derive_icon_pack, resize, …) on the existing/pinned asset — do not generate_image.",
           };
         }
         const pinned = pinnedLogoFilename(projectDir, loopId);
