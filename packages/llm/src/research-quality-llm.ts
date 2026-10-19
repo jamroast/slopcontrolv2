@@ -5,6 +5,7 @@ import {
   chatJson,
   CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
   CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+  PLANNING_JUDGE_EXCERPT_CHARS,
 } from "./json-chat.js";
 
 /**
@@ -52,8 +53,6 @@ export interface JudgeResearchQualityOptions {
   timeoutMs?: number;
 }
 
-const EXCERPT_TAIL_CHARS = 16_000;
-
 function clip(text: string, max: number): string {
   return consolidateText(text, max);
 }
@@ -96,7 +95,7 @@ export async function judgeResearchQualityViaLlm(
     temperature: 0,
     timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
     maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
-    schema: ResearchQualityVerdictSchema,
+    schema: ResearchQualityVerdictSchema.partial(),
     schemaHint: "Return ONE JSON object (ok/gaps/suggestedFixes/…), never an array",
     system: RESEARCH_QUALITY_SYSTEM_PROMPT,
     user: [
@@ -107,7 +106,7 @@ export async function judgeResearchQualityViaLlm(
       clip(opts.phaseDescription ?? "", 4_000),
       "",
       "RESEARCH.md excerpt:",
-      clip(opts.researchExcerpt ?? "", EXCERPT_TAIL_CHARS),
+      clip(opts.researchExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),
     ].join("\n"),
   });
   return parseResearchQualityVerdictPayload(parsed);

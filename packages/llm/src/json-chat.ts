@@ -12,6 +12,16 @@ export const CHAT_JSON_DEFAULT_MAX_TOKENS = 4096;
 export const CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS = 300_000;
 export const CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS = 8192;
 
+/**
+ * Shared RESEARCH.md / PHASE.md excerpt budget for planning judges and the
+ * drafter prompts those judges score. Judges cannot read_file past a clip, so
+ * a smaller inner consolidate (the old 16k head+tail) drops the middle the
+ * drafter was told to implement. 96k covers a realistic research doc inside
+ * one cloud-judge context. Callers that must truncate further should keep
+ * head and tail inside this budget, never a shorter head-only slice.
+ */
+export const PLANNING_JUDGE_EXCERPT_CHARS = 96_000;
+
 export interface ChatJsonOptions {
   endpoint: LlmEndpoint;
   modelId?: string;
@@ -254,10 +264,13 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
   // Only relax response_format after the provider returned empty content with
   // it forced — never as a last-resort against prose output.
   let dropJsonFormat = false;
+  // Field-level reason from the previous shape failure, so a retry is told
+  // which key was missing or which type was wrong — not only "send JSON".
+  let shapeNudge = "";
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const userContent =
-      attempt === 1 ? opts.user : `${opts.user}${JSON_ONLY_NUDGE}`;
+      attempt === 1 ? opts.user : `${opts.user}${JSON_ONLY_NUDGE}${shapeNudge}`;
     const body: Record<string, unknown> = {
       model: modelId,
       messages: [
@@ -333,8 +346,10 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
           if (unwrapped.success) checked = unwrapped;
         }
         if (!checked.success) {
+          const issues = formatZodIssues(checked.error);
+          shapeNudge = `\n\nYour previous JSON failed schema validation: ${issues}.${opts.schemaHint ? ` ${opts.schemaHint}.` : ""}`;
           lastError = new Error(
-            `JSON shape invalid: ${formatZodIssues(checked.error)}${opts.schemaHint ? ` — ${opts.schemaHint}` : ""} (attempt ${attempt}/${maxAttempts})`,
+            `JSON shape invalid: ${issues}${opts.schemaHint ? ` — ${opts.schemaHint}` : ""} (attempt ${attempt}/${maxAttempts})`,
           );
           if (attempt < maxAttempts) continue;
           throw lastError;

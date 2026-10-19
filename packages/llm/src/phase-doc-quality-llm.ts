@@ -5,6 +5,7 @@ import {
   chatJson,
   CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
   CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+  PLANNING_JUDGE_EXCERPT_CHARS,
 } from "./json-chat.js";
 
 /**
@@ -65,8 +66,6 @@ export interface JudgePhaseDocQualityOptions {
   timeoutMs?: number;
 }
 
-const EXCERPT_TAIL_CHARS = 16_000;
-
 function clip(text: string, max: number): string {
   return consolidateText(text, max);
 }
@@ -113,7 +112,7 @@ export async function judgePhaseDocQualityViaLlm(
     temperature: 0,
     timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
     maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
-    schema: PhaseDocQualityVerdictSchema,
+    schema: PhaseDocQualityVerdictSchema.partial(),
     schemaHint: "Return ONE JSON object (ok/gaps/…), never an array",
     system: PHASE_DOC_QUALITY_SYSTEM_PROMPT,
     user: [
@@ -124,10 +123,10 @@ export async function judgePhaseDocQualityViaLlm(
       clip(opts.phaseDescription ?? "", 4_000),
       "",
       "RESEARCH.md excerpt:",
-      clip(opts.researchExcerpt ?? "", EXCERPT_TAIL_CHARS),
+      clip(opts.researchExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),
       "",
       "PHASE.md excerpt (Scope / Success Criteria / Automated Checks / Blueprint Deltas):",
-      clip(opts.phaseDocExcerpt ?? "", EXCERPT_TAIL_CHARS),
+      clip(opts.phaseDocExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),
     ].join("\n"),
   });
   return parsePhaseDocQualityVerdictPayload(parsed);

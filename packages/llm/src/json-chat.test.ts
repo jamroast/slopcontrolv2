@@ -566,10 +566,10 @@ describe("chatJson schema validation", () => {
         assert.deepEqual(body.response_format, { type: "json_object" });
       }
       const retryMessages = bodies[1]?.messages as Array<{ role: string; content: string }>;
-      assert.match(
-        retryMessages.find((m) => m.role === "user")?.content ?? "",
-        /ONLY a single valid JSON object/,
-      );
+      const retryUser = retryMessages.find((m) => m.role === "user")?.content ?? "";
+      assert.match(retryUser, /ONLY a single valid JSON object/);
+      assert.match(retryUser, /failed schema validation/);
+      assert.match(retryUser, /Return ONE object/);
     } finally {
       fetchMock.mock.restore();
     }

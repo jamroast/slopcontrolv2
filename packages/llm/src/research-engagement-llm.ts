@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { LlmEndpoint } from "@slopcontrol/types";
 import { consolidateText } from "@slopcontrol/artifacts";
-import { chatJson } from "./json-chat.js";
+import { chatJson, PLANNING_JUDGE_EXCERPT_CHARS } from "./json-chat.js";
 
 /**
  * LLM judge for engagement RESEARCH overclaim. This is the SOLE authority for
@@ -53,8 +53,6 @@ export interface JudgeResearchEngagementOptions {
   timeoutMs?: number;
 }
 
-const EXCERPT_TAIL_CHARS = 16_000;
-
 /** Head+tail consolidation (safety net) — never drops the tail (Risks section). */
 function clip(text: string, max: number): string {
   return consolidateText(text, max);
@@ -100,7 +98,7 @@ export async function judgeResearchEngagementViaLlm(
     modelId: opts.modelId,
     temperature: 0,
     timeoutMs: opts.timeoutMs,
-    schema: ResearchEngagementVerdictSchema,
+    schema: ResearchEngagementVerdictSchema.partial(),
     schemaHint: "Return ONE JSON object (overclaims/gaps/…), never an array",
     system: RESEARCH_ENGAGEMENT_SYSTEM_PROMPT,
     user: [
@@ -108,7 +106,7 @@ export async function judgeResearchEngagementViaLlm(
       opts.intentBlock,
       "",
       "RESEARCH.md body:",
-      clip(opts.researchExcerpt ?? "", EXCERPT_TAIL_CHARS),
+      clip(opts.researchExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),
     ].join("\n"),
   });
   return parseResearchEngagementVerdictPayload(parsed);

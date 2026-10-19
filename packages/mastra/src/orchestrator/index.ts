@@ -338,6 +338,7 @@ import {
   judgeNarrationOnlyViaLlm,
   buildElementHonorSnippets,
   tryMenubarEmbedSimilarity,
+  PLANNING_JUDGE_EXCERPT_CHARS,
   type LlmRegistry,
 type MastraModelConfig,
 } from "@slopcontrol/llm";
@@ -868,33 +869,53 @@ function clipPromptSection(
   text: string,
   maxChars: number,
   fullPath?: string,
+  /**
+   * Keep the head and the tail inside maxChars. Required for RESEARCH.md and
+   * PHASE.md that a judge also scores: a head-only slice hides the sections
+   * (File Changes, Automated Checks, Risks) the judge reads from the tail.
+   */
+  balance = false,
 ): string {
   const body = (text ?? "").trim();
   if (!body) return `(${label}: none)`;
   if (body.length <= maxChars) return body;
   const where = fullPath ?? `.slopcontrol/${label}`;
-  return `${body.slice(0, maxChars)}\n\n…[truncated ${label}: ${body.length} chars total; read_file \`${where}\` if you need more]`;
+  const marker = `\n\n…[truncated ${label}: ${body.length} chars total; read_file \`${where}\` if you need more]\n\n`;
+  if (!balance || marker.length >= maxChars) {
+    return `${body.slice(0, maxChars)}${marker}`;
+  }
+  const budget = maxChars - marker.length;
+  const headChars = Math.ceil(budget / 2);
+  const tailChars = budget - headChars;
+  return `${body.slice(0, headChars)}${marker}${body.slice(body.length - tailChars)}`;
+}
+
+/** Same window the planning judges score: head+tail, never a shorter head-only cut. */
+function clipSharedDoc(label: string, text: string, fullPath?: string): string {
+  return clipPromptSection(
+    label,
+    text,
+    JUDGE_DOC_EXCERPT_MAX_CHARS,
+    fullPath,
+    true,
+  );
 }
 
 /**
- * Excerpt budget for tool-less JSON judge/classifier calls that must validate
- * a document's contents (section presence, intent alignment). Unlike agent
- * prompts, judges cannot read_file past a clip — head-truncation here causes
- * false-negative "section missing" verdicts and leg-retry loops (observed
- * 2026-09-23: the research gate failed a complete 21.8k RESEARCH.md whose
- * Automated Checks section began at char ~17.5k, past the old 16k clip, and
- * burned 10 minutes of regen turns + judge retries before failing the run).
- * 96k covers realistic RESEARCH/PHASE docs within cloud judges' contexts.
+ * Research budget for the SLIM draft retry (provider 400 "prompt too long").
+ * The slim prompt exists to shrink the request; research is the dominant term,
+ * so it must shrink too — head+tail keeps the criteria sections at both ends.
  */
-const JUDGE_DOC_EXCERPT_MAX_CHARS = 96_000;
+const SLIM_RESEARCH_CLIP_CHARS = 24_000;
 
 /**
- * RESEARCH.md budget for AGENT prompts (draft/repair/quality-retry/revise).
- * Must be close to JUDGE_DOC_EXCERPT_MAX_CHARS: a judge that sees the whole
- * research cannot be satisfied by a drafter that saw only its first 8k (the
- * repeated "generic Success Criteria / File Changes missing" rejections).
+ * Excerpt budget shared by planning judges and the drafter/revise prompts
+ * they score. Judges cannot read_file past a clip — a shorter inner
+ * consolidate caused false-negative "section missing" verdicts (observed
+ * 2026-09-23: Automated Checks began past a 16k clip). Drafter prompts use
+ * the same budget so a judge cannot demand a tail the drafter never saw.
  */
-const RESEARCH_PROMPT_CLIP_CHARS = 64_000;
+const JUDGE_DOC_EXCERPT_MAX_CHARS = PLANNING_JUDGE_EXCERPT_CHARS;
 
 /** Media tools from structured ContinueIntent (no chat regex). */
 function designLoopNeedsMediaTools(intent: ContinueIntent): boolean {
@@ -5882,10 +5903,10 @@ ${message.trim()}`;
               judge({
                 intentBlock,
                 phaseDescription: description,
-                researchExcerpt: clipPromptSection(
+                researchExcerpt: clipSharedDoc(
                   "RESEARCH.md",
                   researchDoc,
-                  JUDGE_DOC_EXCERPT_MAX_CHARS,
+                  `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
                 ),
               }),
             (v) => v.gaps,
@@ -5896,10 +5917,10 @@ ${message.trim()}`;
                     fallbackJudge({
                       intentBlock,
                       phaseDescription: description,
-                      researchExcerpt: clipPromptSection(
+                      researchExcerpt: clipSharedDoc(
                         "RESEARCH.md",
                         researchDoc,
-                        JUDGE_DOC_EXCERPT_MAX_CHARS,
+                        `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
                       ),
                     })
                 : undefined,
@@ -6806,10 +6827,10 @@ Phase id: ${phase.id}`;
     log(project, run, "--- Drafting PHASE.md ---");
 
     const research = readResearch(project.rootPath, phase.id);
-    const researchExcerpt = clipPromptSection(
+    const researchExcerpt = clipSharedDoc(
       "RESEARCH.md",
       research,
-      JUDGE_DOC_EXCERPT_MAX_CHARS,
+      `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
     );
     const blueprint = readBlueprint(project.rootPath);
     const config = readProjectConfig(project.rootPath);
@@ -7016,7 +7037,6 @@ Specification phase (changeKind=specification):
     const buildDraftPrompt = (slim: boolean) => {
       const pack = slim ? "" : adjacentPack ? `${adjacentPack}\n` : "";
       const blueprintClip = slim ? 2_500 : 6_000;
-      const researchClip = slim ? 8_000 : RESEARCH_PROMPT_CLIP_CHARS;
       return `Draft PHASE.md for phase ${phase.id} only (single phase).
 Phase id: ${phase.id}. Full context is in this message (description, Change Intent, RESEARCH.md, blueprint excerpt). Do NOT ask the operator for missing inputs — output the complete PHASE.md starting with \`# Phase …\`.
 Description:
@@ -7046,7 +7066,21 @@ Blueprint (excerpt — full at .slopcontrol/BLUEPRINT.md; prefer Live decisions)
 ${clipPromptSection("BLUEPRINT.md", clipBlueprintForPrompt(blueprint, blueprintClip), blueprintClip)}
 
 Research:
-${clipPromptSection("RESEARCH.md", research, researchClip, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
+${
+  slim
+    ? clipPromptSection(
+        "RESEARCH.md",
+        research,
+        SLIM_RESEARCH_CLIP_CHARS,
+        `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
+        true,
+      )
+    : clipSharedDoc(
+        "RESEARCH.md",
+        research,
+        `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
+      )
+}`;
     };
 
     const watch = phaseDocWatchPaths(project.rootPath, phase.id);
@@ -7407,7 +7441,7 @@ End with PHASE_COMPLETE.
 Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 Research:
-${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
+${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
         let repairThrew = false;
         let finalBrokenReason: string | null = null;
         try {
@@ -7728,15 +7762,15 @@ ${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopc
               phaseQualityJudge({
                 intentBlock,
                 phaseDescription: phase.description,
-                researchExcerpt: clipPromptSection(
+                researchExcerpt: clipSharedDoc(
                   "RESEARCH.md",
                   research,
-                  JUDGE_DOC_EXCERPT_MAX_CHARS,
+                  `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
                 ),
-                phaseDocExcerpt: clipPromptSection(
+                phaseDocExcerpt: clipSharedDoc(
                   "PHASE.md",
                   phaseDocForQuality,
-                  JUDGE_DOC_EXCERPT_MAX_CHARS,
+                  `.slopcontrol/phases/${phase.id}/PHASE.md`,
                 ),
               }),
             (v) => v.gaps,
@@ -7747,15 +7781,15 @@ ${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopc
                     fallbackPhaseQualityJudge({
                       intentBlock,
                       phaseDescription: phase.description,
-                      researchExcerpt: clipPromptSection(
+                      researchExcerpt: clipSharedDoc(
                         "RESEARCH.md",
                         research,
-                        JUDGE_DOC_EXCERPT_MAX_CHARS,
+                        `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
                       ),
-                      phaseDocExcerpt: clipPromptSection(
+                      phaseDocExcerpt: clipSharedDoc(
                         "PHASE.md",
                         phaseDocForQuality,
-                        JUDGE_DOC_EXCERPT_MAX_CHARS,
+                        `.slopcontrol/phases/${phase.id}/PHASE.md`,
                       ),
                     })
                 : undefined,
@@ -7819,7 +7853,7 @@ ${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopc
         canonicalPath,
         intentBlock,
         description: clipPromptSection("change-request", phase.description, 4_000),
-        research: clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
+        research: clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
         judgeFeedback: feedback,
       });
       try {
@@ -7976,10 +8010,10 @@ ${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopc
         phaseDoc,
         intent,
         {
-          researchExcerpt: clipPromptSection(
+          researchExcerpt: clipSharedDoc(
             "RESEARCH.md",
             researchForIntent,
-            JUDGE_DOC_EXCERPT_MAX_CHARS,
+            `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
           ),
         },
       );
@@ -8545,10 +8579,10 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       phaseDoc,
       intent,
       {
-        researchExcerpt: clipPromptSection(
+        researchExcerpt: clipSharedDoc(
           "RESEARCH.md",
           research,
-          JUDGE_DOC_EXCERPT_MAX_CHARS,
+          `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
         ),
       },
     );
@@ -8588,7 +8622,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         phase.description,
         4_000,
       ),
-      research: clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
+      research: clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
       preamble: input.preamble,
     });
     try {
@@ -8841,16 +8875,8 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         endpoint,
         modelId,
         feedback,
-        researchExcerpt: clipPromptSection(
-          "RESEARCH.md",
-          research,
-          JUDGE_DOC_EXCERPT_MAX_CHARS,
-        ),
-        phaseExcerpt: clipPromptSection(
-          "PHASE.md",
-          phaseDoc,
-          JUDGE_DOC_EXCERPT_MAX_CHARS,
-        ),
+        researchExcerpt: clipSharedDoc("RESEARCH.md", research),
+        phaseExcerpt: clipSharedDoc("PHASE.md", phaseDoc),
         timeoutMs: 90_000,
         ...(fallback
           ? {
@@ -8949,7 +8975,7 @@ Apply surgical edits to the full RESEARCH.md:
 If you use write_file, write ONLY to ${researchPath}.
 
 Current RESEARCH.md:
-${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
+${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
 
     const watch = researchDocWatchPaths(project.rootPath, phase.id);
     const beforeStats = snapshotFileStats(watch);
@@ -9015,7 +9041,7 @@ Current phase doc:
 ${priorPhaseDoc}
 
 Research:
-${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
+${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
 
     const watch = phaseDocWatchPaths(project.rootPath, phase.id);
     const beforeStats = snapshotFileStats(watch);

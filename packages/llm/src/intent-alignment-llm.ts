@@ -5,6 +5,7 @@ import {
   chatJson,
   CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
   CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+  PLANNING_JUDGE_EXCERPT_CHARS,
 } from "./json-chat.js";
 
 /**
@@ -89,7 +90,6 @@ export interface JudgeIntentAlignmentOptions {
   timeoutMs?: number;
 }
 
-const EXCERPT_TAIL_CHARS = 16_000;
 
 /** Head+tail consolidation (safety net) — never drops the tail of the excerpt. */
 function clip(text: string, max: number): string {
@@ -143,7 +143,7 @@ export async function judgeIntentAlignmentViaLlm(
     temperature: 0,
     timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
     maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
-    schema: IntentAlignmentVerdictSchema,
+    schema: IntentAlignmentVerdictSchema.partial(),
     schemaHint: "Return ONE JSON object (aligned/gaps/…), never an array",
     system: INTENT_ALIGNMENT_SYSTEM_PROMPT,
     user: [
@@ -153,12 +153,12 @@ export async function judgeIntentAlignmentViaLlm(
       ...(opts.researchExcerpt?.trim()
         ? [
             "RESEARCH.md excerpt (for faultLeg attribution):",
-            clip(opts.researchExcerpt, EXCERPT_TAIL_CHARS),
+            clip(opts.researchExcerpt, PLANNING_JUDGE_EXCERPT_CHARS),
             "",
           ]
         : []),
       "PHASE doc excerpt (Scope / Success Criteria / Automated Checks / Blueprint Deltas):",
-      clip(opts.phaseDocExcerpt ?? "", EXCERPT_TAIL_CHARS),
+      clip(opts.phaseDocExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),
     ].join("\n"),
   });
   return parseIntentAlignmentVerdictPayload(parsed);
