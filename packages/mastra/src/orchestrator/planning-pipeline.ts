@@ -303,3 +303,41 @@ export function shouldReclassifyIntentForPlanningSelfHeal(opts: {
   if (repeatedEngagementFault) return true;
   return isIntentEngagementContradiction(opts);
 }
+
+/**
+ * Prior DRAFT-gate gaps to carry into an operator-triggered `retry_draft`.
+ *
+ * The planning self-heal loop feeds each round's judge gaps forward, but the
+ * operator action used to call `draftPhase` with no feedback and delete the
+ * diagnosis first — so every retry_draft regenerated the same check defects
+ * (e.g. an unsatisfiable grep, a missing test file) that the judge had already
+ * rejected. Extract those gaps from the persisted diagnosis instead.
+ *
+ * Only draft-gate diagnoses qualify: a develop/verify diagnosis is not
+ * actionable for a PHASE.md draft.
+ */
+export function priorDraftJudgeIssuesFromDiagnosis(
+  diagnosis: {
+    title?: string;
+    rootCause?: string;
+    evidence?: string;
+    tags?: string[];
+  } | null,
+): string[] {
+  if (!diagnosis) return [];
+  const tags = diagnosis.tags ?? [];
+  const isDraftGate =
+    tags.includes("draft") || /^draft rejected/i.test(diagnosis.title ?? "");
+  if (!isDraftGate) return [];
+  // evidence is the longer copy (rootCause caps at 2k and can slice a gap).
+  const detail = (diagnosis.evidence || diagnosis.rootCause || "").trim();
+  if (!detail) return [];
+  return [
+    ...new Set(
+      detail
+        .split("; ")
+        .map((issue) => issue.trim())
+        .filter(Boolean),
+    ),
+  ];
+}

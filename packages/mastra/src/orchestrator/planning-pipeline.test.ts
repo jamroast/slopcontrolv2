@@ -6,6 +6,7 @@ import {
   isIntentEngagementContradiction,
   mergeFaultLegs,
   planningGateIssueFingerprint,
+  priorDraftJudgeIssuesFromDiagnosis,
   shouldContinuePlanningSelfHeal,
   shouldReclassifyIntentForPlanningSelfHeal,
   MAX_PLANNING_SELF_HEAL_ROUNDS,
@@ -280,5 +281,49 @@ describe("planning-pipeline", () => {
       false,
       "first round should not reclassify on repetition alone",
     );
+  });
+});
+
+describe("priorDraftJudgeIssuesFromDiagnosis", () => {
+  it("carries deduped draft-gate gaps from evidence", () => {
+    const issues = priorDraftJudgeIssuesFromDiagnosis({
+      title: "Draft rejected: phase quality judge",
+      rootCause: "Check 13 greps mcp:read in routes.ts — unsatisfiable",
+      evidence:
+        "Check 13 greps mcp:read in routes.ts — unsatisfiable; Check 12 single-gate scan excludes N14.3; Check 13 greps mcp:read in routes.ts — unsatisfiable",
+      tags: ["planning", "draft", "phase-quality"],
+    });
+    assert.deepEqual(issues, [
+      "Check 13 greps mcp:read in routes.ts — unsatisfiable",
+      "Check 12 single-gate scan excludes N14.3",
+    ]);
+  });
+
+  it("falls back to rootCause when evidence is empty", () => {
+    const issues = priorDraftJudgeIssuesFromDiagnosis({
+      title: "Draft rejected: invalid PHASE.md (structural)",
+      rootCause: "Automated Checks restarts infra with docker compose up",
+      evidence: "",
+      tags: ["planning", "draft", "draft-structural"],
+    });
+    assert.deepEqual(issues, [
+      "Automated Checks restarts infra with docker compose up",
+    ]);
+  });
+
+  it("ignores develop/verify diagnoses (not actionable for a draft)", () => {
+    assert.deepEqual(
+      priorDraftJudgeIssuesFromDiagnosis({
+        title: "Verify failed",
+        rootCause: "testCommand exited 1",
+        evidence: "testCommand exited 1",
+        tags: ["verify", "product"],
+      }),
+      [],
+    );
+  });
+
+  it("returns [] without a diagnosis", () => {
+    assert.deepEqual(priorDraftJudgeIssuesFromDiagnosis(null), []);
   });
 });

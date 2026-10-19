@@ -362,6 +362,7 @@ import {
   faultLegFromPhaseQualityVerdict,
   shouldContinuePlanningSelfHeal,
   planningGateIssueFingerprint,
+  priorDraftJudgeIssuesFromDiagnosis,
   shouldReclassifyIntentForPlanningSelfHeal,
   brokenOutputReason,
 } from "./planning-pipeline.js";
@@ -12131,6 +12132,21 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
       );
     }
     log(project, run, "--- retry_draft: re-running PHASE.md draft (research intact) ---");
+    // Carry the last draft-gate judge gaps into this attempt. Without this the
+    // retry regenerates the same check defects the judge already rejected.
+    const priorDiagnosis =
+      readDiagnosis(project.rootPath, run.id) ??
+      readLatestDiagnosisForPhase(project.rootPath, phase.id);
+    const priorJudgeIssues = priorDraftJudgeIssuesFromDiagnosis(priorDiagnosis);
+    if (priorJudgeIssues.length > 0) {
+      log(
+        project,
+        run,
+        `--- retry_draft: carrying ${priorJudgeIssues.length} prior judge gap(s) into the draft ---\n${priorJudgeIssues
+          .map((issue) => `- ${issue}`)
+          .join("\n")}`,
+      );
+    }
     deleteRunDiagnosis(project.rootPath, run.id);
     return this.draftPhase({
       project,
@@ -12138,6 +12154,8 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
       run,
       onStage,
       listProjects: input.listProjects,
+      priorJudgeIssues:
+        priorJudgeIssues.length > 0 ? priorJudgeIssues : undefined,
     });
   }
 
