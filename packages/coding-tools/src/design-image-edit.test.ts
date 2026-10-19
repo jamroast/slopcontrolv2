@@ -6,7 +6,9 @@ import { describe, it, after } from "node:test";
 import sharp from "sharp";
 import {
   alphaOutputFilename,
+  buildIcoFromPngs,
   circularMaskDesignAsset,
+  deriveFaviconPackFromAsset,
   deriveIconPackFromAsset,
   applyDesignImagePipeline,
   makeTransparentDesignAsset,
@@ -653,5 +655,152 @@ describe("design-image-edit", () => {
     }
     // Untrimmed would be 24/96 of 16px ≈ 4px wide; trimmed fills the tile.
     assert.ok(maxX - minX + 1 >= 12, `opaque bbox ${maxX - minX + 1}px too small`);
+  });
+
+  it("buildIcoFromPngs writes header, directory entries and PNG payloads", () => {
+    const a = Buffer.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+    const b = Buffer.from([0x89, 0x50, 0x4e, 0x47, 4, 5, 6, 7, 8]);
+    const ico = buildIcoFromPngs([
+      { size: 16, png: a },
+      { size: 32, png: b },
+    ]);
+    assert.equal(ico.readUInt16LE(0), 0);
+    assert.equal(ico.readUInt16LE(2), 1);
+    assert.equal(ico.readUInt16LE(4), 2);
+    const e0 = 6;
+    const e1 = 6 + 16;
+    assert.equal(ico.readUInt8(e0), 16);
+    assert.equal(ico.readUInt8(e1), 32);
+    assert.equal(ico.readUInt16LE(e0 + 6), 32); // 32bpp
+    const off0 = ico.readUInt32LE(e0 + 12);
+    const off1 = ico.readUInt32LE(e1 + 12);
+    assert.equal(off0, 6 + 16 * 2);
+    assert.equal(off1, off0 + a.length);
+    assert.equal(ico.readUInt32LE(e0 + 8), a.length);
+    assert.deepEqual(ico.subarray(off0, off0 + a.length), a);
+    assert.deepEqual(ico.subarray(off1, off1 + b.length), b);
+  });
+
+  it("favicon pack: multi-size ico + maskable PNGs from SVG variants", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-favicon-"));
+    roots.push(root);
+    const assetsDir = ".slopcontrol/phases/p1/design/assets";
+    const dir = join(root, assetsDir);
+    mkdirSync(dir, { recursive: true });
+    const size = 64;
+    const px = Buffer.alloc(size * size * 4, 0);
+    for (let i = 0; i < size * size; i++) px[i * 4 + 3] = 255;
+    await sharp(px, { raw: { width: size, height: size, channels: 4 } })
+      .png()
+      .toFile(join(dir, "mark.png"));
+    const svg = (label: string): string =>
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" role="img"><title>${label}</title><path fill="#D9480F" d="M0 0h16v16H0z"/></svg>\n`;
+    writeFileSync(join(dir, "mark-16.svg"), svg("m16"));
+    writeFileSync(join(dir, "mark-32.svg"), svg("m32"));
+    writeFileSync(join(dir, "mark.svg"), svg("master"));
+
+    const pack = await deriveFaviconPackFromAsset({
+      projectRoot: root,
+      assetsDir,
+      sourceFilename: "mark.png",
+      prefix: "site",
+    });
+    assert.equal(pack.icoFilename, "site.ico");
+    assert.deepEqual(
+      pack.files.map((f) => f.filename),
+      ["site.ico", "site-maskable-192.png", "site-maskable-512.png"],
+    );
+    for (const file of pack.files) {
+      assert.ok(existsSync(join(dir, file.filename)));
+    }
+
+    const ico = readFileSync(join(dir, "site.ico"));
+    assert.equal(ico.readUInt16LE(0), 0);
+    assert.equal(ico.readUInt16LE(2), 1);
+    assert.equal(ico.readUInt16LE(4), 3);
+    const sizes: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const base = 6 + i * 16;
+      sizes.push(ico.readUInt8(base));
+      const len = ico.readUInt32LE(base + 8);
+      const off = ico.readUInt32LE(base + 12);
+      assert.equal(ico.subarray(off, off + 4).toString("hex"), "89504e47");
+      assert.ok(off + len <= ico.length);
+    }
+    assert.deepEqual(sizes, [16, 32, 48]);
+
+    const maskableAbs = join(dir, "site-maskable-192.png");
+    const meta = await sharp(maskableAbs).metadata();
+    assert.equal(meta.width, 192);
+    assert.equal(meta.height, 192);
+    assert.equal(meta.hasAlpha, true);
+    const raw = await sharp(maskableAbs).raw().toBuffer({ resolveWithObject: true });
+    let minX = raw.info.width;
+    let maxX = -1;
+    for (let y = 0; y < raw.info.height; y++) {
+      for (let x = 0; x < raw.info.width; x++) {
+        if (raw.data[(y * raw.info.width + x) * 4 + 3]! > 0) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+        }
+      }
+    }
+    // 80% safe zone: 192 * 0.8 = 153.6 → 154px of content.
+    const bbox = maxX - minX + 1;
+    assert.ok(bbox >= 150 && bbox <= 158, `maskable bbox ${bbox} outside safe zone`);
+    assert.equal(raw.data[3], 0); // transparent padding by default
+  });
+
+  it("favicon pack raster fallback fills the padding with the requested background", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-favicon-bg-"));
+    roots.push(root);
+    const assetsDir = ".slopcontrol/phases/p1/design/assets";
+    const dir = join(root, assetsDir);
+    mkdirSync(dir, { recursive: true });
+    const size = 96;
+    const px = Buffer.alloc(size * size * 4, 0);
+    for (let y = 36; y < 60; y++) {
+      for (let x = 36; x < 60; x++) {
+        const i = (y * size + x) * 4;
+        px[i] = 0xd9;
+        px[i + 1] = 0x48;
+        px[i + 2] = 0x0f;
+        px[i + 3] = 255;
+      }
+    }
+    await sharp(px, { raw: { width: size, height: size, channels: 4 } })
+      .png()
+      .toFile(join(dir, "padded.png"));
+
+    const pack = await deriveFaviconPackFromAsset({
+      projectRoot: root,
+      assetsDir,
+      sourceFilename: "padded.png",
+      prefix: "fallback",
+      icoSizes: [16],
+      maskableSizes: [64],
+      background: "#112233",
+    });
+    assert.equal(pack.files[1]?.renderedFrom?.kind, "raster");
+    const { data, info } = await sharp(
+      join(dir, "fallback-maskable-64.png"),
+    )
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    assert.deepEqual([...data.subarray(0, 4)], [0x11, 0x22, 0x33, 255]);
+    let minX = info.width;
+    let maxX = -1;
+    for (let y = 0; y < info.height; y++) {
+      for (let x = 0; x < info.width; x++) {
+        const i = (y * info.width + x) * 4;
+        if (data[i] !== 0x11 || data[i + 1] !== 0x22 || data[i + 2] !== 0x33) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+        }
+      }
+    }
+    // Art trimmed then scaled to 64 * 0.8 = 51.
+    const bbox = maxX - minX + 1;
+    assert.ok(bbox >= 48 && bbox <= 54, `art bbox ${bbox} not 80% of 64`);
   });
 });

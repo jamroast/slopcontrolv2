@@ -27,6 +27,8 @@ describe("design-image-catalog", () => {
   it("lists and asserts known ops", () => {
     const ids = listDesignImageOpIds();
     assert.ok(ids.includes("vectorize"));
+    assert.ok(ids.includes("favicon_pack"));
+    assert.match(formatDesignImageCatalogForLlm().slice(0, 1200), /favicon_pack/);
     assert.ok(ids.includes("make_transparent"));
     assert.match(formatDesignImageCatalogForLlm().slice(0, 1200), /vectorize/);
     assert.ok(ids.includes("circular_mask"));

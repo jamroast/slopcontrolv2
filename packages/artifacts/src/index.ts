@@ -1013,9 +1013,9 @@ export interface DesignAssetBrief {
   source?: string;
 }
 
-/** Derivative ops: icon pack / circular mask / alpha / resize from an existing asset. */
+/** Derivative ops: favicon pack / icon pack / circular mask / alpha / resize from an existing asset. */
 const DERIVATIVE_ASSET_RE =
-  /\b(?:icon\s*pack|favicon|alpha(?:[- ]channel)?|transparent|cut\s*out|circular\s*(?:mask|cut[\s-]?out)|resize|sizes)\b/i;
+  /\b(?:icon\s*pack|favicon|maskable|\.ico|alpha(?:[- ]channel)?|transparent|cut\s*out|circular\s*(?:mask|cut[\s-]?out)|resize|sizes)\b/i;
 
 /** Documentation-only rows: name or prompt marks the asset as reference. */
 const REFERENCE_ROW_NAME_RE =

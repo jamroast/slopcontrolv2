@@ -6,6 +6,7 @@
 
 export type DesignImageOpId =
   | "vectorize"
+  | "favicon_pack"
   | "make_transparent"
   | "circular_mask"
   | "resize"
@@ -52,6 +53,17 @@ export const DESIGN_IMAGE_CAPABILITIES: readonly DesignImageCapability[] = [
       "make an SVG version",
     ],
     neverFor: ["invent a new mark", "photos / gradient art", "wordmark text"],
+  },
+  {
+    id: "favicon_pack",
+    title: "Favicon pack (.ico + maskable)",
+    description:
+      "From an EXISTING mark: a multi-size PNG-embedded .ico (16/32/48) plus maskable Android icons (192/512) with an 80% safe zone. Rendered from vectorized variants when present. Deterministic; never invents a mark.",
+    sharpPrimitives: ["ensureAlpha", "trim", "resize", "extend", "png"],
+    paramsHint:
+      "icoSizes?: number[]; maskableSizes?: number[]; maskableSafeZone?: number; background?: '#hex'; prefix?: string",
+    examples: ["favicon pack", "make a favicon.ico", "maskable app icons", "site icon"],
+    neverFor: ["invent a new mark", "wordmark text"],
   },
   {
     id: "make_transparent",

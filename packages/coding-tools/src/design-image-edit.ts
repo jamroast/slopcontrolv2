@@ -1,4 +1,10 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, join, resolve } from "node:path";
 import sharp from "sharp";
 import {
@@ -601,6 +607,180 @@ export type DeriveIconPackResult = {
   }>;
 };
 
+type TileSource = { filename: string; kind: "variant" | "master" | "raster" };
+
+/** Vector stems to try for a raster source (exact, then alpha-stripped). */
+function svgStemsFor(filename: string): string[] {
+  const stem = filename.replace(/\.[^.]+$/, "");
+  return [
+    ...new Set([
+      stem,
+      stem.replace(/(?:-(?:alpha|cutout))+(?:-v\d+)?$/i, ""),
+    ]),
+  ].filter(Boolean);
+}
+
+/** Nearest vector source for a size: exact variant → smaller variant → master. */
+function pickSvgSource(opts: {
+  assetsDirAbs: string;
+  stems: string[];
+  size: number;
+}): { name: string; kind: "variant" | "master" } | null {
+  for (const stem of opts.stems) {
+    const candidates: Array<{ name: string; kind: "variant" | "master" }> = [
+      { name: `${stem}-${opts.size}.svg`, kind: "variant" },
+      ...(opts.size <= 16
+        ? [{ name: `${stem}-16.svg`, kind: "variant" as const }]
+        : []),
+      ...(opts.size > 16 && opts.size <= 32
+        ? [{ name: `${stem}-32.svg`, kind: "variant" as const }]
+        : []),
+      { name: `${stem}.svg`, kind: "master" },
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(join(opts.assetsDirAbs, candidate.name))) return candidate;
+    }
+  }
+  return null;
+}
+
+const TRANSPARENT = { r: 0, g: 0, b: 0, alpha: 0 } as const;
+
+/** Parse #rgb/#rrggbb (+ optional alpha) into a sharp background. */
+function parseHexColor(value: string | undefined): {
+  r: number;
+  g: number;
+  b: number;
+  alpha: number;
+} {
+  if (!value?.trim()) return TRANSPARENT;
+  const hex = value.trim().replace(/^#/, "");
+  const expanded =
+    hex.length === 3 || hex.length === 4
+      ? hex
+          .split("")
+          .map((c) => `${c}${c}`)
+          .join("")
+      : hex;
+  if (!/^[0-9a-f]{6}([0-9a-f]{2})?$/i.test(expanded)) return TRANSPARENT;
+  return {
+    r: parseInt(expanded.slice(0, 2), 16),
+    g: parseInt(expanded.slice(2, 4), 16),
+    b: parseInt(expanded.slice(4, 6), 16),
+    alpha: expanded.length === 8 ? parseInt(expanded.slice(6, 8), 16) : 255,
+  };
+}
+
+/**
+ * Render one square tile as a PNG buffer. Vector variants win when present;
+ * otherwise the raster is trimmed (padding removal) and resized.
+ * `innerScale < 1` shrinks the art inside the canvas (maskable safe zone) and
+ * fills the padding with `background`.
+ */
+async function renderTileBuffer(opts: {
+  rasterAbs: string;
+  rasterName: string;
+  assetsDirAbs: string;
+  stems: string[];
+  size: number;
+  preferSvgVariants: boolean;
+  innerScale?: number;
+  background?: { r: number; g: number; b: number; alpha: number };
+}): Promise<{ png: Buffer; source: TileSource }> {
+  const background = opts.background ?? TRANSPARENT;
+  const inner = Math.max(0.1, Math.min(1, opts.innerScale ?? 1));
+  const box = Math.max(1, Math.round(opts.size * inner));
+  const svg = opts.preferSvgVariants
+    ? pickSvgSource({
+        assetsDirAbs: opts.assetsDirAbs,
+        stems: opts.stems,
+        size: box,
+      })
+    : null;
+
+  let art: Buffer;
+  let source: TileSource;
+  if (svg) {
+    art = await sharp(join(opts.assetsDirAbs, svg.name), { density: 144 })
+      .resize(box, box, { fit: "contain", background })
+      .png()
+      .toBuffer();
+    source = { filename: svg.name, kind: svg.kind };
+  } else {
+    try {
+      // Trim the transparent padding first so the mark fills the tile.
+      art = await sharp(opts.rasterAbs)
+        .ensureAlpha()
+        .trim({ background: TRANSPARENT })
+        .resize(box, box, { fit: "contain", background })
+        .png()
+        .toBuffer();
+    } catch {
+      // A fully transparent source can make trim throw — resize as-is.
+      art = await sharp(opts.rasterAbs)
+        .ensureAlpha()
+        .resize(box, box, { fit: "contain", background })
+        .png()
+        .toBuffer();
+    }
+    source = { filename: opts.rasterName, kind: "raster" };
+  }
+
+  if (box === opts.size) return { png: art, source };
+  const off = Math.floor((opts.size - box) / 2);
+  const rest = opts.size - box - off;
+  const png = await sharp(art)
+    .extend({ top: off, bottom: rest, left: off, right: rest, background })
+    .png()
+    .toBuffer();
+  return { png, source };
+}
+
+/** Build a PNG-embedded ICO container from square PNG renders (16/32/48…). */
+export function buildIcoFromPngs(
+  entries: Array<{ size: number; png: Buffer }>,
+): Buffer {
+  const count = entries.length;
+  const header = Buffer.alloc(6);
+  header.writeUInt16LE(0, 0);
+  header.writeUInt16LE(1, 2);
+  header.writeUInt16LE(count, 4);
+  const dir = Buffer.alloc(16 * count);
+  let offset = 6 + 16 * count;
+  entries.forEach((entry, i) => {
+    const base = i * 16;
+    const dim = entry.size >= 256 ? 0 : entry.size;
+    dir.writeUInt8(dim, base);
+    dir.writeUInt8(dim, base + 1);
+    dir.writeUInt8(0, base + 2);
+    dir.writeUInt8(0, base + 3);
+    dir.writeUInt16LE(1, base + 4);
+    dir.writeUInt16LE(32, base + 6);
+    dir.writeUInt32LE(entry.png.length, base + 8);
+    dir.writeUInt32LE(offset, base + 12);
+    offset += entry.png.length;
+  });
+  return Buffer.concat([header, dir, ...entries.map((e) => e.png)]);
+}
+
+export const DEFAULT_FAVICON_ICO_SIZES = [16, 32, 48] as const;
+export const DEFAULT_MASKABLE_SIZES = [192, 512] as const;
+export const DEFAULT_MASKABLE_SAFE_ZONE = 0.8;
+
+export type DeriveFaviconPackResult = {
+  sourceFilename: string;
+  redirectedFrom?: string;
+  hasAlpha: boolean;
+  icoFilename: string;
+  files: Array<{
+    filename: string;
+    relativePath: string;
+    kind: "ico" | "maskable";
+    size?: number;
+    renderedFrom?: TileSource;
+  }>;
+};
+
 /** Resize source into favicon/icon pack sizes (deterministic). */
 export async function deriveIconPackFromAsset(opts: {
   projectRoot: string;
@@ -650,89 +830,159 @@ export async function deriveIconPackFromAsset(opts: {
     : [16, 24, 32, 48, 64, 128, 192, 512];
   const src = resolveScopedAsset(scope, resolved.filename);
   const assetsDirAbs = scopeAssetsDir(scope);
-  const preferSvg = opts.preferSvgVariants !== false;
-  const srcStem = resolved.filename.replace(/\.[^.]+$/, "");
-  const svgStems = [
-    ...new Set([
-      srcStem,
-      srcStem.replace(/(?:-(?:alpha|cutout))+(?:-v\d+)?$/i, ""),
-    ]),
-  ].filter(Boolean);
-  /** Nearest vector source for a size: exact variant → smaller variant → master. */
-  const pickSvg = (
-    size: number,
-  ): { name: string; kind: "variant" | "master" } | null => {
-    if (!preferSvg) return null;
-    for (const stem of svgStems) {
-      const candidates: Array<{
-        name: string;
-        kind: "variant" | "master";
-      }> = [
-        { name: `${stem}-${size}.svg`, kind: "variant" },
-        ...(size <= 16
-          ? [{ name: `${stem}-16.svg`, kind: "variant" as const }]
-          : []),
-        ...(size > 16 && size <= 32
-          ? [{ name: `${stem}-32.svg`, kind: "variant" as const }]
-          : []),
-        { name: `${stem}.svg`, kind: "master" },
-      ];
-      for (const candidate of candidates) {
-        if (existsSync(join(assetsDirAbs, candidate.name))) return candidate;
-      }
-    }
-    return null;
-  };
+  const stems = svgStemsFor(resolved.filename);
   const packPrefix = (opts.prefix?.trim() || "icon-pack").replace(
     /[^a-z0-9_-]+/gi,
     "-",
   );
   const files: DeriveIconPackResult["files"] = [];
-  const transparent = { r: 0, g: 0, b: 0, alpha: 0 } as const;
   for (const size of sizes) {
     const filename = `${packPrefix}-${size}.png`;
     const out = outPathScoped(scope, filename);
-    const svg = pickSvg(size);
-    if (svg) {
-      await sharp(join(assetsDirAbs, svg.name), { density: 144 })
-        .resize(size, size, { fit: "contain", background: transparent })
-        .png()
-        .toFile(out.absolutePath);
-      files.push({
-        size,
-        relativePath: out.relativePath,
-        filename,
-        renderedFrom: { filename: svg.name, kind: svg.kind },
-      });
-      continue;
-    }
-    try {
-      // Trim the transparent padding first so the mark fills the tile.
-      await sharp(src.absolutePath)
-        .ensureAlpha()
-        .trim({ background: transparent })
-        .resize(size, size, { fit: "contain", background: transparent })
-        .png()
-        .toFile(out.absolutePath);
-    } catch {
-      // A fully transparent source can make trim throw — resize as-is.
-      await sharp(src.absolutePath)
-        .ensureAlpha()
-        .resize(size, size, { fit: "contain", background: transparent })
-        .png()
-        .toFile(out.absolutePath);
-    }
+    const tile = await renderTileBuffer({
+      rasterAbs: src.absolutePath,
+      rasterName: src.name,
+      assetsDirAbs,
+      stems,
+      size,
+      preferSvgVariants: opts.preferSvgVariants !== false,
+    });
+    writeFileSync(out.absolutePath, tile.png);
     files.push({
       size,
       relativePath: out.relativePath,
       filename,
-      renderedFrom: { filename: src.name, kind: "raster" },
+      renderedFrom: tile.source,
     });
   }
   return {
     sourceFilename: src.name,
     redirectedFrom: resolved.redirectedFrom,
     hasAlpha: resolved.hasAlpha,
+    files,
+  };
+}
+
+/**
+ * Favicon pack from an existing mark: a multi-size PNG-embedded `.ico` plus
+ * maskable Android icons with a safe zone. Rendered from vectorized variants
+ * when present (crisp at 16px), otherwise from the trimmed raster.
+ */
+export async function deriveFaviconPackFromAsset(opts: {
+  projectRoot: string;
+  loopId?: string;
+  /** Project-relative assets dir — alternative to loopId (design stage). */
+  assetsDir?: string;
+  sourceFilename?: string;
+  preferredFilename?: string;
+  /** ICO render sizes (default 16/32/48). */
+  icoSizes?: number[];
+  /** Maskable PNG sizes (default 192/512). */
+  maskableSizes?: number[];
+  /** Fraction of the canvas the mark may occupy (default 0.8). */
+  maskableSafeZone?: number;
+  /** Fill behind maskable art (default transparent). */
+  background?: string;
+  /** Output prefix (default "favicon"; the ICO becomes <prefix>.ico). */
+  prefix?: string;
+  preferSvgVariants?: boolean;
+  requireRealAlphaIfClaimed?: boolean;
+}): Promise<DeriveFaviconPackResult> {
+  const scope: AssetScope = {
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
+  };
+  const resolved = await resolveIconPackSourceFilename({
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
+    sourceFilename: opts.sourceFilename,
+    preferredFilename: opts.preferredFilename,
+  });
+  if (
+    opts.requireRealAlphaIfClaimed !== false &&
+    claimsAlphaInName(resolved.filename) &&
+    !resolved.hasAlpha
+  ) {
+    throw new Error(
+      `Refusing favicon pack from ${resolved.filename}: claims alpha but hasAlpha=false`,
+    );
+  }
+  const src = resolveScopedAsset(scope, resolved.filename);
+  const assetsDirAbs = scopeAssetsDir(scope);
+  const stems = svgStemsFor(resolved.filename);
+  const prefix = (opts.prefix?.trim() || "favicon").replace(
+    /[^a-z0-9_-]+/gi,
+    "-",
+  );
+  const background = parseHexColor(opts.background);
+  const safeZone = Math.max(
+    0.5,
+    Math.min(1, opts.maskableSafeZone ?? DEFAULT_MASKABLE_SAFE_ZONE),
+  );
+  const preferSvgVariants = opts.preferSvgVariants !== false;
+
+  const icoSizes = opts.icoSizes?.length
+    ? opts.icoSizes
+    : [...DEFAULT_FAVICON_ICO_SIZES];
+  const icoEntries: Array<{ size: number; png: Buffer }> = [];
+  let icoSource: TileSource | undefined;
+  for (const size of icoSizes) {
+    const tile = await renderTileBuffer({
+      rasterAbs: src.absolutePath,
+      rasterName: src.name,
+      assetsDirAbs,
+      stems,
+      size,
+      preferSvgVariants,
+    });
+    icoEntries.push({ size, png: tile.png });
+    icoSource ??= tile.source;
+  }
+  const icoName = `${prefix}.ico`;
+  const icoOut = outPathScoped(scope, icoName);
+  writeFileSync(icoOut.absolutePath, buildIcoFromPngs(icoEntries));
+
+  const files: DeriveFaviconPackResult["files"] = [
+    {
+      filename: icoName,
+      relativePath: icoOut.relativePath,
+      kind: "ico",
+      ...(icoSource ? { renderedFrom: icoSource } : {}),
+    },
+  ];
+  const maskableSizes = opts.maskableSizes?.length
+    ? opts.maskableSizes
+    : [...DEFAULT_MASKABLE_SIZES];
+  for (const size of maskableSizes) {
+    const tile = await renderTileBuffer({
+      rasterAbs: src.absolutePath,
+      rasterName: src.name,
+      assetsDirAbs,
+      stems,
+      size,
+      preferSvgVariants,
+      innerScale: safeZone,
+      background,
+    });
+    const name = `${prefix}-maskable-${size}.png`;
+    const out = outPathScoped(scope, name);
+    writeFileSync(out.absolutePath, tile.png);
+    files.push({
+      filename: name,
+      relativePath: out.relativePath,
+      kind: "maskable",
+      size,
+      renderedFrom: tile.source,
+    });
+  }
+
+  return {
+    sourceFilename: src.name,
+    redirectedFrom: resolved.redirectedFrom,
+    hasAlpha: resolved.hasAlpha,
+    icoFilename: icoName,
     files,
   };
 }
@@ -836,6 +1086,56 @@ export async function applyDesignImageOp(opts: {
       absolutePath: result.absolutePath,
       sourceFilename: result.sourceFilename,
       summary: result.summary,
+      files: result.files.map((f) => ({
+        filename: f.filename,
+        relativePath: f.relativePath,
+        size: f.size,
+      })),
+    };
+  }
+
+  if (op === "favicon_pack") {
+    const result = await deriveFaviconPackFromAsset({
+      projectRoot: opts.projectRoot,
+      loopId: opts.loopId,
+      assetsDir: opts.assetsDir,
+      sourceFilename: opts.sourceFilename,
+      icoSizes: Array.isArray(params.icoSizes)
+        ? (params.icoSizes as unknown[]).filter(
+            (n): n is number => typeof n === "number" && n > 0,
+          )
+        : undefined,
+      maskableSizes: Array.isArray(params.maskableSizes)
+        ? (params.maskableSizes as unknown[]).filter(
+            (n): n is number => typeof n === "number" && n > 0,
+          )
+        : undefined,
+      maskableSafeZone:
+        typeof params.maskableSafeZone === "number"
+          ? params.maskableSafeZone
+          : undefined,
+      background:
+        typeof params.background === "string" ? params.background : undefined,
+      prefix: typeof params.prefix === "string" ? params.prefix : undefined,
+    });
+    const first = result.files[0];
+    const vectorSource = result.files.some(
+      (f) => f.renderedFrom?.kind === "variant",
+    )
+      ? "variants"
+      : result.files.some((f) => f.renderedFrom?.kind === "master")
+        ? "master"
+        : "";
+    return {
+      op,
+      relativePath: first?.relativePath ?? "",
+      absolutePath: first
+        ? resolve(opts.projectRoot, first.relativePath)
+        : "",
+      sourceFilename: result.sourceFilename,
+      summary: `Favicon pack: ${result.files.length} files from ${result.sourceFilename}${
+        vectorSource ? ` via SVG ${vectorSource}` : ""
+      } (${result.icoFilename})`,
       files: result.files.map((f) => ({
         filename: f.filename,
         relativePath: f.relativePath,

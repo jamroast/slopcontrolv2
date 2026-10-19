@@ -66,7 +66,9 @@ describe("resolveVisionImagePaths", () => {
 describe("classifyDerivativeOp", () => {
   const cases: Array<[string, string, string]> = [
     ["Icon pack (8 sizes)", "icon-pack.png", "icon_pack"],
-    ["Favicon", "favicon.png", "icon_pack"],
+    ["Favicon", "favicon.png", "favicon_pack"],
+    ["Maskable app icons", "maskable-512.png", "favicon_pack"],
+    ["Site icon", "site.ico", "favicon_pack"],
     ["Circular mask", "mark-circle.png", "circular_mask"],
     ["Circular cut-out", "mark-round.png", "circular_mask"],
     ["Transparent mark", "mark-alpha.png", "alpha"],

@@ -299,6 +299,7 @@ import {
   syncPhaseArtifactsToWorktree,
   syncIgnoredArtifactsFromWorktree,
   deriveIconPackFromAsset,
+  deriveFaviconPackFromAsset,
   assertBytesMatchExtension,
   worktreeAssetTarget,
   makeTransparentDesignAsset,
@@ -9395,7 +9396,24 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
         }
         try {
           const derivativeOp = classifyDerivativeOp(brief);
-          if (derivativeOp === "icon_pack") {
+          if (derivativeOp === "favicon_pack") {
+            const pack = await deriveFaviconPackFromAsset({
+              projectRoot: project.rootPath,
+              assetsDir: phaseAssetsRel,
+              sourceFilename: sourceName,
+              preferredFilename: pinnedLogoAsset ?? undefined,
+            });
+            for (const f of pack.files) {
+              const abs = join(phaseAssetsAbs, f.filename);
+              copyFileSync(abs, join(worktree.path, assetDirRel, f.filename));
+              generatedPaths.push(f.relativePath);
+            }
+            log(
+              project,
+              run,
+              `--- Asset ${brief.name}: favicon pack from ${pack.sourceFilename} (${pack.icoFilename} + ${pack.files.length - 1} maskable) ---`,
+            );
+          } else if (derivativeOp === "icon_pack") {
             const pack = await deriveIconPackFromAsset({
               projectRoot: project.rootPath,
               assetsDir: phaseAssetsRel,

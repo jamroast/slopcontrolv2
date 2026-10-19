@@ -76,9 +76,10 @@ export function resolveVisionImagePaths(
   return sorted.slice(0, max);
 }
 
-export type DerivativeOp = "icon_pack" | "circular_mask" | "alpha";
+export type DerivativeOp = "favicon_pack" | "icon_pack" | "circular_mask" | "alpha";
 
-const ICON_PACK_RE = /\bicon\s*pack\b|favicon|\bsizes\b/i;
+const FAVICON_RE = /\bfavicon\b|maskable|\.ico\b/i;
+const ICON_PACK_RE = /\bicon\s*pack\b|\bsizes\b/i;
 const CIRCULAR_RE = /\bcircular\s*(?:mask|cut[\s-]?out)\b/i;
 
 /** Deterministic op for a derivative asset brief (name + filename only). */
@@ -87,6 +88,7 @@ export function classifyDerivativeOp(brief: {
   filename: string;
 }): DerivativeOp {
   const text = `${brief.name} ${brief.filename}`;
+  if (FAVICON_RE.test(text)) return "favicon_pack";
   if (ICON_PACK_RE.test(text)) return "icon_pack";
   if (CIRCULAR_RE.test(text)) return "circular_mask";
   return "alpha";

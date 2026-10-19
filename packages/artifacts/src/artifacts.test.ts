@@ -1437,6 +1437,12 @@ true
         isDerivativeAssetBrief({ name: "Circular mask", filename: "mark-circle.png" }),
       );
       assert.ok(
+        isDerivativeAssetBrief({ name: "Favicon pack", filename: "favicon.ico" }),
+      );
+      assert.ok(
+        isDerivativeAssetBrief({ name: "Maskable icons", filename: "maskable-512.png" }),
+      );
+      assert.ok(
         !isDerivativeAssetBrief({ name: "Hero artwork", filename: "hero.png" }),
       );
 
