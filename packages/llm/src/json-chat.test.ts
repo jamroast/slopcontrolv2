@@ -12,6 +12,7 @@ import {
   chatJson,
 } from "./json-chat.js";
 import type { LlmEndpoint } from "@slopcontrol/types";
+import { z } from "zod";
 
 describe("json-chat helpers", () => {
   it("stripJsonFence unwraps markdown fences", () => {
@@ -499,6 +500,92 @@ describe("chatJson empty-content retry", () => {
             sleep: async () => {},
           }),
         /JSON chat timed out after 90000ms/,
+      );
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+});
+
+
+describe("chatJson schema validation", () => {
+  const endpoint: LlmEndpoint = {
+    id: "test",
+    label: "test",
+    baseUrl: "http://example.test/v1",
+    apiType: "openai-chat",
+    modelId: "test-model",
+    capabilities: { chat: true, vision: false, imageGen: false },
+  };
+  const schema = z.object({ targets: z.string(), intent: z.boolean().optional() });
+  const reply = (content: string) =>
+    new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  it("unwraps a single-element array for an object schema", async () => {
+    const fetchMock = mock.method(globalThis, "fetch", async () =>
+      reply('[{"targets":"both"}]'),
+    );
+    try {
+      const result = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        schema,
+      });
+      assert.deepEqual(result.parsed, { targets: "both" });
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("retries a shape mismatch with a nudge and keeps response_format", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    const fetchMock = mock.method(globalThis, "fetch", async (_url: string, init?: RequestInit) => {
+      calls += 1;
+      bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return calls === 1
+        ? reply('[{"targets":"both"},{"targets":"phase"}]')
+        : reply('{"targets":"research"}');
+    });
+    try {
+      const result = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        schema,
+        schemaHint: "Return ONE object",
+      });
+      assert.equal(calls, 2);
+      assert.deepEqual(result.parsed, { targets: "research" });
+      // response_format is never dropped for shape retries.
+      for (const body of bodies) {
+        assert.deepEqual(body.response_format, { type: "json_object" });
+      }
+      const retryMessages = bodies[1]?.messages as Array<{ role: string; content: string }>;
+      assert.match(
+        retryMessages.find((m) => m.role === "user")?.content ?? "",
+        /ONLY a single valid JSON object/,
+      );
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("throws a clean shape error (not a raw issues array) after retries", async () => {
+    const fetchMock = mock.method(globalThis, "fetch", async () => reply("[]"));
+    try {
+      await assert.rejects(
+        () => chatJson({ endpoint, system: "sys", user: "user", schema }),
+        (err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          assert.match(msg, /JSON shape invalid/);
+          assert.doesNotMatch(msg, /"expected":/);
+          return true;
+        },
       );
     } finally {
       fetchMock.mock.restore();

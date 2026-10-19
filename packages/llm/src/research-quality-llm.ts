@@ -96,6 +96,8 @@ export async function judgeResearchQualityViaLlm(
     temperature: 0,
     timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
     maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
+    schema: ResearchQualityVerdictSchema,
+    schemaHint: "Return ONE JSON object (ok/gaps/suggestedFixes/…), never an array",
     system: RESEARCH_QUALITY_SYSTEM_PROMPT,
     user: [
       "Change Intent (authoritative):",

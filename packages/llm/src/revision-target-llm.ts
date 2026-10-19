@@ -33,6 +33,8 @@ export interface ClassifyRevisionTargetOptions {
   researchExcerpt: string;
   phaseExcerpt: string;
   timeoutMs?: number;
+  /** Retry with this endpoint when the primary returns unusable output. */
+  fallback?: { endpoint: LlmEndpoint; modelId?: string };
 }
 
 export async function classifyRevisionTargetsViaLlm(
@@ -49,14 +51,28 @@ export async function classifyRevisionTargetsViaLlm(
     opts.phaseExcerpt || "(empty)",
   ].join("\n");
 
-  const { parsed } = await chatJson({
-    endpoint: opts.endpoint,
-    modelId: opts.modelId,
-    system: REVISION_TARGET_SYSTEM_PROMPT,
-    user,
-    timeoutMs: opts.timeoutMs ?? 90_000,
-    temperature: 0,
-  });
+  const run = async (
+    endpoint: LlmEndpoint,
+    modelId?: string,
+  ): Promise<RevisionClassification> => {
+    const { parsed } = await chatJson({
+      endpoint,
+      modelId,
+      system: REVISION_TARGET_SYSTEM_PROMPT,
+      user,
+      timeoutMs: opts.timeoutMs ?? 90_000,
+      temperature: 0,
+      schema: RevisionTargetSchema,
+      schemaHint:
+        'Return ONE object: {"targets":"research"|"phase"|"both","intent":true|false} — never an array',
+    });
+    return RevisionTargetSchema.parse(parsed);
+  };
 
-  return RevisionTargetSchema.parse(parsed);
+  try {
+    return await run(opts.endpoint, opts.modelId);
+  } catch (err) {
+    if (!opts.fallback) throw err;
+    return run(opts.fallback.endpoint, opts.fallback.modelId);
+  }
 }

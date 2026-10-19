@@ -143,6 +143,8 @@ export async function judgeIntentAlignmentViaLlm(
     temperature: 0,
     timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
     maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
+    schema: IntentAlignmentVerdictSchema,
+    schemaHint: "Return ONE JSON object (aligned/gaps/…), never an array",
     system: INTENT_ALIGNMENT_SYSTEM_PROMPT,
     user: [
       "Change Intent (authoritative):",

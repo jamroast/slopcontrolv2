@@ -100,6 +100,8 @@ export async function judgeResearchEngagementViaLlm(
     modelId: opts.modelId,
     temperature: 0,
     timeoutMs: opts.timeoutMs,
+    schema: ResearchEngagementVerdictSchema,
+    schemaHint: "Return ONE JSON object (overclaims/gaps/…), never an array",
     system: RESEARCH_ENGAGEMENT_SYSTEM_PROMPT,
     user: [
       "Change Intent (authoritative):",

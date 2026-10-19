@@ -36,6 +36,8 @@ export interface JudgeDocRevisionOptions {
   before: string;
   after: string;
   timeoutMs?: number;
+  /** Retry with this endpoint when the primary returns unusable output. */
+  fallback?: { endpoint: LlmEndpoint; modelId?: string };
 }
 
 export async function judgeDocRevisionViaLlm(
@@ -52,15 +54,29 @@ export async function judgeDocRevisionViaLlm(
     opts.after || "(empty)",
   ].join("\n");
 
-  const { parsed } = await chatJson({
-    endpoint: opts.endpoint,
-    modelId: opts.modelId,
-    system: DOC_REVISION_JUDGE_SYSTEM_PROMPT,
-    user,
-    timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
-    maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
-    temperature: 0,
-  });
+  const run = async (
+    endpoint: LlmEndpoint,
+    modelId?: string,
+  ): Promise<DocRevisionJudgeResult> => {
+    const { parsed } = await chatJson({
+      endpoint,
+      modelId,
+      system: DOC_REVISION_JUDGE_SYSTEM_PROMPT,
+      user,
+      timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
+      maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
+      temperature: 0,
+      schema: DocRevisionJudgeSchema,
+      schemaHint:
+        'Return ONE object: {"applied":string[],"missing":string[]} — never an array',
+    });
+    return DocRevisionJudgeSchema.parse(parsed);
+  };
 
-  return DocRevisionJudgeSchema.parse(parsed);
+  try {
+    return await run(opts.endpoint, opts.modelId);
+  } catch (err) {
+    if (!opts.fallback) throw err;
+    return run(opts.fallback.endpoint, opts.fallback.modelId);
+  }
 }

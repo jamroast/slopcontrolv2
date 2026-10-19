@@ -77,3 +77,35 @@ describe("verifyDocRevisionApplied", () => {
     assert.deepEqual(v.missing, ["add the issuer config"]);
   });
 });
+
+
+describe("verifyDocRevisionApplied judge outage", () => {
+  it("accepts a changed doc when the judge throws, recording judgeError", async () => {
+    const verdict = await verifyDocRevisionApplied({
+      before: "alpha",
+      after: "beta",
+      feedback: "change it",
+      judge: async () => {
+        throw new Error("JSON chat parse failed: \"Let me ana\"");
+      },
+    });
+    assert.equal(verdict.ok, true);
+    assert.equal(verdict.changed, true);
+    assert.match(verdict.reason, /judge unavailable/);
+    assert.match(verdict.judgeError ?? "", /parse failed/);
+  });
+
+  it("fails closed on a byte-identical doc when the judge throws", async () => {
+    const verdict = await verifyDocRevisionApplied({
+      before: "same",
+      after: "same",
+      feedback: "change it",
+      judge: async () => {
+        throw new Error("boom");
+      },
+    });
+    assert.equal(verdict.ok, false);
+    assert.match(verdict.reason, /byte-identical/);
+    assert.match(verdict.judgeError ?? "", /boom/);
+  });
+});

@@ -23,6 +23,8 @@ export interface DocRevisionVerdict {
   changed: boolean;
   missing: string[];
   reason: string;
+  /** Judge call failed (outage/unparseable output) — verdict fell back to bytes. */
+  judgeError?: string;
 }
 
 /** Normalize a doc for byte-identity comparison: strip date lines, collapse
@@ -68,11 +70,33 @@ export async function verifyDocRevisionApplied(opts: {
     };
   }
 
-  const verdict = await opts.judge({
-    feedback: opts.feedback,
-    before: opts.before,
-    after: opts.after,
-  });
+  let verdict: { applied: string[]; missing: string[] };
+  try {
+    verdict = await opts.judge({
+      feedback: opts.feedback,
+      before: opts.before,
+      after: opts.after,
+    });
+  } catch (err) {
+    // A judge outage/unparseable reply must not kill the run: fall back to the
+    // byte-identity signal (never silently accept a no-op revision).
+    const judgeError = err instanceof Error ? err.message : String(err);
+    return changed
+      ? {
+          ok: true,
+          changed,
+          missing: [],
+          reason: "changed (judge unavailable)",
+          judgeError,
+        }
+      : {
+          ok: false,
+          changed,
+          missing: [],
+          reason: `byte-identical revision and judge unavailable (${judgeError.slice(0, 200)})`,
+          judgeError,
+        };
+  }
   const missing = (verdict.missing ?? []).filter((m) => m.trim());
   if (missing.length > 0) {
     return {

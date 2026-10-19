@@ -73,7 +73,6 @@ import {
   resolvePhaseDocFromAgentTurn,
   resolveResearchFromAgentTurn,
   resolveIntentFromAgentTurn,
-  scaffoldPhaseDoc,
   scaffoldResearch,
   scaffoldLlmTestHarness,
   snapshotFileStats,
@@ -864,11 +863,17 @@ function persistCheckOutput(
 const REVERSE_ENGINEER_MAX_STEPS = 50;
 
 /** Cap large docs in agent prompts so observational memory is not blown before the agent can write. */
-function clipPromptSection(label: string, text: string, maxChars: number): string {
+function clipPromptSection(
+  label: string,
+  text: string,
+  maxChars: number,
+  fullPath?: string,
+): string {
   const body = (text ?? "").trim();
   if (!body) return `(${label}: none)`;
   if (body.length <= maxChars) return body;
-  return `${body.slice(0, maxChars)}\n\n…[truncated ${label}: ${body.length} chars total; read_file \`.slopcontrol/${label}\` if you need more]`;
+  const where = fullPath ?? `.slopcontrol/${label}`;
+  return `${body.slice(0, maxChars)}\n\n…[truncated ${label}: ${body.length} chars total; read_file \`${where}\` if you need more]`;
 }
 
 /**
@@ -882,6 +887,14 @@ function clipPromptSection(label: string, text: string, maxChars: number): strin
  * 96k covers realistic RESEARCH/PHASE docs within cloud judges' contexts.
  */
 const JUDGE_DOC_EXCERPT_MAX_CHARS = 96_000;
+
+/**
+ * RESEARCH.md budget for AGENT prompts (draft/repair/quality-retry/revise).
+ * Must be close to JUDGE_DOC_EXCERPT_MAX_CHARS: a judge that sees the whole
+ * research cannot be satisfied by a drafter that saw only its first 8k (the
+ * repeated "generic Success Criteria / File Changes missing" rejections).
+ */
+const RESEARCH_PROMPT_CLIP_CHARS = 64_000;
 
 /** Media tools from structured ContinueIntent (no chat regex). */
 function designLoopNeedsMediaTools(intent: ContinueIntent): boolean {
@@ -7003,7 +7016,7 @@ Specification phase (changeKind=specification):
     const buildDraftPrompt = (slim: boolean) => {
       const pack = slim ? "" : adjacentPack ? `${adjacentPack}\n` : "";
       const blueprintClip = slim ? 2_500 : 6_000;
-      const researchClip = slim ? 4_000 : 8_000;
+      const researchClip = slim ? 8_000 : RESEARCH_PROMPT_CLIP_CHARS;
       return `Draft PHASE.md for phase ${phase.id} only (single phase).
 Phase id: ${phase.id}. Full context is in this message (description, Change Intent, RESEARCH.md, blueprint excerpt). Do NOT ask the operator for missing inputs — output the complete PHASE.md starting with \`# Phase …\`.
 Description:
@@ -7033,13 +7046,13 @@ Blueprint (excerpt — full at .slopcontrol/BLUEPRINT.md; prefer Live decisions)
 ${clipPromptSection("BLUEPRINT.md", clipBlueprintForPrompt(blueprint, blueprintClip), blueprintClip)}
 
 Research:
-${clipPromptSection("RESEARCH.md", research, researchClip)}`;
+${clipPromptSection("RESEARCH.md", research, researchClip, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
     };
 
     const watch = phaseDocWatchPaths(project.rootPath, phase.id);
     let beforeStats = snapshotFileStats(watch);
 
-    const finishWithScaffold = (reason: string): RunStage | void => {
+    const rejectDraftStructural = (reason: string): RunStage => {
       if (intent.interaction && intent.interaction.mount !== "n/a") {
         log(
           project,
@@ -7075,16 +7088,15 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         );
         return "failed";
       }
-      const scaffolded = scaffoldPhaseDoc({
-        phaseId: phase.id,
-        description: phase.description,
-        research,
-        testCommand: config.testCommand,
-        intent,
-        projectRoot: project.rootPath,
+      // The phase-quality judge rejects scaffold docs by construction
+      // (generic Success Criteria / "BD: None (scaffold)" / clipped scope), so a
+      // scaffold here only burns a judge round plus two leg retries. Treat the
+      // structural failure as a draft fault and re-draft with this feedback.
+      return recoverableDraftFail(reason, {
+        title: "Draft rejected: invalid PHASE.md (structural)",
+        kind: "draft-structural",
+        faultLeg: "draft",
       });
-      log(project, run, reason);
-      writePhaseDoc(project.rootPath, phase.id, scaffolded);
     };
 
     const recoverableDraftFail = (
@@ -7249,8 +7261,8 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
           const retryDetail = formatLlmErrorForLog(retryError);
           log(project, run, `ERROR: slim draft retry failed — ${retryDetail}`);
           if (researchLooksSolid(research)) {
-            const scaffolded = finishWithScaffold(
-              `Draft LLM threw after solid RESEARCH.md (${retryDetail}). Using scaffold so review can proceed. Handoff: retry draft if scaffold is insufficient.`,
+            const scaffolded = rejectDraftStructural(
+              `Draft LLM threw after solid RESEARCH.md (${retryDetail}). Failing the draft so self-heal re-drafts with this feedback.`,
             );
             if (scaffolded === "failed") return scaffolded;
             phaseDocWritten = true;
@@ -7259,8 +7271,8 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
           }
         }
       } else if (researchLooksSolid(research)) {
-        const scaffolded = finishWithScaffold(
-          `Draft LLM threw after solid RESEARCH.md (${detail}). Using scaffold so review can proceed. Handoff: retry draft if scaffold is insufficient.`,
+        const scaffolded = rejectDraftStructural(
+          `Draft LLM threw after solid RESEARCH.md (${detail}). Failing the draft so self-heal re-drafts with this feedback.`,
         );
         if (scaffolded === "failed") return scaffolded;
         phaseDocWritten = true;
@@ -7284,9 +7296,10 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
         research,
       });
 
-      // Broken (empty / chat-preamble) output with no harvested doc: retry once
-      // with a fallback model before falling through to repair/scaffold. Harvest
-      // first so a tool-written PHASE.md (write_file) is not treated as broken.
+      // Broken (empty / chat-preamble) output with no harvested doc: retry the
+      // SAME model once first (empty completions are usually transient), then
+      // fall back to the fallback model. Harvest first so a tool-written
+      // PHASE.md (write_file) is not treated as broken.
       const brokenReason = brokenOutputReason(output);
       if (resolved.source === "none" && brokenReason) {
         log(
@@ -7294,23 +7307,53 @@ ${clipPromptSection("RESEARCH.md", research, researchClip)}`;
           run,
           `--- Draft returned broken output (${brokenReason}) ---`,
         );
-        beforeStats = snapshotFileStats(watch);
-        const fallbackOutput = await retryDraftWithFallback(
-          buildDraftPrompt(false),
-          "draft-fallback",
-          20,
-        );
-        if (fallbackOutput != null && !brokenOutputReason(fallbackOutput)) {
-          output = fallbackOutput;
-          log(project, run, fallbackOutput);
-          resolved = resolvePhaseDocFromAgentTurn({
-            projectRoot: project.rootPath,
-            phaseId: phase.id,
-            agentOutput: output,
-            beforeStats,
-            description: phase.description,
-            research,
-          });
+        try {
+          beforeStats = snapshotFileStats(watch);
+          const sameModelRetry = await runAgent(
+            this.ctx.agents.phasePlannerAgent,
+            buildDraftPrompt(false),
+            project.id,
+            `${run.id}-draft-empty-retry`,
+            planningAgentRunOpts(20),
+          );
+          if (sameModelRetry != null && !brokenOutputReason(sameModelRetry)) {
+            output = sameModelRetry;
+            log(project, run, sameModelRetry);
+            resolved = resolvePhaseDocFromAgentTurn({
+              projectRoot: project.rootPath,
+              phaseId: phase.id,
+              agentOutput: output,
+              beforeStats,
+              description: phase.description,
+              research,
+            });
+          }
+        } catch (retryErr) {
+          log(
+            project,
+            run,
+            `--- Same-model draft retry failed: ${formatLlmErrorForLog(retryErr)} ---`,
+          );
+        }
+        if (resolved.source === "none") {
+          beforeStats = snapshotFileStats(watch);
+          const fallbackOutput = await retryDraftWithFallback(
+            buildDraftPrompt(false),
+            "draft-fallback",
+            20,
+          );
+          if (fallbackOutput != null && !brokenOutputReason(fallbackOutput)) {
+            output = fallbackOutput;
+            log(project, run, fallbackOutput);
+            resolved = resolvePhaseDocFromAgentTurn({
+              projectRoot: project.rootPath,
+              phaseId: phase.id,
+              agentOutput: output,
+              beforeStats,
+              description: phase.description,
+              research,
+            });
+          }
         }
       }
 
@@ -7364,7 +7407,7 @@ End with PHASE_COMPLETE.
 Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 Research:
-${clipPromptSection("RESEARCH.md", research, 8_000)}`;
+${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
         let repairThrew = false;
         let finalBrokenReason: string | null = null;
         try {
@@ -7435,8 +7478,8 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
           const repairDetail = formatLlmErrorForLog(repairError);
           log(project, run, `ERROR: draft repair failed — ${repairDetail}`);
           if (researchLooksSolid(research)) {
-            const scaffolded = finishWithScaffold(
-              `Draft repair threw after solid RESEARCH.md (${repairDetail}). Using scaffold so review can proceed.`,
+            const scaffolded = rejectDraftStructural(
+              `Draft repair threw after solid RESEARCH.md (${repairDetail}). Failing the draft so self-heal re-drafts with this feedback.`,
             );
             if (scaffolded === "failed") return scaffolded;
             phaseDocWritten = true;
@@ -7485,12 +7528,12 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
                 },
               );
             }
-            const scaffolded = finishWithScaffold(
+            const scaffolded = rejectDraftStructural(
               `PHASE.md still invalid after repair (${[
                 ...resolved.gate.issues,
                 ...(resolved.alignIssues ?? []),
                 ...intentIssues,
-              ].join("; ")}). Using scaffold so review can proceed.`,
+              ].join("; ")}). Failing the draft so self-heal re-drafts with this feedback.`,
             );
             if (scaffolded === "failed") return scaffolded;
           } else {
@@ -7776,7 +7819,7 @@ ${clipPromptSection("RESEARCH.md", research, 8_000)}`;
         canonicalPath,
         intentBlock,
         description: clipPromptSection("change-request", phase.description, 4_000),
-        research: clipPromptSection("RESEARCH.md", research, 8_000),
+        research: clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
         judgeFeedback: feedback,
       });
       try {
@@ -8137,7 +8180,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         }
         return await finish();
       }
-      let verdict = await verifyDocRevisionApplied({
+      let verdict = await this.verifyRevisionWithLog({ project, run,
         before: research,
         after: researchAfter,
         feedback: feedback ?? "",
@@ -8179,7 +8222,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           }
           return await finish();
         }
-        verdict = await verifyDocRevisionApplied({
+        verdict = await this.verifyRevisionWithLog({ project, run,
           before: research,
           after: researchAfter,
           feedback: feedback ?? "",
@@ -8246,7 +8289,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         });
         return await finish();
       }
-      let verdict = await verifyDocRevisionApplied({
+      let verdict = await this.verifyRevisionWithLog({ project, run,
         before: phaseDoc,
         after: phaseAfter,
         feedback: feedback ?? "",
@@ -8282,7 +8325,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           return await finish();
         }
         phaseAfterDoc = retryRev.doc;
-        verdict = await verifyDocRevisionApplied({
+        verdict = await this.verifyRevisionWithLog({ project, run,
           before: phaseDoc,
           after: phaseAfterDoc,
           feedback: feedback ?? "",
@@ -8334,7 +8377,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         });
         return await finish();
       }
-      const intentVerdict = await verifyDocRevisionApplied({
+      const intentVerdict = await this.verifyRevisionWithLog({ project, run,
         before: JSON.stringify(intent, null, 2),
         after: JSON.stringify(intentRev.intent, null, 2),
         feedback: feedback ?? "",
@@ -8545,7 +8588,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         phase.description,
         4_000,
       ),
-      research: clipPromptSection("RESEARCH.md", research, 8_000),
+      research: clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
       preamble: input.preamble,
     });
     try {
@@ -8793,6 +8836,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     try {
       const { endpoint, modelId } =
         this.ctx.registry.resolveEndpointForRole("classification");
+      const fallback = resolvePlanningJudgeFallback(this.ctx.registry);
       const result = await classifyRevisionTargetsViaLlm({
         endpoint,
         modelId,
@@ -8808,6 +8852,14 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
           JUDGE_DOC_EXCERPT_MAX_CHARS,
         ),
         timeoutMs: 90_000,
+        ...(fallback
+          ? {
+              fallback: {
+                endpoint: fallback.endpoint,
+                modelId: fallback.modelId,
+              },
+            }
+          : {}),
       });
       return { targets: result.targets, intent: result.intent === true };
     } catch {
@@ -8826,6 +8878,7 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
     const resolved = resolvePlanningJudgeEndpoint(this.ctx.registry);
     if (!resolved) return undefined;
     const { endpoint, modelId } = resolved;
+    const fallback = resolvePlanningJudgeFallback(this.ctx.registry);
     return (input: { feedback: string; before: string; after: string }) =>
       judgeDocRevisionViaLlm({
         endpoint,
@@ -8833,7 +8886,44 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         feedback: input.feedback,
         before: input.before,
         after: input.after,
+        ...(fallback
+          ? {
+              fallback: {
+                endpoint: fallback.endpoint,
+                modelId: fallback.modelId,
+              },
+            }
+          : {}),
       });
+  }
+
+  /**
+   * verifyDocRevisionApplied + logging when the judge itself was unavailable
+   * (the verdict then falls back to byte-identity instead of killing the run).
+   */
+  private async verifyRevisionWithLog(input: {
+    project: Project;
+    run: Run;
+    before: string;
+    after: string;
+    feedback: string;
+    judge?: Parameters<typeof verifyDocRevisionApplied>[0]["judge"];
+  }) {
+    const verdict: Awaited<ReturnType<typeof verifyDocRevisionApplied>> =
+      await verifyDocRevisionApplied({
+        before: input.before,
+        after: input.after,
+        feedback: input.feedback,
+        judge: input.judge,
+      });
+    if (verdict.judgeError) {
+      log(
+        input.project,
+        input.run,
+        `--- Revision judge unavailable: ${verdict.judgeError.slice(0, 300)} (fell back to byte-identity) ---`,
+      );
+    }
+    return verdict;
   }
 
   /** Surgical edit of RESEARCH.md from review feedback (research agent, not review agent). */
@@ -8859,7 +8949,7 @@ Apply surgical edits to the full RESEARCH.md:
 If you use write_file, write ONLY to ${researchPath}.
 
 Current RESEARCH.md:
-${clipPromptSection("RESEARCH.md", research, 8_000)}`;
+${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
 
     const watch = researchDocWatchPaths(project.rootPath, phase.id);
     const beforeStats = snapshotFileStats(watch);
@@ -8925,7 +9015,7 @@ Current phase doc:
 ${priorPhaseDoc}
 
 Research:
-${clipPromptSection("RESEARCH.md", research, 6_000)}`;
+${clipPromptSection("RESEARCH.md", research, RESEARCH_PROMPT_CLIP_CHARS, `.slopcontrol/phases/${phase.id}/RESEARCH.md`)}`;
 
     const watch = phaseDocWatchPaths(project.rootPath, phase.id);
     const beforeStats = snapshotFileStats(watch);

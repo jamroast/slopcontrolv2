@@ -1,3 +1,4 @@
+import { type ZodError, type ZodType } from "zod";
 import type { LlmEndpoint, ProvidersConfig } from "@slopcontrol/types";
 import { resolveEndpointSecrets } from "./secrets.js";
 
@@ -32,6 +33,14 @@ export interface ChatJsonOptions {
   maxTokens?: number;
   /** Test hook: override the sleep used for server-error retry backoff. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Validate the parsed value inside the retry loop. A shape mismatch (e.g. an
+   * object schema receiving an array) retries with a nudge instead of throwing
+   * out of chatJson — callers no longer parse outside the retry boundary.
+   */
+  schema?: ZodType;
+  /** Prompt fragment describing the expected shape (used in shape-error nudges). */
+  schemaHint?: string;
 }
 
 export interface ChatJsonResult {
@@ -42,6 +51,19 @@ export interface ChatJsonResult {
 
 const JSON_ONLY_NUDGE =
   "\n\nIMPORTANT: Respond with ONLY a single valid JSON object. No prose, no markdown, no explanation.";
+
+/** Human-readable zod issue summary (never a raw issues array). */
+export function formatZodIssues(error: ZodError): string {
+  const issues = error.issues ?? [];
+  if (issues.length === 0) return "invalid shape";
+  return issues
+    .map((issue) => {
+      const where =
+        issue.path.length > 0 ? issue.path.map(String).join(".") : "(root)";
+      return `${where}: ${issue.message}`;
+    })
+    .join("; ");
+}
 
 /** Strip optional markdown fences around a JSON object/array. */
 export function stripJsonFence(text: string): string {
@@ -229,6 +251,9 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
     opts.sleep ??
     ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   let lastError: Error | null = null;
+  // Only relax response_format after the provider returned empty content with
+  // it forced — never as a last-resort against prose output.
+  let dropJsonFormat = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const userContent =
@@ -245,9 +270,10 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
         endpoint.defaultParams?.maxTokens ??
         CHAT_JSON_DEFAULT_MAX_TOKENS,
     };
-    // Keep json_object while retrying parse/prose failures. Drop it only on the
-    // final attempt (some models return empty when response_format is forced).
-    if (useJsonObject && attempt < maxAttempts) {
+    // Keep json_object while retrying parse/prose failures. Drop it only after
+    // an empty completion (some models return empty when response_format is
+    // forced) — dropping it on the final attempt makes prose more likely.
+    if (useJsonObject && !dropJsonFormat) {
       body.response_format = { type: "json_object" };
     }
 
@@ -276,6 +302,7 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
         lastError = new Error(
           `JSON chat returned empty content (attempt ${attempt}/${maxAttempts})`,
         );
+        dropJsonFormat = true;
         if (attempt < maxAttempts) continue;
         throw lastError;
       }
@@ -288,6 +315,31 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
         );
         if (attempt < maxAttempts) continue;
         throw lastError;
+      }
+      if (opts.schema) {
+        let checked = opts.schema.safeParse(parsed);
+        // Single-element array wrapping is a common model tic — unwrap when the
+        // wrapped element satisfies the schema (never for genuine array schemas,
+        // because the wrapped check must pass).
+        if (
+          !checked.success &&
+          Array.isArray(parsed) &&
+          parsed.length === 1 &&
+          parsed[0] !== null &&
+          typeof parsed[0] === "object" &&
+          !Array.isArray(parsed[0])
+        ) {
+          const unwrapped = opts.schema.safeParse(parsed[0]);
+          if (unwrapped.success) checked = unwrapped;
+        }
+        if (!checked.success) {
+          lastError = new Error(
+            `JSON shape invalid: ${formatZodIssues(checked.error)}${opts.schemaHint ? ` — ${opts.schemaHint}` : ""} (attempt ${attempt}/${maxAttempts})`,
+          );
+          if (attempt < maxAttempts) continue;
+          throw lastError;
+        }
+        return { text, parsed: checked.data, modelId };
       }
       return { text, parsed, modelId };
     } catch (err) {

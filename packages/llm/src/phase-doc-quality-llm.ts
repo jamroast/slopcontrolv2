@@ -113,6 +113,8 @@ export async function judgePhaseDocQualityViaLlm(
     temperature: 0,
     timeoutMs: opts.timeoutMs ?? CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
     maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
+    schema: PhaseDocQualityVerdictSchema,
+    schemaHint: "Return ONE JSON object (ok/gaps/…), never an array",
     system: PHASE_DOC_QUALITY_SYSTEM_PROMPT,
     user: [
       "Change Intent (authoritative):",
