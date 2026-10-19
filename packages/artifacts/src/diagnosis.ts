@@ -18,6 +18,12 @@ export type PersistedDiagnosis = {
   harnessRecoverable?: boolean;
   /** Classifier tags for coding-retry routing (long-lived, host-utility, …). */
   tags?: string[];
+  /**
+   * Structured planning gaps (judge findings / gate issues). Authoritative for
+   * retry_draft + self-heal feedback: a gap may contain "; ", which a flat
+   * "; "-joined detail cannot round-trip losslessly.
+   */
+  issues?: string[];
   failingStep?: {
     name: string;
     command?: string;

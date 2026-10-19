@@ -322,6 +322,7 @@ export function priorDraftJudgeIssuesFromDiagnosis(
     rootCause?: string;
     evidence?: string;
     tags?: string[];
+    issues?: string[];
   } | null,
 ): string[] {
   if (!diagnosis) return [];
@@ -329,7 +330,13 @@ export function priorDraftJudgeIssuesFromDiagnosis(
   const isDraftGate =
     tags.includes("draft") || /^draft rejected/i.test(diagnosis.title ?? "");
   if (!isDraftGate) return [];
-  // evidence is the longer copy (rootCause caps at 2k and can slice a gap).
+  // Structured gaps are authoritative (a gap may itself contain "; ").
+  const structured = (diagnosis.issues ?? [])
+    .map((issue) => issue.trim())
+    .filter(Boolean);
+  if (structured.length > 0) return [...new Set(structured)];
+  // Fallback for older diagnoses: evidence is the longer copy (rootCause caps
+  // at 2k and can slice a gap).
   const detail = (diagnosis.evidence || diagnosis.rootCause || "").trim();
   if (!detail) return [];
   return [
@@ -340,4 +347,20 @@ export function priorDraftJudgeIssuesFromDiagnosis(
         .filter(Boolean),
     ),
   ];
+}
+
+/** Title used when carrying a prior draft's judge gaps into the next draft. */
+export const PRIOR_DRAFT_FEEDBACK_TITLE =
+  "Prior PHASE.md draft was rejected by the quality judge — address every gap below in the rewritten draft";
+
+/**
+ * The exact block `draftPhase` injects into the draft prompt when a retry or a
+ * self-heal round carries prior judge gaps. Empty string when there are none.
+ */
+export function formatPriorDraftFeedbackBlock(issues: string[]): string {
+  if (issues.length === 0) return "";
+  return `${formatJudgeFeedbackBlock({
+    title: PRIOR_DRAFT_FEEDBACK_TITLE,
+    gaps: issues,
+  })}\n`;
 }

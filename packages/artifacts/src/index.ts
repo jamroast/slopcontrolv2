@@ -1564,6 +1564,12 @@ export function buildPlanningFailureDiagnosis(opts: {
   /** Planning self-heal: which leg to re-run (research | draft | both). */
   faultLeg?: "research" | "draft" | "both";
   operatorActions?: string[];
+  /**
+   * Structured judge/gate gaps (authoritative). A judge gap may itself contain
+   * "; ", so a flat "; "-joined detail cannot round-trip losslessly — persist
+   * the array and let retry_draft/self-heal feed it back verbatim.
+   */
+  issues?: string[];
 }): PersistedDiagnosis {
   const detail = (opts.detail ?? "").trim() || "(no detail)";
   const kind =
@@ -1593,12 +1599,23 @@ export function buildPlanningFailureDiagnosis(opts: {
     class: "process",
     confidence: "high",
     title: opts.title.slice(0, 160),
-    rootCause: detail.slice(0, 2_000),
-    evidence: detail.slice(0, 4_000),
+    // Planning gaps are "; "-joined judge findings; the retry_draft feedback
+    // loop extracts them from evidence, so keep a realistic multi-gap list
+    // intact (phase-196-class rejections run ~3.5k chars).
+    rootCause: detail.slice(0, 4_000),
+    evidence: detail.slice(0, 12_000),
     nextActions:
       opts.stage === "draft"
         ? "Retry draft (research intact)."
         : "Retry research or fix bootstrap intent.",
+    ...(opts.issues?.length
+      ? {
+          issues: opts.issues
+            .map((issue) => issue.trim())
+            .filter(Boolean)
+            .slice(0, 40),
+        }
+      : {}),
     fingerprint: `planning-${kind}-${fingerprint}`,
     codingAgentShouldFix: true,
     tags: [

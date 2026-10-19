@@ -338,7 +338,6 @@ import {
   judgeNarrationOnlyViaLlm,
   buildElementHonorSnippets,
   tryMenubarEmbedSimilarity,
-  PLANNING_JUDGE_EXCERPT_CHARS,
   type LlmRegistry,
 type MastraModelConfig,
 } from "@slopcontrol/llm";
@@ -362,10 +361,17 @@ import {
   faultLegFromPhaseQualityVerdict,
   shouldContinuePlanningSelfHeal,
   planningGateIssueFingerprint,
+  formatPriorDraftFeedbackBlock,
   priorDraftJudgeIssuesFromDiagnosis,
   shouldReclassifyIntentForPlanningSelfHeal,
   brokenOutputReason,
 } from "./planning-pipeline.js";
+import {
+  clipPromptSection,
+  clipSharedDoc,
+  JUDGE_DOC_EXCERPT_MAX_CHARS,
+  SLIM_RESEARCH_CLIP_CHARS,
+} from "./prompt-clip.js";
 import {
   classifyDerivativeOp,
   resolveVisionImagePaths,
@@ -864,59 +870,6 @@ function persistCheckOutput(
 
 const REVERSE_ENGINEER_MAX_STEPS = 50;
 
-/** Cap large docs in agent prompts so observational memory is not blown before the agent can write. */
-function clipPromptSection(
-  label: string,
-  text: string,
-  maxChars: number,
-  fullPath?: string,
-  /**
-   * Keep the head and the tail inside maxChars. Required for RESEARCH.md and
-   * PHASE.md that a judge also scores: a head-only slice hides the sections
-   * (File Changes, Automated Checks, Risks) the judge reads from the tail.
-   */
-  balance = false,
-): string {
-  const body = (text ?? "").trim();
-  if (!body) return `(${label}: none)`;
-  if (body.length <= maxChars) return body;
-  const where = fullPath ?? `.slopcontrol/${label}`;
-  const marker = `\n\n…[truncated ${label}: ${body.length} chars total; read_file \`${where}\` if you need more]\n\n`;
-  if (!balance || marker.length >= maxChars) {
-    return `${body.slice(0, maxChars)}${marker}`;
-  }
-  const budget = maxChars - marker.length;
-  const headChars = Math.ceil(budget / 2);
-  const tailChars = budget - headChars;
-  return `${body.slice(0, headChars)}${marker}${body.slice(body.length - tailChars)}`;
-}
-
-/** Same window the planning judges score: head+tail, never a shorter head-only cut. */
-function clipSharedDoc(label: string, text: string, fullPath?: string): string {
-  return clipPromptSection(
-    label,
-    text,
-    JUDGE_DOC_EXCERPT_MAX_CHARS,
-    fullPath,
-    true,
-  );
-}
-
-/**
- * Research budget for the SLIM draft retry (provider 400 "prompt too long").
- * The slim prompt exists to shrink the request; research is the dominant term,
- * so it must shrink too — head+tail keeps the criteria sections at both ends.
- */
-const SLIM_RESEARCH_CLIP_CHARS = 24_000;
-
-/**
- * Excerpt budget shared by planning judges and the drafter/revise prompts
- * they score. Judges cannot read_file past a clip — a shorter inner
- * consolidate caused false-negative "section missing" verdicts (observed
- * 2026-09-23: Automated Checks began past a 16k clip). Drafter prompts use
- * the same budget so a judge cannot demand a tail the drafter never saw.
- */
-const JUDGE_DOC_EXCERPT_MAX_CHARS = PLANNING_JUDGE_EXCERPT_CHARS;
 
 /** Media tools from structured ContinueIntent (no chat regex). */
 function designLoopNeedsMediaTools(intent: ContinueIntent): boolean {
@@ -6089,6 +6042,7 @@ Phase id: ${input.phase.id}`;
             ? "Research failed: quality judge infra"
             : "Research failed: quality judge",
           detail: (gate.gaps ?? []).join("; "),
+          issues: gate.gaps ?? [],
           phaseId: input.phase.id,
           runId: input.run.id,
           kind: gate.judgeInfraFailed
@@ -6244,6 +6198,7 @@ Phase id: ${input.phase.id}`;
               ? "Draft rejected: judge infra"
               : "Draft rejected: planning gates",
             detail: outcome.issues.join("; ") || "Planning gates failed",
+            issues: outcome.issues,
             phaseId: phase.id,
             runId: run.id,
             kind: outcome.judgeInfraFailed
@@ -6782,6 +6737,7 @@ Phase id: ${phase.id}`;
             ? "Research failed: quality judge infra"
             : "Research failed: quality judge",
           detail: (gate.gaps ?? []).join("; "),
+          issues: gate.gaps ?? [],
           phaseId: phase.id,
           runId: run.id,
           kind: gate.judgeInfraFailed
@@ -7027,13 +6983,9 @@ Specification phase (changeKind=specification):
 `
         : "";
 
-    const priorFeedbackBlock = priorJudgeIssues?.length
-      ? formatJudgeFeedbackBlock({
-          title:
-            "Prior PHASE.md draft was rejected by the quality judge — address every gap below in the rewritten draft",
-          gaps: priorJudgeIssues,
-        }) + "\n"
-      : "";
+    const priorFeedbackBlock = formatPriorDraftFeedbackBlock(
+      priorJudgeIssues ?? [],
+    );
 
     const buildDraftPrompt = (slim: boolean) => {
       const pack = slim ? "" : adjacentPack ? `${adjacentPack}\n` : "";
@@ -7087,7 +7039,10 @@ ${
     const watch = phaseDocWatchPaths(project.rootPath, phase.id);
     let beforeStats = snapshotFileStats(watch);
 
-    const rejectDraftStructural = (reason: string): RunStage => {
+    const rejectDraftStructural = (
+      reason: string,
+      issues?: string[],
+    ): RunStage => {
       if (intent.interaction && intent.interaction.mount !== "n/a") {
         log(
           project,
@@ -7131,6 +7086,7 @@ ${
         title: "Draft rejected: invalid PHASE.md (structural)",
         kind: "draft-structural",
         faultLeg: "draft",
+        ...(issues?.length ? { issues } : {}),
       });
     };
 
@@ -7141,6 +7097,8 @@ ${
         kind?: string;
         faultLeg?: PlanningFaultLeg;
         judgeInfraFailed?: boolean;
+        /** Structured gaps (authoritative when a gap itself contains "; "). */
+        issues?: string[];
       },
     ): RunStage => {
       log(
@@ -7169,7 +7127,10 @@ ${
       if (deferFailureDiagnosis) {
         this.planningGateOutcome = {
           faultLeg: outcomeFaultLeg,
-          issues: detail.split("; ").filter(Boolean),
+          issues:
+            opts?.issues?.length
+              ? [...new Set(opts.issues.map((i) => i.trim()).filter(Boolean))]
+              : detail.split("; ").filter(Boolean),
           judgeInfraFailed: opts?.judgeInfraFailed,
         };
         return "failed";
@@ -7188,6 +7149,7 @@ ${
           phaseId: phase.id,
           runId: run.id,
           kind,
+          ...(opts?.issues?.length ? { issues: opts.issues } : {}),
           faultLeg:
             outcomeFaultLeg === "none" ? undefined : outcomeFaultLeg,
         }),
@@ -7537,19 +7499,18 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
                 intentAlign.faultLeg && intentAlign.faultLeg !== "none"
                   ? intentAlign.faultLeg
                   : "draft";
-              return recoverableDraftFail(
-                [
-                  ...resolved.gate.issues,
-                  ...(resolved.alignIssues ?? []),
-                  ...intentIssues,
-                ].join("; "),
-                {
-                  title: "Draft rejected: Change Intent",
-                  kind: "change-intent",
-                  faultLeg: intentFaultLeg,
-                  judgeInfraFailed: intentAlign.judgeInfraFailed,
-                },
-              );
+              const intentGateIssues = [
+                ...resolved.gate.issues,
+                ...(resolved.alignIssues ?? []),
+                ...intentIssues,
+              ];
+              return recoverableDraftFail(intentGateIssues.join("; "), {
+                title: "Draft rejected: Change Intent",
+                kind: "change-intent",
+                faultLeg: intentFaultLeg,
+                judgeInfraFailed: intentAlign.judgeInfraFailed,
+                issues: intentGateIssues,
+              });
             }
             // Broken output (empty / chat-preamble) after primary + fallback:
             // fail closed instead of writing a placeholder scaffold that the
@@ -7563,12 +7524,14 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
                 },
               );
             }
+            const structuralIssues = [
+              ...resolved.gate.issues,
+              ...(resolved.alignIssues ?? []),
+              ...intentIssues,
+            ];
             const scaffolded = rejectDraftStructural(
-              `PHASE.md still invalid after repair (${[
-                ...resolved.gate.issues,
-                ...(resolved.alignIssues ?? []),
-                ...intentIssues,
-              ].join("; ")}). Failing the draft so self-heal re-drafts with this feedback.`,
+              `PHASE.md still invalid after repair (${structuralIssues.join("; ")}). Failing the draft so self-heal re-drafts with this feedback.`,
+              structuralIssues,
             );
             if (scaffolded === "failed") return scaffolded;
           } else {
@@ -7808,14 +7771,16 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
         );
       }
       if (phaseJudgeInfra) {
+        const infraGaps = phaseQuality!.gaps;
         return recoverableDraftFail(
-          phaseQuality.gaps.join("; ") ||
+          infraGaps.join("; ") ||
             "PHASE quality could not be verified (LLM judge failed)",
           {
             title: "Draft rejected: phase quality judge infra",
             kind: "phase-quality-infra",
             faultLeg: "draft",
             judgeInfraFailed: true,
+            issues: infraGaps,
           },
         );
       }
@@ -7836,6 +7801,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
           title: "Draft rejected: phase quality judge",
           kind: "phase-quality",
           faultLeg: qualityFaultLeg,
+          issues: phaseQuality.gaps,
         });
       }
 
