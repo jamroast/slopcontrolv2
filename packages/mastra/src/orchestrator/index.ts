@@ -338,7 +338,6 @@ import {
   judgeNarrationOnlyViaLlm,
   buildElementHonorSnippets,
   tryMenubarEmbedSimilarity,
-  filterRasterVisionPaths,
   type LlmRegistry,
 type MastraModelConfig,
 } from "@slopcontrol/llm";
@@ -365,6 +364,10 @@ import {
   shouldReclassifyIntentForPlanningSelfHeal,
   brokenOutputReason,
 } from "./planning-pipeline.js";
+import {
+  classifyDerivativeOp,
+  resolveVisionImagePaths,
+} from "./design-assets.js";
 import {
   ASK_SYNTHESIS_PROMPT_PREFIX,
   askProgressFromStreamChunk,
@@ -9391,7 +9394,8 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
           continue;
         }
         try {
-          if (/\bicon\s*pack\b|favicon|\bsizes\b/i.test(`${brief.name} ${brief.filename}`)) {
+          const derivativeOp = classifyDerivativeOp(brief);
+          if (derivativeOp === "icon_pack") {
             const pack = await deriveIconPackFromAsset({
               projectRoot: project.rootPath,
               assetsDir: phaseAssetsRel,
@@ -9407,6 +9411,20 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
               project,
               run,
               `--- Asset ${brief.name}: derived icon pack from ${pack.sourceFilename} (${pack.files.length} sizes) ---`,
+            );
+          } else if (derivativeOp === "circular_mask") {
+            const masked = await circularMaskDesignAsset({
+              projectRoot: project.rootPath,
+              assetsDir: phaseAssetsRel,
+              sourceFilename: sourceName,
+              filename: brief.filename,
+            });
+            copyFileSync(masked.absolutePath, wtOut);
+            generatedPaths.push(masked.relativePath);
+            log(
+              project,
+              run,
+              `--- Asset ${brief.name}: circular cut-out from ${masked.sourceFilename} → ${masked.relativePath} ---`,
             );
           } else {
             const derived = await makeTransparentDesignAsset({
@@ -9532,41 +9550,43 @@ ${extractSection(phaseDoc, /Brand/i)?.trim().slice(0, 400) || phase.description}
     }
 
     const vision = this.ctx.registry.tryResolveDesignVision(config.roleBindings);
-    if (vision && generatedPaths.length > 0 && !signal?.aborted) {
-      const rasterPaths = filterRasterVisionPaths(generatedPaths.slice(0, 3));
-      if (rasterPaths.length === 0) {
+    const visionPaths = resolveVisionImagePaths({
+      projectRoot: project.rootPath,
+      generatedPaths,
+      previewPaths,
+    });
+    if (vision && visionPaths.length > 0 && !signal?.aborted) {
+      try {
+        const critique = await chatWithImages({
+          endpoint: vision.endpoint,
+          modelId: vision.modelId,
+          imagePaths: visionPaths,
+          prompt: `Critique these design assets against the brief. Be concise (bullet points).\n\nThese PNGs may be previews of vector (SVG) variants, including 16px/32px renders. Judge silhouette, composition, and small-size legibility; call out unreadable small sizes.\n\nBrief:\n${clipPromptSection("UI-SPEC", uiSpec, 2_000)}`,
+        });
+        appendAppendix(
+          project.rootPath,
+          phase.id,
+          `## Design vision review\n\n${critique.text}\n`,
+        );
+        log(project, run, "--- Design vision review appended to APPENDIX ---");
+      } catch (error) {
         log(
           project,
           run,
-          "--- Design vision review skipped (SVG-only assets; providers reject image/svg+xml) ---",
+          `--- Design vision review skipped: ${error instanceof Error ? error.message : String(error)} ---`,
         );
-      } else {
-        try {
-          const critique = await chatWithImages({
-            endpoint: vision.endpoint,
-            modelId: vision.modelId,
-            imagePaths: rasterPaths,
-            prompt: `Critique these design assets against the brief. Be concise (bullet points).\n\nBrief:\n${clipPromptSection("UI-SPEC", uiSpec, 2_000)}`,
-          });
-          appendAppendix(
-            project.rootPath,
-            phase.id,
-            `## Design vision review\n\n${critique.text}\n`,
-          );
-          log(project, run, "--- Design vision review appended to APPENDIX ---");
-        } catch (error) {
-          log(
-            project,
-            run,
-            `--- Design vision review skipped: ${error instanceof Error ? error.message : String(error)} ---`,
-          );
-        }
       }
     } else if (!vision) {
       log(
         project,
         run,
         "--- Design vision review skipped (designVision unbound or not vision-capable) ---",
+      );
+    } else if (generatedPaths.length > 0 || previewPaths.length > 0) {
+      log(
+        project,
+        run,
+        "--- Design vision review skipped (no raster asset or preview to review) ---",
       );
     }
 

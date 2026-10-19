@@ -599,7 +599,7 @@ None.
   });
 
   it("phaseDocMatchesPhase accepts a slug phase-N token that differs from the slot number", () => {
-    // jamauth phase 37: id "37-phase-36-…" but H1 "# Phase 36 …".
+    // Managed-project phase 37: id "37-phase-36-…" but H1 "# Phase 36 …".
     const doc = "# Phase 36 — Account-scoped session list/revoke\n\n## Scope\n\nBackend-only.";
     assert.equal(
       phaseDocMatchesPhase(
@@ -612,7 +612,7 @@ None.
   });
 
   it("phaseDocMatchesPhase accepts a mid-slug phase-N token", () => {
-    // jamauth phase 81: id "81-title-phase-74-d-…" but H1 "# Phase 74 (D) …".
+    // Managed-project phase 81: id "81-title-phase-74-d-…" but H1 "# Phase 74 (D) …".
     const doc =
       "# Phase 74 (D) — Checkout precondition + tier reconciliation\n\n## Scope\n\nBackend-only.";
     assert.equal(
@@ -1420,18 +1420,21 @@ true
       const derived = parseDesignAssetBriefs(`## Assets
 | Name | Filename | Prompt | Source |
 | --- | --- | --- | --- |
-| Alpha logo | jamlight-alpha.png | alpha-channel cut-out of the pinned logo | jamlight-circular-mark-v1.png |
-| Icon pack | icon-pack.png | 5 sizes from pinned logo | \`jamlight-circular-mark-v1.png\` |
+| Alpha logo | brand-alpha.png | alpha-channel cut-out of the pinned logo | brand-circular-mark-v1.png |
+| Icon pack | icon-pack.png | 5 sizes from pinned logo | \`brand-circular-mark-v1.png\` |
 `);
       assert.equal(derived.length, 2);
-      assert.equal(derived[0]?.source, "jamlight-circular-mark-v1.png");
-      assert.equal(derived[1]?.source, "jamlight-circular-mark-v1.png");
+      assert.equal(derived[0]?.source, "brand-circular-mark-v1.png");
+      assert.equal(derived[1]?.source, "brand-circular-mark-v1.png");
       assert.ok(isDerivativeAssetBrief(derived[0]!));
       assert.ok(isDerivativeAssetBrief(derived[1]!));
 
       // Derivative names route even without an explicit Source column.
       assert.ok(
         isDerivativeAssetBrief({ name: "Icon pack (5 sizes)", filename: "icon-pack.png" }),
+      );
+      assert.ok(
+        isDerivativeAssetBrief({ name: "Circular mask", filename: "mark-circle.png" }),
       );
       assert.ok(
         !isDerivativeAssetBrief({ name: "Hero artwork", filename: "hero.png" }),
@@ -1442,7 +1445,7 @@ true
       const withRefRows = parseDesignAssetBriefs(`## Assets
 | Name | Filename | Prompt | Source |
 | --- | --- | --- | --- |
-| Pinned circular mark (authority) | jamlight-circular-mark-v1.png | The operator-pinned mark, already on disk | |
+| Pinned circular mark (authority) | brand-circular-mark-v1.png | The operator-pinned mark, already on disk | |
 | New hero artwork | hero-new.png | generate a wide jam-making hero banner | |
 | Existing footer logo (reference) | footer-logo.svg | For reference only | |
 `);
@@ -1457,7 +1460,7 @@ true
     const root = mkdtempSync(join(tmpdir(), "slop-briefs-inv-"));
     try {
       ensureSlopcontrolDir(root);
-      // Exact shape of JamLight phase 26 ## Assets: inventory table with
+      // Exact shape of a managed project's phase 26 ## Assets: inventory table with
       // Asset|Path|Status headers + production table with a "—" placeholder.
       const briefs = parseDesignAssetBriefs(`## Assets
 
@@ -1465,9 +1468,9 @@ No new brand assets are produced in this phase. The existing authoritative asset
 
 | Asset | Path | Status |
 |-------|------|--------|
-| Circular mark | \`public/brand/jamlight-circular-mark-v1.png\` | Authoritative — mounted in menubar and footer |
-| Circular mark (alpha) | \`public/brand/jamlight-circular-mark-v1-alpha.png\` | Derived alpha cut-out of circular mark |
-| Design-pack mark | \`public/brand/jamlight-logo-modern-v4-alpha.png\` | Deprecated on disk — not mounted |
+| Circular mark | \`public/brand/brand-circular-mark-v1.png\` | Authoritative — mounted in menubar and footer |
+| Circular mark (alpha) | \`public/brand/brand-circular-mark-v1-alpha.png\` | Derived alpha cut-out of circular mark |
+| Design-pack mark | \`public/brand/brand-logo-modern-v4-alpha.png\` | Deprecated on disk — not mounted |
 
 ### Assets to produce
 
@@ -1503,7 +1506,7 @@ No new brand assets are produced in this phase. The existing authoritative asset
 Requires design pass: no
 
 ## Scope
-Strip custom menubars; mount stock jamroast-components menubar theming.
+Strip custom menubars; mount the stock component-library menubar theming.
 
 ## File Changes
 - src/components/menubar.tsx
@@ -1518,7 +1521,7 @@ npx vitest run
 `,
       );
       writeChangeIntent(root, phaseId, {
-        title: "Adopt stock jamroast-components menubar theming",
+        title: "Adopt stock component-library menubar theming",
         goal: "Strip custom menubars and use stock library theming",
         uiMount: "page",
         changeKind: "other",
@@ -1528,7 +1531,7 @@ npx vitest run
         supersedes: [],
         mustNot: [],
         rawDescription:
-          "Strip it away and use the stock menubar theming from the jamroast-components project.",
+          "Strip it away and use the stock menubar theming from the component library.",
       });
       assert.equal(phaseNeedsDesign(root, phaseId), false);
 
@@ -1557,10 +1560,10 @@ npx vitest run
 Requires design pass: no
 
 ## Scope
-Point menubar at jamlight-circular-mark-v1.png instead of the alpha variant.
+Point menubar at brand-circular-mark-v1.png instead of the alpha variant.
 
 ## File Changes
-- src/components/jamlight-menubar.tsx
+- src/components/brand-menubar.tsx
 
 ## Success Criteria
 Pinned mark renders
@@ -1573,7 +1576,7 @@ npx vitest run
       );
       writeChangeIntent(root, phaseId, {
         title: "Swap menubar logo to pinned mark",
-        goal: "Use jamlight-circular-mark-v1.png rather than the alpha variant",
+        goal: "Use brand-circular-mark-v1.png rather than the alpha variant",
         uiMount: "page",
         changeKind: "other",
         assetSwap: true,
@@ -1582,7 +1585,7 @@ npx vitest run
         supersedes: [],
         mustNot: [],
         rawDescription:
-          "Make sure jamlight-circular-mark-v1.png is used rather than the alpha logo.",
+          "Make sure brand-circular-mark-v1.png is used rather than the alpha logo.",
       });
       assert.equal(phaseNeedsDesign(root, phaseId), false);
     } finally {
@@ -1599,7 +1602,7 @@ npx vitest run
 
       // Project brand dir with a mark → usable
       mkdirSync(join(root, "public", "brand"), { recursive: true });
-      writeFileSync(join(root, "public", "brand", "jamlight-circular-mark-v1.png"), "png");
+      writeFileSync(join(root, "public", "brand", "brand-circular-mark-v1.png"), "png");
       assert.equal(phaseHasUsableLogo(root, phaseId), true);
 
       // Pinned logo selection in the phase design pack → usable even without files
@@ -1787,14 +1790,14 @@ true
       );
       writeChangeIntent(root, brandId, {
         title: "for me to promote to research.",
-        goal: "apply the theming from basic-web-agent and a new logo",
+        goal: "apply the theming from the sibling app and a new logo",
         uiMount: "n/a",
         changeKind: "backend",
         refinementOf: [],
         supersedes: [],
         mustNot: [],
         rawDescription:
-          "Please apply the theming from JamPress and a cleaner logo",
+          "Please apply the theming from the sibling app and a cleaner logo",
       });
       assert.equal(phaseNeedsDesign(root, brandId), true);
 
@@ -1845,7 +1848,7 @@ pnpm test
 
   it("brand theming Intent classifies as other not backend", () => {
     const intent = extractChangeIntent(
-      "Please apply the theming from /Users/brettchaldecott/Projects/basic-web-agent and a new logo based on jampress concepts",
+      "Please apply the theming from /Users/example/Projects/sibling-app and a new logo based on sibling concepts",
     );
     assert.equal(intent.changeKind, "other");
     assert.equal(intent.interaction, undefined);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, after } from "node:test";
@@ -520,5 +520,138 @@ describe("design-image-edit", () => {
     });
     assert.equal(pack.sourceFilename, "large-alpha.png");
     assert.equal(pack.redirectedFrom, "brand-fake-alpha.png");
+  });
+
+  it("circularMaskDesignAsset runs on an assetsDir scope without a loopId", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-circle-scope-"));
+    roots.push(root);
+    const assetsDir = ".slopcontrol/phases/p1/design/assets";
+    const dir = join(root, assetsDir);
+    mkdirSync(dir, { recursive: true });
+    const size = 64;
+    const px = Buffer.alloc(size * size * 4, 0);
+    for (let i = 0; i < size * size; i++) {
+      px[i * 4] = 0x1b;
+      px[i * 4 + 1] = 0x3a;
+      px[i * 4 + 2] = 0x4b;
+      px[i * 4 + 3] = 255;
+    }
+    await sharp(px, { raw: { width: size, height: size, channels: 4 } })
+      .png()
+      .toFile(join(dir, "mark.png"));
+
+    const out = await circularMaskDesignAsset({
+      projectRoot: root,
+      assetsDir,
+      sourceFilename: "mark.png",
+      filename: "mark-circle.png",
+    });
+    assert.equal(out.relativePath, `${assetsDir}/mark-circle.png`);
+    assert.ok(existsSync(out.absolutePath));
+    const meta = await sharp(out.absolutePath).metadata();
+    assert.equal(meta.hasAlpha, true);
+    // Corner masked away, centre kept.
+    const { data, info } = await sharp(out.absolutePath)
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    assert.equal(info.channels, 4);
+    assert.equal(data[3], 0);
+    const centre = ((info.height >> 1) * info.width + (info.width >> 1)) * 4;
+    assert.equal(data[centre + 3], 255);
+  });
+
+  it("deriveIconPackFromAsset renders 16/32 from SVG variants and larger sizes from the master", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-icon-svg-"));
+    roots.push(root);
+    const assetsDir = ".slopcontrol/phases/p1/design/assets";
+    const dir = join(root, assetsDir);
+    mkdirSync(dir, { recursive: true });
+    const size = 64;
+    const px = Buffer.alloc(size * size * 4, 0);
+    for (let i = 0; i < size * size; i++) px[i * 4 + 3] = 255;
+    await sharp(px, { raw: { width: size, height: size, channels: 4 } })
+      .png()
+      .toFile(join(dir, "mark.png"));
+
+    const svg = (label: string): string =>
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" role="img"><title>${label}</title><path fill="#D9480F" d="M0 0h16v16H0z"/></svg>\n`;
+    writeFileSync(join(dir, "mark-16.svg"), svg("m16"));
+    writeFileSync(join(dir, "mark-32.svg"), svg("m32"));
+    writeFileSync(join(dir, "mark.svg"), svg("master"));
+
+    const pack = await deriveIconPackFromAsset({
+      projectRoot: root,
+      assetsDir,
+      sourceFilename: "mark.png",
+      sizes: [16, 32, 64],
+      prefix: "icon-v1",
+    });
+    assert.deepEqual(
+      pack.files.map((f) => [f.size, f.renderedFrom?.filename, f.renderedFrom?.kind]),
+      [
+        [16, "mark-16.svg", "variant"],
+        [32, "mark-32.svg", "variant"],
+        [64, "mark.svg", "master"],
+      ],
+    );
+    const tile = readFileSync(join(dir, "icon-v1-16.png"));
+    assert.equal(tile.subarray(0, 4).toString("hex"), "89504e47");
+    const meta = await sharp(join(dir, "icon-v1-16.png")).metadata();
+    assert.equal(meta.width, 16);
+    assert.equal(meta.hasAlpha, true);
+    // The 16px tile comes from the full-bleed variant, not a padded downscale.
+    const { data, info } = await sharp(join(dir, "icon-v1-16.png"))
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    assert.equal(data[3], 255);
+    assert.equal(info.width, 16);
+  });
+
+  it("raster-only icon packs trim transparent padding before resizing", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-icon-trim-"));
+    roots.push(root);
+    const loopId = "loop-trim";
+    const dir = join(root, ".slopcontrol", "design-loops", loopId, "assets");
+    mkdirSync(dir, { recursive: true });
+    const size = 96;
+    const px = Buffer.alloc(size * size * 4, 0);
+    for (let y = 36; y < 60; y++) {
+      for (let x = 36; x < 60; x++) {
+        const i = (y * size + x) * 4;
+        px[i] = 0xd9;
+        px[i + 1] = 0x48;
+        px[i + 2] = 0x0f;
+        px[i + 3] = 255;
+      }
+    }
+    await sharp(px, { raw: { width: size, height: size, channels: 4 } })
+      .png()
+      .toFile(join(dir, "padded.png"));
+
+    const pack = await deriveIconPackFromAsset({
+      projectRoot: root,
+      loopId,
+      sourceFilename: "padded.png",
+      sizes: [16],
+      prefix: "icon-trim",
+    });
+    assert.equal(pack.files[0]?.renderedFrom?.kind, "raster");
+    const { data, info } = await sharp(
+      join(dir, "icon-trim-16.png"),
+    )
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    let minX = info.width;
+    let maxX = -1;
+    for (let y = 0; y < info.height; y++) {
+      for (let x = 0; x < info.width; x++) {
+        if (data[(y * info.width + x) * 4 + 3]! > 0) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+        }
+      }
+    }
+    // Untrimmed would be 24/96 of 16px ≈ 4px wide; trimmed fills the tile.
+    assert.ok(maxX - minX + 1 >= 12, `opaque bbox ${maxX - minX + 1}px too small`);
   });
 });

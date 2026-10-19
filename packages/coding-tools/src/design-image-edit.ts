@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import sharp from "sharp";
 import {
   outPathScoped,
@@ -155,22 +155,6 @@ export async function resolveIconPackSourceFilename(opts: {
   throw new Error(
     "No suitable icon-pack source — pin a logo or pass sourceFilename (prefer true RGBA)",
   );
-}
-
-function resolveLoopAsset(
-  projectRoot: string,
-  loopId: string,
-  filename: string,
-): { absolutePath: string; relativePath: string; name: string } {
-  return resolveScopedAsset({ projectRoot, loopId }, filename);
-}
-
-function outPath(
-  projectRoot: string,
-  loopId: string,
-  filename: string,
-): { absolutePath: string; relativePath: string; name: string } {
-  return outPathScoped({ projectRoot, loopId }, filename);
 }
 
 export type MakeTransparentResult = {
@@ -474,26 +458,25 @@ export async function makeTransparentDesignAsset(opts: {
  * Geometric circular cut-out: soft circular alpha on an EXISTING asset.
  * Keeps interior pixels; does not invent a new mark.
  */
-export async function circularMaskDesignAsset(opts: {
-  projectRoot: string;
-  loopId: string;
-  sourceFilename: string;
-  filename?: string;
-  softPx?: number;
-}): Promise<MakeTransparentResult> {
-  const resolvedName = preferNonAlphaSiblingFilename(
-    opts.projectRoot,
-    opts.loopId,
+export async function circularMaskDesignAsset(
+  opts: AssetScope & {
+    sourceFilename: string;
+    filename?: string;
+    softPx?: number;
+  },
+): Promise<MakeTransparentResult> {
+  const scope: AssetScope = {
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
+  };
+  const resolvedName = preferNonAlphaSiblingInScope(
+    scope,
     opts.sourceFilename,
   );
-  const src = resolveLoopAsset(
-    opts.projectRoot,
-    opts.loopId,
-    resolvedName,
-  );
-  const out = outPath(
-    opts.projectRoot,
-    opts.loopId,
+  const src = resolveScopedAsset(scope, resolvedName);
+  const out = outPathScoped(
+    scope,
     alphaOutputFilename(src.name, opts.filename),
   );
 
@@ -524,25 +507,25 @@ export async function circularMaskDesignAsset(opts: {
   };
 }
 
-export async function resizeDesignAsset(opts: {
-  projectRoot: string;
-  loopId: string;
-  sourceFilename: string;
-  width: number;
-  height?: number;
-  filename?: string;
-}): Promise<{ relativePath: string; width: number; height: number }> {
-  const src = resolveLoopAsset(
-    opts.projectRoot,
-    opts.loopId,
-    opts.sourceFilename,
-  );
+export async function resizeDesignAsset(
+  opts: AssetScope & {
+    sourceFilename: string;
+    width: number;
+    height?: number;
+    filename?: string;
+  },
+): Promise<{ relativePath: string; width: number; height: number }> {
+  const scope: AssetScope = {
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
+  };
+  const src = resolveScopedAsset(scope, opts.sourceFilename);
   const w = opts.width;
   const h = opts.height ?? opts.width;
   const stem = src.name.replace(/\.[^.]+$/, "");
-  const out = outPath(
-    opts.projectRoot,
-    opts.loopId,
+  const out = outPathScoped(
+    scope,
     opts.filename ?? `${stem}-${w}.png`,
   );
   await sharp(src.absolutePath)
@@ -552,43 +535,43 @@ export async function resizeDesignAsset(opts: {
   return { relativePath: out.relativePath, width: w, height: h };
 }
 
-export async function trimDesignAsset(opts: {
-  projectRoot: string;
-  loopId: string;
-  sourceFilename: string;
-  filename?: string;
-}): Promise<{ relativePath: string }> {
-  const src = resolveLoopAsset(
-    opts.projectRoot,
-    opts.loopId,
-    opts.sourceFilename,
-  );
+export async function trimDesignAsset(
+  opts: AssetScope & {
+    sourceFilename: string;
+    filename?: string;
+  },
+): Promise<{ relativePath: string }> {
+  const scope: AssetScope = {
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
+  };
+  const src = resolveScopedAsset(scope, opts.sourceFilename);
   const stem = src.name.replace(/\.[^.]+$/, "");
-  const out = outPath(
-    opts.projectRoot,
-    opts.loopId,
+  const out = outPathScoped(
+    scope,
     opts.filename ?? `${stem}-trim.png`,
   );
   await sharp(src.absolutePath).trim().png().toFile(out.absolutePath);
   return { relativePath: out.relativePath };
 }
 
-export async function padDesignAsset(opts: {
-  projectRoot: string;
-  loopId: string;
-  sourceFilename: string;
-  size: number;
-  filename?: string;
-}): Promise<{ relativePath: string }> {
-  const src = resolveLoopAsset(
-    opts.projectRoot,
-    opts.loopId,
-    opts.sourceFilename,
-  );
+export async function padDesignAsset(
+  opts: AssetScope & {
+    sourceFilename: string;
+    size: number;
+    filename?: string;
+  },
+): Promise<{ relativePath: string }> {
+  const scope: AssetScope = {
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
+  };
+  const src = resolveScopedAsset(scope, opts.sourceFilename);
   const stem = src.name.replace(/\.[^.]+$/, "");
-  const out = outPath(
-    opts.projectRoot,
-    opts.loopId,
+  const out = outPathScoped(
+    scope,
     opts.filename ?? `${stem}-pad-${opts.size}.png`,
   );
   const size = opts.size;
@@ -606,7 +589,16 @@ export type DeriveIconPackResult = {
   sourceFilename: string;
   redirectedFrom?: string;
   hasAlpha: boolean;
-  files: Array<{ size: number; relativePath: string; filename: string }>;
+  files: Array<{
+    size: number;
+    relativePath: string;
+    filename: string;
+    /** Pixels came from a vectorized variant/master, else the raster source. */
+    renderedFrom?: {
+      filename: string;
+      kind: "variant" | "master" | "raster";
+    };
+  }>;
 };
 
 /** Resize source into favicon/icon pack sizes (deterministic). */
@@ -625,6 +617,12 @@ export async function deriveIconPackFromAsset(opts: {
    * are RGB-only, unless a true RGBA redirect is found.
    */
   requireRealAlphaIfClaimed?: boolean;
+  /**
+   * When true (default), render each size from a vectorized SVG sibling
+   * (`<stem>-16.svg` / `<stem>-32.svg` / `<stem>.svg`) instead of downscaling
+   * the padded raster. Falls back to trim-then-resize when no SVG exists.
+   */
+  preferSvgVariants?: boolean;
 }): Promise<DeriveIconPackResult> {
   const scope: AssetScope = {
     projectRoot: opts.projectRoot,
@@ -651,23 +649,85 @@ export async function deriveIconPackFromAsset(opts: {
     ? opts.sizes
     : [16, 24, 32, 48, 64, 128, 192, 512];
   const src = resolveScopedAsset(scope, resolved.filename);
+  const assetsDirAbs = scopeAssetsDir(scope);
+  const preferSvg = opts.preferSvgVariants !== false;
+  const srcStem = resolved.filename.replace(/\.[^.]+$/, "");
+  const svgStems = [
+    ...new Set([
+      srcStem,
+      srcStem.replace(/(?:-(?:alpha|cutout))+(?:-v\d+)?$/i, ""),
+    ]),
+  ].filter(Boolean);
+  /** Nearest vector source for a size: exact variant → smaller variant → master. */
+  const pickSvg = (
+    size: number,
+  ): { name: string; kind: "variant" | "master" } | null => {
+    if (!preferSvg) return null;
+    for (const stem of svgStems) {
+      const candidates: Array<{
+        name: string;
+        kind: "variant" | "master";
+      }> = [
+        { name: `${stem}-${size}.svg`, kind: "variant" },
+        ...(size <= 16
+          ? [{ name: `${stem}-16.svg`, kind: "variant" as const }]
+          : []),
+        ...(size > 16 && size <= 32
+          ? [{ name: `${stem}-32.svg`, kind: "variant" as const }]
+          : []),
+        { name: `${stem}.svg`, kind: "master" },
+      ];
+      for (const candidate of candidates) {
+        if (existsSync(join(assetsDirAbs, candidate.name))) return candidate;
+      }
+    }
+    return null;
+  };
   const packPrefix = (opts.prefix?.trim() || "icon-pack").replace(
     /[^a-z0-9_-]+/gi,
     "-",
   );
   const files: DeriveIconPackResult["files"] = [];
+  const transparent = { r: 0, g: 0, b: 0, alpha: 0 } as const;
   for (const size of sizes) {
     const filename = `${packPrefix}-${size}.png`;
     const out = outPathScoped(scope, filename);
-    await sharp(src.absolutePath)
-      .ensureAlpha()
-      .resize(size, size, {
-        fit: "contain",
-        background: { r: 0, g: 0, b: 0, alpha: 0 },
-      })
-      .png()
-      .toFile(out.absolutePath);
-    files.push({ size, relativePath: out.relativePath, filename });
+    const svg = pickSvg(size);
+    if (svg) {
+      await sharp(join(assetsDirAbs, svg.name), { density: 144 })
+        .resize(size, size, { fit: "contain", background: transparent })
+        .png()
+        .toFile(out.absolutePath);
+      files.push({
+        size,
+        relativePath: out.relativePath,
+        filename,
+        renderedFrom: { filename: svg.name, kind: svg.kind },
+      });
+      continue;
+    }
+    try {
+      // Trim the transparent padding first so the mark fills the tile.
+      await sharp(src.absolutePath)
+        .ensureAlpha()
+        .trim({ background: transparent })
+        .resize(size, size, { fit: "contain", background: transparent })
+        .png()
+        .toFile(out.absolutePath);
+    } catch {
+      // A fully transparent source can make trim throw — resize as-is.
+      await sharp(src.absolutePath)
+        .ensureAlpha()
+        .resize(size, size, { fit: "contain", background: transparent })
+        .png()
+        .toFile(out.absolutePath);
+    }
+    files.push({
+      size,
+      relativePath: out.relativePath,
+      filename,
+      renderedFrom: { filename: src.name, kind: "raster" },
+    });
   }
   return {
     sourceFilename: src.name,
@@ -712,7 +772,9 @@ function editedOutputFilename(
  */
 export async function applyDesignImageOp(opts: {
   projectRoot: string;
-  loopId: string;
+  loopId?: string;
+  /** Project-relative assets dir — alternative to loopId (design stage). */
+  assetsDir?: string;
   sourceFilename: string;
   op: string;
   params?: Record<string, unknown>;
@@ -729,12 +791,13 @@ export async function applyDesignImageOp(opts: {
       ? (params.palette as VectorizeParams["palette"])
       : undefined;
     const loopPalette =
-      !tokensCss && !palette?.length
+      !tokensCss && !palette?.length && opts.loopId
         ? readLoopTokenPalette(opts.projectRoot, opts.loopId)
         : [];
     const result = await vectorizeDesignAsset({
       projectRoot: opts.projectRoot,
       loopId: opts.loopId,
+      assetsDir: opts.assetsDir,
       sourceFilename: opts.sourceFilename,
       filename,
       tokensCss,
@@ -810,6 +873,7 @@ export async function applyDesignImageOp(opts: {
     const result = await circularMaskDesignAsset({
       projectRoot: opts.projectRoot,
       loopId: opts.loopId,
+      assetsDir: opts.assetsDir,
       sourceFilename: opts.sourceFilename,
       filename,
       softPx: typeof params.softPx === "number" ? params.softPx : undefined,
@@ -832,6 +896,7 @@ export async function applyDesignImageOp(opts: {
     const pack = await deriveIconPackFromAsset({
       projectRoot: opts.projectRoot,
       loopId: opts.loopId,
+      assetsDir: opts.assetsDir,
       sourceFilename: opts.sourceFilename,
       preferredFilename: opts.sourceFilename,
       sizes,
@@ -839,6 +904,13 @@ export async function applyDesignImageOp(opts: {
         typeof params.prefix === "string" ? params.prefix : undefined,
     });
     const first = pack.files[0];
+    const vectorSource = pack.files.some(
+      (f) => f.renderedFrom?.kind === "variant",
+    )
+      ? "variants"
+      : pack.files.some((f) => f.renderedFrom?.kind === "master")
+        ? "master"
+        : "";
     return {
       op,
       relativePath: first?.relativePath ?? "",
@@ -847,8 +919,8 @@ export async function applyDesignImageOp(opts: {
         : "",
       sourceFilename: pack.sourceFilename,
       summary: `Icon pack ${pack.files.length} sizes from ${pack.sourceFilename}${
-        pack.redirectedFrom ? ` (redirected from ${pack.redirectedFrom})` : ""
-      }`,
+        vectorSource ? ` via SVG ${vectorSource}` : ""
+      }${pack.redirectedFrom ? ` (redirected from ${pack.redirectedFrom})` : ""}`,
       files: pack.files.map((f) => ({
         filename: f.filename,
         relativePath: f.relativePath,
@@ -867,6 +939,7 @@ export async function applyDesignImageOp(opts: {
     const result = await resizeDesignAsset({
       projectRoot: opts.projectRoot,
       loopId: opts.loopId,
+      assetsDir: opts.assetsDir,
       sourceFilename: opts.sourceFilename,
       width,
       height,
@@ -885,6 +958,7 @@ export async function applyDesignImageOp(opts: {
     const result = await trimDesignAsset({
       projectRoot: opts.projectRoot,
       loopId: opts.loopId,
+      assetsDir: opts.assetsDir,
       sourceFilename: opts.sourceFilename,
       filename,
     });
@@ -905,6 +979,7 @@ export async function applyDesignImageOp(opts: {
     const result = await padDesignAsset({
       projectRoot: opts.projectRoot,
       loopId: opts.loopId,
+      assetsDir: opts.assetsDir,
       sourceFilename: opts.sourceFilename,
       size,
       filename,
@@ -919,18 +994,15 @@ export async function applyDesignImageOp(opts: {
   }
 
   // Remaining ops: direct sharp pipeline on a resolved source.
-  const resolvedName = preferNonAlphaSiblingFilename(
-    opts.projectRoot,
-    opts.loopId,
-    opts.sourceFilename,
-  );
-  const src = resolveLoopAsset(
-    opts.projectRoot,
-    opts.loopId,
-    resolvedName,
-  );
+  const scope: AssetScope = {
+    projectRoot: opts.projectRoot,
+    loopId: opts.loopId,
+    assetsDir: opts.assetsDir,
+  };
+  const resolvedName = preferNonAlphaSiblingInScope(scope, opts.sourceFilename);
+  const src = resolveScopedAsset(scope, resolvedName);
   const outName = editedOutputFilename(src.name, op, filename);
-  const out = outPath(opts.projectRoot, opts.loopId, outName);
+  const out = outPathScoped(scope, outName);
   let pipeline = sharp(src.absolutePath).ensureAlpha();
 
   switch (op) {
@@ -1024,7 +1096,9 @@ export async function applyDesignImageOp(opts: {
 /** Run catalog ops in order; each step uses the previous output as source. */
 export async function applyDesignImagePipeline(opts: {
   projectRoot: string;
-  loopId: string;
+  loopId?: string;
+  /** Project-relative assets dir — alternative to loopId (design stage). */
+  assetsDir?: string;
   sourceFilename: string;
   ops: Array<{ op: string; params?: Record<string, unknown> }>;
 }): Promise<{
@@ -1045,6 +1119,7 @@ export async function applyDesignImagePipeline(opts: {
     const result = await applyDesignImageOp({
       projectRoot: opts.projectRoot,
       loopId: opts.loopId,
+      assetsDir: opts.assetsDir,
       sourceFilename: source,
       op: step.op,
       params: step.params,
