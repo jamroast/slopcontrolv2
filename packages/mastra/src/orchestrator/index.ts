@@ -362,15 +362,16 @@ import {
   shouldContinuePlanningSelfHeal,
   planningGateIssueFingerprint,
   formatPriorDraftFeedbackBlock,
+  nextSelfHealDraftIssues,
   priorDraftJudgeIssuesFromDiagnosis,
   shouldReclassifyIntentForPlanningSelfHeal,
   brokenOutputReason,
 } from "./planning-pipeline.js";
 import {
+  clipDraftResearch,
   clipPromptSection,
   clipSharedDoc,
   JUDGE_DOC_EXCERPT_MAX_CHARS,
-  SLIM_RESEARCH_CLIP_CHARS,
 } from "./prompt-clip.js";
 import {
   classifyDerivativeOp,
@@ -966,9 +967,29 @@ function isTransientLlmError(error: unknown): boolean {
   return false;
 }
 
-const MAX_AGENT_RETRIES = 2;
+/** Finish reason from a Mastra generate result (top level or last step). */
+export function agentFinishReason(result: unknown): string {
+  const r = result as {
+    finishReason?: unknown;
+    steps?: Array<{ finishReason?: unknown }>;
+  };
+  if (typeof r.finishReason === "string") return r.finishReason;
+  const steps = Array.isArray(r.steps) ? r.steps : [];
+  const last = steps.length > 0 ? steps[steps.length - 1] : undefined;
+  return typeof last?.finishReason === "string" ? last.finishReason : "";
+}
 
-async function runAgent(
+/** Agent's configured completion budget (Mastra model defaultParams). */
+function agentBaseMaxTokens(agent: Agent): number {
+  const model = (
+    agent as { model?: { defaultParams?: { maxTokens?: number } } }
+  ).model;
+  return model?.defaultParams?.maxTokens ?? 8_192;
+}
+
+const AGENT_TRUNCATION_MAX_TOKENS = 32_768;
+
+export async function runAgent(
   agent: Agent,
   prompt: string,
   resourceId: string,
@@ -980,6 +1001,8 @@ async function runAgent(
     memory?: false | { resource: string; thread: string };
     /** Override the agent's model for this turn (fallback-model retry). */
     model?: MastraModelConfig;
+    /** Retry once on finishReason=length with a larger token budget (default true). */
+    truncationRetry?: boolean;
   },
 ): Promise<string> {
   const name =
@@ -1004,95 +1027,113 @@ async function runAgent(
     memory: memoryOpt ? "thread" : "none",
     modelOverride: modelOverride ? modelOverride.id : undefined,
   });
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= MAX_AGENT_RETRIES; attempt++) {
-    try {
-      const generate = () =>
-        agent.generate(prompt, {
-          maxSteps,
-          ...(memoryOpt ? { memory: memoryOpt } : {}),
-          ...(modelOverride ? { model: modelOverride } : {}),
-        });
-      const result =
-        timeoutMs && timeoutMs > 0
-          ? await Promise.race([
-              generate(),
-              new Promise<never>((_, reject) => {
-                setTimeout(
-                  () =>
-                    reject(
-                      new Error(
-                        `Agent ${name} timed out after ${timeoutMs}ms`,
-                      ),
-                    ),
-                  timeoutMs,
-                );
-              }),
-            ])
-          : await generate();
-      const text = result.text ?? "";
-      slog.info("agent", `done ${name}`, {
+
+  // Timeouts abort the request (Mastra/AI SDK retries are native now) instead
+  // of racing a timer and leaving the generation running.
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer =
+    timeoutMs && timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs)
+      : undefined;
+
+  const generate = (maxOutputTokens?: number) =>
+    agent.generate(prompt, {
+      maxSteps,
+      ...(memoryOpt ? { memory: memoryOpt } : {}),
+      ...(modelOverride ? { model: modelOverride } : {}),
+      abortSignal: controller.signal,
+      ...(maxOutputTokens ? { modelSettings: { maxOutputTokens } } : {}),
+    });
+
+  try {
+    let result = await generate();
+    if (
+      agentFinishReason(result) === "length" &&
+      opts?.truncationRetry !== false
+    ) {
+      const base = agentBaseMaxTokens(agent);
+      const bumped = Math.min(
+        AGENT_TRUNCATION_MAX_TOKENS,
+        Math.max(base * 2, base + 2_048),
+      );
+      slog.warn(
+        "agent",
+        `truncated (finishReason=length); retrying ${name} with maxOutputTokens=${bumped}`,
+        { resourceId, threadId, base },
+      );
+      result = await generate(bumped);
+      if (agentFinishReason(result) === "length") {
+        throw new Error(
+          `agent_truncated: ${name} exceeded its token budget (finishReason=length at maxOutputTokens=${bumped})`,
+        );
+      }
+    }
+    const text = (result as { text?: string }).text ?? "";
+    slog.info("agent", `done ${name}`, {
+      resourceId,
+      threadId,
+      durationMs: Date.now() - started,
+      duration: formatDurationMs(Date.now() - started),
+      outputChars: text.length,
+    });
+    return text;
+  } catch (error) {
+    const detail = formatLlmErrorForLog(error);
+    if (timedOut) {
+      const timeoutError = new Error(
+        `Agent ${name} timed out after ${timeoutMs}ms`,
+        { cause: error },
+      );
+      slog.error("agent", `failed ${name}`, {
         resourceId,
         threadId,
         durationMs: Date.now() - started,
-        duration: formatDurationMs(Date.now() - started),
-        outputChars: text.length,
+        error: timeoutError.message,
       });
-      return text;
-    } catch (error) {
-      lastError = error;
-      if (attempt < MAX_AGENT_RETRIES && isTransientLlmError(error)) {
-        slog.warn(
-          "agent",
-          `transient error, retrying ${name} (attempt ${attempt + 1}/${MAX_AGENT_RETRIES})`,
-          {
-            resourceId,
-            threadId,
-            error: formatLlmErrorForLog(error).slice(0, 200),
-          },
-        );
-        await new Promise((r) => setTimeout(r, 1_000 * (attempt + 1)));
-        continue;
+      throw timeoutError;
+    }
+    slog.error("agent", `failed ${name}`, {
+      resourceId,
+      threadId,
+      durationMs: Date.now() - started,
+      error: detail,
+      transient: isTransientLlmError(error) || undefined,
+    });
+    if (
+      /memory|storage|libsql|observational/i.test(detail) &&
+      !/requires a threadId|none was found in RequestContext/i.test(detail)
+    ) {
+      slog.error(
+        "agent",
+        "Mastra Memory/storage failure — check ~/.slopcontrol/mastra.db is writable and the supervisor LLM endpoint resolves for observationalMemory",
+        {
+          hint: "GET /health → mastraStorage; configure endpoints.json supervisor role",
+        },
+      );
+    }
+    if (/requires a threadId|ObservationalMemory.*threadId/i.test(detail)) {
+      slog.error(
+        "agent",
+        "ObservationalMemory requires threadId — supervisor enrich must use memory:false without OM Memory on the agent",
+        {
+          hint: "createDevSupervisorAgent must not attach shared Memory with observationalMemory",
+        },
+      );
+    }
+    if (error instanceof Error) {
+      if (detail !== error.message) {
+        throw new Error(detail, { cause: error });
       }
-      break;
+      throw error;
     }
+    throw new Error(detail, { cause: error });
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  const error = lastError;
-  const detail = formatLlmErrorForLog(error);
-  slog.error("agent", `failed ${name}`, {
-    resourceId,
-    threadId,
-    durationMs: Date.now() - started,
-    error: detail,
-  });
-  if (
-    /memory|storage|libsql|observational/i.test(detail) &&
-    !/requires a threadId|none was found in RequestContext/i.test(detail)
-  ) {
-    slog.error(
-      "agent",
-      "Mastra Memory/storage failure — check ~/.slopcontrol/mastra.db is writable and the supervisor LLM endpoint resolves for observationalMemory",
-      {
-        hint: "GET /health → mastraStorage; configure endpoints.json supervisor role",
-      },
-    );
-  }
-  if (/requires a threadId|ObservationalMemory.*threadId/i.test(detail)) {
-    slog.error(
-      "agent",
-      "ObservationalMemory requires threadId — supervisor enrich must use memory:false without OM Memory on the agent",
-      {
-        hint: "createDevSupervisorAgent must not attach shared Memory with observationalMemory",
-      },
-    );
-  }
-  if (error instanceof Error) {
-    if (detail !== error.message) {
-      throw new Error(detail, { cause: error });
-    }
-    throw error;
-  }
-  throw new Error(detail, { cause: error });
 }
 
 /**
@@ -1106,7 +1147,7 @@ async function runAgent(
  */
 const EMPTY_LIVE_REPLY = "(empty reply)";
 
-async function runAgentLiveTurn(
+export async function runAgentLiveTurn(
   agent: Agent,
   prompt: string,
   resourceId: string,
@@ -1130,19 +1171,24 @@ async function runAgentLiveTurn(
   const maxSteps = opts?.maxSteps ?? 12;
   const timeoutMs = opts?.timeoutMs ?? resolveAskTurnTimeoutMs();
   const onProgress = opts?.onProgress;
-  const signal = opts?.abortSignal;
+  const callerSignal = opts?.abortSignal;
+  const timeoutSignal = AbortSignal.timeout(Math.max(1, timeoutMs));
+  const combinedSignal = callerSignal
+    ? AbortSignal.any([callerSignal, timeoutSignal])
+    : timeoutSignal;
+  const timedOut = () =>
+    timeoutSignal.aborted && !(callerSignal?.aborted ?? false);
+  const abortError = () =>
+    timedOut()
+      ? new Error(`Agent ${name} timed out after ${timeoutMs}ms`)
+      : new LiveTurnInterruptedError("Live turn interrupted", textAccum.trim());
   const memoryOpt = resolveAgentMemoryOption(resourceId, threadId);
   const started = Date.now();
   let toolCallCount = 0;
   let textAccum = "";
 
   const throwIfAborted = () => {
-    if (signal?.aborted) {
-      throw new LiveTurnInterruptedError(
-        "Live turn interrupted",
-        textAccum.trim(),
-      );
-    }
+    if (combinedSignal.aborted) throw abortError();
   };
 
   const emit = (event: Parameters<NonNullable<LiveProgressCallback>>[0]) => {
@@ -1165,7 +1211,7 @@ async function runAgentLiveTurn(
     summary: opts?.statusLabel ?? "turn started",
   });
 
-  const runStream = async (): Promise<string> => {
+  const runStream = async (): Promise<{ text: string; finishReason: string }> => {
     throwIfAborted();
     const defaultParams = (
       agent as {
@@ -1189,7 +1235,7 @@ async function runAgentLiveTurn(
       maxSteps,
       ...(modelSettings ? { modelSettings } : {}),
       ...(memoryOpt ? { memory: memoryOpt } : {}),
-      ...(signal ? { abortSignal: signal } : {}),
+      abortSignal: combinedSignal,
     });
     const fullStream = (
       streamResult as { fullStream?: AsyncIterable<unknown> }
@@ -1215,37 +1261,39 @@ async function runAgentLiveTurn(
             typeof (finalTextRaw as Promise<string>).then === "function"
           ? await finalTextRaw
           : textAccum;
-    return (finalText || textAccum || "").trim();
+    const finishReasonRaw = (streamResult as {
+      finishReason?: string | Promise<string>;
+    }).finishReason;
+    const finishReason =
+      typeof finishReasonRaw === "string"
+        ? finishReasonRaw
+        : finishReasonRaw &&
+            typeof (finishReasonRaw as Promise<string>).then === "function"
+          ? await finishReasonRaw
+          : "";
+    return {
+      text: (finalText || textAccum || "").trim(),
+      finishReason: finishReason ?? "",
+    };
   };
 
   try {
     throwIfAborted();
-    const reply = await Promise.race([
+    const streamed = await Promise.race([
       runStream(),
       new Promise<never>((_, reject) => {
-        const onAbort = () => {
-          reject(
-            new LiveTurnInterruptedError(
-              "Live turn interrupted",
-              textAccum.trim(),
-            ),
-          );
-        };
-        if (signal) {
-          if (signal.aborted) onAbort();
-          else signal.addEventListener("abort", onAbort, { once: true });
-        }
-        setTimeout(
-          () =>
-            reject(
-              new Error(`Agent ${name} timed out after ${timeoutMs}ms`),
-            ),
-          timeoutMs,
-        );
+        const onAbort = () => reject(abortError());
+        if (combinedSignal.aborted) onAbort();
+        else combinedSignal.addEventListener("abort", onAbort, { once: true });
       }),
     ]);
+    if (streamed.finishReason === "length") {
+      throw new Error(
+        `agent_truncated: ${name} exceeded its token budget (streaming finishReason=length)`,
+      );
+    }
 
-    let out = reply;
+    let out = streamed.text;
     let synthesized = false;
     const narrationDecision = await decideNarrationSynthesis({
       reply: out,
@@ -1291,42 +1339,35 @@ ${out.slice(0, 2_000) || "(empty)"}`;
         resource: resourceId,
         thread: `${threadId}-synth`,
       };
+      const synthSignal = callerSignal
+        ? AbortSignal.any([
+            callerSignal,
+            AbortSignal.timeout(Math.max(1, remainingMs)),
+          ])
+        : AbortSignal.timeout(Math.max(1, remainingMs));
       const synthGenerate = () =>
         agent.generate(synthPrompt, {
           maxSteps: 1,
           activeTools: [],
           memory: synthMemory,
-          ...(signal ? { abortSignal: signal } : {}),
+          abortSignal: synthSignal,
         });
-      const synthResult =
-        remainingMs > 0
-          ? await Promise.race([
-              synthGenerate(),
-              new Promise<never>((_, reject) => {
-                const onAbort = () => {
-                  reject(
-                    new LiveTurnInterruptedError(
-                      "Live turn interrupted",
-                      out,
-                    ),
-                  );
-                };
-                if (signal) {
-                  if (signal.aborted) onAbort();
-                  else signal.addEventListener("abort", onAbort, { once: true });
-                }
-                setTimeout(
-                  () =>
-                    reject(
-                      new Error(
-                        `Agent ${name} synthesis timed out after ${remainingMs}ms`,
-                      ),
-                    ),
-                  remainingMs,
-                );
-              }),
-            ])
-          : await synthGenerate();
+      const synthResult = await Promise.race([
+        synthGenerate(),
+        new Promise<never>((_, reject) => {
+          const onAbort = () => {
+            reject(
+              callerSignal?.aborted
+                ? new LiveTurnInterruptedError("Live turn interrupted", out)
+                : new Error(
+                    `Agent ${name} synthesis timed out after ${remainingMs}ms`,
+                  ),
+            );
+          };
+          if (synthSignal.aborted) onAbort();
+          else synthSignal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
       const synthText = (synthResult as { text?: Promise<string> | string })
         .text;
       out = String(
@@ -7019,21 +7060,7 @@ Blueprint (excerpt — full at .slopcontrol/BLUEPRINT.md; prefer Live decisions)
 ${clipPromptSection("BLUEPRINT.md", clipBlueprintForPrompt(blueprint, blueprintClip), blueprintClip)}
 
 Research:
-${
-  slim
-    ? clipPromptSection(
-        "RESEARCH.md",
-        research,
-        SLIM_RESEARCH_CLIP_CHARS,
-        `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
-        true,
-      )
-    : clipSharedDoc(
-        "RESEARCH.md",
-        research,
-        `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
-      )
-}`;
+${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, slim)}`;
     };
 
     const watch = phaseDocWatchPaths(project.rootPath, phase.id);
@@ -7127,10 +7154,7 @@ ${
       if (deferFailureDiagnosis) {
         this.planningGateOutcome = {
           faultLeg: outcomeFaultLeg,
-          issues:
-            opts?.issues?.length
-              ? [...new Set(opts.issues.map((i) => i.trim()).filter(Boolean))]
-              : detail.split("; ").filter(Boolean),
+          issues: nextSelfHealDraftIssues(detail, opts?.issues),
           judgeInfraFailed: opts?.judgeInfraFailed,
         };
         return "failed";

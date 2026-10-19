@@ -1,4 +1,13 @@
 import { type ZodError, type ZodType } from "zod";
+import {
+  generateObject,
+  generateText,
+  NoObjectGeneratedError,
+  type FlexibleSchema,
+  type LanguageModel,
+} from "ai";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
 import type { LlmEndpoint, ProvidersConfig } from "@slopcontrol/types";
 import { resolveEndpointSecrets } from "./secrets.js";
 
@@ -51,6 +60,12 @@ export interface ChatJsonOptions {
   schema?: ZodType;
   /** Prompt fragment describing the expected shape (used in shape-error nudges). */
   schemaHint?: string;
+  /**
+   * AI SDK transport retries for 408/409/429/5xx and network errors
+   * (default 2). Applies to the AI SDK transport; the fetch fallback uses
+   * `emptyContentRetries` as before.
+   */
+  maxRetries?: number;
 }
 
 export interface ChatJsonResult {
@@ -234,11 +249,16 @@ function timeoutError(timeoutMs: number, attempt: number, maxAttempts: number): 
 }
 
 /**
- * OpenAI-compatible JSON chat. Prefer `response_format: json_object` for
- * openai-chat; otherwise strip fences and parse.
- * Retries on empty content, invalid JSON, or client timeout abort.
+ * Direct OpenAI-compatible JSON chat (compatibility transport).
+ *
+ * Kept as the bounded fallback behind `chatJson` for endpoints that reject
+ * structured output, plus the `SLOPCONTROL_JUDGE_TRANSPORT=fetch` escape hatch.
+ * Prefers `response_format: json_object` for openai-chat; otherwise strips
+ * fences and parses. Retries empty content, invalid JSON, shape and timeouts.
  */
-export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
+export async function chatJsonFetch(
+  opts: ChatJsonOptions,
+): Promise<ChatJsonResult> {
   const endpoint = resolveEndpointSecrets(opts.endpoint, opts.providers);
   const modelId = opts.modelId ?? endpoint.modelId;
   const baseUrl = endpoint.baseUrl.replace(/\/+$/, "");
@@ -382,4 +402,209 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
   }
 
   throw lastError ?? new Error("JSON chat returned empty content");
+}
+
+// ─── AI SDK transport (the layer Mastra runs on) ────────────────────────────
+
+const TRUNCATION_RETRY_CAP = 32_768;
+
+class JsonTruncatedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "JsonTruncatedError";
+  }
+}
+
+/** generateObject parse repair: pull the JSON value out of fences/prose. */
+async function repairJsonText({
+  text,
+}: {
+  text: string;
+}): Promise<string | null> {
+  const trimmed = (text ?? "").trim();
+  if (!trimmed) return null;
+  const extracted = stripJsonFence(trimmed);
+  return extracted && extracted !== trimmed ? extracted : null;
+}
+
+const openaiProviders = new Map<string, ReturnType<typeof createOpenAI>>();
+const anthropicProviders = new Map<string, ReturnType<typeof createAnthropic>>();
+
+/** Build (and cache) an AI SDK model for an endpoint; null when unsupported. */
+export function aiSdkModelFor(
+  endpoint: LlmEndpoint,
+  modelId: string,
+): LanguageModel | null {
+  const baseUrl = endpoint.baseUrl.replace(/\/+$/, "");
+  if (!baseUrl) return null;
+  const headers = endpoint.headers ?? {};
+  const apiKey = endpoint.apiKey?.trim() || "not-needed";
+  const key = `${endpoint.apiType}|${baseUrl}|${apiKey}|${JSON.stringify(headers)}`;
+  if (endpoint.apiType === "anthropic-messages") {
+    let provider = anthropicProviders.get(key);
+    if (!provider) {
+      provider = createAnthropic({ baseURL: baseUrl, apiKey, headers });
+      anthropicProviders.set(key, provider);
+    }
+    return provider(modelId) as LanguageModel;
+  }
+  if (
+    endpoint.apiType === "openai-chat" ||
+    endpoint.apiType === "openai-completions"
+  ) {
+    let provider = openaiProviders.get(key);
+    if (!provider) {
+      provider = createOpenAI({ baseURL: baseUrl, apiKey, headers });
+      openaiProviders.set(key, provider);
+    }
+    return provider.chat(
+      modelId as Parameters<typeof provider.chat>[0],
+    ) as LanguageModel;
+  }
+  return null;
+}
+
+/** Transport-level failure after the SDK's own retries (429/5xx/network). */
+function isTransportFailure(err: unknown): boolean {
+  const status = (err as { statusCode?: number } | null)?.statusCode;
+  if (status != null && (status === 429 || status >= 500)) return true;
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return isServerSideChatJsonError(msg);
+}
+
+/**
+ * JSON chat with the AI SDK transport (generateObject when a schema is given,
+ * generateText otherwise), Mastra-native retries/abort/finishReason, and a
+ * bounded fallback to the direct fetch transport for endpoints that reject
+ * structured output.
+ */
+export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
+  if (process.env.SLOPCONTROL_JUDGE_TRANSPORT === "fetch") {
+    return chatJsonFetch(opts);
+  }
+  const endpoint = resolveEndpointSecrets(opts.endpoint, opts.providers);
+  const modelId = opts.modelId ?? endpoint.modelId;
+  const model = aiSdkModelFor(endpoint, modelId);
+  if (!model) return chatJsonFetch(opts);
+
+  const timeoutMs =
+    opts.timeoutMs ?? endpoint.timeoutMs ?? CHAT_JSON_DEFAULT_TIMEOUT_MS;
+  const baseBudget =
+    opts.maxTokens ??
+    endpoint.defaultParams?.maxTokens ??
+    CHAT_JSON_DEFAULT_MAX_TOKENS;
+  const maxRetries = opts.maxRetries ?? 2;
+
+  const call = async (
+    useSchema: boolean,
+    budget: number,
+  ): Promise<ChatJsonResult> => {
+    const abortSignal = AbortSignal.timeout(Math.max(1, timeoutMs));
+    try {
+      if (useSchema && opts.schema) {
+        const result = await generateObject({
+          model,
+          schema: opts.schema as unknown as FlexibleSchema<unknown>,
+          system: opts.system,
+          prompt: opts.user,
+          temperature: opts.temperature ?? 0,
+          maxOutputTokens: budget,
+          maxRetries,
+          abortSignal,
+          experimental_repairText: repairJsonText,
+        });
+        if (result.finishReason === "length") {
+          throw new JsonTruncatedError(
+            `JSON chat truncated (finishReason=length, maxOutputTokens=${budget})`,
+          );
+        }
+        return {
+          text: JSON.stringify(result.object),
+          parsed: result.object,
+          modelId,
+        };
+      }
+      const result = await generateText({
+        model,
+        system: opts.system,
+        prompt: `${opts.user}${JSON_ONLY_NUDGE}`,
+        temperature: opts.temperature ?? 0,
+        maxOutputTokens: budget,
+        maxRetries,
+        abortSignal,
+      });
+      if (result.finishReason === "length") {
+        throw new JsonTruncatedError(
+          `JSON chat truncated (finishReason=length, maxOutputTokens=${budget})`,
+        );
+      }
+      const text = (result.text ?? "").trim();
+      if (!text) throw new Error("JSON chat returned empty content");
+      const parsed: unknown = JSON.parse(stripJsonFence(text));
+      if (opts.schema) {
+        const checked = opts.schema.safeParse(parsed);
+        if (!checked.success) {
+          throw new Error(
+            `JSON shape invalid: ${formatZodIssues(checked.error)}${opts.schemaHint ? ` — ${opts.schemaHint}` : ""}`,
+          );
+        }
+        return { text, parsed: checked.data, modelId };
+      }
+      return { text, parsed, modelId };
+    } catch (err) {
+      if (abortSignal.aborted || isChatJsonTimeoutError(err)) {
+        throw timeoutError(timeoutMs, 1, 1);
+      }
+      if (
+        err instanceof NoObjectGeneratedError &&
+        (err as { finishReason?: string }).finishReason === "length"
+      ) {
+        throw new JsonTruncatedError(
+          `JSON chat truncated (finishReason=length, maxOutputTokens=${budget})`,
+        );
+      }
+      throw err;
+    }
+  };
+
+  const withTruncationRetry = async (
+    useSchema: boolean,
+  ): Promise<ChatJsonResult> => {
+    try {
+      return await call(useSchema, baseBudget);
+    } catch (err) {
+      if (!(err instanceof JsonTruncatedError)) throw err;
+      const bumped = Math.min(
+        TRUNCATION_RETRY_CAP,
+        Math.max(baseBudget * 2, baseBudget + 2_048),
+      );
+      if (bumped <= baseBudget) throw err;
+      return call(useSchema, bumped);
+    }
+  };
+
+  let firstError: unknown;
+  if (opts.schema) {
+    try {
+      return await withTruncationRetry(true);
+    } catch (err) {
+      firstError = err;
+      // A transport failure already burned the SDK retries: go straight to the
+      // compatibility transport instead of paying for a second text attempt.
+      if (isTransportFailure(err) || isChatJsonTimeoutError(err)) {
+        return chatJsonFetch(opts);
+      }
+    }
+  }
+  try {
+    return await withTruncationRetry(false);
+  } catch (err) {
+    firstError = firstError ?? err;
+    if (isChatJsonTimeoutError(err)) return chatJsonFetch(opts);
+  }
+  try {
+    return await chatJsonFetch(opts);
+  } catch (fetchErr) {
+    throw fetchErr ?? firstError;
+  }
 }

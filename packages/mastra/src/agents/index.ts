@@ -2,9 +2,18 @@ import { Agent } from "@mastra/core/agent";
 import { Memory } from "@mastra/memory";
 import { blueprintContractPromptBlock } from "@slopcontrol/artifacts";
 import { formatDesignImageCatalogForLlm } from "@slopcontrol/coding-tools";
-import type { LlmRegistry } from "@slopcontrol/llm";
+import { buildAgentModelChain, type LlmRegistry } from "@slopcontrol/llm";
 import { createProjectTools } from "../tools/project-tools.js";
 import { createDesignLoopMediaTools } from "../tools/design-loop-tools.js";
+
+/** Plan-loop agents: prefer "planning", fall back to "research" when unbound. */
+function planLoopModel(registry: LlmRegistry) {
+  try {
+    return buildAgentModelChain(registry, "planning");
+  } catch {
+    return buildAgentModelChain(registry, "research");
+  }
+}
 
 export function createResearchAgent(
   registry: LlmRegistry,
@@ -50,7 +59,8 @@ Rules:
 - When ThemeToggle / day-night / menubar theme controls are in scope (especially design \`theme_modes\` / \`togglePresent\`):
   - **Mounted ≠ visible.** Confirm Menubar mounts ThemeToggle, then check playground CSS for \`@source\` covering package \`../src\` **or** that built CSS would contain ThemeToggle utilities (\`text-text-secondary\`, size classes).
   - Recommend Automated Checks: mount greps **plus** \`@source\` / built-CSS utility greps — not import-order-only (\`@import "tailwindcss"\` first).`,
-    model: registry.resolve("research"),
+    model: buildAgentModelChain(registry, "research"),
+    maxRetries: 2,
     memory,
     tools: {
       read_file: tools.readFile,
@@ -95,7 +105,8 @@ Greenfield: design from intent; Phase 01 must be scaffold. Still use the require
 
 When validating an existing blueprint, say STALE or FRESH on its own line before BLUEPRINT_COMPLETE.
 If STALE, output the full corrected blueprint. If FRESH, you may output the existing blueprint unchanged — but it must still satisfy the required sections.`,
-    model: registry.resolve("planning"),
+    model: buildAgentModelChain(registry, "planning"),
+    maxRetries: 2,
     memory,
     tools: {
       read_file: tools.readFile,
@@ -150,7 +161,8 @@ Rules:
 - Prefer returning the full document in your response even if you also write_file.
 - Do NOT embed a full multi-phase roadmap inside PHASE.md — that belongs in ROADMAP.md / BLUEPRINT.md.
 - End with PHASE_COMPLETE on its own line.`,
-    model: registry.resolve("planning"),
+    model: buildAgentModelChain(registry, "planning"),
+    maxRetries: 2,
     memory,
     tools: {
       read_file: tools.readFile,
@@ -178,7 +190,8 @@ Apply human feedback to improve PHASE.md while preserving alignment with BLUEPRI
 Keep or add ## Automated Checks with runnable fenced cells (\`\`\`bash / \`\`\`typescript / \`lang cmd=…\`) — one fence = one process; manual-only verification is not enough.
 Runtime probes on dockerized apps must be finite: \`docker compose up -d <svc>\` plus \`trap 'docker compose down' EXIT\`, then curl/wget/node one-shot — never bare \`docker compose up\` or dev servers.
 Output ONLY the revised PHASE.md markdown (start with #). End with PHASE_COMPLETE.`,
-    model: registry.resolve("planning"),
+    model: buildAgentModelChain(registry, "planning"),
+    maxRetries: 2,
     memory,
     tools: {
       read_file: tools.readFile,
@@ -213,7 +226,8 @@ Rules:
 - Keep tokens concrete (hex colors, font stacks). Avoid purple-on-white defaults unless the brief asks for them.
 - Output the UI-SPEC markdown in your final message (start with # UI-SPEC). End with UI_SPEC_COMPLETE on its own line.
 - Do not invent product features; design only.`,
-    model: registry.resolve("design"),
+    model: buildAgentModelChain(registry, "design"),
+    maxRetries: 2,
     memory,
     tools: {
       read_file: tools.readFile,
@@ -249,7 +263,8 @@ When LLM/env/verify fails (entitlement, 429, missing keys, runtime down): audien
 **Infra/env failures** (ECONNREFUSED, missing secrets, failed verifyPreflightCommand, LLM quota) are NOT app bugs — tell the operator to restore deps; prefer DEV_BLOCKED after repeated infra.
 Obey durable project learnings. Respond with concise Next actions only.
 Use DEV_BLOCKED when unrecoverable.`,
-    model: registry.resolve("supervisor"),
+    model: buildAgentModelChain(registry, "supervisor"),
+    maxRetries: 2,
   });
 }
 
@@ -296,7 +311,8 @@ Keep the Task brief to a title plus 2–5 bullets so promote_ask can seed start_
 - If the operator needs several separate investigations, recommend MCP/HTTP \`ask_sub_research\` with a short topics list (max 4). Do not pretend sub-research ran unless that API was invoked.
 - Return a concise findings document: \`## Summary\` (2–4 sentences — the answer/root cause), \`## Key paths\` (bullets of the files that matter), \`## Task brief\` (only when shaping a change). Do NOT paste large code blocks or raw grep output — cite the path and one line, not the dump.
 - Cite paths you inspected. Do not claim work is implemented unless you verified it.`,
-    model: registry.resolve("ask"),
+    model: buildAgentModelChain(registry, "ask"),
+    maxRetries: 2,
     memory,
     tools: {
       read_file: tools.readFile,
@@ -327,7 +343,8 @@ Rules:
 - Answer the operator's actual question, or score the coding turn against the brief.
 - Cite paths from the findings. Do not invent files.
 - If an implementable fix is in scope, include ## Task brief with Title, Goal, Likely areas.`,
-    model: registry.resolve("judge"),
+    model: buildAgentModelChain(registry, "judge"),
+    maxRetries: 2,
     memory,
   });
 }
@@ -357,7 +374,8 @@ Rules:
 - Do NOT create phases or claim promote_ask ran.
 - Keep tool use focused (~8–12 calls max), then write findings.
 - Never invent files. Never print secrets/API keys.`,
-    model: registry.resolve("ask"),
+    model: buildAgentModelChain(registry, "ask"),
+    maxRetries: 2,
     memory,
     tools: {
       read_file: tools.readFile,
@@ -419,7 +437,8 @@ Rules:
 - Do NOT write product source files. Do NOT produce UI-SPEC.md as a file.
 - After a clear chat-facing summary (what changed / refused — 2–6 sentences), end with the HTML document and MOCK_HTML_COMPLETE — or MOCK_ASSETS_ONLY when CONTINUE MODE is asset_only.
 - Avoid purple-on-white defaults unless the brief asks for them.`,
-    model: registry.resolve("design"),
+    model: buildAgentModelChain(registry, "design"),
+    maxRetries: 2,
     memory,
     tools: {
       generate_image: media.generate_image,
@@ -447,14 +466,6 @@ export function createPlanLoopAgent(
   memory: Memory,
 ): Agent {
   const tools = createProjectTools(projectDir);
-  const resolvePlanningModel = () => {
-    try {
-      return registry.resolve("planning");
-    } catch {
-      return registry.resolve("research");
-    }
-  };
-
   return new Agent({
     id: "plan-loop-agent",
     name: "Plan Loop Agent",
@@ -482,7 +493,8 @@ Rules:
 - Do NOT write RESEARCH.md, PHASE.md, or product source. Do NOT claim promote ran.
 - End with PLAN_COMPLETE on its own line.
 - Keep Likely areas as hypotheses when uncertain; put unknowns under Risks & open questions for research to resolve.`,
-    model: resolvePlanningModel(),
+    model: planLoopModel(registry),
+    maxRetries: 2,
     memory,
     tools: {
       read_file: tools.readFile,
@@ -502,14 +514,6 @@ export function createPlanLoopRepairAgent(
   registry: LlmRegistry,
   memory: Memory,
 ): Agent {
-  const resolvePlanningModel = () => {
-    try {
-      return registry.resolve("planning");
-    } catch {
-      return registry.resolve("research");
-    }
-  };
-
   return new Agent({
     id: "plan-loop-repair-agent",
     name: "Plan Loop Repair Agent",
@@ -525,7 +529,8 @@ Rules:
 - Fill every section with concrete stubs if uncertain; cite any sibling paths given in the user prompt under Likely areas.
 - Do NOT call tools. Do NOT explore. Do NOT narrate investigation.
 - End with PLAN_COMPLETE on its own line.`,
-    model: resolvePlanningModel(),
+    model: planLoopModel(registry),
+    maxRetries: 2,
     memory,
     // Intentionally no tools — empty extract repair must not re-explore.
   });
@@ -557,7 +562,8 @@ Rules:
 - When DEPENDENCY INTENT / CROSS-PROJECT DEPS appear: follow them. You may run \`pnpm add @jam/…\` only after npm_registry_ensure_rc guidance — never npm/pnpm link or file: sibling installs.
 - Never print secrets/API keys. Never claim DEV_COMPLETE or that a phase merged.
 - Cite paths and command outcomes you actually ran.`,
-    model: registry.resolve("agent"),
+    model: buildAgentModelChain(registry, "agent"),
+    maxRetries: 2,
     memory,
     tools: {
       read_file: tools.readFile,

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it, mock } from "node:test";
+import { after, before, describe, it, mock } from "node:test";
 import {
   CHAT_JSON_DEFAULT_TIMEOUT_MS,
   CHAT_JSON_SERVER_RETRY_MAX_MS,
@@ -172,6 +172,14 @@ describe("json-chat helpers", () => {
 });
 
 describe("chatJson empty-content retry", () => {
+  // These pin the compatibility (fetch) transport semantics.
+  before(() => {
+    process.env.SLOPCONTROL_JUDGE_TRANSPORT = "fetch";
+  });
+  after(() => {
+    delete process.env.SLOPCONTROL_JUDGE_TRANSPORT;
+  });
+
   it("retries empty content then succeeds", async () => {
     let calls = 0;
     const fetchMock = mock.method(globalThis, "fetch", async () => {
@@ -509,6 +517,13 @@ describe("chatJson empty-content retry", () => {
 
 
 describe("chatJson schema validation", () => {
+  before(() => {
+    process.env.SLOPCONTROL_JUDGE_TRANSPORT = "fetch";
+  });
+  after(() => {
+    delete process.env.SLOPCONTROL_JUDGE_TRANSPORT;
+  });
+
   const endpoint: LlmEndpoint = {
     id: "test",
     label: "test",
@@ -587,6 +602,149 @@ describe("chatJson schema validation", () => {
           return true;
         },
       );
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+});
+
+
+describe("chatJson AI SDK transport", () => {
+  const endpoint: LlmEndpoint = {
+    id: "test",
+    label: "test",
+    baseUrl: "http://example.test/v1",
+    apiType: "openai-chat",
+    modelId: "test-model",
+    capabilities: { chat: true, vision: false, imageGen: false },
+  };
+  const completion = (content: string, finishReason = "stop") =>
+    new Response(
+      JSON.stringify({
+        id: "chatcmpl-test",
+        object: "chat.completion",
+        created: 0,
+        model: "test-model",
+        choices: [
+          { index: 0, message: { role: "assistant", content }, finish_reason: finishReason },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  const capture = () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: string, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return completion('{"targets":"both"}');
+      },
+    );
+    return { bodies, fetchMock };
+  };
+  const tokens = (body: Record<string, unknown>): number =>
+    Number(body.max_tokens ?? body.max_completion_tokens ?? 0);
+
+  it("uses structured output for a schema and returns the typed object", async () => {
+    const { bodies, fetchMock } = capture();
+    try {
+      const res = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        schema: z.object({ targets: z.string() }),
+      });
+      assert.deepEqual(res.parsed, { targets: "both" });
+      assert.equal(bodies.length, 1);
+      assert.match(
+        JSON.stringify(bodies[0]),
+        /response_format|json_schema|json_object/,
+      );
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("repairs fenced JSON via experimental_repairText", async () => {
+    const fetchMock = mock.method(globalThis, "fetch", async () =>
+      completion('Here you go:\n\n```json\n{"targets":"phase"}\n```\n'),
+    );
+    try {
+      const res = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        schema: z.object({ targets: z.string() }),
+      });
+      assert.deepEqual(res.parsed, { targets: "phase" });
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("retries once with a larger budget when output is truncated", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: string, init?: RequestInit) => {
+        calls += 1;
+        bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return calls === 1
+          ? completion('{"targets":', "length")
+          : completion('{"targets":"both"}');
+      },
+    );
+    try {
+      const res = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        schema: z.object({ targets: z.string() }),
+        maxTokens: 1024,
+      });
+      assert.deepEqual(res.parsed, { targets: "both" });
+      assert.equal(calls, 2);
+      assert.ok(
+        tokens(bodies[1]!) > tokens(bodies[0]!),
+        `expected a larger budget, got ${tokens(bodies[0]!)} → ${tokens(bodies[1]!)}`,
+      );
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("falls back to the compatibility transport when structured output is rejected", async () => {
+    let calls = 0;
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: string, init?: RequestInit) => {
+        calls += 1;
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        const structured =
+          body.response_format !== undefined || body.tools !== undefined;
+        if (calls === 1 && structured) {
+          return new Response(
+            JSON.stringify({ error: "response_format is not supported" }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return completion('{"targets":"both"}');
+      },
+    );
+    try {
+      const res = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        schema: z.object({ targets: z.string() }),
+      });
+      assert.deepEqual(res.parsed, { targets: "both" });
+      assert.ok(calls >= 2, `expected a fallback call, got ${calls}`);
     } finally {
       fetchMock.mock.restore();
     }

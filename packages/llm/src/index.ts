@@ -233,6 +233,37 @@ export function toMastraModelConfig(
   };
 }
 
+
+/** Mastra model-chain entry (structurally matches @mastra/core ModelWithRetries). */
+export type AgentModelChainEntry = {
+  model: MastraModelConfig;
+  maxRetries?: number;
+};
+
+/**
+ * Mastra-native model chain for an agent: the role's primary model with 2
+ * transport retries, then the role fallback (a different model) with 1 retry
+ * when the registry resolves one. Returns the plain config otherwise.
+ */
+export function buildAgentModelChain(
+  registry: {
+    resolve(role: AgentRole): MastraModelConfig;
+    resolveFallback(role: AgentRole): MastraModelConfig | null;
+  },
+  role: AgentRole,
+): MastraModelConfig | AgentModelChainEntry[] {
+  const primary = registry.resolve(role);
+  const fallback = registry.resolveFallback(role);
+  if (!fallback) return primary;
+  const same =
+    fallback.id === primary.id && (fallback.url ?? "") === (primary.url ?? "");
+  if (same) return primary;
+  return [
+    { model: primary, maxRetries: 2 },
+    { model: fallback, maxRetries: 1 },
+  ];
+}
+
 export class LlmRegistry {
   private readonly endpoints: Map<string, LlmEndpoint>;
   private readonly roles: RoleModelBindings;

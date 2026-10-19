@@ -67,3 +67,23 @@ export function clipSharedDoc(
     true,
   );
 }
+
+/**
+ * RESEARCH.md window for a draft prompt. The slim retry (provider 400) uses
+ * the smaller head+tail budget; every other draft uses the judge's window.
+ */
+export function clipDraftResearch(
+  text: string,
+  fullPath: string,
+  slim = false,
+): string {
+  return slim
+    ? clipPromptSection(
+        "RESEARCH.md",
+        text,
+        SLIM_RESEARCH_CLIP_CHARS,
+        fullPath,
+        true,
+      )
+    : clipSharedDoc("RESEARCH.md", text, fullPath);
+}

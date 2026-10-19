@@ -288,14 +288,14 @@ describe("priorDraftJudgeIssuesFromDiagnosis", () => {
   it("carries deduped draft-gate gaps from evidence", () => {
     const issues = priorDraftJudgeIssuesFromDiagnosis({
       title: "Draft rejected: phase quality judge",
-      rootCause: "Check 13 greps mcp:read in routes.ts — unsatisfiable",
+      rootCause: "Check 3 greps token:read in routes.ts — unsatisfiable",
       evidence:
-        "Check 13 greps mcp:read in routes.ts — unsatisfiable; Check 12 single-gate scan excludes N14.3; Check 13 greps mcp:read in routes.ts — unsatisfiable",
+        "Check 3 greps token:read in routes.ts — unsatisfiable; Check 2 single-gate scan excludes the registry test; Check 3 greps token:read in routes.ts — unsatisfiable",
       tags: ["planning", "draft", "phase-quality"],
     });
     assert.deepEqual(issues, [
-      "Check 13 greps mcp:read in routes.ts — unsatisfiable",
-      "Check 12 single-gate scan excludes N14.3",
+      "Check 3 greps token:read in routes.ts — unsatisfiable",
+      "Check 2 single-gate scan excludes the registry test",
     ]);
   });
 

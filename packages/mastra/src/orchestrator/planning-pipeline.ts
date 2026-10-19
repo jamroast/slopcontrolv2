@@ -305,12 +305,30 @@ export function shouldReclassifyIntentForPlanningSelfHeal(opts: {
 }
 
 /**
+ * Gaps a deferred draft failure stores for the next self-heal round.
+ * Structured `issues` win: a gap may itself contain "; ", which splitting
+ * `detail` would fragment.
+ */
+export function nextSelfHealDraftIssues(
+  detail: string,
+  issues?: string[],
+): string[] {
+  if (issues?.length) {
+    return [...new Set(issues.map((issue) => issue.trim()).filter(Boolean))];
+  }
+  return detail
+    .split("; ")
+    .map((issue) => issue.trim())
+    .filter(Boolean);
+}
+
+/**
  * Prior DRAFT-gate gaps to carry into an operator-triggered `retry_draft`.
  *
  * The planning self-heal loop feeds each round's judge gaps forward, but the
  * operator action used to call `draftPhase` with no feedback and delete the
  * diagnosis first — so every retry_draft regenerated the same check defects
- * (e.g. an unsatisfiable grep, a missing test file) that the judge had already
+ * (an unsatisfiable grep, a missing test file) that the judge had already
  * rejected. Extract those gaps from the persisted diagnosis instead.
  *
  * Only draft-gate diagnoses qualify: a develop/verify diagnosis is not
@@ -336,7 +354,7 @@ export function priorDraftJudgeIssuesFromDiagnosis(
     .filter(Boolean);
   if (structured.length > 0) return [...new Set(structured)];
   // Fallback for older diagnoses: evidence is the longer copy (rootCause caps
-  // at 2k and can slice a gap).
+  // at 4k and can slice a gap).
   const detail = (diagnosis.evidence || diagnosis.rootCause || "").trim();
   if (!detail) return [];
   return [
