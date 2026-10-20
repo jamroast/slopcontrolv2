@@ -430,6 +430,30 @@ describe("quality-judge convergence memory", () => {
     ]);
   });
 
+  it("filters infra-shaped messages even when the diagnosis is tagged phase-quality", () => {
+    // The "no LLM judge bound" failure keeps kind/tag phase-quality and a title
+    // without "infra", so the tag/title gate alone would seed its transport text.
+    assert.deepEqual(
+      priorQualityJudgeGapsFromDiagnosis({
+        title: "Draft rejected: phase quality judge",
+        tags: ["planning", "draft", "phase-quality"],
+        issues: [
+          "PHASE quality could not be verified (no LLM judge bound)",
+          "Verdict line undeclared",
+        ],
+      }),
+      ["Verdict line undeclared"],
+    );
+    assert.deepEqual(
+      priorQualityJudgeGapsFromDiagnosis({
+        title: "Draft rejected: phase quality judge",
+        tags: ["planning", "draft", "phase-quality"],
+        issues: ["PHASE quality could not be verified (JSON chat timed out after 300000ms)"],
+      }),
+      [],
+    );
+  });
+
   it("drops seeds when RESEARCH.md was regenerated after the verdict", () => {
     const diagnosedAt = Date.parse(qualityDiagnosis.updatedAt);
     // Research older than the verdict → still relevant.

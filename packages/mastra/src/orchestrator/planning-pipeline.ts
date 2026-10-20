@@ -404,20 +404,18 @@ export function priorQualityJudgeGapsFromDiagnosis(
       (/phase quality judge/i.test(diagnosis.title ?? "") &&
         !/infra/i.test(diagnosis.title ?? "")));
   if (!isQuality) return [];
-  const structured = (diagnosis.issues ?? [])
-    .map((issue) => issue.trim())
-    .filter(Boolean);
-  if (structured.length > 0) return [...new Set(structured)];
+  // Belt and braces: transport/infra messages are not content gaps even when
+  // the diagnosis is tagged `phase-quality` (e.g. the "no LLM judge bound"
+  // failure keeps that kind while carrying "…could not be verified…").
+  const contentGaps = (issues: string[]) =>
+    [...new Set(issues.map((issue) => issue.trim()).filter(Boolean))].filter(
+      (issue) => !isPlanningJudgeInfraIssue(issue),
+    );
+  const structured = contentGaps(diagnosis.issues ?? []);
+  if (structured.length > 0) return structured;
   const detail = (diagnosis.evidence || diagnosis.rootCause || "").trim();
   if (!detail) return [];
-  return [
-    ...new Set(
-      detail
-        .split("; ")
-        .map((issue) => issue.trim())
-        .filter(Boolean),
-    ),
-  ];
+  return contentGaps(detail.split("; "));
 }
 
 /**
