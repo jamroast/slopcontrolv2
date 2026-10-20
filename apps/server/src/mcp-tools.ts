@@ -74,6 +74,229 @@ async function consumeLiveTurnSse(
   });
 }
 
+/** Default bounded wait for MCP loop turns (clients time out near 60s). */
+export const MCP_LIVE_WAIT_DEFAULT_MS = 20_000;
+export const MCP_LIVE_WAIT_MAX_MS = 45_000;
+
+export function resolveMcpWaitMs(value: unknown): number {
+  const raw =
+    typeof value === "number" && Number.isFinite(value)
+      ? value
+      : MCP_LIVE_WAIT_DEFAULT_MS;
+  return Math.min(MCP_LIVE_WAIT_MAX_MS, Math.max(1_000, Math.floor(raw)));
+}
+
+export type BoundedLiveTurnResult = {
+  ok: boolean;
+  done?: Record<string, unknown>;
+  errorText?: string;
+  timedOut?: boolean;
+  turnId?: string;
+  progress: string[];
+};
+
+/**
+ * Consume a live-turn SSE stream for at most waitMs. On timeout the body is
+ * cancelled but the server-side turn keeps running (the route has no
+ * disconnect→abort hook), so the caller can return a resumable running
+ * envelope instead of failing the MCP call.
+ */
+export async function consumeLiveTurnSseBounded(opts: {
+  sendLog?: (logger: string, line: string) => Promise<void>;
+  logger: string;
+  body: ReadableStream<Uint8Array> | null;
+  waitMs: number;
+}): Promise<BoundedLiveTurnResult> {
+  let turnId: string | undefined;
+  const progress: string[] = [];
+  const result = await consumeAskSseStream(opts.body, async (event) => {
+    if (!turnId && typeof event.turnId === "string" && event.turnId) {
+      turnId = event.turnId;
+    }
+    const line = askProgressLogLine(event);
+    if (!line) return;
+    progress.push(line);
+    if (progress.length > 50) progress.shift();
+    if (!opts.sendLog) return;
+    try {
+      await opts.sendLog(opts.logger, line);
+    } catch {
+      /* progress notifications are best-effort */
+    }
+  }, { deadlineMs: opts.waitMs });
+  return { ...result, turnId, progress };
+}
+
+async function fetchRunningLiveTurn(
+  serverUrl: string,
+  projectId: string,
+  kind: string,
+  sessionId: string,
+): Promise<Record<string, unknown> | null> {
+  if (!projectId) return null;
+  try {
+    const qs = new URLSearchParams({ kind });
+    if (sessionId) qs.set("sessionId", sessionId);
+    const res = await fetch(
+      `${serverUrl}/projects/${encodeURIComponent(projectId)}/live-turns?${qs}`,
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as {
+      running?: boolean;
+      liveTurn?: Record<string, unknown> | null;
+    };
+    return body?.running && body.liveTurn ? body.liveTurn : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Non-error payload for a turn that is still running when the wait expires. */
+export function formatRunningTurnEnvelope(opts: {
+  kind: string;
+  loopId?: string;
+  turnId?: string;
+  waitedMs: number;
+  progress?: string[];
+  getTool: string;
+}): string {
+  const turnHint = opts.turnId ? `turnId=${opts.turnId}` : "the loopId";
+  return JSON.stringify({
+    status: "running",
+    kind: opts.kind,
+    loopId: opts.loopId,
+    turnId: opts.turnId,
+    waitedMs: opts.waitedMs,
+    progress: (opts.progress ?? []).slice(-8),
+    nextStep:
+      `Still running (MCP waits are bounded so the client does not time out). Call wait_for_live_turn with ${turnHint} for another bounded wait, then re-read with ${opts.getTool}. Do not start or continue this loop again while it is running.`,
+  });
+}
+
+type LoopTurnToolResult = {
+  content: Array<{ type: "text"; text: string }>;
+  isError: boolean;
+};
+
+/**
+ * Shared MCP loop-turn runner: attach to an already-running turn, otherwise
+ * POST with attachIfRunning=1 and wait at most waitMs before returning a
+ * resumable running envelope (never a client-side timeout).
+ */
+export async function runLoopTurnTool(opts: {
+  serverUrl: string;
+  kind: "plan_loop" | "marketing_loop" | "design_loop";
+  logger: string;
+  projectId: string;
+  sessionId: string;
+  postUrl: string;
+  payload: Record<string, unknown>;
+  waitMs: number;
+  getTool: string;
+  format: (body: string, ok: boolean) => string;
+  sendLog?: (logger: string, line: string) => Promise<void>;
+}): Promise<LoopTurnToolResult> {
+  const running = await fetchRunningLiveTurn(
+    opts.serverUrl,
+    opts.projectId,
+    opts.kind,
+    opts.sessionId,
+  );
+  if (running) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: opts.format(
+            formatRunningTurnEnvelope({
+              kind: opts.kind,
+              loopId:
+                opts.sessionId ||
+                (typeof running.sessionId === "string" ? running.sessionId : ""),
+              turnId: typeof running.turnId === "string" ? running.turnId : undefined,
+              waitedMs: 0,
+              progress: [],
+              getTool: opts.getTool,
+            }),
+            true,
+          ),
+        },
+      ],
+      isError: false,
+    };
+  }
+
+  const sep = opts.postUrl.includes("?") ? "&" : "?";
+  const res = await fetch(`${opts.postUrl}${sep}attachIfRunning=1`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(opts.payload),
+  });
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("text/event-stream")) {
+    const body = await res.text();
+    return {
+      content: [{ type: "text", text: opts.format(body, res.ok) }],
+      isError: !res.ok,
+    };
+  }
+  const consumed = await consumeLiveTurnSseBounded({
+    sendLog: opts.sendLog,
+    logger: opts.logger,
+    body: res.body,
+    waitMs: opts.waitMs,
+  });
+  if (consumed.timedOut) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: opts.format(
+            formatRunningTurnEnvelope({
+              kind: opts.kind,
+              loopId: opts.sessionId || undefined,
+              turnId: consumed.turnId,
+              waitedMs: opts.waitMs,
+              progress: consumed.progress,
+              getTool: opts.getTool,
+            }),
+            true,
+          ),
+        },
+      ],
+      isError: false,
+    };
+  }
+  if (!consumed.ok || !consumed.done) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: opts.format(
+            JSON.stringify({
+              error: consumed.errorText,
+              code: consumed.done?.code ?? consumed.done?.type,
+              notes: consumed.done?.notes ?? consumed.done?.reply,
+              loopId: consumed.done?.loopId ?? (opts.sessionId || undefined),
+            }),
+            false,
+          ),
+        },
+      ],
+      isError: true,
+    };
+  }
+  return {
+    content: [
+      { type: "text", text: opts.format(JSON.stringify(consumed.done), true) },
+    ],
+    isError: false,
+  };
+}
+
 /**
  * Consume ask SSE body; invoke onEvent for each progress payload.
  * Returns the terminal done/error event (or a synthetic error).
@@ -81,10 +304,12 @@ async function consumeLiveTurnSse(
 export async function consumeAskSseStream(
   body: ReadableStream<Uint8Array> | null,
   onEvent: (event: Record<string, unknown>) => void | Promise<void>,
+  opts?: { deadlineMs?: number },
 ): Promise<{
   ok: boolean;
   done?: Record<string, unknown>;
   errorText?: string;
+  timedOut?: boolean;
 }> {
   if (!body) {
     return { ok: false, errorText: "empty SSE body" };
@@ -93,9 +318,39 @@ export async function consumeAskSseStream(
   const decoder = new TextDecoder();
   let buffer = "";
   let terminal: Record<string, unknown> | undefined;
+  const deadline =
+    typeof opts?.deadlineMs === "number"
+      ? Date.now() + Math.max(0, opts.deadlineMs)
+      : undefined;
+  let timedOut = false;
 
   while (true) {
-    const { done, value } = await reader.read();
+    let read: { done: boolean; value?: Uint8Array } | "timeout";
+    if (deadline == null) {
+      read = await reader.read();
+    } else {
+      const remaining = deadline - Date.now();
+      read =
+        remaining <= 0
+          ? "timeout"
+          : await Promise.race([
+              reader.read(),
+              new Promise<"timeout">((resolve) => {
+                const timer = setTimeout(() => resolve("timeout"), remaining);
+                (timer as { unref?: () => void }).unref?.();
+              }),
+            ]);
+    }
+    if (read === "timeout") {
+      timedOut = true;
+      try {
+        await reader.cancel();
+      } catch {
+        /* stream already closed */
+      }
+      break;
+    }
+    const { done, value } = read;
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const parts = buffer.split("\n");
@@ -119,6 +374,10 @@ export async function consumeAskSseStream(
     }
   }
 
+  if (timedOut && !terminal) {
+    // Partial by design: the caller resumes via a status/poll tool.
+    return { ok: true, timedOut: true };
+  }
   if (!terminal) {
     return { ok: false, errorText: "ask stream ended without done event" };
   }
@@ -141,6 +400,54 @@ export async function consumeAskSseStream(
 /**
  * Put loopId first so clients reuse it; include mock HTML for display.
  */
+/** Rendering for the resumable {status:"running"} envelope (not an error). */
+function formatRunningEnvelopeText(body: string): string {
+  try {
+    const p = JSON.parse(body) as {
+      status?: string;
+      kind?: string;
+      loopId?: string;
+      turnId?: string;
+      waitedMs?: number;
+      progress?: string[];
+      nextStep?: string;
+    };
+    return [
+      "status: running",
+      p.kind ? `kind: ${p.kind}` : null,
+      p.loopId ? `loopId: ${p.loopId}` : null,
+      p.turnId ? `turnId: ${p.turnId}` : null,
+      typeof p.waitedMs === "number" ? `waitedMs: ${p.waitedMs}` : null,
+      p.progress?.length
+        ? "progress:\n" + p.progress.map((line) => `  - ${line}`).join("\n")
+        : null,
+      p.nextStep ? `nextStep: ${p.nextStep}` : null,
+      "---",
+      body,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  } catch {
+    return body;
+  }
+}
+
+/** Compact live-turn line for loop get envelopes (null when idle). */
+function liveTurnLine(
+  liveTurn:
+    | { status?: string; turnId?: string; elapsedMs?: number }
+    | null
+    | undefined,
+): string | null {
+  if (!liveTurn) return null;
+  return (
+    `liveTurn: ${liveTurn.status ?? "?"}` +
+    (liveTurn.turnId ? ` turnId=${liveTurn.turnId}` : "") +
+    (typeof liveTurn.elapsedMs === "number"
+      ? ` elapsedMs=${liveTurn.elapsedMs}`
+      : "")
+  );
+}
 /**
  * Put loopId first for plan loops; include PLAN.md for display.
  */
@@ -169,7 +476,11 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
         focus?: string;
         inScope?: string[];
       };
+      liveTurn?: { status?: string; turnId?: string; elapsedMs?: number } | null;
     };
+    if ((parsed as { status?: string }).status === "running") {
+      return formatRunningEnvelopeText(body);
+    }
     const loopId = parsed.loopId || parsed.loop?.id || "";
     if (!ok) {
       return [
@@ -206,6 +517,7 @@ export function formatPlanLoopMcpEnvelope(body: string, ok: boolean): string {
       (!plan && planChars !== null && planChars > 0);
     return [
       `loopId: ${loopId}`,
+      liveTurnLine(parsed.liveTurn),
       `status: ${parsed.loop?.status ?? "open"}`,
       parsed.version !== undefined ? `version: ${parsed.version}` : null,
       parsed.phaseId ? `phaseId: ${parsed.phaseId}` : null,
@@ -250,8 +562,12 @@ export function formatMarketingLoopMcpEnvelope(body: string, ok: boolean): strin
       designReady?: boolean;
       readyPhaseIds?: string[];
       verdict?: { ok?: boolean; gaps?: string[] };
+      liveTurn?: { status?: string; turnId?: string; elapsedMs?: number } | null;
       error?: string;
     };
+    if ((parsed as { status?: string }).status === "running") {
+      return formatRunningEnvelopeText(body);
+    }
     if (!ok) {
       return [
         parsed.loopId ? `loopId: ${parsed.loopId}` : null,
@@ -273,6 +589,7 @@ export function formatMarketingLoopMcpEnvelope(body: string, ok: boolean): strin
         : null;
     const header = [
       `loopId: ${parsed.loopId ?? ""}`,
+      liveTurnLine(parsed.liveTurn),
       parsed.loop?.status ? `status: ${parsed.loop.status}` : null,
       parsed.version !== undefined ? `version: ${parsed.version}` : null,
       parsed.verdict
@@ -319,7 +636,11 @@ export function formatDesignLoopMcpEnvelope(body: string, ok: boolean): string {
         theme?: { modes?: string[]; togglePresent?: boolean };
         inScope?: string[];
       };
+      liveTurn?: { status?: string; turnId?: string; elapsedMs?: number } | null;
     };
+    if ((parsed as { status?: string }).status === "running") {
+      return formatRunningEnvelopeText(body);
+    }
     const loopId = parsed.loopId || parsed.loop?.id || "";
     if (!ok) {
       return [
@@ -334,6 +655,7 @@ export function formatDesignLoopMcpEnvelope(body: string, ok: boolean): string {
     }
     const status = parsed.loop?.status ?? "open";
     const version = parsed.version ?? parsed.loop?.currentVersion;
+    const liveLine = liveTurnLine(parsed.liveTurn);
     const html =
       typeof parsed.html === "string" && parsed.html.trim()
         ? parsed.html
@@ -359,6 +681,7 @@ export function formatDesignLoopMcpEnvelope(body: string, ok: boolean): string {
       `loopId: ${loopId}`,
       `status: ${status}`,
       version !== undefined ? `version: ${version}` : null,
+      liveLine,
       parsed.phaseId ? `phaseId: ${parsed.phaseId}` : null,
       cmLine,
       parsed.usedScaffold ? "usedScaffold: true" : null,
@@ -1066,6 +1389,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
             },
           },
         },
+          waitMs: {
+            type: "number",
+            description:
+              "Max ms to block before returning a resumable {status:'running', turnId} envelope (default 20000, max 45000). Poll with wait_for_live_turn.",
+          },
         required: ["projectId", "brief"],
       },
     },
@@ -1088,6 +1416,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
               "Active version to revise from (default: tip / currentVersion). Use after discarding a bad tip to continue from its parent.",
           },
         },
+          waitMs: {
+            type: "number",
+            description:
+              "Max ms to block before returning a resumable {status:'running', turnId} envelope (default 20000, max 45000). Poll with wait_for_live_turn.",
+          },
         required: ["projectId", "loopId", "message"],
       },
     },
@@ -1876,6 +2209,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
               "Optional { kind: feature|bugfix|refactor|integration|spike, focus: string, preserve?: string[] }",
           },
         },
+          waitMs: {
+            type: "number",
+            description:
+              "Max ms to block before returning a resumable {status:'running', turnId} envelope (default 20000, max 45000). Poll with wait_for_live_turn.",
+          },
         required: ["projectId", "brief"],
       },
     },
@@ -1899,6 +2237,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
               "Version to revise from (default: tip / currentVersion). Pass the last intact version when the tip is truncated or regressed.",
           },
         },
+          waitMs: {
+            type: "number",
+            description:
+              "Max ms to block before returning a resumable {status:'running', turnId} envelope (default 20000, max 45000). Poll with wait_for_live_turn.",
+          },
         required: ["projectId", "loopId"],
       },
     },
@@ -1921,6 +2264,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           projectId: { type: "string" },
           brief: { type: "string" },
         },
+          waitMs: {
+            type: "number",
+            description:
+              "Max ms to block before returning a resumable {status:'running', turnId} envelope (default 20000, max 45000). Poll with wait_for_live_turn.",
+          },
         required: ["projectId", "brief"],
       },
     },
@@ -1936,6 +2284,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           message: { type: "string" },
           baseVersion: { type: "number" },
         },
+          waitMs: {
+            type: "number",
+            description:
+              "Max ms to block before returning a resumable {status:'running', turnId} envelope (default 20000, max 45000). Poll with wait_for_live_turn.",
+          },
         required: ["projectId", "loopId", "message"],
       },
     },
@@ -1996,6 +2349,28 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           startResearch: { type: "boolean" },
         },
         required: ["projectId", "loopId"],
+      },
+    },
+    {
+      name: "wait_for_live_turn",
+      description:
+        "Bounded wait for a running plan/marketing/design turn after a loop start/continue returned {status:'running'}. Pass turnId, or projectId + kind + loopId (kind: plan_loop | marketing_loop | design_loop). Default 25000 ms, max 45000. Returns liveTurn.status + recent progress; when status is done, read the loop with plan_loop_get / marketing_loop_get / design_loop_get. Never starts or aborts a turn.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          turnId: {
+            type: "string",
+            description: "Turn id from a running envelope (or plan_loop_get liveTurn.turnId).",
+          },
+          projectId: { type: "string" },
+          kind: {
+            type: "string",
+            description: "plan_loop | marketing_loop | design_loop",
+          },
+          loopId: { type: "string" },
+          timeoutMs: { type: "number" },
+        },
+        required: [],
       },
     },
     {
@@ -3532,67 +3907,26 @@ export async function dispatchSlopcontrolTool(
             isError: true,
           };
         }
-        const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops?stream=1`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "text/event-stream",
-            },
-            body: JSON.stringify({
-              brief,
-              askId: args.askId,
-              scope: args.scope,
-              investigateTool: args.investigateTool,
-            }),
+        return runLoopTurnTool({
+          serverUrl: SERVER_URL,
+          kind: "plan_loop",
+          logger: "plan_loop",
+          projectId,
+          sessionId: "",
+          getTool: "plan_loop_get",
+          postUrl: `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops?stream=1`,
+          payload: {
+            brief,
+            askId: args.askId,
+            scope: args.scope,
+            investigateTool: args.investigateTool,
           },
-        );
-        const contentType = res.headers.get("content-type") ?? "";
-        if (!contentType.includes("text/event-stream")) {
-          const body = await res.text();
-          return {
-            content: [
-              { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
-            ],
-            isError: !res.ok,
-          };
-        }
-        const consumed = await consumeLiveTurnSse(sendLog, "plan_loop", res.body);
-        if (!consumed.ok || !consumed.done) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: formatPlanLoopMcpEnvelope(
-                  JSON.stringify({
-                    error: consumed.errorText,
-                    code: consumed.done?.code ?? consumed.done?.type,
-                    notes: consumed.done?.notes ?? consumed.done?.reply,
-                    loopId: consumed.done?.loopId,
-                  }),
-                  false,
-                ),
-              },
-            ],
-            isError: true,
-          };
-        }
-        return {
-          content: [
-            {
-              type: "text",
-              text: formatPlanLoopMcpEnvelope(
-                JSON.stringify(consumed.done),
-                true,
-              ),
-            },
-          ],
-          isError: false,
-        };
+          waitMs: resolveMcpWaitMs(args.waitMs),
+          format: formatPlanLoopMcpEnvelope,
+          sendLog,
+        });
       });
     }
-
     if (name === "plan_loop_continue") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -3601,55 +3935,108 @@ export async function dispatchSlopcontrolTool(
         if (args.baseVersion !== undefined && args.baseVersion !== null) {
           payload.baseVersion = Number(args.baseVersion);
         }
+        return runLoopTurnTool({
+          serverUrl: SERVER_URL,
+          kind: "plan_loop",
+          logger: "plan_loop",
+          projectId,
+          sessionId: loopId,
+          getTool: "plan_loop_get",
+          postUrl: `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/continue?stream=1`,
+          payload,
+          waitMs: resolveMcpWaitMs(args.waitMs),
+          format: formatPlanLoopMcpEnvelope,
+          sendLog,
+        });
+      });
+    }
+    if (name === "wait_for_live_turn") {
+      return wrap(async () => {
+        const projectId = String(args.projectId ?? "");
+        let turnId = String(args.turnId ?? "").trim();
+        const kind = String(args.kind ?? "").trim();
+        const loopId = String(args.loopId ?? "").trim();
+        const timeoutMs = resolveMcpWaitMs(args.timeoutMs);
+        if (!turnId) {
+          const validKind =
+            kind === "plan_loop" ||
+            kind === "marketing_loop" ||
+            kind === "design_loop";
+          if (!projectId || !validKind || !loopId) {
+            return {
+              content: [{ type: "text", text: JSON.stringify({ error: "turnId is required, or pass projectId + kind + loopId", hint: "kind ∈ plan_loop | marketing_loop | design_loop" }) }],
+              isError: true,
+            };
+          }
+          const running = await fetchRunningLiveTurn(
+            SERVER_URL,
+            projectId,
+            kind,
+            loopId,
+          );
+          if (!running?.turnId) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    status: "idle",
+                    kind,
+                    loopId,
+                    nextStep: `No running turn. Read the loop with ${kind}_get.`,
+                  }),
+                },
+              ],
+              isError: false,
+            };
+          }
+          turnId = String(running.turnId);
+        }
         const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/plan-loops/${encodeURIComponent(loopId)}/continue?stream=1`,
+          `${SERVER_URL}/live-turns/${encodeURIComponent(turnId)}/wait`,
           {
             method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "text/event-stream",
-            },
-            body: JSON.stringify(payload),
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ timeoutMs }),
           },
         );
-        const contentType = res.headers.get("content-type") ?? "";
-        if (!contentType.includes("text/event-stream")) {
-          const body = await res.text();
+        const body = await res.text();
+        if (!res.ok) {
           return {
-            content: [
-              { type: "text", text: formatPlanLoopMcpEnvelope(body, res.ok) },
-            ],
-            isError: !res.ok,
-          };
-        }
-        const consumed = await consumeLiveTurnSse(sendLog, "plan_loop", res.body);
-        if (!consumed.ok || !consumed.done) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: formatPlanLoopMcpEnvelope(
-                  JSON.stringify({
-                    error: consumed.errorText,
-                    code: consumed.done?.code ?? consumed.done?.type,
-                    notes: consumed.done?.notes ?? consumed.done?.reply,
-                    loopId: consumed.done?.loopId,
-                  }),
-                  false,
-                ),
-              },
-            ],
+            content: [{ type: "text", text: body }],
             isError: true,
           };
         }
+        let parsed: {
+          liveTurn?: { status?: string; turnId?: string; kind?: string; sessionId?: string; events?: unknown[] };
+          running?: boolean;
+        } = {};
+        try {
+          parsed = JSON.parse(body);
+        } catch {
+          return {
+            content: [{ type: "text", text: body }],
+            isError: false,
+          };
+        }
+        const status = parsed.liveTurn?.status;
+        const getTool =
+          parsed.liveTurn?.kind === "marketing_loop"
+            ? "marketing_loop_get"
+            : parsed.liveTurn?.kind === "design_loop"
+              ? "design_loop_get"
+              : "plan_loop_get";
         return {
           content: [
             {
               type: "text",
-              text: formatPlanLoopMcpEnvelope(
-                JSON.stringify(consumed.done),
-                true,
-              ),
+              text: JSON.stringify({
+                ...parsed,
+                nextStep:
+                  status === "running"
+                    ? `Still running after ${timeoutMs} ms. Call wait_for_live_turn again with turnId=${turnId} (do not start another turn).`
+                    : `Turn ${status ?? "unknown"}. Read the result with ${getTool} (loopId ${parsed.liveTurn?.sessionId ?? (loopId || "?")}).`,
+              }),
             },
           ],
           isError: false,
@@ -3840,34 +4227,28 @@ export async function dispatchSlopcontrolTool(
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
         const loopId = String(args.loopId ?? "");
-        const path =
-          name === "marketing_loop_start"
+        const isStart = name === "marketing_loop_start";
+        return runLoopTurnTool({
+          serverUrl: SERVER_URL,
+          kind: "marketing_loop",
+          logger: "marketing_loop",
+          projectId,
+          sessionId: isStart ? "" : loopId,
+          getTool: "marketing_loop_get",
+          postUrl: isStart
             ? `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/marketing-loops?stream=1`
-            : `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/marketing-loops/${encodeURIComponent(loopId)}/continue?stream=1`;
-        const res = await fetch(path, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "text/event-stream",
-          },
-          body: JSON.stringify({
+            : `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/marketing-loops/${encodeURIComponent(loopId)}/continue?stream=1`,
+          payload: {
             brief: args.brief,
             message: args.message,
             baseVersion: args.baseVersion,
-          }),
-        });
-        const consumed = await consumeLiveTurnSse(
+          },
+          waitMs: resolveMcpWaitMs(args.waitMs),
+          format: formatMarketingLoopMcpEnvelope,
           sendLog,
-          "marketing_loop",
-          res.body,
-        );
-        const text = consumed.done
-          ? formatMarketingLoopMcpEnvelope(JSON.stringify(consumed.done), consumed.ok)
-          : (consumed.errorText ?? "marketing loop turn failed");
-        return { content: [{ type: "text", text }], isError: !consumed.ok };
+        });
       });
     }
-
     if (name === "marketing_loop_get") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -3942,71 +4323,26 @@ export async function dispatchSlopcontrolTool(
     if (name === "design_loop_start") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
-        const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops?stream=1`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "text/event-stream",
-            },
-            body: JSON.stringify({
-              brief: args.brief,
-              phaseId: args.phaseId,
-              askId: args.askId,
-              scope: args.scope,
-            }),
+        return runLoopTurnTool({
+          serverUrl: SERVER_URL,
+          kind: "design_loop",
+          logger: "design_loop",
+          projectId,
+          sessionId: "",
+          getTool: "design_loop_get",
+          postUrl: `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops?stream=1`,
+          payload: {
+            brief: args.brief,
+            phaseId: args.phaseId,
+            askId: args.askId,
+            scope: args.scope,
           },
-        );
-        const contentType = res.headers.get("content-type") ?? "";
-        if (!contentType.includes("text/event-stream")) {
-          const body = await res.text();
-          return {
-            content: [
-              { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
-            ],
-            isError: !res.ok,
-          };
-        }
-        const consumed = await consumeLiveTurnSse(
+          waitMs: resolveMcpWaitMs(args.waitMs),
+          format: formatDesignLoopMcpEnvelope,
           sendLog,
-          "design_loop",
-          res.body,
-        );
-        if (!consumed.ok || !consumed.done) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: formatDesignLoopMcpEnvelope(
-                  JSON.stringify({
-                    error: consumed.errorText,
-                    code: consumed.done?.code ?? consumed.done?.type,
-                    notes: consumed.done?.notes ?? consumed.done?.reply,
-                    loopId: consumed.done?.loopId,
-                  }),
-                  false,
-                ),
-              },
-            ],
-            isError: true,
-          };
-        }
-        return {
-          content: [
-            {
-              type: "text",
-              text: formatDesignLoopMcpEnvelope(
-                JSON.stringify(consumed.done),
-                true,
-              ),
-            },
-          ],
-          isError: false,
-        };
+        });
       });
     }
-
     if (name === "design_loop_continue") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");
@@ -4015,66 +4351,21 @@ export async function dispatchSlopcontrolTool(
         if (args.baseVersion !== undefined && args.baseVersion !== null) {
           payload.baseVersion = Number(args.baseVersion);
         }
-        const res = await fetch(
-          `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/continue?stream=1`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "text/event-stream",
-            },
-            body: JSON.stringify(payload),
-          },
-        );
-        const contentType = res.headers.get("content-type") ?? "";
-        if (!contentType.includes("text/event-stream")) {
-          const body = await res.text();
-          return {
-            content: [
-              { type: "text", text: formatDesignLoopMcpEnvelope(body, res.ok) },
-            ],
-            isError: !res.ok,
-          };
-        }
-        const consumed = await consumeLiveTurnSse(
+        return runLoopTurnTool({
+          serverUrl: SERVER_URL,
+          kind: "design_loop",
+          logger: "design_loop",
+          projectId,
+          sessionId: loopId,
+          getTool: "design_loop_get",
+          postUrl: `${SERVER_URL}/projects/${encodeURIComponent(projectId)}/design-loops/${encodeURIComponent(loopId)}/continue?stream=1`,
+          payload,
+          waitMs: resolveMcpWaitMs(args.waitMs),
+          format: formatDesignLoopMcpEnvelope,
           sendLog,
-          "design_loop",
-          res.body,
-        );
-        if (!consumed.ok || !consumed.done) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: formatDesignLoopMcpEnvelope(
-                  JSON.stringify({
-                    error: consumed.errorText,
-                    code: consumed.done?.code ?? consumed.done?.type,
-                    notes: consumed.done?.notes ?? consumed.done?.reply,
-                    loopId: consumed.done?.loopId,
-                  }),
-                  false,
-                ),
-              },
-            ],
-            isError: true,
-          };
-        }
-        return {
-          content: [
-            {
-              type: "text",
-              text: formatDesignLoopMcpEnvelope(
-                JSON.stringify(consumed.done),
-                true,
-              ),
-            },
-          ],
-          isError: false,
-        };
+        });
       });
     }
-
     if (name === "design_loop_get") {
       return wrap(async () => {
         const projectId = String(args.projectId ?? "");

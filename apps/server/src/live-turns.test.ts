@@ -7,6 +7,48 @@ import {
   type LiveWatcherConfig,
 } from "./live-turn-watcher.js";
 
+describe("LiveTurnRegistry snapshots and waits", () => {
+  it("snapshot caps events and reports elapsed time", () => {
+    const reg = new LiveTurnRegistry();
+    const turn = reg.start({ kind: "plan_loop", projectId: "p1", sessionId: "l1" });
+    for (let i = 0; i < 30; i += 1) {
+      reg.emit(turn.turnId, { type: "status", summary: `step ${i}` });
+    }
+    const snap = reg.snapshot(turn.turnId, 5);
+    assert.ok(snap);
+    assert.equal(snap?.status, "running");
+    assert.equal(snap?.events.length, 5);
+    assert.equal(snap?.events.at(-1)?.type, "status");
+    assert.ok((snap?.elapsedMs ?? -1) >= 0);
+    assert.equal(reg.snapshot("missing"), undefined);
+  });
+
+  it("waitFor resolves when the turn completes", async () => {
+    const reg = new LiveTurnRegistry();
+    const turn = reg.start({ kind: "plan_loop", projectId: "p1", sessionId: "l1" });
+    const waiting = reg.waitFor(turn.turnId, 2_000);
+    setTimeout(() => reg.complete(turn.turnId, "done"), 10);
+    const snap = await waiting;
+    assert.equal(snap?.status, "done");
+  });
+
+  it("waitFor resolves with a running snapshot on timeout without aborting", async () => {
+    const reg = new LiveTurnRegistry();
+    const turn = reg.start({ kind: "plan_loop", projectId: "p1", sessionId: "l1" });
+    const started = Date.now();
+    const snap = await reg.waitFor(turn.turnId, 30);
+    assert.ok(Date.now() - started < 1_000);
+    assert.equal(snap?.status, "running");
+    assert.equal(turn.controller.signal.aborted, false);
+    assert.equal(reg.getActive("plan_loop", "l1")?.turnId, turn.turnId);
+  });
+
+  it("waitFor resolves undefined for an unknown turn", async () => {
+    const reg = new LiveTurnRegistry();
+    assert.equal(await reg.waitFor("nope", 10), undefined);
+  });
+});
+
 describe("LiveTurnRegistry", () => {
   it("start emit stop aborts signal", () => {
     const reg = new LiveTurnRegistry();

@@ -196,6 +196,7 @@ import {
 } from "@slopcontrol/llm";
 import { getSlopcontrolRuntime, ensureChangeIntentAsync, previewChangeIntentAsync, previewIntentAlignmentAsync, askProgressLine, formatAskWorkingStub, isLiveTurnInterruptedError, ChatService, ConversationClosedError, ConversationNotFoundError, clearSlopcontrolRuntimeCache, waitForRun, formatWaitForRunResult, DEFAULT_WAIT_TIMEOUT_MS, DEFAULT_WAIT_INTERVAL_MS, HTTP_WAIT_MAX_MS, RunStageBroker } from "@slopcontrol/mastra";
 import {
+  attachIfRunningLiveTurn,
   bindLiveTurn,
   wantsLiveStream,
   workingStubFromBound,
@@ -206,7 +207,7 @@ import {
   materializeMarketingLandingPhases,
   registerMarketingLoopRoutes,
 } from "./marketing-loop-routes.js";
-import { liveTurns } from "./live-turns.js";
+import { LIVE_TURN_KINDS, liveTurns, type LiveTurnKind } from "./live-turns.js";
 import { startLiveTurnWatcher } from "./live-turn-watcher.js";
 import {
   auditProjectBuildProcess,
@@ -2945,6 +2946,7 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
     acceptance,
     hasPlan: selected.planPresent,
   });
+  const runningTurn = liveTurns.getActive("plan_loop", meta.id);
   const revisionRequired =
     meta.status === "open" &&
     meta.currentVersion >= 1 &&
@@ -2972,6 +2974,7 @@ app.get("/projects/:id/plan-loops/:loopId", (req, res) => {
     versions: buildPlanLoopVersionTree(project.rootPath, meta.id),
     nextStep: progress.nextStep,
     blockers: progress.blockers,
+    liveTurn: runningTurn ? liveTurns.snapshot(runningTurn.turnId) : null,
     revisionRequired,
     revisionHint: revisionRequired
       ? "Operator feedback requires plan_loop_continue (with message or auto-composed from loop chat) — plan_loop_get does not revise PLAN.md."
@@ -3032,6 +3035,7 @@ app.post("/projects/:id/plan-loops", async (req, res) => {
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const version = 1;
+    if (attachIfRunningLiveTurn(req, res, "plan_loop", meta.id)) return;
     const stream = wantsLiveStream(req);
     const bound = bindLiveTurn({
       kind: "plan_loop",
@@ -3244,6 +3248,7 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
       project.rootPath,
       working.id,
     );
+    if (attachIfRunningLiveTurn(req, res, "plan_loop", working.id)) return;
     const stream = wantsLiveStream(req);
     const bound = bindLiveTurn({
       kind: "plan_loop",
@@ -3696,6 +3701,7 @@ app.post("/projects/:id/plan-loops/:loopId/retry", async (req, res) => {
     readPlanLoopRequest(project.rootPath, meta.id, version) ?? meta.brief;
   try {
     const { orchestrator } = getRuntime(project.rootPath);
+    if (attachIfRunningLiveTurn(req, res, "plan_loop", meta.id)) return;
     const stream = wantsLiveStream(req);
     const bound = bindLiveTurn({
       kind: "plan_loop",
@@ -3969,6 +3975,10 @@ app.get("/projects/:id/design-loops/:loopId", (req, res) => {
     loop: meta,
     loopId: meta.id,
     version: Number.isFinite(version) ? version : null,
+    liveTurn: (() => {
+      const running = liveTurns.getActive("design_loop", meta.id);
+      return running ? liveTurns.snapshot(running.turnId) : null;
+    })(),
     html: htmlForApi,
     notes,
     transcript,
@@ -4319,6 +4329,7 @@ app.post("/projects/:id/design-loops", async (req, res) => {
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const version = 1;
+    if (attachIfRunningLiveTurn(req, res, "design_loop", meta.id)) return;
     const stream = wantsLiveStream(req);
     const bound = bindLiveTurn({
       kind: "design_loop",
@@ -4537,6 +4548,7 @@ app.post("/projects/:id/design-loops/:loopId/continue", async (req, res) => {
       project.rootPath,
       working.id,
     );
+    if (attachIfRunningLiveTurn(req, res, "design_loop", working.id)) return;
     const stream = wantsLiveStream(req);
     const bound = bindLiveTurn({
       kind: "design_loop",
@@ -4932,6 +4944,7 @@ app.post("/projects/:id/design-loops/:loopId/retry", async (req, res) => {
   try {
     const { orchestrator } = getRuntime(project.rootPath);
     const isFirst = version === 1;
+    if (attachIfRunningLiveTurn(req, res, "design_loop", meta.id)) return;
     const stream = wantsLiveStream(req);
     const bound = bindLiveTurn({
       kind: "design_loop",
@@ -7331,6 +7344,69 @@ app.post("/runs/:id/wait", async (req, res) => {
       .status(500)
       .json({ error: err instanceof Error ? err.message : String(err) });
   }
+});
+
+/** Read a live turn's status + recent progress (MCP polling). */
+app.get("/live-turns/:turnId", (req, res) => {
+  const snap = liveTurns.snapshot(routeParam(req, "turnId"));
+  if (!snap) {
+    res.status(404).json({ error: "Live turn not found" });
+    return;
+  }
+  res.json({ liveTurn: snap, running: snap.status === "running" });
+});
+
+/** The running turn for a loop/session, if any (MCP attach pre-check). */
+app.get("/projects/:id/live-turns", (req, res) => {
+  const project = store.getProject(routeParam(req, "id"));
+  if (!project) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+  const kind = String(req.query.kind ?? "").trim();
+  const sessionId = String(req.query.sessionId ?? "").trim();
+  if (!(LIVE_TURN_KINDS as readonly string[]).includes(kind)) {
+    res.status(400).json({
+      error: "kind is required",
+      hint: `kind ∈ ${LIVE_TURN_KINDS.join(", ")}`,
+    });
+    return;
+  }
+  if (sessionId) {
+    const running = liveTurns.getActive(kind as LiveTurnKind, sessionId);
+    res.json({
+      running: Boolean(running),
+      liveTurn: running ? liveTurns.snapshot(running.turnId) : null,
+      turns: running ? [liveTurns.snapshot(running.turnId)] : [],
+    });
+    return;
+  }
+  // No sessionId: any active turn of this kind in the project (start-retry attach).
+  const active = liveTurns
+    .listActive(project.id)
+    .filter((turn) => turn.kind === kind);
+  res.json({
+    running: active.length > 0,
+    liveTurn: active[0] ? liveTurns.snapshot(active[0].turnId) : null,
+    turns: active.map((turn) => liveTurns.snapshot(turn.turnId)),
+  });
+});
+
+/** Bounded wait for a live turn; resolves with a running snapshot on timeout. */
+app.post("/live-turns/:turnId/wait", async (req, res) => {
+  const requested =
+    typeof req.body?.timeoutMs === "number" ? req.body.timeoutMs : 25_000;
+  const timeoutMs = Math.min(Math.max(0, requested), 60_000);
+  const snap = await liveTurns.waitFor(routeParam(req, "turnId"), timeoutMs);
+  if (!snap) {
+    res.status(404).json({ error: "Live turn not found" });
+    return;
+  }
+  res.json({
+    liveTurn: snap,
+    running: snap.status === "running",
+    timedOut: snap.status === "running",
+  });
 });
 
 app.get("/runs/:id/steps", (req, res) => {

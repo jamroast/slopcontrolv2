@@ -51,6 +51,7 @@ import {
 import type { SlopStore } from "./store.js";
 import { defaultDataDir } from "./store.js";
 import {
+  attachIfRunningLiveTurn,
   bindLiveTurn,
   wantsLiveStream,
   workingStubFromBound,
@@ -227,6 +228,10 @@ export function registerMarketingLoopRoutes(
       release,
       messages: readLoopChatMessages(project.rootPath, "marketing", meta.id),
       versions: listMarketingVersions(project.rootPath, meta.id),
+      liveTurn: (() => {
+        const running = liveTurns.getActive("marketing_loop", meta.id);
+        return running ? liveTurns.snapshot(running.turnId) : null;
+      })(),
       nextStep: scheduleView?.nextStep ?? progress.nextStep,
       designReady: scheduleView?.designReady ?? false,
       readyPhaseIds: scheduleView?.readyPhaseIds ?? [],
@@ -973,6 +978,7 @@ async function runGenerate(
 ): Promise<void> {
   try {
     const { orchestrator } = getSlopcontrolRuntime(defaultDataDir(), project.rootPath);
+    if (attachIfRunningLiveTurn(req, res, "marketing_loop", meta.id)) return;
     const stream = wantsLiveStream(req);
     const bound = bindLiveTurn({
       kind: "marketing_loop",

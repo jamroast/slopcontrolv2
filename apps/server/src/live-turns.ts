@@ -7,6 +7,14 @@ import { randomUUID } from "node:crypto";
 
 export type LiveTurnKind = "ask" | "agent" | "design_loop" | "plan_loop" | "marketing_loop";
 
+export const LIVE_TURN_KINDS = [
+  "ask",
+  "agent",
+  "design_loop",
+  "plan_loop",
+  "marketing_loop",
+] as const;
+
 export type LiveTurnStatus =
   | "running"
   | "done"
@@ -38,6 +46,22 @@ export type LiveTurnRecord = {
   lastEventAt: string;
   interruptReason?: string;
   partialReply?: string;
+};
+
+/** Status payload for MCP/HTTP consumers (no controllers). */
+export type LiveTurnSnapshot = {
+  turnId: string;
+  kind: LiveTurnKind;
+  projectId: string;
+  sessionId: string;
+  status: LiveTurnStatus;
+  startedAt: string;
+  lastEventAt: string;
+  elapsedMs: number;
+  textLen: number;
+  interruptReason?: string;
+  partialReply?: string;
+  events: LiveTurnEvent[];
 };
 
 type Listener = (event: LiveTurnEvent, turn: LiveTurnRecord) => void;
@@ -103,6 +127,64 @@ export class LiveTurnRegistry {
     if (!id) return undefined;
     const t = this.turns.get(id);
     return t?.status === "running" ? t : undefined;
+  }
+
+  /** Bounded snapshot for MCP/HTTP status responses. */
+  snapshot(
+    turnId: string,
+    maxEvents = 20,
+  ): LiveTurnSnapshot | undefined {
+    const turn = this.turns.get(turnId);
+    if (!turn) return undefined;
+    return {
+      turnId: turn.turnId,
+      kind: turn.kind,
+      projectId: turn.projectId,
+      sessionId: turn.sessionId,
+      status: turn.status,
+      startedAt: turn.startedAt,
+      lastEventAt: turn.lastEventAt,
+      elapsedMs: Math.max(0, Date.now() - Date.parse(turn.startedAt)),
+      textLen: turn.textLen,
+      interruptReason: turn.interruptReason,
+      partialReply: turn.partialReply,
+      events: turn.events.slice(-Math.max(1, maxEvents)),
+    };
+  }
+
+  /**
+   * Wait up to timeoutMs for a turn to leave "running". Resolves with a
+   * snapshot (running on timeout) or undefined when the turn is unknown.
+   * Never rejects and never aborts the turn.
+   */
+  waitFor(
+    turnId: string,
+    timeoutMs: number,
+  ): Promise<LiveTurnSnapshot | undefined> {
+    const turn = this.turns.get(turnId);
+    if (!turn) return Promise.resolve(undefined);
+    if (turn.status !== "running") {
+      return Promise.resolve(this.snapshot(turnId));
+    }
+    return new Promise((resolve) => {
+      let settled = false;
+      let unsubscribe: (() => void) | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        unsubscribe?.();
+        if (timer) clearTimeout(timer);
+        resolve(this.snapshot(turnId));
+      };
+      unsubscribe = this.subscribe((_event, changed) => {
+        if (changed.turnId === turnId && changed.status !== "running") {
+          finish();
+        }
+      });
+      timer = setTimeout(finish, Math.max(0, timeoutMs));
+      (timer as { unref?: () => void }).unref?.();
+    });
   }
 
   signal(turnId: string): AbortSignal | undefined {

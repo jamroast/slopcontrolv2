@@ -80,6 +80,25 @@ export function bindLiveTurn(opts: {
     });
   }
 
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const stopHeartbeat = () => {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = undefined;
+  };
+  if (opts.stream) {
+    heartbeat = setInterval(() => {
+      if (opts.res.writableEnded) return;
+      writeSse(opts.res, {
+        type: "status",
+        summary: "still working",
+        turnId: turn.turnId,
+        elapsedMs: Math.max(0, Date.now() - Date.parse(turn.startedAt)),
+      });
+    }, 10_000);
+    (heartbeat as { unref?: () => void }).unref?.();
+    opts.res.on("close", stopHeartbeat);
+  }
+
   const onProgress = (event: LiveProgressEvent) => {
     liveTurns.emit(turn.turnId, event);
     if (opts.stream) writeSse(opts.res, event);
@@ -93,6 +112,7 @@ export function bindLiveTurn(opts: {
     onProgress,
     progressLines,
     completeDone(extra) {
+      stopHeartbeat();
       liveTurns.complete(turn.turnId, "done");
       if (opts.stream) {
         writeSse(opts.res, {
@@ -105,6 +125,7 @@ export function bindLiveTurn(opts: {
       }
     },
     completeInterrupted(partial, extra) {
+      stopHeartbeat();
       liveTurns.complete(turn.turnId, "interrupted", {
         reason: turn.interruptReason ?? "operator_stop",
         partialReply: partial,
@@ -123,6 +144,7 @@ export function bindLiveTurn(opts: {
       }
     },
     completeFailed(error, extra) {
+      stopHeartbeat();
       liveTurns.complete(turn.turnId, "failed", { reason: error });
       if (opts.stream) {
         writeSse(opts.res, {
@@ -143,3 +165,35 @@ export function workingStubFromBound(bound: BoundLiveTurn): string {
 }
 
 export { isLiveTurnInterruptedError, liveTurns };
+
+/**
+ * Answer 202 with the already-running turn instead of starting another one.
+ * A client that timed out will retry the same call; superseding would abort the
+ * in-flight generation (LiveTurnRegistry.start aborts a prior running turn).
+ * Callers pass ?attachIfRunning=1 from MCP/HTTP retries.
+ */
+export function attachIfRunningLiveTurn(
+  req: { query?: Record<string, unknown> },
+  res: Response,
+  kind: LiveTurnKind,
+  sessionId: string,
+): boolean {
+  const flag = String((req.query ?? {}).attachIfRunning ?? "");
+  if (flag !== "1" && flag !== "true") return false;
+  const running = liveTurns.getActive(kind, sessionId);
+  if (!running) return false;
+  res.status(202).json({
+    running: true,
+    status: "running",
+    kind,
+    sessionId,
+    loopId: sessionId,
+    turnId: running.turnId,
+    liveTurn: liveTurns.snapshot(running.turnId),
+    nextStep:
+      "This turn is already running. Call wait_for_live_turn (turnId=" +
+      running.turnId +
+      ") or re-read the loop (plan_loop_get / marketing_loop_get / design_loop_get). Do not start another turn.",
+  });
+  return true;
+}
