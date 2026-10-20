@@ -7,6 +7,9 @@ import {
   mergeFaultLegs,
   planningGateIssueFingerprint,
   priorDraftJudgeIssuesFromDiagnosis,
+  priorQualityJudgeGapsFromDiagnosis,
+  priorGapsAfterResolution,
+  seedPriorQualityGaps,
   shouldContinuePlanningSelfHeal,
   shouldReclassifyIntentForPlanningSelfHeal,
   MAX_PLANNING_SELF_HEAL_ROUNDS,
@@ -371,5 +374,71 @@ describe("priorDraftJudgeIssuesFromDiagnosis", () => {
 
   it("returns [] without a diagnosis", () => {
     assert.deepEqual(priorDraftJudgeIssuesFromDiagnosis(null), []);
+  });
+});
+
+describe("quality-judge convergence memory", () => {
+  const qualityDiagnosis = {
+    title: "Draft rejected: phase quality judge",
+    tags: ["planning", "draft", "phase-quality"],
+    issues: ["Check 2 greps a string the doc does not contain", "Verdict line undeclared"],
+    updatedAt: "2026-10-20T10:00:00.000Z",
+  };
+
+  it("seeds only quality-judge gaps, never structural shell findings", () => {
+    assert.deepEqual(priorQualityJudgeGapsFromDiagnosis(qualityDiagnosis), [
+      "Check 2 greps a string the doc does not contain",
+      "Verdict line undeclared",
+    ]);
+
+    const structural = {
+      title: "Draft rejected: invalid PHASE.md (structural)",
+      tags: ["planning", "draft", "draft-structural"],
+      issues: ["Brittle Automated Check requires multiple tokens on ONE line"],
+    };
+    assert.deepEqual(priorQualityJudgeGapsFromDiagnosis(structural), []);
+
+    // The draft-prompt helper still carries structural gaps for re-drafting.
+    assert.deepEqual(priorDraftJudgeIssuesFromDiagnosis(structural), [
+      "Brittle Automated Check requires multiple tokens on ONE line",
+    ]);
+  });
+
+  it("drops seeds when RESEARCH.md was regenerated after the verdict", () => {
+    const diagnosedAt = Date.parse(qualityDiagnosis.updatedAt);
+    // Research older than the verdict → still relevant.
+    assert.equal(
+      seedPriorQualityGaps({
+        diagnosis: qualityDiagnosis,
+        researchMtimeMs: diagnosedAt - 60_000,
+      }).length,
+      2,
+    );
+    // Research regenerated after the verdict → gaps may be obsolete.
+    assert.deepEqual(
+      seedPriorQualityGaps({
+        diagnosis: qualityDiagnosis,
+        researchMtimeMs: diagnosedAt + 60_000,
+      }),
+      [],
+    );
+    // Non-quality diagnosis → never seeded.
+    assert.deepEqual(
+      seedPriorQualityGaps({
+        diagnosis: { ...qualityDiagnosis, tags: ["planning", "draft"], title: "Draft rejected: PHASE structure" },
+        researchMtimeMs: diagnosedAt - 1,
+      }),
+      [],
+    );
+  });
+
+  it("dropping resolved gaps is whitespace/case tolerant but otherwise verbatim", () => {
+    const prior = ["Check 2 greps `runs the /auth`", "Verdict line undeclared"];
+    assert.deepEqual(
+      priorGapsAfterResolution(prior, ["  check 2 greps   `runs the /auth` "]),
+      ["Verdict line undeclared"],
+    );
+    assert.deepEqual(priorGapsAfterResolution(prior, []), prior);
+    assert.deepEqual(priorGapsAfterResolution(prior, ["some other gap"]), prior);
   });
 });

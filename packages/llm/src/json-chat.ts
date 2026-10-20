@@ -66,6 +66,13 @@ export interface ChatJsonOptions {
    * `emptyContentRetries` as before.
    */
   maxRetries?: number;
+  /**
+   * Retries of a TIMED-OUT attempt in the fetch transport (default
+   * CHAT_JSON_TIMEOUT_RETRIES). A timeout is a latency signal, not flaky JSON.
+   * `chatJson` passes 0 when it falls back after an SDK timeout, so one slow
+   * provider costs one timed-out window rather than three.
+   */
+  timeoutRetries?: number;
 }
 
 export interface ChatJsonResult {
@@ -295,7 +302,9 @@ export async function chatJsonFetch(
   // Field-level reason from the previous shape failure, so a retry is told
   // which key was missing or which type was wrong — not only "send JSON".
   let shapeNudge = "";
-  // Timeouts retry at most CHAT_JSON_TIMEOUT_RETRIES times (see constant).
+  // Timeouts retry at most `timeoutRetries` times (default
+  // CHAT_JSON_TIMEOUT_RETRIES): a 300s abort is a latency signal, not flaky JSON.
+  const timeoutRetryBudget = Math.max(0, opts.timeoutRetries ?? CHAT_JSON_TIMEOUT_RETRIES);
   let timeoutRetriesUsed = 0;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -392,7 +401,7 @@ export async function chatJsonFetch(
         lastError = timeoutError(timeoutMs, attempt, maxAttempts);
         if (
           attempt < maxAttempts &&
-          timeoutRetriesUsed < CHAT_JSON_TIMEOUT_RETRIES
+          timeoutRetriesUsed < timeoutRetryBudget
         ) {
           timeoutRetriesUsed += 1;
           // Timeouts usually mean an overloaded server — back off, don't hammer.
@@ -605,7 +614,12 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
       firstError = err;
       // A transport failure already burned the SDK retries: go straight to the
       // compatibility transport instead of paying for a second text attempt.
-      if (isTransportFailure(err) || isChatJsonTimeoutError(err)) {
+      // A timeout gets exactly one fetch attempt (timeoutRetries: 0) — repeating
+      // the same slow window would triple wall time without changing the cause.
+      if (isChatJsonTimeoutError(err)) {
+        return chatJsonFetch({ ...opts, timeoutRetries: 0 });
+      }
+      if (isTransportFailure(err)) {
         return chatJsonFetch(opts);
       }
     }
@@ -614,7 +628,9 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
     return await withTruncationRetry(false);
   } catch (err) {
     firstError = firstError ?? err;
-    if (isChatJsonTimeoutError(err)) return chatJsonFetch(opts);
+    if (isChatJsonTimeoutError(err)) {
+      return chatJsonFetch({ ...opts, timeoutRetries: 0 });
+    }
   }
   try {
     return await chatJsonFetch(opts);

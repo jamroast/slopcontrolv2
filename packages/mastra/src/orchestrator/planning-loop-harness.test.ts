@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -404,21 +404,19 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
       // First judgement has no priors — no convergence block.
       assert.doesNotMatch(firstJudgeUser, /already rejected an earlier draft/);
 
-      // 1b. Convergence memory: every re-draft judgement (the stub exercises
-      // the whole transport ladder, so there are several) carries the
-      // persisted gaps from the failed leg, with the objectively-fatal bar
-      // for raising new ones.
+      // 1b. A re-research leg invalidates the convergence seed: the old gap
+      // was about RESEARCH facts that were regenerated, so the re-judged draft
+      // must NOT be anchored on it (the gap still drove the research prompt).
       const reJudgements = judgeCalls.filter((c) =>
         c.user.includes("Widget state is read-only"),
       );
       assert.ok(reJudgements.length >= 1, "re-drafted PHASE must be judged");
       for (const call of reJudgements) {
-        assert.match(call.user, /already rejected an earlier draft/);
-        assert.match(
+        assert.doesNotMatch(call.user, /already rejected an earlier draft/);
+        assert.doesNotMatch(
           call.user,
           /RESEARCH does not quote docs\/llms-full\.txt wording/,
         );
-        assert.match(call.user, /objectively fatal/);
       }
 
       // The re-drafted document (not just its predecessor) reached the judge.
@@ -436,6 +434,114 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
         !gate.issues.some((i) => /Brittle Automated Check/i.test(i)),
         gate.issues.join("; "),
       );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("drops gaps the judge resolved and carries only the unresolved ones", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-converge-"));
+    const judgeCalls: Captured[] = [];
+    const gapA =
+      "File Changes never declares the Verdict line the evidence check requires";
+    const gapB =
+      "The mount sentinel uses head -n1 and cannot prove 'mounted exactly once'";
+
+    const v2 = PHASE_MD.replace(
+      "Mount a status widget in the dashboard shell.\n",
+      "Mount a status widget in the dashboard shell. Widget state is read-only in v1.\n",
+    );
+    const v3 = v2.replace(
+      "Widget state is read-only in v1.\n",
+      "Widget state is read-only in v1. Sentinels are count-exact.\n",
+    );
+
+    const restore = installFetchStub({
+      judgeCalls,
+      judge: ({ user }) => {
+        if (user.includes("Sentinels are count-exact")) {
+          return {
+            ok: true,
+            gaps: [],
+            suggestedFixes: [],
+            resolvedGaps: [gapB],
+            researchFaults: [],
+            draftFaults: [],
+          };
+        }
+        if (user.includes("Widget state is read-only")) {
+          return {
+            ok: false,
+            gaps: [gapB],
+            suggestedFixes: ["Assert an exact match count"],
+            resolvedGaps: [gapA],
+            researchFaults: [],
+            draftFaults: [gapB],
+          };
+        }
+        return {
+          ok: false,
+          gaps: [gapA],
+          suggestedFixes: ["Declare the Verdict line"],
+          resolvedGaps: [],
+          researchFaults: [],
+          draftFaults: [gapA],
+        };
+      },
+    });
+
+    const plannerCalls: string[] = [];
+    try {
+      writeFixture(root);
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      const variants = [PHASE_MD, v2, v3];
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          researchAgent: stubAgent(() => RESEARCH_MD, [], join(phaseDir, "RESEARCH.md")),
+          phasePlannerAgent: stubAgent(
+            () => variants[Math.min(plannerCalls.length - 1, variants.length - 1)]!,
+            plannerCalls,
+            join(phaseDir, "PHASE.md"),
+          ),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const stage = await orchestrator.draftPhase({ project, phase, run });
+      assert.equal(stage, "in_review", "a resolved gap must let the leg converge");
+
+      // One judgement is fetched several times by the transport ladder, so
+      // select by document marker (V2 / V3) rather than by call index.
+      const judgedV2 = judgeCalls.find((c) =>
+        c.user.includes("Widget state is read-only"),
+      );
+      const judgedV3 = judgeCalls.find((c) =>
+        c.user.includes("Sentinels are count-exact"),
+      );
+      assert.ok(judgedV2, "the retried draft must be judged");
+      assert.ok(judgedV3, "the second retried draft must be judged");
+
+      // Second judgement: gap A is prior context and must be verified.
+      assert.match(judgedV2!.user, /already rejected an earlier draft/);
+      assert.ok(judgedV2!.user.includes(gapA), "gap A must be prior context");
+
+      // Third judgement: A was resolved and must not be re-seeded; B still is.
+      assert.match(judgedV3!.user, /already rejected an earlier draft/);
+      assert.ok(judgedV3!.user.includes(gapB), "unresolved gap B must be prior context");
+      assert.ok(
+        !judgedV3!.user.includes(gapA),
+        "resolved gap A must not be re-asserted",
+      );
+
+      const log = readFileSync(join(root, ".slopcontrol", "runs", "run-1", "log.txt"), "utf8");
+      assert.match(log, /Phase quality judge resolved prior gaps/);
+      assert.ok(log.includes(gapA), "resolved gaps are logged for observability");
     } finally {
       restore();
       globalThis.fetch = originalFetch;

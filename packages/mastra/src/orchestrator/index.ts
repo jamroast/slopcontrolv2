@@ -366,6 +366,8 @@ import {
   formatPriorDraftFeedbackBlock,
   nextSelfHealDraftIssues,
   priorDraftJudgeIssuesFromDiagnosis,
+  priorGapsAfterResolution,
+  seedPriorQualityGaps,
   shouldReclassifyIntentForPlanningSelfHeal,
   brokenOutputReason,
 } from "./planning-pipeline.js";
@@ -419,6 +421,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import {
@@ -7791,13 +7794,24 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
 
     let phaseDocForQuality = phaseDoc;
     let phaseQualityLegRetries = 0;
-    // Convergence memory: gaps the judge already raised — seeded from the
-    // persisted diagnosis of earlier self-heal rounds, then each verdict in
-    // this loop — so a re-judgement verifies resolution instead of inventing
-    // an unbounded stream of fresh issues (the phase-197 loop pattern).
-    let priorQualityGaps = priorDraftJudgeIssuesFromDiagnosis(
-      readLatestDiagnosisForPhase(project.rootPath, phase.id),
-    );
+    // Convergence memory: gaps the QUALITY judge already raised — seeded from
+    // the persisted phase-quality diagnosis (never structural/shell findings,
+    // which the quality judge never judged) and only while RESEARCH.md has not
+    // been regenerated since that verdict. Each verdict then replaces the list
+    // (minus gaps the judge verified as resolved).
+    const researchMtimeMs = (() => {
+      try {
+        return statSync(
+          join(project.rootPath, ".slopcontrol", "phases", phase.id, "RESEARCH.md"),
+        ).mtimeMs;
+      } catch {
+        return undefined;
+      }
+    })();
+    let priorQualityGaps = seedPriorQualityGaps({
+      diagnosis: readLatestDiagnosisForPhase(project.rootPath, phase.id),
+      researchMtimeMs,
+    });
     while (true) {
       // Deterministic: which repo paths the Automated Checks target, and
       // whether they exist. Lets the judge distinguish a real missing file
@@ -7878,8 +7892,21 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
       }
       if (phaseQuality.ok) break;
 
-      // Feed this verdict's gaps to the next judgement as prior context.
-      priorQualityGaps = phaseQuality.gaps;
+      // Feed this verdict's unresolved gaps to the next judgement as prior
+      // context; gaps it verified as fixed are dropped deterministically.
+      priorQualityGaps = priorGapsAfterResolution(
+        phaseQuality.gaps,
+        phaseQuality.resolvedGaps,
+      );
+      if (phaseQuality.resolvedGaps.length > 0) {
+        log(
+          project,
+          run,
+          `--- Phase quality judge resolved prior gaps ---\n${phaseQuality.resolvedGaps
+            .map((gap) => `- ${gap}`)
+            .join("\n")}`,
+        );
+      }
       const qualityFaultLeg = faultLegFromPhaseQualityVerdict(phaseQuality);
       if (
         qualityFaultLeg === "research" ||

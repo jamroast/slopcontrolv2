@@ -378,6 +378,92 @@ export function priorDraftJudgeIssuesFromDiagnosis(
   ];
 }
 
+/**
+ * Gaps the PHASE quality judge raised (only), for the convergence block.
+ *
+ * Structural/shell-validator diagnoses are NOT quality verdicts: feeding their
+ * findings to the judge as "gaps you already raised" anchors it on mechanics it
+ * never judged (phase-197: a false-positive brittle-grep finding echoed forever).
+ */
+export function priorQualityJudgeGapsFromDiagnosis(
+  diagnosis: {
+    title?: string;
+    rootCause?: string;
+    evidence?: string;
+    tags?: string[];
+    issues?: string[];
+  } | null,
+): string[] {
+  if (!diagnosis) return [];
+  const tags = diagnosis.tags ?? [];
+  const isQuality =
+    tags.includes("phase-quality") ||
+    /phase quality judge/i.test(diagnosis.title ?? "");
+  if (!isQuality) return [];
+  const structured = (diagnosis.issues ?? [])
+    .map((issue) => issue.trim())
+    .filter(Boolean);
+  if (structured.length > 0) return [...new Set(structured)];
+  const detail = (diagnosis.evidence || diagnosis.rootCause || "").trim();
+  if (!detail) return [];
+  return [
+    ...new Set(
+      detail
+        .split("; ")
+        .map((issue) => issue.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+/**
+ * Seed the quality judge's convergence memory.
+ *
+ * Returns [] when the only diagnosis is not a quality verdict, or when
+ * RESEARCH.md was regenerated after that verdict — a re-research leg can
+ * invalidate the facts the old gaps were about, and re-asserting them would
+ * keep a resolved/obsolete item in the loop forever.
+ */
+export function seedPriorQualityGaps(opts: {
+  diagnosis: {
+    title?: string;
+    rootCause?: string;
+    evidence?: string;
+    tags?: string[];
+    issues?: string[];
+    updatedAt?: string;
+  } | null;
+  researchMtimeMs?: number;
+}): string[] {
+  const { diagnosis } = opts;
+  if (!diagnosis) return [];
+  const gaps = priorQualityJudgeGapsFromDiagnosis(diagnosis);
+  if (gaps.length === 0) return [];
+  const diagnosedAt = Date.parse(diagnosis.updatedAt ?? "");
+  if (
+    Number.isFinite(diagnosedAt) &&
+    typeof opts.researchMtimeMs === "number" &&
+    opts.researchMtimeMs > diagnosedAt
+  ) {
+    return [];
+  }
+  return gaps;
+}
+
+/**
+ * Prior gaps minus the ones the judge verified as fixed (verbatim match after
+ * whitespace/case normalization), so resolved findings cannot be re-asserted.
+ */
+export function priorGapsAfterResolution(
+  priorGaps: string[],
+  resolvedGaps: string[],
+): string[] {
+  const normalize = (gap: string) =>
+    gap.trim().toLowerCase().replace(/\s+/g, " ");
+  const resolved = new Set(resolvedGaps.map(normalize));
+  return priorGaps.filter((gap) => !resolved.has(normalize(gap)));
+}
+
 /** Title used when carrying a prior draft's judge gaps into the next draft. */
 export const PRIOR_DRAFT_FEEDBACK_TITLE =
   "Prior PHASE.md draft was rejected by the quality judge — address every gap below in the rewritten draft";

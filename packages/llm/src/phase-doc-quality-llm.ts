@@ -19,6 +19,11 @@ export const PhaseDocQualityVerdictSchema = z.object({
   gaps: z.array(z.string()),
   suggestedFixes: z.array(z.string()),
   /**
+   * Prior gaps this judgement verified as fixed (verbatim). Kept out of the
+   * next convergence block so a resolved finding cannot be re-asserted.
+   */
+  resolvedGaps: z.array(z.string()),
+  /**
    * Gaps attributable to thin/missing RESEARCH (research leg should re-run).
    * Subset of gaps — may be empty even when ok=false.
    */
@@ -35,8 +40,9 @@ export const PHASE_DOC_QUALITY_SYSTEM_PROMPT = `You are SlopControl's PHASE.md q
 
 Schema:
 - ok: boolean
-- gaps: string[] — all issues (empty when ok)
+- gaps: string[] — all issues still present (empty when ok)
 - suggestedFixes: string[] — concrete fixes parallel to gaps
+- resolvedGaps: string[] — prior gaps you verified as fixed, verbatim (empty when there were no prior gaps)
 - researchFaults: string[] — gaps only a re-research can fix: evidence missing from RESEARCH.md itself
 - draftFaults: string[] — gaps in how PHASE is written, including check mechanics, even when the target came from RESEARCH
 
@@ -102,6 +108,7 @@ export function parsePhaseDocQualityVerdictPayload(
       : [];
   const gaps = pickStrings("gaps");
   const suggestedFixes = pickStrings("suggestedFixes");
+  const resolvedGaps = pickStrings("resolvedGaps");
   const researchFaults = pickStrings("researchFaults");
   const draftFaults = pickStrings("draftFaults");
   const okIsBool = typeof asObj.ok === "boolean";
@@ -115,6 +122,7 @@ export function parsePhaseDocQualityVerdictPayload(
           ? []
           : ["PHASE quality could not be verified (unreadable judge verdict)"],
     suggestedFixes,
+    resolvedGaps,
     researchFaults,
     draftFaults,
   });
@@ -134,7 +142,8 @@ export function formatPriorGapsConvergenceBlock(priorGaps: string[]): string {
     "You already rejected an earlier draft of this PHASE.md with these gaps:",
     ...gaps.map((g, i) => `${i + 1}. ${g}`),
     "The draft was rewritten to address them. Convergence rules:",
-    "- First verify each prior gap: if it is still present, report it again (same or sharper wording).",
+    "- First verify each prior gap against the new draft: if it is still present, report it again in gaps[] (same or sharper wording).",
+    "- If a prior gap is fixed, list it VERBATIM in resolvedGaps[]. Never re-report a resolved gap, and never carry it forward.",
     "- Report a NEW gap (one you did not raise before) only when it is objectively fatal: the phase cannot pass as written — a check targets a MISSING path, a check fails under a reasonable correct implementation, a required section is missing or placeholder, or the draft contradicts RESEARCH.md / the Change Intent.",
     "- Do NOT report new gaps for hypothetical or hostile implementations (\u201can implementer could write X and evade this check\u201d) when a reasonable implementation passes.",
     "- Robustness hardening and stronger-than-needed invariants are not gaps; omit them.",

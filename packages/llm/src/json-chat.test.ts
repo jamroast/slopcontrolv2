@@ -10,6 +10,7 @@ import {
   serverRetryDelayMs,
   stripJsonFence,
   chatJson,
+  chatJsonFetch,
 } from "./json-chat.js";
 import type { LlmEndpoint } from "@slopcontrol/types";
 import { z } from "zod";
@@ -913,6 +914,61 @@ describe("chatJson AI SDK transport ladder", () => {
       assert.ok(calls >= 3, `expected structured, text, then fetch; got ${calls}`);
     } finally {
       fetchMock.mock.restore();
+    }
+  });
+
+  it("chatJsonFetch retries a timed-out attempt at most timeoutRetries times", async () => {
+    const hang = async (_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError")),
+        );
+      });
+
+    let calls = 0;
+    const once = mock.method(globalThis, "fetch", async (url: string, init?: RequestInit) => {
+      calls += 1;
+      return hang(url, init);
+    });
+    try {
+      await assert.rejects(
+        () =>
+          chatJsonFetch({
+            endpoint,
+            system: "sys",
+            user: "user",
+            timeoutMs: 20,
+            emptyContentRetries: 2,
+            timeoutRetries: 0,
+          }),
+        /JSON chat timed out after/,
+      );
+      assert.equal(calls, 1, "timeoutRetries: 0 must not retry a timeout");
+    } finally {
+      once.mock.restore();
+    }
+
+    calls = 0;
+    const twice = mock.method(globalThis, "fetch", async (url: string, init?: RequestInit) => {
+      calls += 1;
+      return hang(url, init);
+    });
+    try {
+      await assert.rejects(
+        () =>
+          chatJsonFetch({
+            endpoint,
+            system: "sys",
+            user: "user",
+            timeoutMs: 20,
+            emptyContentRetries: 2,
+            timeoutRetries: 1,
+          }),
+        /JSON chat timed out after/,
+      );
+      assert.equal(calls, 2, "timeoutRetries: 1 allows exactly one retry");
+    } finally {
+      twice.mock.restore();
     }
   });
 
