@@ -26,6 +26,24 @@ describe("phase-doc-quality-llm", () => {
     );
   });
 
+  it("system prompt routes check-mechanics critiques to draftFaults", () => {
+    // Phase-197 loop: check-design critiques were attributed to
+    // researchFaults, forcing full re-research legs that cannot fix how a
+    // check is written.
+    assert.match(
+      PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+      /researchFaults is ONLY for evidence missing from RESEARCH\.md itself/,
+    );
+    assert.match(
+      PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+      /HOW a check is written.*is a draftFault/s,
+    );
+    assert.match(
+      PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+      /A re-research cannot fix check mechanics/,
+    );
+  });
+
   it("parses fault attribution lists", () => {
     const verdict = parsePhaseDocQualityVerdictPayload({
       ok: false,
@@ -106,6 +124,77 @@ describe("phase-doc-quality-llm", () => {
       assert.deepEqual(verdict.gaps, ["missing checks"]);
       assert.deepEqual(verdict.researchFaults, []);
       assert.deepEqual(verdict.draftFaults, []);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("sends prior gaps with convergence rules on re-judgement", async () => {
+    let userContent = "";
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: unknown, init?: { body?: string }) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          messages?: Array<{ role: string; content: string }>;
+        };
+        userContent = body.messages?.find((m) => m.role === "user")?.content ?? "";
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"ok":true,"gaps":[]}' } }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+    try {
+      const verdict = await judgePhaseDocQualityViaLlm({
+        endpoint,
+        intentBlock: "intent",
+        phaseDescription: "phase",
+        researchExcerpt: "research",
+        phaseDocExcerpt: "phase doc",
+        priorGaps: ["The Verdict: line format is undeclared in the spec"],
+      });
+      assert.equal(verdict.ok, true);
+      // The judge is told what it already rejected and given a higher bar
+      // for fresh issues — an unbounded issue stream prevents convergence.
+      assert.match(userContent, /already rejected an earlier draft/);
+      assert.match(userContent, /1\. The Verdict: line format is undeclared/);
+      assert.match(userContent, /objectively fatal/);
+      assert.match(userContent, /hypothetical or hostile implementations/);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("omits the convergence block on a first judgement (no prior gaps)", async () => {
+    let userContent = "";
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: unknown, init?: { body?: string }) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          messages?: Array<{ role: string; content: string }>;
+        };
+        userContent = body.messages?.find((m) => m.role === "user")?.content ?? "";
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"ok":true,"gaps":[]}' } }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+    try {
+      await judgePhaseDocQualityViaLlm({
+        endpoint,
+        intentBlock: "intent",
+        phaseDescription: "phase",
+        researchExcerpt: "research",
+        phaseDocExcerpt: "phase doc",
+      });
+      assert.doesNotMatch(userContent, /already rejected an earlier draft/);
     } finally {
       fetchMock.mock.restore();
     }

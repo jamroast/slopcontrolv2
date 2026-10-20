@@ -513,6 +513,79 @@ describe("chatJson empty-content retry", () => {
       fetchMock.mock.restore();
     }
   });
+
+  it("caps timeout retries at one even with a large retry budget", async () => {
+    // A 300s abort is a latency signal, not flaky JSON — re-sending the
+    // identical payload at the same timeout just multiplies wall time.
+    let calls = 0;
+    const fetchMock = mock.method(globalThis, "fetch", async () => {
+      calls += 1;
+      const err = new Error("This operation was aborted");
+      err.name = "AbortError";
+      throw err;
+    });
+    try {
+      const endpoint: LlmEndpoint = {
+        id: "test",
+        label: "test",
+        baseUrl: "http://example.test/v1",
+        apiType: "openai-chat",
+        modelId: "test-model",
+        capabilities: { chat: true, vision: false, imageGen: false },
+      };
+      await assert.rejects(
+        () =>
+          chatJson({
+            endpoint,
+            system: "sys",
+            user: "user",
+            timeoutMs: 90_000,
+            emptyContentRetries: 5,
+            sleep: async () => {},
+          }),
+        /JSON chat timed out after 90000ms/,
+      );
+      assert.equal(calls, 2, "initial attempt + exactly one timeout retry");
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("still spends the full retry budget on parse failures", async () => {
+    // Contrast: parse/empty retries are cheap model tics, not latency signals.
+    let calls = 0;
+    const fetchMock = mock.method(globalThis, "fetch", async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: calls < 3 ? "not json" : '{"ok":true}' } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    try {
+      const endpoint: LlmEndpoint = {
+        id: "test",
+        label: "test",
+        baseUrl: "http://example.test/v1",
+        apiType: "openai-chat",
+        modelId: "test-model",
+        capabilities: { chat: true, vision: false, imageGen: false },
+      };
+      const result = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        timeoutMs: 90_000,
+        emptyContentRetries: 5,
+        sleep: async () => {},
+      });
+      assert.equal(calls, 3);
+      assert.deepEqual(result.parsed, { ok: true });
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
 });
 
 

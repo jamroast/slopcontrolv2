@@ -2674,6 +2674,7 @@ function tryBindPhaseDocQualityJudge(
   researchExcerpt: string;
   phaseDocExcerpt: string;
   checkTargetsBlock?: string;
+  priorGaps?: string[];
 }) => ReturnType<typeof judgePhaseDocQualityViaLlm>) | null {
   const ep = resolved ?? resolvePlanningJudgeEndpoint(registry);
   if (!ep) return null;
@@ -2686,6 +2687,7 @@ function tryBindPhaseDocQualityJudge(
       researchExcerpt: input.researchExcerpt,
       phaseDocExcerpt: input.phaseDocExcerpt,
       checkTargetsBlock: input.checkTargetsBlock,
+      priorGaps: input.priorGaps,
     });
 }
 
@@ -7789,6 +7791,13 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
 
     let phaseDocForQuality = phaseDoc;
     let phaseQualityLegRetries = 0;
+    // Convergence memory: gaps the judge already raised — seeded from the
+    // persisted diagnosis of earlier self-heal rounds, then each verdict in
+    // this loop — so a re-judgement verifies resolution instead of inventing
+    // an unbounded stream of fresh issues (the phase-197 loop pattern).
+    let priorQualityGaps = priorDraftJudgeIssuesFromDiagnosis(
+      readLatestDiagnosisForPhase(project.rootPath, phase.id),
+    );
     while (true) {
       // Deterministic: which repo paths the Automated Checks target, and
       // whether they exist. Lets the judge distinguish a real missing file
@@ -7816,6 +7825,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
                   `.slopcontrol/phases/${phase.id}/PHASE.md`,
                 ),
                 checkTargetsBlock,
+                priorGaps: priorQualityGaps,
               }),
             (v) => v.gaps,
             undefined,
@@ -7836,6 +7846,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
                         `.slopcontrol/phases/${phase.id}/PHASE.md`,
                       ),
                       checkTargetsBlock,
+                      priorGaps: priorQualityGaps,
                     })
                 : undefined,
             },
@@ -7867,6 +7878,8 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
       }
       if (phaseQuality.ok) break;
 
+      // Feed this verdict's gaps to the next judgement as prior context.
+      priorQualityGaps = phaseQuality.gaps;
       const qualityFaultLeg = faultLegFromPhaseQualityVerdict(phaseQuality);
       if (
         qualityFaultLeg === "research" ||

@@ -37,8 +37,8 @@ Schema:
 - ok: boolean
 - gaps: string[] — all issues (empty when ok)
 - suggestedFixes: string[] — concrete fixes parallel to gaps
-- researchFaults: string[] — gaps because RESEARCH lacks required facts/paths/check proposals
-- draftFaults: string[] — gaps because PHASE omitted what RESEARCH already specified
+- researchFaults: string[] — gaps only a re-research can fix: evidence missing from RESEARCH.md itself
+- draftFaults: string[] — gaps in how PHASE is written, including check mechanics, even when the target came from RESEARCH
 
 Check ALL of:
 1. Required sections present and substantive: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence), ## Blueprint Deltas — not placeholder/scaffold text.
@@ -55,6 +55,11 @@ Interaction contract rules:
 - When Change Intent has NO interaction block, do NOT require Playwright fill/submit or form engagement proofs — grep/route/href proofs suffice for page mounts.
 - When interaction primaryAction is submit form, Success Criteria + Automated Checks must prove fill+submit at the locked mount.
 
+Fault routing (researchFaults vs draftFaults) — getting this right matters because researchFaults forces a costly full re-research leg:
+- researchFaults is ONLY for evidence missing from RESEARCH.md itself: a repo path the checks rely on that RESEARCH never verified, a doc string a check greps for that RESEARCH never quoted, a wrong/contradicted fact, a missing required section — things only fresh investigation in the repo can supply.
+- Everything about HOW a check is written — brittle or evadable greps, count-exact sentinels, ordering assumptions, missing invariants, weak assertions — is a draftFault, even when the check's target came from RESEARCH. A re-research cannot fix check mechanics.
+- Never attribute a gap to researchFaults unless new repo investigation could resolve it. When unsure, attribute to draftFaults.
+
 Verdict rules:
 - ok=true only when PHASE is ready for operator review and development.
 - Attribute each gap to researchFaults OR draftFaults (can be both lists non-empty).
@@ -69,6 +74,12 @@ export interface JudgePhaseDocQualityOptions {
   phaseDocExcerpt: string;
   /** Deterministic existence list for paths referenced by Automated Checks. */
   checkTargetsBlock?: string;
+  /**
+   * Gaps the judge already raised against an earlier draft of this PHASE.
+   * Supplied on re-judgement so the judge verifies resolution instead of
+   * inventing an unbounded stream of fresh issues (convergence pressure).
+   */
+  priorGaps?: string[];
   timeoutMs?: number;
 }
 
@@ -109,6 +120,27 @@ export function parsePhaseDocQualityVerdictPayload(
   });
 }
 
+/**
+ * Convergence block for re-judgement: the judge must verify its prior gaps
+ * and may only raise NEW issues that are objectively fatal — a judge that
+ * can always find one more hypothetical issue prevents the loop from ever
+ * passing (phase-197 pattern).
+ */
+export function formatPriorGapsConvergenceBlock(priorGaps: string[]): string {
+  const gaps = priorGaps.filter((g) => g.trim().length > 0).slice(0, 12);
+  if (gaps.length === 0) return "";
+  return [
+    "Prior review context (convergence rules apply):",
+    "You already rejected an earlier draft of this PHASE.md with these gaps:",
+    ...gaps.map((g, i) => `${i + 1}. ${g}`),
+    "The draft was rewritten to address them. Convergence rules:",
+    "- First verify each prior gap: if it is still present, report it again (same or sharper wording).",
+    "- Report a NEW gap (one you did not raise before) only when it is objectively fatal: the phase cannot pass as written — a check targets a MISSING path, a check fails under a reasonable correct implementation, a required section is missing or placeholder, or the draft contradicts RESEARCH.md / the Change Intent.",
+    "- Do NOT report new gaps for hypothetical or hostile implementations (\u201can implementer could write X and evade this check\u201d) when a reasonable implementation passes.",
+    "- Robustness hardening and stronger-than-needed invariants are not gaps; omit them.",
+  ].join("\n");
+}
+
 export async function judgePhaseDocQualityViaLlm(
   opts: JudgePhaseDocQualityOptions,
 ): Promise<PhaseDocQualityVerdict> {
@@ -132,6 +164,8 @@ export async function judgePhaseDocQualityViaLlm(
       clip(opts.researchExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),
       "",
       opts.checkTargetsBlock ? opts.checkTargetsBlock : "",
+      "",
+      formatPriorGapsConvergenceBlock(opts.priorGaps ?? []),
       "",
       "PHASE.md excerpt (Scope / Success Criteria / Automated Checks / Blueprint Deltas):",
       clip(opts.phaseDocExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),

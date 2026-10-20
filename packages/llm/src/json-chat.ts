@@ -233,6 +233,14 @@ export function isRetryableChatJsonError(message: string, err?: unknown): boolea
 export const CHAT_JSON_SERVER_RETRY_BASE_MS = 2_000;
 export const CHAT_JSON_SERVER_RETRY_MAX_MS = 15_000;
 
+/**
+ * Max retries of a timed-out attempt. A timeout is a latency signal (prompt
+ * too big / provider too slow), not flaky JSON — the identical payload at the
+ * same timeout almost always re-aborts, so more than one retry just triples
+ * wall time for the same verdict.
+ */
+export const CHAT_JSON_TIMEOUT_RETRIES = 1;
+
 /** Exponential backoff with up to 1s jitter: ~2s, ~4s, ~8s, then capped ~15s. */
 export function serverRetryDelayMs(attempt: number): number {
   const exp = Math.min(
@@ -287,6 +295,8 @@ export async function chatJsonFetch(
   // Field-level reason from the previous shape failure, so a retry is told
   // which key was missing or which type was wrong — not only "send JSON".
   let shapeNudge = "";
+  // Timeouts retry at most CHAT_JSON_TIMEOUT_RETRIES times (see constant).
+  let timeoutRetriesUsed = 0;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const userContent =
@@ -380,7 +390,11 @@ export async function chatJsonFetch(
     } catch (err) {
       if (isChatJsonTimeoutError(err)) {
         lastError = timeoutError(timeoutMs, attempt, maxAttempts);
-        if (attempt < maxAttempts) {
+        if (
+          attempt < maxAttempts &&
+          timeoutRetriesUsed < CHAT_JSON_TIMEOUT_RETRIES
+        ) {
+          timeoutRetriesUsed += 1;
           // Timeouts usually mean an overloaded server — back off, don't hammer.
           await sleep(serverRetryDelayMs(attempt));
           continue;

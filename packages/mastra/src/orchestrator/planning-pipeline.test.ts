@@ -229,6 +229,52 @@ describe("planning-pipeline", () => {
     assert.equal(result.ok, true);
   });
 
+  it("callPlanningJudgeWithInfraRetry does not re-pay same-leg retries on timeout", async () => {
+    // A timeout is a latency signal — the same endpoint's ladder already
+    // burned its bounded retries, so the wrapper must fail over to the
+    // fallback endpoint instead of tripling wall time on the dead one.
+    let primaryCalls = 0;
+    let fallbackCalls = 0;
+    const { result, judgeInfraFailed, usedFallback } =
+      await callPlanningJudgeWithInfraRetry(
+        async () => {
+          primaryCalls += 1;
+          throw new Error("JSON chat timed out after 300000ms (attempt 2/3)");
+        },
+        (r: { ok: boolean }) => (r.ok ? [] : ["LLM judge failed"]),
+        3,
+        {
+          fallbackCall: async () => {
+            fallbackCalls += 1;
+            return { ok: true };
+          },
+        },
+      );
+    assert.equal(primaryCalls, 1, "no same-leg retry on timeout");
+    assert.equal(fallbackCalls, 1, "fallback endpoint gets the failover");
+    assert.equal(usedFallback, true);
+    assert.equal(judgeInfraFailed, false);
+    assert.equal(result.ok, true);
+  });
+
+  it("callPlanningJudgeWithInfraRetry still retries same-leg parse failures", async () => {
+    // Contrast: parse/empty failures are cheap model tics worth re-trying.
+    let primaryCalls = 0;
+    await assert.rejects(
+      () =>
+        callPlanningJudgeWithInfraRetry(
+          async () => {
+            primaryCalls += 1;
+            throw new Error("JSON chat parse failed at position 4");
+          },
+          () => [],
+          3,
+        ),
+      PlanningJudgeInfraError,
+    );
+    assert.equal(primaryCalls, 3);
+  });
+
   it("planningGateIssueFingerprint is stable for equivalent issue sets", () => {
     const a = planningGateIssueFingerprint([
       "No fill+submit proof at page mount",

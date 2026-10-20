@@ -401,6 +401,25 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
       assert.match(firstJudgeUser, /- exists: src\/dashboard\.tsx/);
       assert.match(firstJudgeUser, /- NEW: tests\/unit\/widget\.test\.ts/);
       assert.doesNotMatch(firstJudgeUser, /Widget state is read-only/);
+      // First judgement has no priors — no convergence block.
+      assert.doesNotMatch(firstJudgeUser, /already rejected an earlier draft/);
+
+      // 1b. Convergence memory: every re-draft judgement (the stub exercises
+      // the whole transport ladder, so there are several) carries the
+      // persisted gaps from the failed leg, with the objectively-fatal bar
+      // for raising new ones.
+      const reJudgements = judgeCalls.filter((c) =>
+        c.user.includes("Widget state is read-only"),
+      );
+      assert.ok(reJudgements.length >= 1, "re-drafted PHASE must be judged");
+      for (const call of reJudgements) {
+        assert.match(call.user, /already rejected an earlier draft/);
+        assert.match(
+          call.user,
+          /RESEARCH does not quote docs\/llms-full\.txt wording/,
+        );
+        assert.match(call.user, /objectively fatal/);
+      }
 
       // The re-drafted document (not just its predecessor) reached the judge.
       assert.ok(

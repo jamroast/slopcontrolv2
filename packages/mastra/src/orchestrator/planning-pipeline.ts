@@ -4,6 +4,7 @@
 
 import { createHash } from "node:crypto";
 import { isSpecificationAsk, PLANNING_AUTOMATED_CHECKS_RULES } from "@slopcontrol/artifacts";
+import { isChatJsonTimeoutError } from "@slopcontrol/llm";
 
 export type PlanningFaultLeg = "none" | "research" | "draft" | "both";
 
@@ -178,7 +179,17 @@ export async function callPlanningJudgeWithInfraRetry<T>(
         return { result: last, judgeInfraFailed: true };
       } catch (err) {
         lastError = err;
-        if (attempt < maxRetries - 1) continue;
+        // A timeout is a latency signal, not a flaky verdict — the same
+        // endpoint's ladder already burned its bounded retries, so re-paying
+        // full timeout windows here just multiplies wall time. Skip the
+        // remaining same-leg attempts; the caller's fallback endpoint (a
+        // different provider) is the useful failover.
+        if (
+          attempt < maxRetries - 1 &&
+          !isChatJsonTimeoutError(err)
+        ) {
+          continue;
+        }
         if (last) return { result: last, judgeInfraFailed: true };
         throw new PlanningJudgeInfraError(lastError);
       }
