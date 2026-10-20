@@ -180,6 +180,22 @@ describe("change intent", () => {
     const block = formatChangeIntentPromptBlock(intent);
     assert.match(block, /uiMount:\*\* composer/);
   });
+  it("surfaces researchNote with precedence over conflicting intent wording", () => {
+    const intent = extractChangeIntent("Tighten the sign-in copy.");
+    const block = formatChangeIntentPromptBlock({
+      ...intent,
+      mustNot: ['Do not use "old wording" — research flags it as unsafe for this phase'],
+      researchNote:
+        'Research overrides intent wording "old wording" — cite only verified SHAs.',
+    });
+    assert.match(block, /researchNote \(overrides conflicting intent wording/);
+    assert.match(block, /cite only verified SHAs/);
+    assert.match(
+      block,
+      /researchNote overrides any conflicting wording in goal \/ mustNot \/ the phase description/,
+    );
+    assert.match(block, /never reproduce the superseded phrasing/);
+  });
 
   it("matches plural chat bubbles and engagement → inherits composer", () => {
     const dir = mkdtempSync(join(tmpdir(), "slop-intent-"));

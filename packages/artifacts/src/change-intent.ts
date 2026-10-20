@@ -55,6 +55,11 @@ export type ChangeIntent = {
   rawDescription: string;
   /** When set, phase must prove fill/submit (or equivalent) at mount — not chip-only. */
   interaction?: InteractionContract;
+  /**
+   * Research-backed correction to conflicting intent wording (rebuilt by
+   * reconcileChangeIntentFromResearch). Overrides goal/mustNot/description.
+   */
+  researchNote?: string;
 };
 
 /** Structured model output for Change Intent extraction (planning role). */
@@ -790,8 +795,14 @@ export function formatChangeIntentPromptBlock(intent: ChangeIntent): string {
     intent.mustNot.length
       ? `- **mustNot:** ${intent.mustNot.map((m) => `"${m}"`).join("; ")}`
       : null,
+    intent.researchNote
+      ? `- **researchNote (overrides conflicting intent wording below/above):** ${intent.researchNote}`
+      : null,
     ...interactionLines,
     "",
+    intent.researchNote
+      ? "- researchNote overrides any conflicting wording in goal / mustNot / the phase description: implement the researchNote version and never reproduce the superseded phrasing."
+      : null,
     "Operator-refinement rules:",
     "- If uiMount is composer/bubble/modal/page, Scope and Blueprint Deltas MUST place the interactive UI there.",
     "- Do NOT \"restore prior UX\" or supersede a mount BD unless Change Intent explicitly asks to restore.",

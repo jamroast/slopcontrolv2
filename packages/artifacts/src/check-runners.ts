@@ -304,21 +304,35 @@ export function unwrapGrepQuietPipe(body: string): string | null {
   return upstream;
 }
 
-export function hasBrittleSameLineGrepChain(body: string): boolean {
+/**
+ * Return the first grep command that requires 2+ tokens on ONE line via `.*`
+ * chains (brittle across formatting), or null.
+ *
+ * Regex alternations are NOT brittle: `AssertionError|expected .* to be` has at
+ * most one `.*` join per branch, so only a single branch with 2+ joins counts.
+ */
+export function findBrittleSameLineGrepChain(body: string): string | null {
   const grepPattern = /\bgrep\b[^\n|&;]*?(['"])((?:(?!\1).)*)\1/g;
   let match: RegExpExecArray | null;
   while ((match = grepPattern.exec(body)) !== null) {
     const expr = match[2] ?? "";
-    // 2+ `.*` joins with literal text on both sides = multi-token same-line.
-    const joins = expr.split(".*");
-    if (
-      joins.length >= 3 &&
-      joins.filter((j) => /[a-zA-Z0-9]/.test(j)).length >= 3
-    ) {
-      return true;
+    // Split on unescaped `|`: each alternative is its own pattern branch.
+    for (const branch of expr.split(/(?<!\\)\|/)) {
+      // 2+ `.*` joins with literal text on both sides = multi-token same-line.
+      const joins = branch.split(".*");
+      if (
+        joins.length >= 3 &&
+        joins.filter((j) => /[a-zA-Z0-9]/.test(j)).length >= 3
+      ) {
+        return match[0];
+      }
     }
   }
-  return false;
+  return null;
+}
+
+export function hasBrittleSameLineGrepChain(body: string): boolean {
+  return findBrittleSameLineGrepChain(body) !== null;
 }
 
 function shellValidate(cell: CheckCell): string[] {
@@ -366,9 +380,10 @@ function shellValidate(cell: CheckCell): string[] {
       `Broken Automated Check backgrounds a process (\`&\`) and then \`wait\` — children often outlive kill and hang verify. Do not background servers in Automated Checks: ${normalized.slice(0, 120)}`,
     );
   }
-  if (hasBrittleSameLineGrepChain(normalized)) {
+  const brittleGrep = findBrittleSameLineGrepChain(normalized);
+  if (brittleGrep) {
     issues.push(
-      `Brittle Automated Check requires multiple tokens on ONE line via \`.*\` chains — code formatting varies. Match tokens independently: one \`grep -q\` per token joined by \`&&\` (or \`grep -Pzo\` for multi-line), e.g. \`grep -q 'fetch("/api/conversations"' f && grep -q 'method: "POST"' f\`: ${normalized.slice(0, 120)}`,
+      `Brittle Automated Check requires multiple tokens on ONE line via \`.*\` chains — code formatting varies. Match tokens independently: one \`grep -q\` per token joined by \`&&\` (or \`grep -Pzo\` for multi-line), e.g. \`grep -q 'fetch("/api/conversations"' f && grep -q 'method: "POST"' f\`: ${brittleGrep.slice(0, 300)}`,
     );
   }
   if (hasVitestGrepQuietAntipattern(normalized)) {

@@ -47,6 +47,44 @@ describe("phase-doc-quality-llm", () => {
     assert.match(verdict.gaps[0] ?? "", /could not be verified/i);
   });
 
+
+  it("passes verified check targets to the judge so existing files are grounded", async () => {
+    let userContent = "";
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: unknown, init?: { body?: string }) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as {
+          messages?: Array<{ role: string; content: string }>;
+        };
+        userContent = body.messages?.find((m) => m.role === "user")?.content ?? "";
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '{"ok":true,"gaps":[]}' } }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+    try {
+      const verdict = await judgePhaseDocQualityViaLlm({
+        endpoint,
+        intentBlock: "intent",
+        phaseDescription: "phase",
+        researchExcerpt: "research",
+        phaseDocExcerpt: "phase doc",
+        checkTargetsBlock:
+          "## Automated Check targets (verified by SlopControl against the repo)\n- exists: tests/a.test.ts\n- MISSING: scripts/nope.mjs",
+      });
+      assert.equal(verdict.ok, true);
+      assert.match(userContent, /Automated Check targets \(verified/);
+      assert.match(userContent, /- exists: tests\/a\.test\.ts/);
+      assert.match(userContent, /- MISSING: scripts\/nope\.mjs/);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
   it("accepts a verdict that omits the fault lists", async () => {
     const fetchMock = mock.method(globalThis, "fetch", async () =>
       new Response(

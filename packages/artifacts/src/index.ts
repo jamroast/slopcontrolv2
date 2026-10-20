@@ -68,6 +68,7 @@ export * from "./project-env.js";
 export * from "./sibling-brand-refs.js";
 export * from "./shell-checks.js";
 export * from "./check-runners.js";
+export * from "./check-targets.js";
 export * from "./claim-vs-proof.js";
 export * from "./design-delivery.js";
 export * from "./phase-complete-gate.js";

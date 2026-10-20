@@ -44,8 +44,12 @@ Check ALL of:
 1. Required sections present and substantive: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence), ## Blueprint Deltas — not placeholder/scaffold text.
 2. RESEARCH translation — file paths, routes, checks, and design decisions from RESEARCH appear in PHASE (especially Automated Checks).
 3. uiMount — when intent uiMount is set, PHASE Scope/File Changes name the concrete mount (route/page/component), not abstract "wire auth".
-4. Automated Checks — finite structural proofs (grep/build/vitest one-shot); no bare dev servers or npm test without path. Checks must NOT restart infra with docker compose up or trap teardown — SlopControl test-services already brings up Postgres/Redis/etc.; DB-dependent checks assume services are up (migrate/seed/targeted vitest). Redundant infra bring-up is a draft fault.
+4. Automated Checks — finite structural proofs (grep/build/vitest one-shot); no bare dev servers or npm test without path. When a "Automated Check targets" block is supplied, a check targeting an "exists" path is grounded even if RESEARCH.md never names it — do NOT fail it as unverified; a "MISSING" target is a real gap. Checks must NOT restart infra with docker compose up or trap teardown — SlopControl test-services already brings up Postgres/Redis/etc.; DB-dependent checks assume services are up (migrate/seed/targeted vitest). Redundant infra bring-up is a draft fault.
 5. Blueprint Deltas — durable decisions recorded when PHASE introduces new routes/surfaces/contracts.
+
+Change Intent precedence:
+- The Change Intent block is authoritative. When it contains a researchNote, that note overrides conflicting wording in the phase description (including its Success criteria).
+- Never require wording that mustNot forbids; never fail a draft for following researchNote over superseded description phrasing.
 
 Interaction contract rules:
 - When Change Intent has NO interaction block, do NOT require Playwright fill/submit or form engagement proofs — grep/route/href proofs suffice for page mounts.
@@ -63,6 +67,8 @@ export interface JudgePhaseDocQualityOptions {
   phaseDescription: string;
   researchExcerpt: string;
   phaseDocExcerpt: string;
+  /** Deterministic existence list for paths referenced by Automated Checks. */
+  checkTargetsBlock?: string;
   timeoutMs?: number;
 }
 
@@ -124,6 +130,8 @@ export async function judgePhaseDocQualityViaLlm(
       "",
       "RESEARCH.md excerpt:",
       clip(opts.researchExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),
+      "",
+      opts.checkTargetsBlock ? opts.checkTargetsBlock : "",
       "",
       "PHASE.md excerpt (Scope / Success Criteria / Automated Checks / Blueprint Deltas):",
       clip(opts.phaseDocExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),

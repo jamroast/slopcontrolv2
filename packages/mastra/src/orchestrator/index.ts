@@ -274,6 +274,8 @@ import {
   MAX_DEVELOP_PHASE_CHECKS_SELF_HEAL,
   SLOPCONTROL_TEST_SERVICES_READY_ENV,
   SLOPCONTROL_TEST_SERVICES_ENV,
+  formatCheckTargetsPromptBlock,
+  verifyCheckTargets,
 } from "@slopcontrol/artifacts";
 import { attemptDevelopPhaseChecksSelfHeal } from "./develop-phase-self-heal.js";
 import {
@@ -756,6 +758,12 @@ export interface StartResearchInput {
   listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
   /** When true, re-run the research agent even if RESEARCH.md looks solid. */
   force?: boolean;
+  /**
+   * Prior planning-gate feedback (judge gaps / structural issues) to resolve in
+   * the new RESEARCH.md. Defaults to the latest planning diagnosis for the
+   * phase, so retries never silently drop the gaps that failed the last leg.
+   */
+  feedback?: string;
 }
 
 export interface ReviewInput {
@@ -2630,6 +2638,33 @@ function tryBindResearchQualityJudge(
     });
 }
 
+/**
+ * Latest planning-gate gaps for a phase (draft/judge/structural), rendered as a
+ * numbered feedback list. Empty when the latest diagnosis is unrelated.
+ */
+export function planningGateFeedbackFromLatestDiagnosis(
+  projectRoot: string,
+  phaseId: string,
+): string {
+  const diagnosis = readLatestDiagnosisForPhase(projectRoot, phaseId);
+  if (!diagnosis) return "";
+  const tags = diagnosis.tags ?? [];
+  const planning =
+    tags.some((t) => t === "planning" || t === "draft" || t === "research") ||
+    /draft|phase quality|planning/i.test(
+      `${diagnosis.title ?? ""} ${diagnosis.class ?? ""}`,
+    );
+  if (!planning) return "";
+  const gaps = (diagnosis.issues ?? []).filter(
+    (g): g is string => typeof g === "string" && g.trim().length > 0,
+  );
+  const list = (gaps.length > 0 ? gaps : [diagnosis.rootCause]).filter(Boolean);
+  return list
+    .slice(0, 12)
+    .map((gap, i) => `${i + 1}. ${gap}`)
+    .join("\n");
+}
+
 function tryBindPhaseDocQualityJudge(
   registry: LlmRegistry,
   resolved?: { endpoint: import("@slopcontrol/types").LlmEndpoint; modelId?: string },
@@ -2638,6 +2673,7 @@ function tryBindPhaseDocQualityJudge(
   phaseDescription: string;
   researchExcerpt: string;
   phaseDocExcerpt: string;
+  checkTargetsBlock?: string;
 }) => ReturnType<typeof judgePhaseDocQualityViaLlm>) | null {
   const ep = resolved ?? resolvePlanningJudgeEndpoint(registry);
   if (!ep) return null;
@@ -2649,6 +2685,7 @@ function tryBindPhaseDocQualityJudge(
       phaseDescription: input.phaseDescription,
       researchExcerpt: input.researchExcerpt,
       phaseDocExcerpt: input.phaseDocExcerpt,
+      checkTargetsBlock: input.checkTargetsBlock,
     });
 }
 
@@ -6334,6 +6371,17 @@ Phase id: ${input.phase.id}`;
 
     log(project, run, `--- Starting research for phase ${phase.id} ---`);
 
+    const priorPlanningFeedback =
+      input.feedback?.trim() ||
+      planningGateFeedbackFromLatestDiagnosis(project.rootPath, phase.id);
+    if (priorPlanningFeedback) {
+      log(
+        project,
+        run,
+        `--- Research carries prior planning-gate feedback ---\n${priorPlanningFeedback}`,
+      );
+    }
+
     const existingResearch = readResearch(project.rootPath, phase.id);
     if (!input.force && researchLooksSolid(existingResearch)) {
       log(
@@ -6545,7 +6593,7 @@ ${themeResearchNote}${elementsResearchNote}${crossDepResearchPack ? `\n${crossDe
         : crossDepResearchPack
           ? `\n${crossDepResearchPack}\n`
           : "";
-    const prompt = `Change request:
+    const prompt = `${priorPlanningFeedback ? `PRIOR PLANNING GATE FEEDBACK (the last draft/judge rejected these; resolve each with code evidence in RESEARCH.md and do not repeat them):\n${priorPlanningFeedback}\n\n` : ""}Change request:
 ${clipPromptSection("change-request", description, 4_000)}
 
 ${intentBlock}
@@ -6563,7 +6611,8 @@ End with RESEARCH_COMPLETE.
 If the blueprint is still thin, include ## Proposed Blueprint and ## Proposed Roadmap.
 Do NOT only chat about investigating — the response body / written file must be the RESEARCH.md document.
 Obey Change Intent uiMount over older contradictory Blueprint Deltas.
-Obey prior learnings (especially infra blockers): do not propose coding-agent work to bring up missing local services.`;
+Obey prior learnings (especially infra blockers): do not propose coding-agent work to bring up missing local services.
+Include a \`## Check targets (verified)\` section listing the exact repo paths/commands PHASE.md Automated Checks may use (test files, scripts, doc/config files) — verify each exists with tools first, and quote exact doc strings for any grep-based doc check.`;
 
     const researchWatch = researchDocWatchPaths(project.rootPath, phase.id);
     let beforeStats = snapshotFileStats(researchWatch);
@@ -7741,6 +7790,12 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
     let phaseDocForQuality = phaseDoc;
     let phaseQualityLegRetries = 0;
     while (true) {
+      // Deterministic: which repo paths the Automated Checks target, and
+      // whether they exist. Lets the judge distinguish a real missing file
+      // from a target RESEARCH simply never mentioned.
+      const checkTargetsBlock = formatCheckTargetsPromptBlock(
+        verifyCheckTargets(project.rootPath, phaseDocForQuality),
+      );
       let phaseQuality: PhaseDocQualityVerdict;
       let phaseJudgeInfra: boolean;
       try {
@@ -7760,6 +7815,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
                   phaseDocForQuality,
                   `.slopcontrol/phases/${phase.id}/PHASE.md`,
                 ),
+                checkTargetsBlock,
               }),
             (v) => v.gaps,
             undefined,
@@ -7779,6 +7835,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
                         phaseDocForQuality,
                         `.slopcontrol/phases/${phase.id}/PHASE.md`,
                       ),
+                      checkTargetsBlock,
                     })
                 : undefined,
             },

@@ -18,6 +18,7 @@ import {
   priorDraftJudgeIssuesFromDiagnosis,
   shouldContinuePlanningSelfHeal,
 } from "./planning-pipeline.js";
+import { planningGateFeedbackFromLatestDiagnosis } from "./index.js";
 import {
   clipDraftResearch,
   clipSharedDoc,
@@ -243,5 +244,53 @@ describe("draft research window", () => {
     assert.ok(full.includes("TAIL_TOKEN"));
     assert.ok(slim.includes("TAIL_TOKEN"));
     assert.ok(slim.includes(`read_file \`${docPath}\``));
+  });
+});
+
+describe("research leg inherits the last planning-gate gaps", () => {
+  it("renders a numbered feedback list from a planning diagnosis", () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-research-feedback-"));
+    try {
+      writeDiagnosis(root, "run-1", draftRejectionDiagnosis(), "01-access");
+      const feedback = planningGateFeedbackFromLatestDiagnosis(root, "01-access");
+      assert.match(feedback, /^1\. Automated Check 3 greps/);
+      assert.ok(feedback.includes(GAPS[1]!));
+      assert.ok(feedback.includes(GAPS[2]!));
+      // Semicolons inside a gap survive (structured issues[]).
+      assert.match(feedback, /contains no literal `token:read`; the check fails/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores non-planning diagnoses and missing ones", () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-research-feedback-skip-"));
+    try {
+      assert.equal(planningGateFeedbackFromLatestDiagnosis(root, "01-access"), "");
+      writeDiagnosis(
+        root,
+        "run-2",
+        {
+          audience: "coding",
+          operatorActions: [],
+          class: "infra",
+          confidence: "high",
+          title: "Verify failed: docker compose up",
+          rootCause: "service unavailable",
+          evidence: "service unavailable",
+          nextActions: "retry_verify",
+          fingerprint: "infra-1",
+          codingAgentShouldFix: false,
+          tags: ["verify", "infra"],
+          phaseId: "01-access",
+          runId: "run-2",
+          updatedAt: new Date().toISOString(),
+        },
+        "01-access",
+      );
+      assert.equal(planningGateFeedbackFromLatestDiagnosis(root, "01-access"), "");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

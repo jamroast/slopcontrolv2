@@ -15,6 +15,7 @@ import {
   hasGnuTimeoutInCheck,
   hasLongLivedServerInCheck,
   hasBackgroundWaitHangAntipattern,
+  findBrittleSameLineGrepChain,
   hasBrittleSameLineGrepChain,
   hasVitestGrepQuietAntipattern,
   unwrapGrepQuietPipe,
@@ -428,6 +429,35 @@ wait $VITE_PID 2>/dev/null`;
       hasBrittleSameLineGrepChain("grep -qE 'className=\".*\"' f.ts"),
       false,
     );
+  });
+
+  it("allows regex alternations whose branches each have at most one .* (phase-197 regression)", () => {
+    // A single legitimate pattern: `.*` lives in separate `|` branches.
+    const alternation = `grep -qE 'AssertionError|expected .* to be|expected .* not to be' "$f" || exit 1`;
+    assert.equal(hasBrittleSameLineGrepChain(alternation), false);
+    assert.equal(findBrittleSameLineGrepChain(alternation), null);
+    const gate = validatePhaseDocForDev(phaseWithCheck(alternation));
+    assert.equal(gate.ok, true, gate.issues.join("; "));
+
+    // A branch that still chains 3 tokens on one line is brittle.
+    assert.equal(
+      hasBrittleSameLineGrepChain(`grep -qE 'foo.*bar.*baz|qux' "$f"`),
+      true,
+    );
+    assert.equal(
+      hasBrittleSameLineGrepChain(`grep -qE 'foo|bar.*baz.*qux' "$f"`),
+      true,
+    );
+  });
+
+  it("names the offending grep command in the brittle-chain issue", () => {
+    const brittle = `set -euo pipefail
+f=".slopcontrol/phases/1-demo/EVIDENCE.md"
+grep -qE 'first.*second.*third' "$f" || exit 1`;
+    const gate = validatePhaseDocForDev(phaseWithCheck(brittle));
+    assert.equal(gate.ok, false);
+    const issue = gate.issues.find((i) => /one line|tokens independently/i.test(i)) ?? "";
+    assert.match(issue, /grep -qE 'first\.\*second\.\*third'/);
   });
 
   it("rejects vitest piped to grep -q", () => {
