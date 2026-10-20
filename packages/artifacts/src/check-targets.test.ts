@@ -11,6 +11,13 @@ import {
 
 const doc = `# Phase 9 — demo
 
+## File Changes
+
+| Path | Action |
+| --- | --- |
+| tests/integration/discovery.test.ts | NEW |
+| scripts/verify-docs.mjs | exists |
+
 Prose mention of src/prose-only.ts must be ignored.
 
 \`\`\`bash
@@ -57,6 +64,7 @@ describe("verifyCheckTargets + prompt block", () => {
     mkdirSync(join(root, "src"), { recursive: true });
     mkdirSync(join(root, "tests/integration"), { recursive: true });
     writeFileSync(join(root, "src/index.ts"), "export const x = 1;\n");
+    mkdirSync(join(root, "tests/integration"), { recursive: true });
     writeFileSync(
       join(root, "tests/integration/discovery.test.ts"),
       "// test\n",
@@ -71,8 +79,21 @@ describe("verifyCheckTargets + prompt block", () => {
     const block = formatCheckTargetsPromptBlock(targets);
     assert.match(block, /Automated Check targets \(verified by SlopControl/);
     assert.match(block, /- exists: src\/index\.ts/);
-    assert.match(block, /- MISSING: scripts\/verify-docs\.mjs/);
+    // Declared in ## File Changes but not on disk yet → NEW, not MISSING.
+    assert.match(block, /- NEW: scripts\/verify-docs\.mjs/);
     assert.match(block, /do not fail it for being absent from the research excerpt/);
+    assert.match(block, /this phase creates it/);
+  });
+
+  it("keeps an undeclared absent path as MISSING", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-check-targets-missing-"));
+    const targets = verifyCheckTargets(
+      root,
+      "## File Changes\n\n| Path | Action |\n| - | - |\n| src/a.ts | NEW |\n\n```bash\ngrep -q x src/a.ts || exit 1\ngrep -q y src/b.ts || exit 1\n```",
+    );
+    const block = formatCheckTargetsPromptBlock(targets);
+    assert.match(block, /- NEW: src\/a\.ts/);
+    assert.match(block, /- MISSING: src\/b\.ts/);
   });
 
   it("returns an empty block when no repo targets are referenced", () => {

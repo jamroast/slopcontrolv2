@@ -14,10 +14,13 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { extractSection } from "./markdown.js";
 
 export type VerifiedCheckTarget = {
   path: string;
   exists: boolean;
+  /** Path is declared in ## File Changes, i.e. this phase creates it. */
+  declared: boolean;
 };
 
 const SHELL_FENCE_RE = /```(?:bash|sh|shell|zsh)\b[^\n]*\n([\s\S]*?)```/gi;
@@ -56,9 +59,16 @@ export function verifyCheckTargets(
   projectRoot: string,
   phaseDoc: string,
 ): VerifiedCheckTarget[] {
+  // Only the prose/table part of ## File Changes — a fenced block after the
+  // section (unlikely, but possible in a compact doc) is not a declaration.
+  const fileChanges =
+    (extractSection(phaseDoc, /^##\s+File Changes\s*$/im) ?? "").split(
+      "```",
+    )[0] ?? "";
   return extractCheckTargetPaths(phaseDoc).map((path) => ({
     path,
     exists: existsSync(join(projectRoot, path)),
+    declared: fileChanges.includes(path),
   }));
 }
 
@@ -70,13 +80,14 @@ export function formatCheckTargetsPromptBlock(
   targets: VerifiedCheckTarget[],
 ): string {
   if (targets.length === 0) return "";
-  const lines = targets.map(
-    (t) => `- ${t.exists ? "exists" : "MISSING"}: ${t.path}`,
-  );
+  const lines = targets.map((t) => {
+    const status = t.exists ? "exists" : t.declared ? "NEW" : "MISSING";
+    return `- ${status}: ${t.path}`;
+  });
   return [
     "## Automated Check targets (verified by SlopControl against the repo)",
     ...lines,
     "",
-    "A check that targets an `exists` path is grounded even when RESEARCH.md does not name it — do not fail it for being absent from the research excerpt. A `MISSING` path is a real defect.",
+    "A check that targets an `exists` path is grounded even when RESEARCH.md does not name it — do not fail it for being absent from the research excerpt. A `NEW` path is declared in ## File Changes, so this phase creates it — a check may assert it. A `MISSING` path is neither present nor declared — that is a real defect.",
   ].join("\n");
 }
