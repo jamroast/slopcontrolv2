@@ -216,3 +216,32 @@ describe("planning prompt windows: drafter and judge see the same research", () 
     assert.equal(clipSharedDoc("RESEARCH.md", "   ", docPath), "(RESEARCH.md: none)");
   });
 });
+
+describe("self-heal draft issue handoff", () => {
+  it("prefers structured issues over splitting the joined detail", () => {
+    assert.deepEqual(
+      nextSelfHealDraftIssues("a; b", ["a; b", " a; b ", "c"]),
+      ["a; b", "c"],
+      "a gap containing \"; \" must survive intact and duplicates must collapse",
+    );
+  });
+
+  it("falls back to splitting the detail when no issues are stored", () => {
+    assert.deepEqual(nextSelfHealDraftIssues("one; two"), ["one", "two"]);
+  });
+});
+
+describe("draft research window", () => {
+  const docPath = ".slopcontrol/phases/196-x/RESEARCH.md";
+  const research = `${"h".repeat(100_000)}TAIL_TOKEN`;
+
+  it("uses the slim budget only for the slim retry and keeps the tail", () => {
+    const full = clipDraftResearch(research, docPath, false);
+    const slim = clipDraftResearch(research, docPath, true);
+    assert.ok(full.length > slim.length);
+    assert.ok(slim.length <= SLIM_RESEARCH_CLIP_CHARS + 64);
+    assert.ok(full.includes("TAIL_TOKEN"));
+    assert.ok(slim.includes("TAIL_TOKEN"));
+    assert.ok(slim.includes(`read_file \`${docPath}\``));
+  });
+});

@@ -116,7 +116,89 @@ describe("runAgent turn budget", () => {
   });
 });
 
+describe("runAgent turn budget", () => {
+  it("does not retry a timed-out turn", async () => {
+    let calls = 0;
+    const agent = stubAgent({
+      generate: async (_prompt, o) => {
+        calls += 1;
+        return new Promise((_resolve, reject) => {
+          o.abortSignal?.addEventListener("abort", () =>
+            reject(new Error("aborted")),
+          );
+        });
+      },
+    });
+    await assert.rejects(
+      () =>
+        runAgent(agent, "prompt", "proj", "thread", {
+          timeoutMs: 30,
+          memory: false,
+        }),
+      /timed out after 30ms/,
+    );
+    assert.equal(calls, 1, "a timeout must not trigger a second generation");
+  });
+
+  it("forwards maxSteps and the per-turn model override", async () => {
+    const seen: Array<{ maxSteps?: number; model?: unknown }> = [];
+    const agent = stubAgent({
+      generate: async (_prompt, o) => {
+        seen.push(o as unknown as { maxSteps?: number; model?: unknown });
+        return { text: "ok", finishReason: "stop" };
+      },
+    });
+    const override = { id: "openai/other", url: "http://x/v1" };
+    const text = await runAgent(agent, "prompt", "proj", "thread", {
+      memory: false,
+      maxSteps: 7,
+      model: override as never,
+    });
+    assert.equal(text, "ok");
+    assert.equal(seen[0]?.maxSteps, 7);
+    assert.deepEqual(seen[0]?.model, override);
+  });
+});
+
 describe("runAgentLiveTurn turn budget", () => {
+  it("fails typed when a streaming turn is truncated", async () => {
+    const agent = stubAgent({
+      stream: async () => ({
+        fullStream: (async function* () {
+          yield { type: "text-delta", textDelta: "partial" };
+        })(),
+        text: Promise.resolve("partial"),
+        finishReason: "length",
+      }),
+    });
+    await assert.rejects(
+      () =>
+        runAgentLiveTurn(agent, "prompt", "proj", "thread", {
+          timeoutMs: 500,
+        }),
+      /agent_truncated: Stub Agent exceeded its token budget/,
+    );
+  });
+
+  it("maps a caller abort to LiveTurnInterruptedError", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const agent = stubAgent({
+      stream: async () => new Promise(() => undefined),
+    });
+    await assert.rejects(
+      () =>
+        runAgentLiveTurn(agent, "prompt", "proj", "thread", {
+          abortSignal: controller.signal,
+          timeoutMs: 500,
+        }),
+      (err: unknown) => {
+        assert.equal((err as Error).name, "LiveTurnInterruptedError");
+        return true;
+      },
+    );
+  });
+
   it("aborts the stream when the turn times out", async () => {
     let captured: AbortSignal | undefined;
     const agent = stubAgent({

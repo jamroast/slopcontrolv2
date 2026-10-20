@@ -750,3 +750,149 @@ describe("chatJson AI SDK transport", () => {
     }
   });
 });
+
+describe("chatJson AI SDK transport ladder", () => {
+  const endpoint: LlmEndpoint = {
+    id: "test",
+    label: "test",
+    baseUrl: "http://example.test/v1",
+    apiType: "openai-chat",
+    modelId: "test-model",
+    capabilities: { chat: true, vision: false, imageGen: false },
+  };
+  const completion = (content: string, finishReason = "stop") =>
+    new Response(
+      JSON.stringify({
+        id: "chatcmpl-test",
+        object: "chat.completion",
+        created: 0,
+        model: "test-model",
+        choices: [
+          { index: 0, message: { role: "assistant", content }, finish_reason: finishReason },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+
+  it("parses fenced JSON on the no-schema text path", async () => {
+    const fetchMock = mock.method(globalThis, "fetch", async () =>
+      completion('Here is the answer:\n\n```json\n{"a":1}\n```'),
+    );
+    try {
+      const res = await chatJson({ endpoint, system: "sys", user: "user" });
+      assert.deepEqual(res.parsed, { a: 1 });
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("retries the text path with a larger budget when truncated", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: string, init?: RequestInit) => {
+        calls += 1;
+        bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return calls === 1
+          ? completion('{"a":1', "length")
+          : completion('{"a":1}');
+      },
+    );
+    const tokens = (b: Record<string, unknown>): number =>
+      Number(b.max_tokens ?? b.max_completion_tokens ?? 0);
+    try {
+      const res = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        maxTokens: 512,
+      });
+      assert.deepEqual(res.parsed, { a: 1 });
+      assert.equal(calls, 2);
+      assert.ok(tokens(bodies[1]!) > tokens(bodies[0]!));
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("walks structured → text → fetch when structured output stays empty", async () => {
+    let calls = 0;
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async () => {
+        calls += 1;
+        // 1: structured attempt (empty) → 2: text attempt (empty) → 3: fetch.
+        return calls >= 3 ? completion('{"targets":"both"}') : completion("");
+      },
+    );
+    try {
+      const res = await chatJson({
+        endpoint,
+        system: "sys",
+        user: "user",
+        schema: z.object({ targets: z.string() }),
+      });
+      assert.deepEqual(res.parsed, { targets: "both" });
+      assert.ok(calls >= 3, `expected structured, text, then fetch; got ${calls}`);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("surfaces the legacy timeout text when the provider hangs", async () => {
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("The operation was aborted.", "AbortError")),
+          );
+        }),
+    );
+    try {
+      await assert.rejects(
+        () =>
+          chatJson({
+            endpoint,
+            system: "sys",
+            user: "user",
+            schema: z.object({ a: z.number() }),
+            timeoutMs: 25,
+            emptyContentRetries: 0,
+          }),
+        /JSON chat timed out after/,
+      );
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("uses the direct transport for api types the AI SDK path declines", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: string, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return completion('{"a":1}');
+      },
+    );
+    try {
+      const res = await chatJson({
+        endpoint: { ...endpoint, apiType: "openai-responses" },
+        system: "sys",
+        user: "user",
+      });
+      assert.deepEqual(res.parsed, { a: 1 });
+      assert.equal(bodies.length, 1);
+      assert.equal(bodies[0]?.response_format, undefined);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+});

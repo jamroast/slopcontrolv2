@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildAgentModelChain, type MastraModelConfig } from "./index.js";
+import {
+  buildAgentModelChain,
+  LlmRegistry,
+  type MastraModelConfig,
+} from "./index.js";
 
 const model = (name: string, url = "http://example.test/v1"): MastraModelConfig => ({
   id: `openai/${name}`,
@@ -56,5 +60,56 @@ describe("buildAgentModelChain", () => {
         { model: fallback, maxRetries: 1 },
       ],
     );
+  });
+});
+
+describe("buildAgentModelChain with a real registry", () => {
+  const endpoints = (primaryModel: string, secondaryModel: string) => [
+    {
+      id: "a",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      apiType: "openai-chat" as const,
+      modelId: primaryModel,
+      capabilities: { chat: true, vision: false, imageGen: false },
+    },
+    {
+      id: "b",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      apiType: "openai-chat" as const,
+      modelId: secondaryModel,
+      capabilities: { chat: true, vision: false, imageGen: false },
+    },
+  ];
+
+  it("derives the fallback from the role graph (supervisor model)", () => {
+    const registry = new LlmRegistry({
+      endpoints: endpoints("model-a", "model-b"),
+      roles: {
+        planning: { endpointId: "a" },
+        research: { endpointId: "a" },
+        supervisor: { endpointId: "b" },
+        coding: { endpointId: "b" },
+      },
+    });
+    const chain = buildAgentModelChain(registry, "planning");
+    assert.ok(Array.isArray(chain), "expected a fallback chain");
+    assert.match(chain[0]!.model.id, /model-a$/);
+    assert.equal(chain[0]!.maxRetries, 2);
+    assert.match(chain[1]!.model.id, /model-b$/);
+    assert.equal(chain[1]!.maxRetries, 1);
+  });
+
+  it("stays a single model when every role shares one model", () => {
+    const registry = new LlmRegistry({
+      endpoints: endpoints("model-a", "model-b"),
+      roles: {
+        planning: { endpointId: "a" },
+        research: { endpointId: "a" },
+        supervisor: { endpointId: "a" },
+        coding: { endpointId: "a" },
+      },
+    });
+    const chain = buildAgentModelChain(registry, "planning");
+    assert.ok(!Array.isArray(chain), "expected the plain model config");
   });
 });
