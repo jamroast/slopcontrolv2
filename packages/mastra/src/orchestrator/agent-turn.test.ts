@@ -36,7 +36,7 @@ describe("agentFinishReason", () => {
   });
 });
 
-describe("runAgent turn budget", () => {
+describe("runAgent token budget", () => {
   it("aborts the generation when the turn times out", async () => {
     let captured: AbortSignal | undefined;
     const agent = stubAgent({
@@ -116,7 +116,7 @@ describe("runAgent turn budget", () => {
   });
 });
 
-describe("runAgent turn budget", () => {
+describe("runAgent timeout and options", () => {
   it("does not retry a timed-out turn", async () => {
     let calls = 0;
     const agent = stubAgent({
