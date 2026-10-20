@@ -404,6 +404,32 @@ describe("quality-judge convergence memory", () => {
     ]);
   });
 
+  it("never seeds from judge-infra diagnoses (transport messages, not content gaps)", () => {
+    const infra = {
+      title: "Draft rejected: phase quality judge infra",
+      tags: ["planning", "draft", "phase-quality-infra"],
+      issues: [
+        "PHASE quality could not be verified (JSON chat timed out after 300000ms)",
+      ],
+      updatedAt: "2026-10-20T10:00:00.000Z",
+    };
+    assert.deepEqual(priorQualityJudgeGapsFromDiagnosis(infra), []);
+    // Legacy infra diagnosis without tags — the title branch must not leak it.
+    const legacyInfra = {
+      title: "Draft rejected: phase quality judge infra",
+      issues: ["PHASE quality could not be verified (LLM judge failed)"],
+    };
+    assert.deepEqual(priorQualityJudgeGapsFromDiagnosis(legacyInfra), []);
+    // …while a legacy QUALITY diagnosis (no tags) still seeds via its title.
+    const legacyQuality = {
+      title: "Draft rejected: phase quality judge",
+      issues: ["Verdict line undeclared"],
+    };
+    assert.deepEqual(priorQualityJudgeGapsFromDiagnosis(legacyQuality), [
+      "Verdict line undeclared",
+    ]);
+  });
+
   it("drops seeds when RESEARCH.md was regenerated after the verdict", () => {
     const diagnosedAt = Date.parse(qualityDiagnosis.updatedAt);
     // Research older than the verdict → still relevant.

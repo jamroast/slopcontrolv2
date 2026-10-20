@@ -396,9 +396,13 @@ export function priorQualityJudgeGapsFromDiagnosis(
 ): string[] {
   if (!diagnosis) return [];
   const tags = diagnosis.tags ?? [];
+  // Infra diagnoses ("…phase quality judge infra", kind phase-quality-infra)
+  // carry transport messages, not content gaps — they must not seed either.
   const isQuality =
-    tags.includes("phase-quality") ||
-    /phase quality judge/i.test(diagnosis.title ?? "");
+    !tags.includes("phase-quality-infra") &&
+    (tags.includes("phase-quality") ||
+      (/phase quality judge/i.test(diagnosis.title ?? "") &&
+        !/infra/i.test(diagnosis.title ?? "")));
   if (!isQuality) return [];
   const structured = (diagnosis.issues ?? [])
     .map((issue) => issue.trim())
