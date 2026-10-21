@@ -482,6 +482,40 @@ describe("quality-judge convergence memory", () => {
     );
   });
 
+  it("keeps draft-attributed gaps and drops research ones when RESEARCH regenerated", () => {
+    const diagnosedAt = Date.parse(qualityDiagnosis.updatedAt);
+    const ledgerDiagnosis = {
+      ...qualityDiagnosis,
+      openIssues: ["draft: bare npm test", "research: stale file claim"],
+      researchIssues: ["research: stale file claim"],
+      draftIssues: ["draft: bare npm test"],
+    };
+    // Research regenerated after the verdict → drop research gaps, keep draft.
+    assert.deepEqual(
+      seedPriorQualityGaps({
+        diagnosis: ledgerDiagnosis,
+        researchMtimeMs: diagnosedAt + 60_000,
+      }),
+      ["draft: bare npm test"],
+    );
+    // Research older than the verdict → keep everything.
+    assert.deepEqual(
+      seedPriorQualityGaps({
+        diagnosis: ledgerDiagnosis,
+        researchMtimeMs: diagnosedAt - 60_000,
+      }),
+      ["draft: bare npm test", "research: stale file claim"],
+    );
+    // Legacy diagnosis without the split → old fail-safe (drop all on regen).
+    assert.deepEqual(
+      seedPriorQualityGaps({
+        diagnosis: qualityDiagnosis,
+        researchMtimeMs: diagnosedAt + 60_000,
+      }),
+      [],
+    );
+  });
+
   it("dropping resolved gaps is whitespace/case tolerant but otherwise verbatim", () => {
     const prior = ["Check 2 greps `runs the /auth`", "Verdict line undeclared"];
     assert.deepEqual(

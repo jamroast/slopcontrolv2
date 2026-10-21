@@ -12,7 +12,7 @@
  * judgment/classification, so it stays deterministic.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractSection } from "./markdown.js";
 
@@ -89,5 +89,83 @@ export function formatCheckTargetsPromptBlock(
     ...lines,
     "",
     "A check that targets an `exists` path is grounded even when RESEARCH.md does not name it — do not fail it for being absent from the research excerpt. A `NEW` path is declared in ## File Changes, so this phase creates it — a check may assert it. A `MISSING` path is neither present nor declared — that is a real defect.",
+  ].join("\n");
+}
+
+export type VerifiedGrepToken = {
+  /** The literal string a `grep -q` asserts exists in the target file. */
+  token: string;
+  path: string;
+  /** true when the token appears verbatim in the on-disk file. */
+  found: boolean;
+};
+
+/**
+ * Deterministic grep-token verification: for each `grep -q '<literal>' <path>`
+ * (or `grep -rq`) in a shell fence, check that the literal token actually
+ * appears in the on-disk file. A token that does not is a no-op guard or a
+ * speculative doc string — the check would fail at verify time.
+ *
+ * Only single literal tokens are checked (no regex metacharacters or `|`
+ * alternation, which need a real engine to evaluate) — this stays structural.
+ */
+export function verifyGrepTokens(
+  projectRoot: string,
+  phaseDoc: string,
+  max = 60,
+): VerifiedGrepToken[] {
+  const results: VerifiedGrepToken[] = [];
+  const push = (token: string, path: string, found: boolean) => {
+    if (results.length >= max) return;
+    results.push({ token, path, found });
+  };
+  for (const fence of phaseDoc.matchAll(SHELL_FENCE_RE)) {
+    const body = fence[1] ?? "";
+    // grep -q / grep -rq with a quoted pattern and a target path.
+    const re = /\bgrep\s+(?:-[A-Za-z]+\s+)*(['"])([^'"]+)\1\s+([^\s;&|]+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(body)) !== null) {
+      const pattern = match[2] ?? "";
+      const path = (match[3] ?? "").replace(/^\.\//, "");
+      if (!pattern || !path) continue;
+      // Only literal tokens — skip regex metacharacters and alternation.
+      if (/[|.^$*+?(){}[\]\\]/.test(pattern)) continue;
+      if (path.startsWith("/") || path.startsWith("~") || path.includes("://")) {
+        continue;
+      }
+      if (!path.includes("/")) continue;
+      let found = false;
+      try {
+        const abs = join(projectRoot, path);
+        if (existsSync(abs)) {
+          found = readFileSync(abs, "utf8").includes(pattern);
+        }
+      } catch {
+        found = false;
+      }
+      push(pattern, path, found);
+    }
+  }
+  return results;
+}
+
+/**
+ * Judge-facing block for grep tokens that do NOT appear in their target file
+ * (no-op guards / speculative doc strings). Empty when every literal token is
+ * grounded.
+ */
+export function formatGrepTokenMismatchesBlock(
+  tokens: VerifiedGrepToken[],
+): string {
+  const mismatches = tokens.filter((t) => !t.found);
+  if (mismatches.length === 0) return "";
+  const lines = mismatches.map(
+    (t) => `- \`grep -q '${t.token}' ${t.path}\` — token not present on disk`,
+  );
+  return [
+    "## Unverifiable grep tokens (token absent from its target file)",
+    ...lines,
+    "",
+    "These are real defects — a no-op guard or a speculative doc string the check can never satisfy. Flag them as gaps and require a concrete token that actually exists in the file.",
   ].join("\n");
 }

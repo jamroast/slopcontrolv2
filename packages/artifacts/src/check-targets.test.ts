@@ -6,7 +6,9 @@ import { describe, it } from "node:test";
 import {
   extractCheckTargetPaths,
   formatCheckTargetsPromptBlock,
+  formatGrepTokenMismatchesBlock,
   verifyCheckTargets,
+  verifyGrepTokens,
 } from "./check-targets.js";
 
 const doc = `# Phase 9 — demo
@@ -98,5 +100,46 @@ describe("verifyCheckTargets + prompt block", () => {
 
   it("returns an empty block when no repo targets are referenced", () => {
     assert.equal(formatCheckTargetsPromptBlock([]), "");
+  });
+});
+
+describe("verifyGrepTokens + mismatch block", () => {
+  it("flags literal grep tokens absent from their target file", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-tokens-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "index.ts"),
+      "export function createApp() {}\n",
+    );
+
+    const doc = "```bash\n" +
+      "grep -qF 'createApp' src/index.ts || exit 1\n" +
+      "grep -qF 'missingToken' src/index.ts || exit 1\n" +
+      "grep -qE 'create(App|Widget)' src/index.ts || exit 1\n" +
+      "```\n";
+
+    const tokens = verifyGrepTokens(root, doc);
+    const createApp = tokens.find((t) => t.token === "createApp");
+    const missing = tokens.find((t) => t.token === "missingToken");
+    assert.ok(createApp, "createApp should be extracted");
+    assert.equal(createApp!.found, true);
+    assert.ok(missing, "missingToken should be extracted");
+    assert.equal(missing!.found, false);
+    // Alternation / regex-group tokens are skipped (need a real engine).
+    assert.ok(!tokens.some((t) => t.token.includes("create(App")));
+
+    const block = formatGrepTokenMismatchesBlock(tokens);
+    assert.match(block, /missingToken/);
+    assert.doesNotMatch(block, /createApp/);
+  });
+
+  it("returns an empty block when every literal token is grounded", () => {
+    assert.equal(formatGrepTokenMismatchesBlock([]), "");
+    assert.equal(
+      formatGrepTokenMismatchesBlock([
+        { token: "x", path: "src/a.ts", found: true },
+      ]),
+      "",
+    );
   });
 });

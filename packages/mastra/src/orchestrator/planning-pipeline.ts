@@ -3,7 +3,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { isSpecificationAsk, PLANNING_AUTOMATED_CHECKS_RULES } from "@slopcontrol/artifacts";
+import { isSpecificationAsk, PLANNING_AUTOMATED_CHECKS_RULES, normalizeGap } from "@slopcontrol/artifacts";
 import { isChatJsonTimeoutError } from "@slopcontrol/llm";
 
 export type PlanningFaultLeg = "none" | "research" | "draft" | "both";
@@ -31,6 +31,9 @@ export const MAX_PLANNING_SELF_HEAL_ROUNDS = 3;
 
 /** Max retries per leg when that leg's quality judge rejects. */
 export const MAX_PLANNING_LEG_RETRIES = 2;
+
+/** Max research re-runs for a phase before failing closed (stale-research guard). */
+export const MAX_PLANNING_RESEARCH_RERUNS = 2;
 
 /** Max JSON judge retries on infra/parse failure before fail-closed. */
 export const MAX_PLANNING_JUDGE_RETRIES = 3;
@@ -352,6 +355,7 @@ export function priorDraftJudgeIssuesFromDiagnosis(
     evidence?: string;
     tags?: string[];
     issues?: string[];
+    draftIssues?: string[];
   } | null,
 ): string[] {
   if (!diagnosis) return [];
@@ -360,7 +364,11 @@ export function priorDraftJudgeIssuesFromDiagnosis(
     tags.includes("draft") || /^draft rejected/i.test(diagnosis.title ?? "");
   if (!isDraftGate) return [];
   // Structured gaps are authoritative (a gap may itself contain "; ").
-  const structured = (diagnosis.issues ?? [])
+  // Prefer the draft-attributed ledger when present, so a research re-run no
+  // longer re-feeds research-only gaps to the drafter.
+  const structured = (
+    diagnosis.draftIssues?.length ? diagnosis.draftIssues : (diagnosis.issues ?? [])
+  )
     .map((issue) => issue.trim())
     .filter(Boolean);
   if (structured.length > 0) return [...new Set(structured)];
@@ -392,11 +400,12 @@ export function priorQualityJudgeGapsFromDiagnosis(
     evidence?: string;
     tags?: string[];
     issues?: string[];
+    openIssues?: string[];
   } | null,
 ): string[] {
   if (!diagnosis) return [];
   const tags = diagnosis.tags ?? [];
-  // Infra diagnoses ("…phase quality judge infra", kind phase-quality-infra)
+  // Infra diagnoses (“…phase quality judge infra”, kind phase-quality-infra)
   // carry transport messages, not content gaps — they must not seed either.
   const isQuality =
     !tags.includes("phase-quality-infra") &&
@@ -411,7 +420,11 @@ export function priorQualityJudgeGapsFromDiagnosis(
     [...new Set(issues.map((issue) => issue.trim()).filter(Boolean))].filter(
       (issue) => !isPlanningJudgeInfraIssue(issue),
     );
-  const structured = contentGaps(diagnosis.issues ?? []);
+  // Prefer the cumulative ledger; fall back to this verdict's issues for
+  // older diagnoses written before the ledger existed.
+  const structured = contentGaps(
+    diagnosis.openIssues?.length ? diagnosis.openIssues : (diagnosis.issues ?? []),
+  );
   if (structured.length > 0) return structured;
   const detail = (diagnosis.evidence || diagnosis.rootCause || "").trim();
   if (!detail) return [];
@@ -421,10 +434,11 @@ export function priorQualityJudgeGapsFromDiagnosis(
 /**
  * Seed the quality judge's convergence memory.
  *
- * Returns [] when the only diagnosis is not a quality verdict, or when
- * RESEARCH.md was regenerated after that verdict — a re-research leg can
- * invalidate the facts the old gaps were about, and re-asserting them would
- * keep a resolved/obsolete item in the loop forever.
+ * Returns [] when the only diagnosis is not a quality verdict. When
+ * RESEARCH.md was regenerated after the verdict, drops only research-
+ * attributed gaps — a re-research leg can invalidate the facts those gaps were
+ * about, but draft-mechanics gaps (which no research change can fix) stay in
+ * the loop so they are not forgotten and rediscovered a later round.
  */
 export function seedPriorQualityGaps(opts: {
   diagnosis: {
@@ -433,6 +447,9 @@ export function seedPriorQualityGaps(opts: {
     evidence?: string;
     tags?: string[];
     issues?: string[];
+    openIssues?: string[];
+    researchIssues?: string[];
+    draftIssues?: string[];
     updatedAt?: string;
   } | null;
   researchMtimeMs?: number;
@@ -442,14 +459,22 @@ export function seedPriorQualityGaps(opts: {
   const gaps = priorQualityJudgeGapsFromDiagnosis(diagnosis);
   if (gaps.length === 0) return [];
   const diagnosedAt = Date.parse(diagnosis.updatedAt ?? "");
-  if (
+  const researchRegen =
     Number.isFinite(diagnosedAt) &&
     typeof opts.researchMtimeMs === "number" &&
-    opts.researchMtimeMs > diagnosedAt
-  ) {
-    return [];
-  }
-  return gaps;
+    opts.researchMtimeMs > diagnosedAt;
+  if (!researchRegen) return gaps;
+  // Research regenerated. With the ledger split we keep draft-attributed gaps
+  // and drop only research ones; without it (legacy diagnosis) we cannot
+  // distinguish, so we preserve the old fail-safe: drop everything.
+  const hasSplit =
+    Array.isArray(diagnosis.researchIssues) ||
+    Array.isArray(diagnosis.draftIssues);
+  if (!hasSplit) return [];
+  const research = new Set(
+    (diagnosis.researchIssues ?? []).map((g) => normalizeGap(g)),
+  );
+  return gaps.filter((g) => !research.has(normalizeGap(g)));
 }
 
 /**

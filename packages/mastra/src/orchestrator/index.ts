@@ -138,6 +138,8 @@ import {
   type RevisionArtifactOutcome,
   readDiagnosis,
   readLatestDiagnosisForPhase,
+  mergePlanningIssueLedger,
+  normalizeGap,
   clearPhaseDiagnosis,
   clearRunDiagnosis,
   deleteRunDiagnosis,
@@ -276,6 +278,8 @@ import {
   SLOPCONTROL_TEST_SERVICES_ENV,
   formatCheckTargetsPromptBlock,
   verifyCheckTargets,
+  formatGrepTokenMismatchesBlock,
+  verifyGrepTokens,
 } from "@slopcontrol/artifacts";
 import { attemptDevelopPhaseChecksSelfHeal } from "./develop-phase-self-heal.js";
 import {
@@ -353,6 +357,7 @@ import {
   isPlanningJudgeInfraIssue,
   MAX_PLANNING_JUDGE_RETRIES,
   MAX_PLANNING_LEG_RETRIES,
+  MAX_PLANNING_RESEARCH_RERUNS,
   MAX_PLANNING_SELF_HEAL_ROUNDS,
   mergeFaultLegs,
   phaseQualityRetryPrompt,
@@ -2677,6 +2682,7 @@ function tryBindPhaseDocQualityJudge(
   researchExcerpt: string;
   phaseDocExcerpt: string;
   checkTargetsBlock?: string;
+  grepTokenMismatchesBlock?: string;
   priorGaps?: string[];
 }) => ReturnType<typeof judgePhaseDocQualityViaLlm>) | null {
   const ep = resolved ?? resolvePlanningJudgeEndpoint(registry);
@@ -2690,6 +2696,7 @@ function tryBindPhaseDocQualityJudge(
       researchExcerpt: input.researchExcerpt,
       phaseDocExcerpt: input.phaseDocExcerpt,
       checkTargetsBlock: input.checkTargetsBlock,
+      grepTokenMismatchesBlock: input.grepTokenMismatchesBlock,
       priorGaps: input.priorGaps,
     });
 }
@@ -2774,6 +2781,9 @@ export class ChangeOrchestrator {
     faultLeg: PlanningFaultLeg;
     issues: string[];
     judgeInfraFailed?: boolean;
+    openIssues?: string[];
+    researchIssues?: string[];
+    draftIssues?: string[];
   } = { faultLeg: "none", issues: [] };
 
   private resetPlanningGateOutcome(): void {
@@ -6156,6 +6166,10 @@ Phase id: ${input.phase.id}`;
     let priorGateFingerprints: string[] = [];
     let intentReclassified = false;
     let priorJudgeIssues: string[] = [];
+    let priorQualityGapsSeed: string[] = [];
+    let researchReruns =
+      readLatestDiagnosisForPhase(project.rootPath, phase.id)?.researchReruns ??
+      0;
 
     for (let round = 0; round < MAX_PLANNING_SELF_HEAL_ROUNDS; round++) {
       if (round > 0) {
@@ -6167,8 +6181,30 @@ Phase id: ${input.phase.id}`;
         deleteRunDiagnosis(project.rootPath, run.id, phase.id);
 
         priorJudgeIssues = [...this.planningGateOutcome.issues];
+        priorQualityGapsSeed = [
+          ...(this.planningGateOutcome.openIssues ?? []),
+        ];
 
         if (faultLeg === "research" || faultLeg === "both") {
+          if (researchReruns >= MAX_PLANNING_RESEARCH_RERUNS) {
+            this.persistDiagnosis(
+              project,
+              run,
+              buildPlanningFailureDiagnosis({
+                stage: "research",
+                title: "Research budget exhausted",
+                detail: `Phase ${phase.id} exceeded ${MAX_PLANNING_RESEARCH_RERUNS} research re-runs without producing a judge-passing draft. The research leg keeps being rejected — surface the unresolved gaps to the operator rather than looping.`,
+                phaseId: phase.id,
+                runId: run.id,
+                kind: "research-budget",
+                faultLeg: "research",
+                researchReruns,
+              }),
+              phase.id,
+            );
+            return "failed";
+          }
+          researchReruns++;
           onStage?.("researching");
           const feedback = formatJudgeFeedbackBlock({
             title: "Planning self-heal — re-run research",
@@ -6219,6 +6255,8 @@ Phase id: ${input.phase.id}`;
         deferFailureDiagnosis: round < MAX_PLANNING_SELF_HEAL_ROUNDS - 1,
         selfHealRound: round,
         priorJudgeIssues,
+        priorQualityGapsSeed,
+        researchReruns,
       });
 
       if (stage === "in_review") return "in_review";
@@ -6866,6 +6904,10 @@ Phase id: ${phase.id}`;
     selfHealRound?: number;
     /** Prior self-heal round's judge gaps, injected into the re-draft prompt. */
     priorJudgeIssues?: string[];
+    /** Cumulative quality-judge convergence gaps carried across self-heal rounds. */
+    priorQualityGapsSeed?: string[];
+    /** Research re-runs already consumed for this phase (carried across rounds). */
+    researchReruns?: number;
   }): Promise<RunStage> {
     const {
       project,
@@ -6874,6 +6916,8 @@ Phase id: ${phase.id}`;
       onStage,
       deferFailureDiagnosis,
       priorJudgeIssues,
+      priorQualityGapsSeed,
+      researchReruns,
     } = input;
     onStage?.("drafting");
     log(project, run, "--- Drafting PHASE.md ---");
@@ -7180,6 +7224,10 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
         judgeInfraFailed?: boolean;
         /** Structured gaps (authoritative when a gap itself contains "; "). */
         issues?: string[];
+        /** Judge verdict split — enables the cumulative open-issue ledger. */
+        resolvedGaps?: string[];
+        researchFaults?: string[];
+        draftFaults?: string[];
       },
     ): RunStage => {
       log(
@@ -7205,11 +7253,40 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
         : rawFaultLeg === "none"
           ? "draft"
           : rawFaultLeg;
+      // Cumulative open-issue ledger: accumulate a judge verdict into the
+      // prior phase ledger; a non-judge gate failure carries the prior ledger
+      // forward so a structural wipe can never forget an unresolved judge gap.
+      const prevDiagnosis = readLatestDiagnosisForPhase(
+        project.rootPath,
+        phase.id,
+      );
+      const isJudgeVerdict =
+        Array.isArray(opts?.resolvedGaps) ||
+        Array.isArray(opts?.researchFaults) ||
+        Array.isArray(opts?.draftFaults);
+      const ledger = mergePlanningIssueLedger(
+        prevDiagnosis
+          ? {
+              openIssues: prevDiagnosis.openIssues ?? prevDiagnosis.issues ?? [],
+              researchIssues: prevDiagnosis.researchIssues ?? [],
+              draftIssues: prevDiagnosis.draftIssues ?? [],
+            }
+          : null,
+        {
+          gaps: opts?.issues ?? [],
+          resolvedGaps: isJudgeVerdict ? (opts?.resolvedGaps ?? []) : [],
+          researchFaults: isJudgeVerdict ? (opts?.researchFaults ?? []) : [],
+          draftFaults: isJudgeVerdict ? (opts?.draftFaults ?? []) : [],
+        },
+      );
       if (deferFailureDiagnosis) {
         this.planningGateOutcome = {
           faultLeg: outcomeFaultLeg,
           issues: nextSelfHealDraftIssues(detail, opts?.issues),
           judgeInfraFailed: opts?.judgeInfraFailed,
+          openIssues: ledger.openIssues,
+          researchIssues: ledger.researchIssues,
+          draftIssues: ledger.draftIssues,
         };
         return "failed";
       }
@@ -7228,6 +7305,15 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
           runId: run.id,
           kind,
           ...(opts?.issues?.length ? { issues: opts.issues } : {}),
+          ...(ledger.openIssues.length ? { openIssues: ledger.openIssues } : {}),
+          ...(ledger.researchIssues.length
+            ? { researchIssues: ledger.researchIssues }
+            : {}),
+          ...(ledger.draftIssues.length ? { draftIssues: ledger.draftIssues } : {}),
+          ...(typeof researchReruns === "number" ||
+          typeof prevDiagnosis?.researchReruns === "number"
+            ? { researchReruns: researchReruns ?? prevDiagnosis?.researchReruns ?? 0 }
+            : {}),
           faultLeg:
             outcomeFaultLeg === "none" ? undefined : outcomeFaultLeg,
         }),
@@ -7812,12 +7898,26 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
       diagnosis: readLatestDiagnosisForPhase(project.rootPath, phase.id),
       researchMtimeMs,
     });
+    // Union with the cumulative gaps carried across self-heal rounds so a
+    // deferred round does not reset the judge's convergence memory.
+    if (priorQualityGapsSeed?.length) {
+      const seen = new Set(priorQualityGaps.map((g) => normalizeGap(g)));
+      for (const g of priorQualityGapsSeed) {
+        if (!seen.has(normalizeGap(g))) {
+          seen.add(normalizeGap(g));
+          priorQualityGaps.push(g);
+        }
+      }
+    }
     while (true) {
       // Deterministic: which repo paths the Automated Checks target, and
       // whether they exist. Lets the judge distinguish a real missing file
       // from a target RESEARCH simply never mentioned.
       const checkTargetsBlock = formatCheckTargetsPromptBlock(
         verifyCheckTargets(project.rootPath, phaseDocForQuality),
+      );
+      const grepTokenMismatchesBlock = formatGrepTokenMismatchesBlock(
+        verifyGrepTokens(project.rootPath, phaseDocForQuality),
       );
       let phaseQuality: PhaseDocQualityVerdict;
       let phaseJudgeInfra: boolean;
@@ -7839,6 +7939,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
                   `.slopcontrol/phases/${phase.id}/PHASE.md`,
                 ),
                 checkTargetsBlock,
+                grepTokenMismatchesBlock,
                 priorGaps: priorQualityGaps,
               }),
             (v) => v.gaps,
@@ -7860,6 +7961,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
                         `.slopcontrol/phases/${phase.id}/PHASE.md`,
                       ),
                       checkTargetsBlock,
+                      grepTokenMismatchesBlock,
                       priorGaps: priorQualityGaps,
                     })
                 : undefined,
@@ -7923,6 +8025,9 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
           kind: "phase-quality",
           faultLeg: qualityFaultLeg,
           issues: phaseQuality.gaps,
+          resolvedGaps: phaseQuality.resolvedGaps,
+          researchFaults: phaseQuality.researchFaults,
+          draftFaults: phaseQuality.draftFaults,
         });
       }
 

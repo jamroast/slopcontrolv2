@@ -80,6 +80,8 @@ export interface JudgePhaseDocQualityOptions {
   phaseDocExcerpt: string;
   /** Deterministic existence list for paths referenced by Automated Checks. */
   checkTargetsBlock?: string;
+  /** Deterministic list of grep tokens absent from their target file. */
+  grepTokenMismatchesBlock?: string;
   /**
    * Gaps the judge already raised against an earlier draft of this PHASE.
    * Supplied on re-judgement so the judge verifies resolution instead of
@@ -173,6 +175,9 @@ export async function judgePhaseDocQualityViaLlm(
       clip(opts.researchExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),
       "",
       opts.checkTargetsBlock ? opts.checkTargetsBlock : "",
+      "",
+      opts.grepTokenMismatchesBlock ? opts.grepTokenMismatchesBlock : "",
+      "",
       "",
       formatPriorGapsConvergenceBlock(opts.priorGaps ?? []),
       "",

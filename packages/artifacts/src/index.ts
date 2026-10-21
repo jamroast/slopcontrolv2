@@ -1257,6 +1257,11 @@ export function phaseDiagnosisPath(projectRoot: string, phaseId: string): string
 }
 
 export type { PersistedDiagnosis } from "./diagnosis.js";
+export {
+  mergePlanningIssueLedger,
+  normalizeGap,
+  type PlanningIssueLedger,
+} from "./diagnosis.js";
 
 /** Replace failure diagnosis with a success stub when the phase completes. */
 export function clearPhaseDiagnosis(
@@ -1571,6 +1576,15 @@ export function buildPlanningFailureDiagnosis(opts: {
    * the array and let retry_draft/self-heal feed it back verbatim.
    */
   issues?: string[];
+  /**
+   * Already-merged cumulative ledger (computed by the caller via
+   * mergePlanningIssueLedger against the prior phase diagnosis). Persisted
+   * verbatim so the next round seeds from the full ledger, not this verdict.
+   */
+  openIssues?: string[];
+  researchIssues?: string[];
+  draftIssues?: string[];
+  researchReruns?: number;
 }): PersistedDiagnosis {
   const detail = (opts.detail ?? "").trim() || "(no detail)";
   const kind =
@@ -1616,6 +1630,18 @@ export function buildPlanningFailureDiagnosis(opts: {
             .filter(Boolean)
             .slice(0, 40),
         }
+      : {}),
+    ...(opts.openIssues?.length
+      ? { openIssues: opts.openIssues.map((g) => g.trim()).filter(Boolean) }
+      : {}),
+    ...(opts.researchIssues?.length
+      ? { researchIssues: opts.researchIssues.map((g) => g.trim()).filter(Boolean) }
+      : {}),
+    ...(opts.draftIssues?.length
+      ? { draftIssues: opts.draftIssues.map((g) => g.trim()).filter(Boolean) }
+      : {}),
+    ...(typeof opts.researchReruns === "number"
+      ? { researchReruns: opts.researchReruns }
       : {}),
     fingerprint: `planning-${kind}-${fingerprint}`,
     codingAgentShouldFix: true,
