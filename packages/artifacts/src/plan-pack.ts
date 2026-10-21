@@ -19,6 +19,14 @@ import { parsePlanDependencyLines } from "./cross-project-catalog.js";
 
 const SLOP_DIR = ".slopcontrol";
 
+function truncateAtWordBoundary(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  const end = lastSpace > Math.floor(max * 0.5) ? lastSpace : max;
+  return `${text.slice(0, end).trimEnd()}…`;
+}
+
 export type PlanPackDependency = {
   kind: "element" | "npm" | "project";
   id: string;
@@ -95,9 +103,10 @@ export function compilePlanPackFromAccept(opts: {
     preserve: [],
     source: "accept",
   };
-  const goal =
-    extractPlanSection(plan, "Goal")?.replace(/\s+/g, " ").trim().slice(0, 500) ||
-    meta.brief;
+  const rawGoal = extractPlanSection(plan, "Goal")
+    ?.replace(/\s+/g, " ")
+    .trim();
+  const goal = rawGoal ? truncateAtWordBoundary(rawGoal, 500) : meta.brief;
   const inScopeBullets = extractPlanBulletLines(
     extractPlanSection(plan, "In scope"),
   );
@@ -359,7 +368,7 @@ export function compileAndWritePlanPackOnAccept(opts: {
 /** Short phase description for store/roadmap from pack. */
 export function phaseDescriptionFromPlanPack(pack: PlanPack): string {
   const lines = [
-    pack.goal.slice(0, 400),
+    pack.goal,
     "",
     `Focus: ${pack.focus} (${pack.kind})`,
   ];
@@ -369,5 +378,5 @@ export function phaseDescriptionFromPlanPack(pack: PlanPack): string {
       lines.push(`- ${s}`);
     }
   }
-  return lines.join("\n").slice(0, 4_000);
+  return truncateAtWordBoundary(lines.join("\n"), 4_000);
 }

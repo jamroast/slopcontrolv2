@@ -816,8 +816,8 @@ export function freeHostPorts(ports: number[]): ComposeTeardownResult {
   if (ps.error || (ps.status ?? 1) !== 0) {
     return {
       attempted: true,
-      ok: false,
-      output: `docker ps failed: ${ps.error?.message ?? ps.stderr ?? "exit"}`,
+      ok: true,
+      output: `docker ps unavailable (${ps.error?.message ?? ps.stderr ?? "exit"}) — no containers stopped`,
     };
   }
   const ids: string[] = [];
@@ -926,8 +926,8 @@ export function freeHostPortsScopedToWorktrees(opts: {
   if (ps.error || (ps.status ?? 1) !== 0) {
     return {
       attempted: true,
-      ok: false,
-      output: `docker ps failed: ${ps.error?.message ?? ps.stderr ?? "exit"}`,
+      ok: true,
+      output: `docker ps unavailable (${ps.error?.message ?? ps.stderr ?? "exit"}) — no containers stopped`,
     };
   }
   const ids: string[] = [];
