@@ -17,9 +17,14 @@ export const CHAT_JSON_DEFAULT_TIMEOUT_MS = 300_000;
 /** Default completion budget when caller and endpoint omit maxTokens. */
 export const CHAT_JSON_DEFAULT_MAX_TOKENS = 4096;
 
-/** Planning quality / intent judges — large excerpts + reasoning headroom. */
+/** Planning quality / intent judges — big excerpts + reasoning headroom. */
 export const CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS = 300_000;
-export const CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS = 8192;
+/**
+ * 8k was too small for reasoning-model judges: deepseek-v4-pro burns ~15k
+ * tokens on chain-of-thought for an 80k-char PHASE judge prompt before the
+ * answer. 32k (the truncation cap) lets a reasoning judge finish in one call.
+ */
+export const CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS = 32_768;
 
 /**
  * Shared RESEARCH.md / PHASE.md excerpt budget for planning judges and the
@@ -83,6 +88,43 @@ export interface ChatJsonResult {
 
 const JSON_ONLY_NUDGE =
   "\n\nIMPORTANT: Respond with ONLY a single valid JSON object. No prose, no markdown, no explanation.";
+
+/** Completion budget shared by every truncation bump ladder. */
+const TRUNCATION_BUDGET_CAP = 32_768;
+
+/**
+ * Bump a completion budget after finish_reason=length (doubling, min +2k).
+ * Returns the next budget, or null when already at the cap.
+ */
+function nextTruncationBudget(current: number): number | null {
+  const bumped = Math.min(
+    TRUNCATION_BUDGET_CAP,
+    Math.max(current* 2, current + 2_048),
+  );
+  return bumped <= current ? null : bumped;
+}
+
+/**
+ * The first balanced, parseable JSON *object* in text (reasoning fallbacks can
+ * contain array literals mid-thought — a "received array" shape failure should
+ * never stop the scan before a real verdict object is checked).
+ */
+function extractJsonObject(text: string): unknown | null {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "{") continue;
+    const candidate = extractBalanced(text, i, "{");
+    if (candidate == null) continue;
+    try {
+      const value: unknown = JSON.parse(candidate);
+      if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+        return value;
+      }
+    } catch {
+      // Not valid JSON — keep scanning.
+    }
+  }
+  return null;
+}
 
 /** Human-readable zod issue summary (never a raw issues array). */
 export function formatZodIssues(error: ZodError): string {
@@ -299,6 +341,13 @@ export async function chatJsonFetch(
   // Only relax response_format after the provider returned empty content with
   // it forced — never as a last-resort against prose output.
   let dropJsonFormat = false;
+  // Mutable completion budget: finish_reason=length retries bump it instead of
+  // burning the same budget on a nudged retry (a truncation needs more tokens,
+  // not a different shape — reasoning-model judges exceed 8k before answering).
+  let maxTokensBudget =
+    opts.maxTokens ??
+    endpoint.defaultParams?.maxTokens ??
+    CHAT_JSON_DEFAULT_MAX_TOKENS;
   // Field-level reason from the previous shape failure, so a retry is told
   // which key was missing or which type was wrong — not only "send JSON".
   let shapeNudge = "";
@@ -317,10 +366,7 @@ export async function chatJsonFetch(
         { role: "user", content: userContent },
       ],
       temperature: opts.temperature ?? 0,
-      max_tokens:
-        opts.maxTokens ??
-        endpoint.defaultParams?.maxTokens ??
-        CHAT_JSON_DEFAULT_MAX_TOKENS,
+      max_tokens: maxTokensBudget,
     };
     // Keep json_object while retrying parse/prose failures. Drop it only after
     // an empty completion (some models return empty when response_format is
@@ -347,10 +393,39 @@ export async function chatJsonFetch(
       }
 
       const json = (await res.json()) as {
-        choices?: Array<{ message?: ChatMessage }>;
+        choices?: Array<{
+          message?: ChatMessage;
+          finish_reason?: string;
+          finishReason?: string;
+        }>;
       };
-      const text = extractChatMessageText(json.choices?.[0]?.message);
+      const finishReason =
+        json.choices?.[0]?.finish_reason ?? json.choices?.[0]?.finishReason;
+      const message = json.choices?.[0]?.message;
+      const text = extractChatMessageText(message);
+      // When content is empty the extractor fell back to reasoning text — a
+      // mid-thought scratch pad whose bracketed snippets are not the answer.
+      const contentText = (() => {
+        const c = message?.content;
+        if (typeof c === "string") return c.trim();
+        if (Array.isArray(c)) {
+          return c.map((p) => (typeof p?.text === "string" ? p.text : "")).filter(Boolean).join("\n").trim();
+        }
+        return "";
+      })();
+      const textFromReasoning = !contentText && Boolean(text);
+      // Truncated completion (reasoning models burn the whole budget on CoT):
+      // bump the budget rather than parse truncated chain-of-thought or retry
+      // the identical budget with a nudge.
+      const bumpOnTruncation = (): boolean => {
+        if (finishReason !== "length") return false;
+        const bumped = nextTruncationBudget(maxTokensBudget);
+        if (bumped == null || attempt >= maxAttempts) return false;
+        maxTokensBudget = bumped;
+        return true;
+      };
       if (!text) {
+        if (bumpOnTruncation()) continue;
         lastError = new Error(
           `JSON chat returned empty content (attempt ${attempt}/${maxAttempts})`,
         );
@@ -362,6 +437,7 @@ export async function chatJsonFetch(
       try {
         parsed = JSON.parse(stripJsonFence(text));
       } catch (err) {
+        if (bumpOnTruncation()) continue;
         lastError = new Error(
           `JSON chat parse failed: ${err instanceof Error ? err.message : String(err)} (attempt ${attempt}/${maxAttempts}; preview=${JSON.stringify(text.slice(0, 80))})`,
         );
@@ -384,7 +460,19 @@ export async function chatJsonFetch(
           const unwrapped = opts.schema.safeParse(parsed[0]);
           if (unwrapped.success) checked = unwrapped;
         }
+        // Truncated reasoning fallback: the extraction scan can land on an
+        // array literal from mid-thought text. Rescan for a verdict object.
+        // Content-based arrays keep the nudge contract (the model's whole
+        // answer really was an array — tell it to send an object instead).
+        if (!checked.success && Array.isArray(parsed) && textFromReasoning) {
+          const obj = extractJsonObject(text);
+          if (obj !== null) {
+            const rescued = opts.schema.safeParse(obj);
+            if (rescued.success) checked = rescued;
+          }
+        }
         if (!checked.success) {
+          if (bumpOnTruncation()) continue;
           const issues = formatZodIssues(checked.error);
           shapeNudge = `\n\nYour previous JSON failed schema validation: ${issues}.${opts.schemaHint ? ` ${opts.schemaHint}.` : ""}`;
           lastError = new Error(
@@ -428,8 +516,6 @@ export async function chatJsonFetch(
 }
 
 // ─── AI SDK transport (the layer Mastra runs on) ────────────────────────────
-
-const TRUNCATION_RETRY_CAP = 32_768;
 
 class JsonTruncatedError extends Error {
   constructor(message: string) {
@@ -597,11 +683,8 @@ export async function chatJson(opts: ChatJsonOptions): Promise<ChatJsonResult> {
       return await call(useSchema, baseBudget);
     } catch (err) {
       if (!(err instanceof JsonTruncatedError)) throw err;
-      const bumped = Math.min(
-        TRUNCATION_RETRY_CAP,
-        Math.max(baseBudget * 2, baseBudget + 2_048),
-      );
-      if (bumped <= baseBudget) throw err;
+      const bumped = nextTruncationBudget(baseBudget);
+      if (bumped == null) throw err;
       return call(useSchema, bumped);
     }
   };

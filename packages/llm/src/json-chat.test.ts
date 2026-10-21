@@ -1025,3 +1025,128 @@ describe("chatJson AI SDK transport ladder", () => {
     }
   });
 });
+
+describe("chatJson truncation + reasoning-fallback hardening", () => {
+  // Pin the fetch transport (like the empty-content suite above).
+  before(() => {
+    process.env.SLOPCONTROL_JUDGE_TRANSPORT = "fetch";
+  });
+  after(() => {
+    delete process.env.SLOPCONTROL_JUDGE_TRANSPORT;
+  });
+
+  it("bumps max_tokens when a truncated judge burns the budget on reasoning (finish_reason=length)", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async (_url: string, init?: RequestInit) => {
+        bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        const maxTokens = Number(bodies[bodies.length - 1]?.max_tokens ?? 0);
+        if (maxTokens < 16_384) {
+          // Reasoning model: all tokens consumed by chain-of-thought, content empty.
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  finish_reason: "length",
+                  message: { content: "", reasoning: "We need to judge… (mid-thought)" },
+                },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: "stop",
+                message: { content: '{"ok":false,"gaps":["g"]}' },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      },
+    );
+    try {
+      const res = await chatJson({
+        endpoint: {
+          id: "test",
+          label: "test",
+          baseUrl: "http://example.test/v1",
+          apiType: "openai-chat",
+          modelId: "test-model",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+        system: "sys",
+        user: "user",
+        schema: z.object({ ok: z.boolean(), gaps: z.array(z.string()) }),
+        maxTokens: 8_192,
+      });
+      assert.deepEqual(res.parsed, { ok: false, gaps: ["g"] });
+      assert.equal(bodies.length, 2);
+      assert.equal(bodies[0]?.max_tokens, 8_192);
+      assert.ok(
+        Number(bodies[1]?.max_tokens) > 8_192,
+        "second attempt must bump max_tokens after finish_reason=length",
+      );
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("rescues the verdict object when the extraction scan lands on an inner array", async () => {
+    // The truncated-reasoning failure mode: content empty, reasoning carries
+    // mid-thought text whose first bracket-balanced value is an array literal.
+    const reasoning =
+      'Need a Set of scopes: new Set(["user", "org", "role"]). Checking…\n\n' +
+      '{"ok":false,"gaps":["still failing"],"suggestedFixes":[],"resolvedGaps":[]}';
+    const fetchMock = mock.method(
+      globalThis,
+      "fetch",
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: "stop",
+                message: { content: "", reasoning },
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    try {
+      const res = await chatJson({
+        endpoint: {
+          id: "test",
+          label: "test",
+          baseUrl: "http://example.test/v1",
+          apiType: "openai-chat",
+          modelId: "test-model",
+          capabilities: { chat: true, vision: false, imageGen: false },
+        },
+        system: "sys",
+        user: "user",
+        schema: z.object({
+          ok: z.boolean(),
+          gaps: z.array(z.string()),
+          suggestedFixes: z.array(z.string()),
+          resolvedGaps: z.array(z.string()),
+        }),
+        maxTokens: 8_192,
+      });
+      assert.deepEqual(res.parsed, {
+        ok: false,
+        gaps: ["still failing"],
+        suggestedFixes: [],
+        resolvedGaps: [],
+      });
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+});
