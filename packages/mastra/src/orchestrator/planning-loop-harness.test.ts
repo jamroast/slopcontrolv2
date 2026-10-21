@@ -548,4 +548,81 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("carries a draft-mechanics gap across a research re-run via the open-issue ledger", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-ledger-"));
+    const judgeCalls: Captured[] = [];
+    const gapDraft = "Check 7 uses bare npm test without a path";
+    const gapResearch = "RESEARCH does not quote the exact doc string";
+
+    // A "both" fault returns immediately (no within-leg re-draft retry), so
+    // each draftPhase yields exactly one judge call.
+    const restore = installFetchStub({
+      judgeCalls,
+      judge: () => ({
+        ok: false,
+        gaps: [gapResearch, gapDraft],
+        researchFaults: [gapResearch],
+        draftFaults: [gapDraft],
+        resolvedGaps: [],
+      }),
+    });
+
+    try {
+      writeFixture(root);
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          phasePlannerAgent: stubAgent(() => PHASE_MD, [], join(phaseDir, "PHASE.md")),
+        } as unknown as OrchestratorAgents,
+      });
+
+      // Leg 1: draft fault → diagnosis persists the ledger with attribution split.
+      const first = await orchestrator.draftPhase({ project, phase, run });
+      assert.equal(first, "failed");
+      const diagnosis = readLatestDiagnosisForPhase(root, PHASE_ID);
+      assert.ok(diagnosis, "draft failure must persist a diagnosis");
+      assert.deepEqual(
+        diagnosis!.researchIssues,
+        [gapResearch],
+        "research-attributed gap must be persisted on the ledger",
+      );
+      assert.deepEqual(
+        diagnosis!.draftIssues,
+        [gapDraft],
+        "draft-attributed gap must be persisted on the ledger",
+      );
+      assert.ok(
+        (diagnosis!.openIssues ?? []).includes(gapDraft),
+        "openIssues is the union of the attribution buckets",
+      );
+
+      // Leg 2: regenerate RESEARCH.md directly (newer mtime than the verdict),
+      // then re-draft. Bypasses startResearch so we exercise the cross-run
+      // ledger (persisted diagnosis → next draftPhase seed), not the in-memory
+      // self-heal outcome.
+      writeFileSync(join(phaseDir, "RESEARCH.md"), RESEARCH_V2_MD);
+      const second = await orchestrator.draftPhase({ project, phase, run });
+      assert.equal(second, "failed");
+
+      // The re-judgement seeds the draft gap (survived research regen) but drops
+      // the research gap (its facts were regenerated).
+      const reJudgement = judgeCalls[judgeCalls.length - 1]?.user ?? "";
+      assert.match(reJudgement, /already rejected an earlier draft/);
+      assert.ok(reJudgement.includes(gapDraft), "draft gap must survive research regen");
+      assert.ok(
+        !reJudgement.includes(gapResearch),
+        "research gap must be dropped once RESEARCH was regenerated",
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
