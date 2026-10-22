@@ -13,8 +13,10 @@ import {
 } from "./index.js";
 import {
   buildPhaseDocRepairPrompt,
+  renderAutomatedChecksRules,
   PLANNING_AUTOMATED_CHECKS_RULES,
 } from "./planning-gate.js";
+import { defaultToolchainSpec } from "./build-toolchain.js";
 import { buildPlanningGateBlockedDiagnosis } from "./revision-outcome.js";
 
 describe("planning gate helpers", () => {
@@ -95,5 +97,94 @@ describe("planning gate helpers", () => {
     });
     assert.ok(d.tags?.includes("planning-gate-blocked"));
     assert.match(d.title, /restored/i);
+  });
+});
+
+describe("renderAutomatedChecksRules toolchain rendering", () => {
+  it("node-pnpm default keeps legacy vitest vocabulary", () => {
+    const rules = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("node-pnpm"),
+      hasTestServices: true,
+    });
+    assert.match(rules, /npx vitest run <file>/);
+    assert.match(rules, /tsc --noEmit/);
+    assert.match(rules, /next dev/);
+    assert.match(rules, /Shared shell regression guard/);
+  });
+
+  it("rust-cargo renders cargo vocabulary and no node-estate commands", () => {
+    const rules = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("rust-cargo"),
+      hasTestServices: true,
+    });
+    assert.match(rules, /cargo test <test_name>/);
+    assert.match(rules, /cargo check/);
+    assert.match(rules, /cargo run/);
+    assert.doesNotMatch(rules, /vitest/);
+    assert.doesNotMatch(rules, /pnpm/);
+    assert.doesNotMatch(rules, /next dev/);
+    // Universal invariants still present.
+    assert.match(rules, /grep -q/);
+    assert.match(rules, /Shared shell regression guard/);
+  });
+
+  it("go renders go test / go vet vocabulary", () => {
+    const rules = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("go"),
+      hasTestServices: true,
+    });
+    assert.match(rules, /go test/);
+    assert.match(rules, /go vet/);
+    assert.doesNotMatch(rules, /vitest/);
+    assert.doesNotMatch(rules, /cargo/);
+  });
+
+  it("python renders pytest vocabulary", () => {
+    const rules = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("python"),
+      hasTestServices: true,
+    });
+    assert.match(rules, /pytest <file>::<test_name>/);
+    assert.doesNotMatch(rules, /vitest/);
+    assert.doesNotMatch(rules, /cargo/);
+  });
+
+  it("hasTestServices=false switches to self-contained probe guidance", () => {
+    const rules = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("node-pnpm"),
+      hasTestServices: false,
+    });
+    assert.match(rules, /self-contained/);
+    assert.match(rules, /docker compose up -d <svc>/);
+    assert.doesNotMatch(
+      rules,
+      /SlopControl verify already brings up test-services/,
+    );
+  });
+
+  it("hasTestServices=true bans infra restarts", () => {
+    const rules = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("rust-cargo"),
+      hasTestServices: true,
+    });
+    assert.match(rules, /verify already brings up test-services/);
+    assert.match(rules, /Do NOT `docker compose up`/);
+  });
+
+  it("buildPhaseDocRepairPrompt honours a checkRules override", () => {
+    const custom = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("rust-cargo"),
+      hasTestServices: true,
+    });
+    const prompt = buildPhaseDocRepairPrompt({
+      issues: ["x"],
+      intentBlock: "intent",
+      canonicalPath: ".slopcontrol/phases/x/PHASE.md",
+      phaseDescription: "desc",
+      research: "research",
+      checkRules: custom,
+    });
+    assert.match(prompt, /cargo test <test_name>/);
+    assert.doesNotMatch(prompt, /npx vitest run/);
   });
 });

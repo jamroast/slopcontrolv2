@@ -130,7 +130,6 @@ import {
   buildReviewApprovalFailureDiagnosis,
   buildRevisionArtifactOutcome,
   buildPhaseDocRepairPrompt,
-  PLANNING_AUTOMATED_CHECKS_RULES,
   type PlanningSnapshot,
   restorePhaseDocSnapshot,
   restoreResearchSnapshot,
@@ -283,6 +282,8 @@ import {
   verifyCheckTargets,
   formatGrepTokenMismatchesBlock,
   verifyGrepTokens,
+  findComposeFile,
+  renderAutomatedChecksRules,
 } from "@slopcontrol/artifacts";
 import { attemptDevelopPhaseChecksSelfHeal } from "./develop-phase-self-heal.js";
 import {
@@ -467,6 +468,7 @@ import {
   type BlueprintStatus,
   type Phase,
   type Project,
+  type ProjectConfig,
   type ProjectOpenMode,
   type Run,
   type RunStage,
@@ -2679,6 +2681,7 @@ export function planningGateFeedbackFromLatestDiagnosis(
 function tryBindPhaseDocQualityJudge(
   registry: LlmRegistry,
   resolved?: { endpoint: import("@slopcontrol/types").LlmEndpoint; modelId?: string },
+  opts?: { checkRulesBlock?: string; hasTestServices?: boolean },
 ): ((input: {
   intentBlock: string;
   phaseDescription: string;
@@ -2700,6 +2703,8 @@ function tryBindPhaseDocQualityJudge(
       phaseDocExcerpt: input.phaseDocExcerpt,
       checkTargetsBlock: input.checkTargetsBlock,
       grepTokenMismatchesBlock: input.grepTokenMismatchesBlock,
+      checkRulesBlock: opts?.checkRulesBlock,
+      hasTestServices: opts?.hasTestServices,
       priorGaps: input.priorGaps,
     });
 }
@@ -2791,6 +2796,29 @@ export class ChangeOrchestrator {
 
   private resetPlanningGateOutcome(): void {
     this.planningGateOutcome = { faultLeg: "none", issues: [] };
+  }
+
+  /**
+   * Render the Automated Checks authoring contract for this project's
+   * resolved toolchain (node defaults when unconfigured). hasTestServices is
+   * true when verify brings up backing services (declared or compose file
+   * present) — it selects the infra-restart ban vs self-contained probe rule.
+   */
+  private planningCheckRules(
+    projectRoot: string,
+    config: ProjectConfig,
+  ): { rules: string; hasTestServices: boolean } {
+    const toolchain = resolveProjectToolchain({
+      projectRoot,
+      configured: config.toolchain,
+    }).spec;
+    const hasTestServices =
+      (config.testServices?.length ?? 0) > 0 ||
+      findComposeFile(projectRoot) !== null;
+    return {
+      rules: renderAutomatedChecksRules({ toolchain, hasTestServices }),
+      hasTestServices,
+    };
   }
 
   /**
@@ -6949,6 +6977,11 @@ Phase id: ${phase.id}`;
     );
     const blueprint = readBlueprint(project.rootPath);
     const config = readProjectConfig(project.rootPath);
+    // Toolchain-rendered Automated Checks contract: the same rendered block
+    // goes to the drafter (authoring) and the judge (judgment criteria), so
+    // both sides apply one toolchain-appropriate contract.
+    const { rules: automatedChecksRules, hasTestServices } =
+      this.planningCheckRules(project.rootPath, config);
     const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
     const cleared = clearMisalignedPhaseDoc({
       projectRoot: project.rootPath,
@@ -7164,11 +7197,9 @@ If Change Intent uiMount is set, Scope/File Changes/Blueprint Deltas MUST honour
 Return the full PHASE.md content starting with # in your response.
 If you use write_file, write ONLY to ${canonicalPath} (never project-root PHASE.md).
 Include ## Blueprint Deltas for durable design changes.
-MUST include ## Automated Checks with at least one runnable command in a \`\`\`bash fence
-(e.g. npm test -- path/to/regression.test.ts). Manual-only success criteria are not enough.
-Match tokens independently: one \`grep -q\` per token joined by \`&&\` — never require multiple tokens on a single line via \`.*\` chains (code formatting varies across lines).
-Never pipe vitest/jest to \`grep -q\` to match "Tests N passed" — use \`npx vitest run … || exit 1\` and trust the runner exit code.
-Automated Checks must be finite: no dev servers (\`next dev\`, \`pnpm dev\`), no bare \`docker compose up\`. A runtime probe against a dockerized app is legal ONLY as: \`docker compose up -d <svc>\` plus \`trap 'docker compose down' EXIT\`, then probe (wget/curl/node one-shot).
+MUST include ## Automated Checks with at least one runnable command in a \`\`\`bash fence.
+Manual-only success criteria are not enough.
+${automatedChecksRules}
 When Change Intent interaction primaryAction is submit form, prove fill+submit at the locked mount; only chat mounts (composer/bubble) also need live AI SDK static tool-part proofs (type: "tool-<name>" / parseToolResult / extractActiveForm). When there is no interaction contract, do not invent fill+submit proofs (click-to-navigate / landing chrome: prove click / onClick / href / router.push). When primaryAction is click/navigate, prove those click proofs — not fill+submit.
 When finished, include PHASE_COMPLETE on its own line.
 Do NOT narrate that you wrote the file — output the document itself.
@@ -7889,6 +7920,10 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
     const phaseQualityJudge = tryBindPhaseDocQualityJudge(
       this.ctx.registry,
       primaryResolved ?? undefined,
+      {
+        checkRulesBlock: automatedChecksRules,
+        hasTestServices,
+      },
     );
     if (!phaseQualityJudge) {
       slog.warn(
@@ -7907,7 +7942,10 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
     }
     const fallbackResolved = resolvePlanningJudgeFallback(this.ctx.registry);
     const fallbackPhaseQualityJudge = fallbackResolved
-      ? tryBindPhaseDocQualityJudge(this.ctx.registry, fallbackResolved)
+      ? tryBindPhaseDocQualityJudge(this.ctx.registry, fallbackResolved, {
+          checkRulesBlock: automatedChecksRules,
+          hasTestServices,
+        })
       : null;
 
     let phaseDocForQuality = phaseDoc;
@@ -8100,6 +8138,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
         description: clipPromptSection("change-request", phase.description, 4_000),
         research: clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
         judgeFeedback: feedback,
+        checkRules: automatedChecksRules,
       });
       try {
         beforeStats = snapshotFileStats(watch);
@@ -8869,6 +8908,10 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
       ),
       research: clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
       preamble: input.preamble,
+      checkRules: this.planningCheckRules(
+        project.rootPath,
+        readProjectConfig(project.rootPath),
+      ).rules,
     });
     try {
       const beforeStats = snapshotFileStats(watch);
@@ -9270,10 +9313,14 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
       input;
     const priorPhaseDoc = readPhaseDoc(project.rootPath, phase.id);
     const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
+    const { rules: automatedChecksRules } = this.planningCheckRules(
+      project.rootPath,
+      readProjectConfig(project.rootPath),
+    );
     const prompt = `Revise PHASE.md based on this feedback:\n${feedback ?? ""}
 
 ${intentBlock}
-${designRoutingNote}${PLANNING_AUTOMATED_CHECKS_RULES}
+${designRoutingNote}${automatedChecksRules}
 Return the full revised PHASE.md content starting with # (document only, no chat).
 If you use write_file, write ONLY to ${canonicalPath}.
 Include "## Blueprint Deltas" for durable design changes.

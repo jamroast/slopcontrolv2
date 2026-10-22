@@ -13,6 +13,10 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { findComposeFile } from "./test-services.js";
 import {
+  resolveProjectToolchain,
+  substituteCommandArgs,
+} from "./build-toolchain.js";
+import {
   PhaseStatusSchema,
   ProjectConfigSchema,
   type IterationMemoryEntry,
@@ -2016,10 +2020,30 @@ export function validatePhaseDocForDev(
     // collide with the already-running containers (fixed container_name →
     // Conflict → trap teardown hang → CHECK_TIMEOUT). Reject at draft time.
     if (opts?.projectRoot && findComposeFile(opts.projectRoot)) {
+      // Toolchain-rendered targeted-test example so non-node projects are
+      // steered at their own runner instead of node-estate vocabulary.
+      const targetedExample = (() => {
+        try {
+          const spec = resolveProjectToolchain({
+            projectRoot: opts.projectRoot!,
+            configured: readProjectConfig(opts.projectRoot!).toolchain,
+          }).spec;
+          return spec?.targetedTestCmd
+            ? substituteCommandArgs(spec.targetedTestCmd, {
+                ref: spec.kind.startsWith("node") ? "<file>" : "<ref>",
+              }).join(" ")
+            : null;
+        } catch {
+          return null;
+        }
+      })();
+      const targetedHint = targetedExample
+        ? `targeted \`${targetedExample}\``
+        : "a targeted test";
       for (const cell of cells) {
         if (/docker\s+compose\s+up\b/i.test(cell.body)) {
           issues.push(
-            `Broken Automated Check restarts infra with \`docker compose up\` — verify already brings up test-services (Postgres/Redis/…). Assume services are up: use migrate/seed/targeted \`npx vitest run <file>\` or grep/build asserts instead: ${cell.body.replace(/\s+/g, " ").trim().slice(0, 120)}`,
+            `Broken Automated Check restarts infra with \`docker compose up\` — verify already brings up test-services (Postgres/Redis/…). Assume services are up: use migrate/seed/${targetedHint} or grep/build asserts instead: ${cell.body.replace(/\s+/g, " ").trim().slice(0, 120)}`,
           );
         } else if (/trap\s+['"]docker compose down/i.test(cell.body)) {
           issues.push(

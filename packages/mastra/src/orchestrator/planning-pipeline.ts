@@ -127,6 +127,8 @@ export function phaseQualityRetryPrompt(opts: {
   description: string;
   research: string;
   judgeFeedback: string;
+  /** Toolchain-rendered checks contract (defaults to the node-default rules). */
+  checkRules?: string;
 }): string {
   return `Your previous PHASE.md failed the quality judge.
 ${opts.judgeFeedback}
@@ -136,7 +138,7 @@ If you use write_file, path must be exactly: ${opts.canonicalPath}
 Required sections: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence), ## Blueprint Deltas.
 Base Scope/File Changes ONLY on the RESEARCH below.
 ${opts.intentBlock}
-${PLANNING_AUTOMATED_CHECKS_RULES}
+${opts.checkRules ?? PLANNING_AUTOMATED_CHECKS_RULES}
 End with PHASE_COMPLETE.
 
 Description:

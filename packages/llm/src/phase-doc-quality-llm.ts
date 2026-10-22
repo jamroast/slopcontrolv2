@@ -50,7 +50,7 @@ Check ALL of:
 1. Required sections present and substantive: ## Scope, ## File Changes, ## Success Criteria, ## Automated Checks (bash fence), ## Blueprint Deltas — not placeholder/scaffold text.
 2. RESEARCH translation — file paths, routes, checks, and design decisions from RESEARCH appear in PHASE (especially Automated Checks).
 3. uiMount — when intent uiMount is set, PHASE Scope/File Changes name the concrete mount (route/page/component), not abstract "wire auth".
-4. Automated Checks — finite structural proofs (grep/build/vitest one-shot); no bare dev servers or npm test without path. When a "Automated Check targets" block is supplied, a check targeting an "exists" path is grounded even if RESEARCH.md never names it — do NOT fail it as unverified; a "NEW" path is declared in File Changes (this phase creates it) and may be asserted; a "MISSING" target is a real gap. Checks must NOT restart infra with docker compose up or trap teardown — SlopControl test-services already brings up Postgres/Redis/etc.; DB-dependent checks assume services are up (migrate/seed/targeted vitest). Redundant infra bring-up is a draft fault.
+4. Automated Checks — finite structural proofs (grep/build/vitest one-shot); no bare dev servers or npm test without path. When a "Automated Check targets" block is supplied, a check targeting an "exists" path is grounded even if RESEARCH.md never names it — do NOT fail it as unverified; a "NEW" path is declared in File Changes (this phase creates it) and may be asserted; a "MISSING" target is a real gap. Checks must NOT restart infra with docker compose up or trap teardown — SlopControl test-services already brings up Postgres/Redis/etc.; DB-dependent checks assume services are up (migrate/seed/targeted tests). Redundant infra bring-up is a draft fault.
 5. Blueprint Deltas — durable decisions recorded when PHASE introduces new routes/surfaces/contracts.
 
 Change Intent precedence:
@@ -71,6 +71,32 @@ Verdict rules:
 - Attribute each gap to researchFaults OR draftFaults (can be both lists non-empty).
 - When in doubt, prefer ok=false (fail closed).`;
 
+// Exact §4 paragraph of PHASE_DOC_QUALITY_SYSTEM_PROMPT — the replace target
+// for the toolchain-rendered variant below.
+const CHECKS_JUDGMENT_CLAUSE = `4. Automated Checks — finite structural proofs (grep/build/vitest one-shot); no bare dev servers or npm test without path. When a "Automated Check targets" block is supplied, a check targeting an "exists" path is grounded even if RESEARCH.md never names it — do NOT fail it as unverified; a "NEW" path is declared in File Changes (this phase creates it) and may be asserted; a "MISSING" target is a real gap. Checks must NOT restart infra with docker compose up or trap teardown — SlopControl test-services already brings up Postgres/Redis/etc.; DB-dependent checks assume services are up (migrate/seed/targeted tests). Redundant infra bring-up is a draft fault.`;
+
+/**
+ * Toolchain-aware variant of the judge system prompt: §4 stops naming one
+ * ecosystem's commands and instead judges against the project's rendered
+ * check-authoring rules (embedded in the user message). The deterministic
+ * targets/infra semantics are unchanged.
+ */
+export function renderPhaseDocQualitySystemPrompt(opts?: {
+  checkRulesBlock?: string;
+  hasTestServices?: boolean;
+}): string {
+  const rules = opts?.checkRulesBlock?.trim();
+  if (!rules) return PHASE_DOC_QUALITY_SYSTEM_PROMPT;
+  const infra = (opts?.hasTestServices ?? true)
+    ? " Checks must NOT restart infra with docker compose up or trap teardown — SlopControl test-services already brings up Postgres/Redis/etc.; DB-dependent checks assume services are up (migrate/seed/targeted tests). Redundant infra bring-up is a draft fault."
+    : " Runtime probes must be finite and self-contained (bring up only what they probe, then tear it down).";
+  const clause = `4. Automated Checks — finite, targeted proofs obeying the project's check-authoring rules (embedded in the user message under "## Automated Checks rules"; those rules are the drafter's contract — judge against them). When a "Automated Check targets" block is supplied, a check targeting an "exists" path is grounded even if RESEARCH.md never names it — do NOT fail it as unverified; a "NEW" path is declared in File Changes (this phase creates it) and may be asserted; a "MISSING" target is a real gap.${infra}`;
+  return PHASE_DOC_QUALITY_SYSTEM_PROMPT.replace(
+    CHECKS_JUDGMENT_CLAUSE,
+    clause,
+  );
+}
+
 export interface JudgePhaseDocQualityOptions {
   endpoint: LlmEndpoint;
   modelId?: string;
@@ -82,6 +108,15 @@ export interface JudgePhaseDocQualityOptions {
   checkTargetsBlock?: string;
   /** Deterministic list of grep tokens absent from their target file. */
   grepTokenMismatchesBlock?: string;
+  /**
+   * Toolchain-rendered check-authoring rules (renderAutomatedChecksRules).
+   * When supplied, §4 of the system prompt judges against this contract
+   * instead of naming one ecosystem's commands, and the block is embedded
+   * in the user message.
+   */
+  checkRulesBlock?: string;
+  /** False when the project has no SlopControl-managed backing services. */
+  hasTestServices?: boolean;
   /**
    * Gaps the judge already raised against an earlier draft of this PHASE.
    * Supplied on re-judgement so the judge verifies resolution instead of
@@ -163,7 +198,12 @@ export async function judgePhaseDocQualityViaLlm(
     maxTokens: CHAT_JSON_PLANNING_JUDGE_MAX_TOKENS,
     schema: PhaseDocQualityVerdictSchema.partial(),
     schemaHint: "Return ONE JSON object (ok/gaps/…), never an array",
-    system: PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+    system: opts.checkRulesBlock
+      ? renderPhaseDocQualitySystemPrompt({
+          checkRulesBlock: opts.checkRulesBlock,
+          hasTestServices: opts.hasTestServices,
+        })
+      : PHASE_DOC_QUALITY_SYSTEM_PROMPT,
     user: [
       "Change Intent (authoritative):",
       opts.intentBlock,
@@ -173,6 +213,8 @@ export async function judgePhaseDocQualityViaLlm(
       "",
       "RESEARCH.md excerpt:",
       clip(opts.researchExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),
+      "",
+      opts.checkRulesBlock ? opts.checkRulesBlock : "",
       "",
       opts.checkTargetsBlock ? opts.checkTargetsBlock : "",
       "",
