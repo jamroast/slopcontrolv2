@@ -1106,6 +1106,8 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
       assert.match(draftPrompt, /cargo check/);
       assert.match(draftPrompt, /The project's declared conventions/);
       assert.doesNotMatch(draftPrompt, /npx vitest run/);
+      // UI guards are node-web-only — no estate shell/mock vocabulary leaks.
+      assert.doesNotMatch(draftPrompt, /Shared shell regression guard|Menubar|App\.tsx|\.env-pane/);
 
       // Judge: the toolchain-aware §4 (judges against the embedded rules
       // block) and the rendered cargo rules embedded in the user message.

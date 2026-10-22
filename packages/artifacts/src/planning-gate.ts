@@ -99,11 +99,16 @@ export function renderAutomatedChecksRules(opts?: {
       `- Static type/compile gate: \`${typecheck}\` is the cheap total proof — prefer it over grep for "still compiles / types line up" claims.`,
     );
   }
-  lines.push(
-    "- No curl with API keys or secrets in Automated Checks.",
-    "- Shared shell regression guard: when a change reuses existing shared shell/navigation (top menubar, dashboard shell, sidebar, theme toggle), the ## Automated Checks MUST include a structural assertion that those shared components are still imported and rendered unchanged — one `grep -q` per token joined by `&&`, using the project's real component names (e.g. `grep -q '<Menubar' src/App.tsx && grep -q 'Shell' src/App.tsx`). Do NOT let the implementer vendor, remove, or structurally rewrite a shared shell component; only its content slots may change.",
-    "- Mock class fidelity guard: when a bound DESIGN_PACK provides element styles (componentStyles / styles.css with named classes like `.env-pane`, `.card`), the ## Automated Checks MUST assert those mock class names (or their documented ported equivalents) exist in the product source or built CSS — one `grep -rq '<class-name>' src packages apps 2>/dev/null || grep -rq '\\.<class-name>' dist 2>/dev/null || exit 1` per class. Utility-class approximations of mock-styled elements (bg-muted/text-muted-foreground soup replacing the mock's named classes) are a fidelity failure, not a port.",
-  );
+  lines.push("- No curl with API keys or secrets in Automated Checks.");
+  // UI guards reference the project's shell components and design-pack mock
+  // classes — design-verify is currently JS-web-only, so render them for
+  // node ecosystems only (never leak estate vocabulary into rust/go/python).
+  if (isNode) {
+    lines.push(
+      "- Shared shell regression guard: when a change reuses existing shared shell/navigation (top menubar, dashboard shell, sidebar, theme toggle), the ## Automated Checks MUST include a structural assertion that those shared components are still imported and rendered unchanged — one `grep -q` per token joined by `&&`, using the project's real component names (e.g. `grep -q '<Menubar' src/App.tsx && grep -q 'Shell' src/App.tsx`). Do NOT let the implementer vendor, remove, or structurally rewrite a shared shell component; only its content slots may change.",
+      "- Mock class fidelity guard: when a bound DESIGN_PACK provides element styles (componentStyles / styles.css with named classes like `.env-pane`, `.card`), the ## Automated Checks MUST assert those mock class names (or their documented ported equivalents) exist in the product source or built CSS — one `grep -rq '<class-name>' src packages apps 2>/dev/null || grep -rq '\\.<class-name>' dist 2>/dev/null || exit 1` per class. Utility-class approximations of mock-styled elements (bg-muted/text-muted-foreground soup replacing the mock's named classes) are a fidelity failure, not a port.",
+    );
+  }
   return lines.join("\n");
 }
 

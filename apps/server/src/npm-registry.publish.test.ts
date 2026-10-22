@@ -260,7 +260,9 @@ describe("publishLibraryToRegistry", () => {
     const lib = tmp("lib-none");
     try {
       const meta0 = ensureNpmRegistryLayout(dataDir);
-      writeFileSync(join(lib, "Cargo.toml"), "[package]\n", "utf-8");
+      // Unknown-ecosystem marker: no manifest/lockfile detectBuildToolchain
+      // recognizes (Cargo.toml now resolves to the rust-cargo default spec).
+      writeFileSync(join(lib, "somefile.txt"), "no toolchain here\n", "utf-8");
       await assert.rejects(
         publishLibraryToRegistry({
           dataDir,

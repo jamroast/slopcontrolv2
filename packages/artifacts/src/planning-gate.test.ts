@@ -125,7 +125,10 @@ describe("renderAutomatedChecksRules toolchain rendering", () => {
     assert.doesNotMatch(rules, /next dev/);
     // Universal invariants still present.
     assert.match(rules, /grep -q/);
-    assert.match(rules, /Shared shell regression guard/);
+    // UI guards are node-web-only (design-verify is JS today) — they must
+    // not leak estate vocabulary into a cargo render.
+    assert.doesNotMatch(rules, /Shared shell regression guard/);
+    assert.doesNotMatch(rules, /Mock class fidelity guard/);
   });
 
   it("go renders go test / go vet vocabulary", () => {

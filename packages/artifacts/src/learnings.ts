@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { detectBuildToolchain } from "./build-toolchain.js";
 import {
   LearningIndexSchema,
   LearningRecordSchema,
@@ -348,6 +349,14 @@ export function loadLearningsPromptBlock(
  * in agent context.
  */
 export function ensurePlatformLearnings(projectRoot: string): void {
+  // Web-JS learnings (Vite/Tailwind/ThemeToggle) carry estate vocabulary and
+  // only apply to node-ecosystem projects. Seed them for node and unknown
+  // roots (historical default), skip for detected compiled ecosystems (rust/
+  // go/python) so a cargo project's drafting context stays ecosystem-clean.
+  const toolchainKind = detectBuildToolchain(projectRoot).kind;
+  const seedWebUiCards =
+    toolchainKind === "unknown" || toolchainKind.startsWith("node");
+
   promoteLearning(projectRoot, {
     kind: "process",
     severity: "blocker",
@@ -412,7 +421,8 @@ export function ensurePlatformLearnings(projectRoot: string): void {
     ].join(" "),
   });
 
-  promoteLearning(projectRoot, {
+  if (seedWebUiCards) {
+    promoteLearning(projectRoot, {
     kind: "process",
     severity: "blocker",
     tags: [
@@ -432,6 +442,7 @@ export function ensurePlatformLearnings(projectRoot: string): void {
       "**Mounted ≠ visible:** Tailwind only emits utilities from scanned sources. Prove style emission via `@source` covering the component tree, or `vite build` / `pnpm build` / `next build` + grep built CSS / globals / package tokens for ThemeToggle utilities, or a non-utility `var(--text-secondary)` color/size fallback. Import-order-only (`@import \"tailwindcss\"` first) is not a visibility proof.",
     ].join(" "),
   });
+  }
 
   promoteLearning(projectRoot, {
     kind: "process",

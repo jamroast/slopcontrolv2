@@ -64,7 +64,10 @@ describe("rust pilot fixture", () => {
     });
     assert.match(rules, /cargo test <test_name>/);
     assert.match(rules, /cargo check/);
+    // No node-estate vocabulary — neither the test-runner wording nor the
+    // JS-web UI guards (shared shell / mock class) may leak into a cargo render.
     assert.doesNotMatch(rules, /vitest|pnpm|npm test|next dev/);
+    assert.doesNotMatch(rules, /App\.tsx|Menubar|\.env-pane|bg-muted/);
   });
 
   it("extracts check targets from a cargo-flavoured PHASE.md (paths only — a cargo test NAME is not a path)", () => {
