@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Persisted diagnosis shape. Lives in its own module (not the index barrel)
  * so modules that both the barrel re-exports and that need the type can
@@ -36,6 +38,13 @@ export type PersistedDiagnosis = {
   draftIssues?: string[];
   /** Research re-runs that did not unblock the phase (budget for A3). */
   researchReruns?: number;
+  /**
+   * SHA-256 hex of the RESEARCH.md body at the time this diagnosis was
+   * written. seedPriorQualityGaps invalidates research-attributed gaps only
+   * when the content changed — mtime is unreliable (rewrite-same-content,
+   * agent timestamps, touch).
+   */
+  researchHash?: string;
   failingStep?: {
     name: string;
     command?: string;
@@ -55,9 +64,23 @@ export type PlanningIssueLedger = {
   draftIssues: string[];
 };
 
-/** Whitespace/case-insensitive identity for a gap string. */
+/**
+ * Whitespace/punctuation-insensitive identity for a gap string: lower-cased,
+ * code fences and stray punctuation collapsed, so judge rewordings like
+ * `token \`npm test\`` vs `token npm test.` dedupe to one ledger entry.
+ */
 export function normalizeGap(gap: string): string {
-  return gap.trim().toLowerCase().replace(/\s+/g, " ");
+  return gap
+    .trim()
+    .toLowerCase()
+    .replace(/[`*_"'(),.;:\[\]{}<>!]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+/** SHA-256 hex of a document body (staleness key for RESEARCH.md). */
+export function sha256Hex(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 function mergeGapSet(

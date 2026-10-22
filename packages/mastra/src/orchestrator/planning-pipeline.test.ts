@@ -525,4 +525,40 @@ describe("quality-judge convergence memory", () => {
     assert.deepEqual(priorGapsAfterResolution(prior, []), prior);
     assert.deepEqual(priorGapsAfterResolution(prior, ["some other gap"]), prior);
   });
+
+  it("keys research staleness on content hash, not mtime", () => {
+    const diagnosedWithHash = {
+      ...qualityDiagnosis,
+      researchHash: "hash-v1",
+      researchIssues: ["research: stale file claim"],
+      draftIssues: ["draft: bare npm test"],
+      openIssues: ["draft: bare npm test", "research: stale file claim"],
+    };
+    // Same content (hash matches) → research gap kept even when mtime is newer.
+    assert.deepEqual(
+      seedPriorQualityGaps({
+        diagnosis: diagnosedWithHash,
+        researchHash: "hash-v1",
+        researchMtimeMs: Date.parse(qualityDiagnosis.updatedAt) + 999_999,
+      }),
+      ["draft: bare npm test", "research: stale file claim"],
+    );
+    // Changed content (hash differs) → research gap dropped, draft gap kept.
+    assert.deepEqual(
+      seedPriorQualityGaps({
+        diagnosis: diagnosedWithHash,
+        researchHash: "hash-v2",
+      }),
+      ["draft: bare npm test"],
+    );
+    // Legacy diagnosis (no stored hash): mtime fallback still applies.
+    assert.deepEqual(
+      seedPriorQualityGaps({
+        diagnosis: qualityDiagnosis,
+        researchHash: "hash-v2",
+        researchMtimeMs: Date.parse(qualityDiagnosis.updatedAt) + 60_000,
+      }),
+      [],
+    );
+  });
 });

@@ -643,6 +643,134 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
     }
   });
 
+  it("re-seeds research gaps on same content (mtime churn must not false-drop)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-ledger-reseed-"));
+    const judgeCalls: Captured[] = [];
+    const gapDraft = "Check 7 uses bare npm test without a path";
+    const gapResearch = "RESEARCH does not quote the exact doc string";
+
+    const restore = installFetchStub({
+      judgeCalls,
+      judge: () => ({
+        ok: false,
+        gaps: [gapResearch, gapDraft],
+        researchFaults: [gapResearch],
+        draftFaults: [gapDraft],
+        resolvedGaps: [],
+      }),
+    });
+
+    try {
+      writeFixture(root);
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          phasePlannerAgent: stubAgent(() => PHASE_MD, [], join(phaseDir, "PHASE.md")),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const first = await orchestrator.draftPhase({ project, phase, run });
+      assert.equal(first, "failed");
+      const diagnosis = readLatestDiagnosisForPhase(root, PHASE_ID);
+      assert.ok(diagnosis?.researchHash, "ledger diagnosis must stamp researchHash");
+
+      // Touch RESEARCH.md with the SAME bytes (mtime churn, no content change).
+      const researchPath = join(phaseDir, "RESEARCH.md");
+      const sameContent = readFileSync(researchPath, "utf8");
+      writeFileSync(researchPath, sameContent);
+
+      const second = await orchestrator.draftPhase({ project, phase, run });
+      assert.equal(second, "failed");
+
+      // Same content → research gap is RE-SEEDED (not false-dropped).
+      const reJudgement = judgeCalls[judgeCalls.length - 1]?.user ?? "";
+      assert.ok(
+        reJudgement.includes(gapResearch),
+        "same-content research gap must be re-seeded",
+      );
+      assert.ok(reJudgement.includes(gapDraft), "draft gap must be re-seeded");
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retry_draft after budget exhaustion resets researchReruns but keeps the ledger", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-budget-reset-"));
+    const restore = installFetchStub({
+      judgeCalls: [],
+      judge: () => ({
+        ok: false,
+        gaps: ["Check 7 uses bare npm test without a path"],
+        researchFaults: [],
+        draftFaults: ["Check 7 uses bare npm test without a path"],
+        resolvedGaps: [],
+      }),
+    });
+    try {
+      writeFixture(root);
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      // Pad RESEARCH.md past the 400-char researchLooksSolid threshold (the
+      // harness fixture is intentionally terse and is never retry_draft'd).
+      writeFileSync(join(phaseDir, "RESEARCH.md"), `${RESEARCH_MD}\n${"evidence note\n".repeat(4)}`);
+      // Seed a wedged phase: budget exhausted + an accumulated ledger.
+      writeFileSync(
+        join(phaseDir, "diagnosis.json"),
+        `${JSON.stringify({
+          audience: "coding",
+          operatorActions: [],
+          class: "process",
+          confidence: "high",
+          title: "Research budget exhausted",
+          rootCause: "x",
+          evidence: "x",
+          nextActions: "Retry draft.",
+          fingerprint: "planning-research-budget-abc",
+          codingAgentShouldFix: true,
+          tags: ["planning", "research", "research-budget"],
+          issues: ["Check 7 uses bare npm test without a path"],
+          openIssues: ["Check 7 uses bare npm test without a path"],
+          draftIssues: ["Check 7 uses bare npm test without a path"],
+          researchReruns: 3,
+          phaseId: PHASE_ID,
+          runId: "run-1",
+          updatedAt: "2026-10-22T00:00:00.000Z",
+        })}\n`,
+      );
+
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          phasePlannerAgent: stubAgent(() => PHASE_MD, [], join(phaseDir, "PHASE.md")),
+        } as unknown as OrchestratorAgents,
+      });
+
+      // retry_draft must reset the budget (operator intent) and preserve the ledger.
+      await orchestrator.retryDraft({ project, phase, run });
+      const persisted = readLatestDiagnosisForPhase(root, PHASE_ID);
+      assert.ok(persisted, "phase diagnosis must persist after retry_draft");
+      assert.equal(persisted!.researchReruns, 0, "budget was reset by retry_draft");
+      assert.ok(
+        (persisted!.openIssues ?? []).some((g) => g.includes("npm test")),
+        "ledger must survive the retry",
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("carries a draft-mechanics gap across a research re-run via the open-issue ledger", async () => {
     const root = mkdtempSync(join(tmpdir(), "planning-ledger-"));
     const judgeCalls: Captured[] = [];

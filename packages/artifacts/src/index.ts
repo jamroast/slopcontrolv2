@@ -40,6 +40,7 @@ import {
 } from "./change-intent.js";
 import type { ChangeIntent } from "./change-intent.js";
 import type { PersistedDiagnosis } from "./diagnosis.js";
+import { normalizeGap } from "./diagnosis.js";
 import { probeProjectForDecisions } from "./blueprint-probes.js";
 import {
   discoverBrandWordmarkTexts,
@@ -1260,6 +1261,7 @@ export type { PersistedDiagnosis } from "./diagnosis.js";
 export {
   mergePlanningIssueLedger,
   normalizeGap,
+  sha256Hex,
   type PlanningIssueLedger,
 } from "./diagnosis.js";
 
@@ -1555,6 +1557,123 @@ export function writeDiagnosis(
 }
 
 /**
+ * Persist a diagnosis without letting any writer clobber the phase-level
+ * planning ledger. Planning-fault diagnoses merge the ledger (dedupe prior +
+ * new, keep new researchReruns/researchHash when set); non-planning diagnoses
+ * (verify/develop failures) re-stamp the prior ledger verbatim so the budget +
+ * open issues survive. A "Phase complete" stub intentionally drops the ledger.
+ *
+ * The phase copy is the durable state; the run copy is rewritten by every
+ * diagnosis on that run, so the ledger lives on the phase copy.
+ */
+export function writeDiagnosisWithLedger(
+  projectRoot: string,
+  runId: string,
+  diagnosis: PersistedDiagnosis,
+  phaseId?: string,
+): string {
+  if (!phaseId) return writeDiagnosis(projectRoot, runId, diagnosis);
+  const prior = readLatestDiagnosisForPhase(projectRoot, phaseId);
+  // Never ride the ledger onto a complete/clear stub.
+  const isCompleteStub = diagnosis.fingerprint === "complete";
+  const isPlanning =
+    diagnosis.audience === "coding" &&
+    ((diagnosis.tags ?? []).includes("planning") ||
+      /^planning[-:]/.test(diagnosis.fingerprint ?? ""));
+  let merged = diagnosis;
+  if (!isCompleteStub && prior) {
+    const ledgerFields = {
+      openIssues: prior.openIssues ?? [],
+      researchIssues: prior.researchIssues ?? [],
+      draftIssues: prior.draftIssues ?? [],
+      researchReruns: prior.researchReruns,
+      researchHash: prior.researchHash,
+    };
+    if (isPlanning) {
+      merged = {
+        ...diagnosis,
+        openIssues: dedupeStrings([
+          ...ledgerFields.openIssues,
+          ...(diagnosis.openIssues ?? []),
+        ]),
+        researchIssues: dedupeStrings([
+          ...ledgerFields.researchIssues,
+          ...(diagnosis.researchIssues ?? []),
+        ]),
+        draftIssues: dedupeStrings([
+          ...ledgerFields.draftIssues,
+          ...(diagnosis.draftIssues ?? []),
+        ]),
+        researchReruns:
+          diagnosis.researchReruns ?? ledgerFields.researchReruns,
+        researchHash: diagnosis.researchHash ?? ledgerFields.researchHash,
+      };
+    } else {
+      // Non-planning diagnosis: carry the ledger forward untouched.
+      merged = {
+        ...diagnosis,
+        ...(ledgerFields.openIssues.length
+          ? { openIssues: ledgerFields.openIssues }
+          : {}),
+        ...(ledgerFields.researchIssues.length
+          ? { researchIssues: ledgerFields.researchIssues }
+          : {}),
+        ...(ledgerFields.draftIssues.length
+          ? { draftIssues: ledgerFields.draftIssues }
+          : {}),
+        ...(typeof ledgerFields.researchReruns === "number"
+          ? { researchReruns: ledgerFields.researchReruns }
+          : {}),
+        ...(ledgerFields.researchHash
+          ? { researchHash: ledgerFields.researchHash }
+          : {}),
+      };
+    }
+  }
+  return writeDiagnosis(projectRoot, runId, merged, phaseId);
+}
+
+function dedupeStrings(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    const key = normalizeGap(item);
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(key)) continue;
+    seen.add(key);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Operator-driven budget reset: zero the phase-level researchReruns counter
+ * while preserving the rest of the planning ledger. Called from retry_draft
+ * and fresh run starts; never from within the self-heal loop.
+ */
+export function resetPhaseResearchReruns(
+  projectRoot: string,
+  phaseId: string,
+): boolean {
+  const path = phaseDiagnosisPath(projectRoot, phaseId);
+  if (!existsSync(path)) return false;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf-8")) as PersistedDiagnosis;
+    if (typeof parsed.researchReruns !== "number" || parsed.researchReruns === 0) {
+      return false;
+    }
+    writeFileSync(
+      path,
+      `${JSON.stringify({ ...parsed, researchReruns: 0 }, null, 2)}\n`,
+      "utf-8",
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Structured diagnosis for research/draft process failures (Change Intent
  * reject, empty research, needs_intent, etc.) — same shape as develop failures
  * so get_run / get_phase_status / dashboard can show it.
@@ -1585,6 +1704,8 @@ export function buildPlanningFailureDiagnosis(opts: {
   researchIssues?: string[];
   draftIssues?: string[];
   researchReruns?: number;
+  /** SHA-256 hex of the RESEARCH.md body at diagnosis time. */
+  researchHash?: string;
 }): PersistedDiagnosis {
   const detail = (opts.detail ?? "").trim() || "(no detail)";
   const kind =
@@ -1643,6 +1764,7 @@ export function buildPlanningFailureDiagnosis(opts: {
     ...(typeof opts.researchReruns === "number"
       ? { researchReruns: opts.researchReruns }
       : {}),
+    ...(opts.researchHash ? { researchHash: opts.researchHash } : {}),
     fingerprint: `planning-${kind}-${fingerprint}`,
     codingAgentShouldFix: true,
     tags: [

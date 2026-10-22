@@ -120,6 +120,9 @@ import {
   resolveProjectEnv,
   writeResolvedEnvToWorktree,
   writeDiagnosis,
+  writeDiagnosisWithLedger,
+  resetPhaseResearchReruns,
+  sha256Hex,
   type PersistedDiagnosis,
   buildPlanningFailureDiagnosis,
   buildPlanningRevisionFailureDiagnosis,
@@ -2801,7 +2804,12 @@ export class ChangeOrchestrator {
     diagnosis: PersistedDiagnosis,
     phaseId?: string,
   ): string {
-    const path = writeDiagnosis(project.rootPath, run.id, diagnosis, phaseId);
+    const path = writeDiagnosisWithLedger(
+      project.rootPath,
+      run.id,
+      diagnosis,
+      phaseId,
+    );
     void appendDiagnosisToMemory({
       memory: this.ctx.memory,
       projectId: project.id,
@@ -6350,6 +6358,9 @@ Phase id: ${input.phase.id}`;
   async startResearch(input: StartResearchInput): Promise<RunStage> {
     const { project, phase, run, description, onStage } = input;
     ensureSlopcontrolDir(project.rootPath);
+    // Fresh planning run start: reset the research-rerun budget (operator
+    // intent). Self-heal internal rounds do NOT route through here.
+    resetPhaseResearchReruns(project.rootPath, phase.id);
     onStage?.("researching");
     slog.info("research", "start", {
       projectId: project.id,
@@ -7268,6 +7279,12 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
         project.rootPath,
         phase.id,
       );
+      // Stamp the RESEARCH.md content hash so the next draftPhase seeding can
+      // key staleness off content, not mtime (rewrites / agent timestamps).
+      const priorResearch = readResearch(project.rootPath, phase.id);
+      const researchHash = priorResearch.trim()
+        ? sha256Hex(priorResearch)
+        : undefined;
       const isJudgeVerdict =
         Array.isArray(opts?.resolvedGaps) ||
         Array.isArray(opts?.researchFaults) ||
@@ -7322,6 +7339,7 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
           typeof prevDiagnosis?.researchReruns === "number"
             ? { researchReruns: researchReruns ?? prevDiagnosis?.researchReruns ?? 0 }
             : {}),
+          ...(researchHash ? { researchHash } : {}),
           faultLeg:
             outcomeFaultLeg === "none" ? undefined : outcomeFaultLeg,
         }),
@@ -7902,8 +7920,16 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
         return undefined;
       }
     })();
+    // Content hash of the RESEARCH.md this draft was built from — the
+    // staleness key for research-attributed gaps (mtime falls false on
+    // rewrite-same-content and agent timestamps).
+    const draftResearch = readResearch(project.rootPath, phase.id);
+    const researchHash = draftResearch.trim()
+      ? sha256Hex(draftResearch)
+      : undefined;
     let priorQualityGaps = seedPriorQualityGaps({
       diagnosis: readLatestDiagnosisForPhase(project.rootPath, phase.id),
+      researchHash,
       researchMtimeMs,
     });
     // Union with the cumulative gaps carried across self-heal rounds so a
@@ -12344,6 +12370,10 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
       );
     }
     log(project, run, "--- retry_draft: re-running PHASE.md draft (research intact) ---");
+    // Operator-driven retry: reset the research-rerun budget so a wedged
+    // phase (research-budget diagnosis) is unblocked without hand-deleting
+    // the persisted diagnosis.
+    resetPhaseResearchReruns(project.rootPath, phase.id);
     // Carry the last draft-gate judge gaps into this attempt. Without this the
     // retry regenerates the same check defects the judge already rejected.
     const priorDiagnosis =

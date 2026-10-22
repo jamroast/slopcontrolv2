@@ -451,18 +451,30 @@ export function seedPriorQualityGaps(opts: {
     researchIssues?: string[];
     draftIssues?: string[];
     updatedAt?: string;
+    researchHash?: string;
   } | null;
+  /** SHA-256 hex of the current RESEARCH.md body (preferred staleness key). */
+  researchHash?: string;
+  /** Legacy staleness fallback for diagnoses written before content hashing. */
   researchMtimeMs?: number;
 }): string[] {
   const { diagnosis } = opts;
   if (!diagnosis) return [];
   const gaps = priorQualityJudgeGapsFromDiagnosis(diagnosis);
   if (gaps.length === 0) return [];
-  const diagnosedAt = Date.parse(diagnosis.updatedAt ?? "");
-  const researchRegen =
-    Number.isFinite(diagnosedAt) &&
-    typeof opts.researchMtimeMs === "number" &&
-    opts.researchMtimeMs > diagnosedAt;
+  let researchRegen = false;
+  if (opts.researchHash && diagnosis.researchHash) {
+    // Content hash: rewrite-same-content does NOT invalidate (no false drop),
+    // mtime does not matter.
+    researchRegen = opts.researchHash !== diagnosis.researchHash;
+  } else {
+    // Legacy mtime fallback (pre-hash diagnoses only).
+    const diagnosedAt = Date.parse(diagnosis.updatedAt ?? "");
+    researchRegen =
+      Number.isFinite(diagnosedAt) &&
+      typeof opts.researchMtimeMs === "number" &&
+      opts.researchMtimeMs > diagnosedAt;
+  }
   if (!researchRegen) return gaps;
   // Research regenerated. With the ledger split we keep draft-attributed gaps
   // and drop only research ones; without it (legacy diagnosis) we cannot
@@ -485,10 +497,8 @@ export function priorGapsAfterResolution(
   priorGaps: string[],
   resolvedGaps: string[],
 ): string[] {
-  const normalize = (gap: string) =>
-    gap.trim().toLowerCase().replace(/\s+/g, " ");
-  const resolved = new Set(resolvedGaps.map(normalize));
-  return priorGaps.filter((gap) => !resolved.has(normalize(gap)));
+  const resolved = new Set(resolvedGaps.map(normalizeGap));
+  return priorGaps.filter((gap) => !resolved.has(normalizeGap(gap)));
 }
 
 /** Title used when carrying a prior draft's judge gaps into the next draft. */
