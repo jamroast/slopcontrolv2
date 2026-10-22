@@ -503,6 +503,136 @@ export function priorGapsAfterResolution(
   return priorGaps.filter((gap) => !resolved.has(normalizeGap(gap)));
 }
 
+/* ------------------------------------------------------------------ */
+/* Bounded critic loop — one primitive for judge→repair→re-judge legs. */
+/* ------------------------------------------------------------------ */
+
+/** A judge verdict shape the critic loop can accumulate a ledger from. */
+export interface CriticLoopVerdict {
+  ok: boolean;
+  gaps: string[];
+  resolvedGaps?: string[];
+}
+
+export type CriticLoopOutcome<V extends CriticLoopVerdict> =
+  | { kind: "passed"; priorGaps: string[] }
+  /** Judge call threw after infra retries — hard infra failure, no verdict. */
+  | { kind: "judge-error"; error: unknown; priorGaps: string[] }
+  /** Judge degraded to an infra verdict (gaps carry transport messages). */
+  | { kind: "infra-failed"; gaps: string[]; priorGaps: string[] }
+  /**
+   * Loop left via fault routing (shouldEscalate reason) or exhausted leg
+   * retries ("max-leg-retries"). `verdict` is the last real judgement;
+   * `priorGaps` is the accumulated ledger for the diagnosis.
+   */
+  | {
+      kind: "escalated";
+      verdict: V;
+      reason: unknown;
+      priorGaps: string[];
+      legRetries: number;
+    }
+  /** Repair leg (agent turn) threw. `verdict` is the judgement being fixed. */
+  | {
+      kind: "repair-error";
+      error: unknown;
+      verdict: V;
+      priorGaps: string[];
+      legRetries: number;
+    };
+
+/**
+ * One bounded critic-loop primitive shared by the planning quality gates
+ * (research leg, draft leg). Owns the loop mechanics: judge invocation with
+ * the convergence ledger, ledger accumulation (union prior+new, subtract
+ * verified-resolved), leg-retry bounding, and outcome classification. The
+ * caller supplies the leg-specific pieces as callbacks: how to judge, when
+ * to escalate (fault routing), and how to run one repair leg.
+ *
+ * Invariants preserved from the hand-rolled loops:
+ * - The ledger accumulates across judgements (never replaces) so a gap an
+ *   earlier verdict raised but this one neither re-raised nor resolved is
+ *   not forgotten (phase-201 pattern).
+ * - resolvedGaps are subtracted verbatim — a resolved finding cannot be
+ *   re-asserted (phase-197 anti-confabulation pressure).
+ */
+export async function runBoundedCriticLoop<V extends CriticLoopVerdict>(opts: {
+  /** Seeded convergence memory (persisted diagnosis + self-heal rounds). */
+  initialPriorGaps: string[];
+  maxLegRetries: number;
+  /** One judgement (infra retry + fallback inside). Throws on hard error. */
+  judge: (
+    priorGaps: string[],
+  ) => Promise<{ result: V; judgeInfraFailed: boolean }>;
+  /**
+   * After a failed verdict: return a non-null escalation reason to leave the
+   * loop (fault routing); null lets the loop run a repair leg.
+   */
+  shouldEscalate?: (verdict: V, legRetriesSoFar: number) => unknown | null;
+  /** Run one repair leg (prompt + agent + harvest). Throws = repair failure. */
+  repair: (verdict: V, legRetry: number) => Promise<void>;
+  /**
+   * Deterministic filter applied to a verdict's gaps before ledger
+   * accumulation (e.g. drop infra/transport phrasing that must not persist).
+   */
+  filterAccumulatedGaps?: (gaps: string[]) => string[];
+  /** Called when the judge verified prior gaps as fixed. */
+  onResolvedGaps?: (resolvedGaps: string[]) => void;
+}): Promise<CriticLoopOutcome<V>> {
+  let priorGaps = [...opts.initialPriorGaps];
+  let legRetries = 0;
+  while (true) {
+    let judged: { result: V; judgeInfraFailed: boolean };
+    try {
+      judged = await opts.judge(priorGaps);
+    } catch (error) {
+      return { kind: "judge-error", error, priorGaps };
+    }
+    if (judged.judgeInfraFailed) {
+      return { kind: "infra-failed", gaps: judged.result.gaps, priorGaps };
+    }
+    const verdict = judged.result;
+    if (verdict.ok) return { kind: "passed", priorGaps };
+
+    // Accumulate the running convergence set: union the prior seed with this
+    // verdict's (filtered) gaps, dedupe, then subtract verified-resolved.
+    const newGaps = opts.filterAccumulatedGaps?.(verdict.gaps) ?? verdict.gaps;
+    const seen = new Set<string>();
+    const accumulated: string[] = [];
+    for (const g of [...priorGaps, ...newGaps]) {
+      const key = normalizeGap(g);
+      if (!seen.has(key)) {
+        seen.add(key);
+        accumulated.push(g);
+      }
+    }
+    const resolvedGaps = verdict.resolvedGaps ?? [];
+    priorGaps = priorGapsAfterResolution(accumulated, resolvedGaps);
+    if (resolvedGaps.length > 0) opts.onResolvedGaps?.(resolvedGaps);
+
+    const reason = opts.shouldEscalate?.(verdict, legRetries) ?? null;
+    if (reason !== null && reason !== undefined) {
+      return { kind: "escalated", verdict, reason, priorGaps, legRetries };
+    }
+    if (legRetries >= opts.maxLegRetries) {
+      return {
+        kind: "escalated",
+        verdict,
+        reason: "max-leg-retries",
+        priorGaps,
+        legRetries,
+      };
+    }
+
+    legRetries++;
+    try {
+      await opts.repair(verdict, legRetries);
+    } catch (error) {
+      return { kind: "repair-error", error, verdict, priorGaps, legRetries };
+    }
+  }
+}
+
 /** Title used when carrying a prior draft's judge gaps into the next draft. */
 export const PRIOR_DRAFT_FEEDBACK_TITLE =
   "Prior PHASE.md draft was rejected by the quality judge — address every gap below in the rewritten draft";

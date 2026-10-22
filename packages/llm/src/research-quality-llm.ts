@@ -7,6 +7,7 @@ import {
   CHAT_JSON_PLANNING_JUDGE_TIMEOUT_MS,
   PLANNING_JUDGE_EXCERPT_CHARS,
 } from "./json-chat.js";
+import { formatPriorGapsConvergenceBlock } from "./phase-doc-quality-llm.js";
 
 /**
  * General RESEARCH.md quality judge — runs after the research agent for every
@@ -20,6 +21,11 @@ export const ResearchQualityVerdictSchema = z.object({
   gaps: z.array(z.string()),
   /** Concrete lines/sections to add (parallel to gaps). */
   suggestedFixes: z.array(z.string()),
+  /**
+   * Prior gaps this judgement verified as fixed (verbatim). Kept out of the
+   * next convergence block so a resolved finding cannot be re-asserted.
+   */
+  resolvedGaps: z.array(z.string()),
 });
 
 export type ResearchQualityVerdict = z.infer<typeof ResearchQualityVerdictSchema>;
@@ -30,6 +36,7 @@ Schema:
 - ok: boolean — true when research is adequate to draft from.
 - gaps: array of strings — what's missing (empty when ok).
 - suggestedFixes: array of strings — concrete additions parallel to gaps.
+- resolvedGaps: array of strings — prior gaps you verified as fixed, verbatim (empty when there were no prior gaps).
 
 Judge against the Change Intent + phase description. Check ALL of:
 1. Problem summary with verified repo findings (file:line or concrete paths where possible).
@@ -50,6 +57,12 @@ export interface JudgeResearchQualityOptions {
   intentBlock: string;
   phaseDescription: string;
   researchExcerpt: string;
+  /**
+   * Gaps the judge already raised against an earlier draft of this RESEARCH.
+   * Supplied on re-judgement so the judge verifies resolution instead of
+   * inventing an unbounded stream of fresh issues (convergence pressure).
+   */
+  priorGaps?: string[];
   timeoutMs?: number;
 }
 
@@ -72,6 +85,11 @@ export function parseResearchQualityVerdictPayload(
         (s): s is string => typeof s === "string" && s.trim() !== "",
       )
     : [];
+  const resolvedGaps = Array.isArray(asObj.resolvedGaps)
+    ? asObj.resolvedGaps.filter(
+        (g): g is string => typeof g === "string" && g.trim() !== "",
+      )
+    : [];
   const okIsBool = typeof asObj.ok === "boolean";
   const ok = okIsBool ? asObj.ok : false;
   return ResearchQualityVerdictSchema.parse({
@@ -83,6 +101,7 @@ export function parseResearchQualityVerdictPayload(
           ? []
           : ["Research quality could not be verified (unreadable judge verdict)"],
     suggestedFixes,
+    resolvedGaps,
   });
 }
 
@@ -104,6 +123,8 @@ export async function judgeResearchQualityViaLlm(
       "",
       "Phase description:",
       clip(opts.phaseDescription ?? "", 4_000),
+      "",
+      formatPriorGapsConvergenceBlock(opts.priorGaps ?? [], "RESEARCH.md"),
       "",
       "RESEARCH.md excerpt:",
       clip(opts.researchExcerpt ?? "", PLANNING_JUDGE_EXCERPT_CHARS),

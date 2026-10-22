@@ -18,6 +18,7 @@ import {
   isPlanningJudgeParseFailure,
   phaseQualityRetryPrompt,
   brokenOutputReason,
+  runBoundedCriticLoop,
 } from "./planning-pipeline.js";
 
 describe("planning-pipeline", () => {
@@ -560,5 +561,191 @@ describe("quality-judge convergence memory", () => {
       }),
       [],
     );
+  });
+});
+
+describe("runBoundedCriticLoop", () => {
+  type V = { ok: boolean; gaps: string[]; resolvedGaps?: string[] };
+  const verdict = (ok: boolean, gaps: string[], resolvedGaps: string[] = []): V => ({
+    ok,
+    gaps,
+    resolvedGaps,
+  });
+
+  it("passes on the first ok verdict with the seeded ledger intact", async () => {
+    const seen: string[][] = [];
+    const outcome = await runBoundedCriticLoop<V>({
+      initialPriorGaps: ["seed gap"],
+      maxLegRetries: 2,
+      judge: async (priorGaps) => {
+        seen.push([...priorGaps]);
+        return { result: verdict(true, []), judgeInfraFailed: false };
+      },
+      repair: async () => {
+        throw new Error("repair must not run");
+      },
+    });
+    assert.equal(outcome.kind, "passed");
+    assert.deepEqual(seen, [["seed gap"]]);
+  });
+
+  it("accumulates gaps across judgements and feeds them back to the judge", async () => {
+    const seen: string[][] = [];
+    const verdicts = [
+      verdict(false, ["gap A"]),
+      verdict(false, ["gap B"]),
+      verdict(true, []),
+    ];
+    let repairs = 0;
+    const outcome = await runBoundedCriticLoop<V>({
+      initialPriorGaps: [],
+      maxLegRetries: 3,
+      judge: async (priorGaps) => {
+        seen.push([...priorGaps]);
+        return { result: verdicts.shift()!, judgeInfraFailed: false };
+      },
+      repair: async () => {
+        repairs++;
+      },
+    });
+    assert.equal(outcome.kind, "passed");
+    assert.equal(repairs, 2);
+    // Second judgement sees gap A; third sees A+B (accumulated, not replaced).
+    assert.deepEqual(seen, [[], ["gap A"], ["gap A", "gap B"]]);
+  });
+
+  it("subtracts verified-resolved gaps from the ledger", async () => {
+    const seen: string[][] = [];
+    const resolvedLogged: string[][] = [];
+    const verdicts = [
+      verdict(false, ["gap A", "gap B"]),
+      // Judge verifies A fixed, keeps B, then passes.
+      verdict(false, ["gap B"], ["gap A"]),
+      verdict(true, []),
+    ];
+    const outcome = await runBoundedCriticLoop<V>({
+      initialPriorGaps: [],
+      maxLegRetries: 3,
+      judge: async (priorGaps) => {
+        seen.push([...priorGaps]);
+        return { result: verdicts.shift()!, judgeInfraFailed: false };
+      },
+      onResolvedGaps: (g) => resolvedLogged.push(g),
+      repair: async () => {},
+    });
+    assert.equal(outcome.kind, "passed");
+    assert.deepEqual(seen[2], ["gap B"]);
+    assert.deepEqual(resolvedLogged, [["gap A"]]);
+  });
+
+  it("drops infra-phrased gaps from the accumulated ledger via the filter", async () => {
+    const seen: string[][] = [];
+    const verdicts = [
+      verdict(false, [
+        "PHASE quality could not be verified (JSON chat timed out)",
+        "real content gap",
+      ]),
+      verdict(true, []),
+    ];
+    const outcome = await runBoundedCriticLoop<V>({
+      initialPriorGaps: [],
+      maxLegRetries: 1,
+      filterAccumulatedGaps: (gaps) =>
+        gaps.filter((g) => !isPlanningJudgeInfraIssue(g)),
+      judge: async (priorGaps) => {
+        seen.push([...priorGaps]);
+        return { result: verdicts.shift()!, judgeInfraFailed: false };
+      },
+      repair: async () => {},
+    });
+    assert.equal(outcome.kind, "passed");
+    assert.deepEqual(seen[1], ["real content gap"]);
+  });
+
+  it("escalates via shouldEscalate without burning a repair leg", async () => {
+    let repairs = 0;
+    const outcome = await runBoundedCriticLoop<V>({
+      initialPriorGaps: [],
+      maxLegRetries: 2,
+      judge: async () => ({
+        result: verdict(false, ["research is thin"]),
+        judgeInfraFailed: false,
+      }),
+      shouldEscalate: () => "research",
+      repair: async () => {
+        repairs++;
+      },
+    });
+    assert.equal(outcome.kind, "escalated");
+    if (outcome.kind === "escalated") {
+      assert.equal(outcome.reason, "research");
+      assert.deepEqual(outcome.priorGaps, ["research is thin"]);
+    }
+    assert.equal(repairs, 0);
+  });
+
+  it("escalates with max-leg-retries after exhausting repairs", async () => {
+    let repairs = 0;
+    const outcome = await runBoundedCriticLoop<V>({
+      initialPriorGaps: [],
+      maxLegRetries: 2,
+      judge: async () => ({
+        result: verdict(false, ["still broken"]),
+        judgeInfraFailed: false,
+      }),
+      repair: async () => {
+        repairs++;
+      },
+    });
+    assert.equal(repairs, 2);
+    assert.equal(outcome.kind, "escalated");
+    if (outcome.kind === "escalated") {
+      assert.equal(outcome.reason, "max-leg-retries");
+      assert.equal(outcome.legRetries, 2);
+    }
+  });
+
+  it("classifies judge throws as judge-error and repair throws as repair-error", async () => {
+    const judgeError = await runBoundedCriticLoop<V>({
+      initialPriorGaps: [],
+      maxLegRetries: 2,
+      judge: async () => {
+        throw new Error("endpoint down");
+      },
+      repair: async () => {},
+    });
+    assert.equal(judgeError.kind, "judge-error");
+
+    const repairError = await runBoundedCriticLoop<V>({
+      initialPriorGaps: [],
+      maxLegRetries: 2,
+      judge: async () => ({
+        result: verdict(false, ["gap"]),
+        judgeInfraFailed: false,
+      }),
+      repair: async () => {
+        throw new Error("agent crashed");
+      },
+    });
+    assert.equal(repairError.kind, "repair-error");
+    if (repairError.kind === "repair-error") {
+      assert.equal(repairError.legRetries, 1);
+    }
+  });
+
+  it("classifies degraded judge verdicts as infra-failed", async () => {
+    const outcome = await runBoundedCriticLoop<V>({
+      initialPriorGaps: ["seed"],
+      maxLegRetries: 2,
+      judge: async () => ({
+        result: verdict(false, ["LLM judge failed (timeout)"]),
+        judgeInfraFailed: true,
+      }),
+      repair: async () => {},
+    });
+    assert.equal(outcome.kind, "infra-failed");
+    if (outcome.kind === "infra-failed") {
+      assert.deepEqual(outcome.gaps, ["LLM judge failed (timeout)"]);
+    }
   });
 });

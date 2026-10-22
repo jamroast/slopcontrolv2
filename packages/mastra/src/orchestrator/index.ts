@@ -345,6 +345,7 @@ import {
   MARKETING_START_INTENT_DEFAULT,
   MARKETING_CONTINUE_INTENT_FALLBACK,
   type PhaseDocQualityVerdict,
+  type ResearchQualityVerdict,
   judgeNarrationOnlyViaLlm,
   buildElementHonorSnippets,
   tryMenubarEmbedSimilarity,
@@ -375,10 +376,10 @@ import {
   formatPriorDraftFeedbackBlock,
   nextSelfHealDraftIssues,
   priorDraftJudgeIssuesFromDiagnosis,
-  priorGapsAfterResolution,
   seedPriorQualityGaps,
   shouldReclassifyIntentForPlanningSelfHeal,
   brokenOutputReason,
+  runBoundedCriticLoop,
 } from "./planning-pipeline.js";
 import {
   clipDraftResearch,
@@ -2638,6 +2639,7 @@ function tryBindResearchQualityJudge(
   intentBlock: string;
   phaseDescription: string;
   researchExcerpt: string;
+  priorGaps?: string[];
 }) => ReturnType<typeof judgeResearchQualityViaLlm>) | null {
   const ep = resolved ?? resolvePlanningJudgeEndpoint(registry);
   if (!ep) return null;
@@ -2648,6 +2650,7 @@ function tryBindResearchQualityJudge(
       intentBlock: input.intentBlock,
       phaseDescription: input.phaseDescription,
       researchExcerpt: input.researchExcerpt,
+      priorGaps: input.priorGaps,
     });
 }
 
@@ -5973,103 +5976,107 @@ ${message.trim()}`;
 
     const researchPath = `.slopcontrol/phases/${phase.id}/RESEARCH.md`;
     const researchDate = new Date().toISOString().slice(0, 10);
-    let legRetries = 0;
+    // First repair leg may carry feedback supplied by the caller (self-heal);
+    // afterwards the loop formats feedback from each verdict itself.
+    let judgeFeedbackOverride = input.judgeFeedback;
 
-    while (true) {
-      const researchDoc = readResearch(project.rootPath, phase.id);
-      let verdict: Awaited<ReturnType<typeof judge>>;
-      let judgeInfraFailed: boolean;
-      try {
-        ({ result: verdict, judgeInfraFailed } =
-          await callPlanningJudgeWithInfraRetry(
-            () =>
-              judge({
-                intentBlock,
-                phaseDescription: description,
-                researchExcerpt: clipSharedDoc(
-                  "RESEARCH.md",
-                  researchDoc,
-                  `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
-                ),
-              }),
-            (v) => v.gaps,
-            undefined,
-            {
-              fallbackCall: fallbackJudge
-                ? () =>
-                    fallbackJudge({
-                      intentBlock,
-                      phaseDescription: description,
-                      researchExcerpt: clipSharedDoc(
-                        "RESEARCH.md",
-                        researchDoc,
-                        `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
-                      ),
-                    })
-                : undefined,
-            },
-          ));
-      } catch (err) {
-        return {
-          ok: false,
-          judgeInfraFailed: true,
-          gaps: [planningJudgeErrorDetail(err)],
+    // Bounded critic loop (shared primitive) — the research judge now judges
+    // with the same convergence ledger as the draft leg: accumulated prior
+    // gaps passed back in, verified-resolved gaps subtracted, infra phrasing
+    // never persisted.
+    const outcome = await runBoundedCriticLoop<ResearchQualityVerdict>({
+      initialPriorGaps: [],
+      maxLegRetries: MAX_PLANNING_LEG_RETRIES,
+      filterAccumulatedGaps: (gaps) =>
+        gaps.filter((g) => !isPlanningJudgeInfraIssue(g)),
+      judge: (judgePriorGaps) => {
+        const researchDoc = readResearch(project.rootPath, phase.id);
+        const judgeInput = {
+          intentBlock,
+          phaseDescription: description,
+          researchExcerpt: clipSharedDoc(
+            "RESEARCH.md",
+            researchDoc,
+            `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
+          ),
+          priorGaps: judgePriorGaps,
         };
-      }
-
-      if (judgeInfraFailed) {
-        return { ok: false, judgeInfraFailed: true, gaps: verdict.gaps };
-      }
-      if (verdict.ok) return { ok: true };
-
-      if (
-        !input.allowLegRetry ||
-        legRetries >= MAX_PLANNING_LEG_RETRIES
-      ) {
-        return { ok: false, gaps: verdict.gaps };
-      }
-
-      legRetries++;
-      const feedback =
-        input.judgeFeedback ??
-        formatJudgeFeedbackBlock({
-          title: "Research quality judge rejected RESEARCH.md",
-          gaps: verdict.gaps,
-          suggestedFixes: verdict.suggestedFixes,
+        return callPlanningJudgeWithInfraRetry(
+          () => judge(judgeInput),
+          (v) => v.gaps,
+          undefined,
+          {
+            fallbackCall: fallbackJudge
+              ? () => fallbackJudge(judgeInput)
+              : undefined,
+          },
+        );
+      },
+      shouldEscalate: () =>
+        !input.allowLegRetry ? "leg-retry-disabled" : null,
+      onResolvedGaps: (resolvedGaps) =>
+        log(
+          project,
+          run,
+          `--- Research quality judge resolved prior gaps ---\n${resolvedGaps
+            .map((gap) => `- ${gap}`)
+            .join("\n")}`,
+        ),
+      repair: async (verdict, legRetry) => {
+        const feedback =
+          judgeFeedbackOverride ??
+          formatJudgeFeedbackBlock({
+            title: "Research quality judge rejected RESEARCH.md",
+            gaps: verdict.gaps,
+            suggestedFixes: verdict.suggestedFixes,
+          });
+        log(
+          project,
+          run,
+          `--- Research quality judge failed (leg retry ${legRetry}/${MAX_PLANNING_LEG_RETRIES}) ---\n${verdict.gaps.map((g) => `- ${g}`).join("\n")}`,
+        );
+        const retryPrompt = researchQualityRetryPrompt({
+          intentBlock,
+          description: clipPromptSection("change-request", description, 4_000),
+          researchPath,
+          researchDate,
+          judgeFeedback: feedback,
         });
-      log(
-        project,
-        run,
-        `--- Research quality judge failed (leg retry ${legRetries}/${MAX_PLANNING_LEG_RETRIES}) ---\n${verdict.gaps.map((g) => `- ${g}`).join("\n")}`,
-      );
-      const retryPrompt = researchQualityRetryPrompt({
-        intentBlock,
-        description: clipPromptSection("change-request", description, 4_000),
-        researchPath,
-        researchDate,
-        judgeFeedback: feedback,
-      });
-      const researchWatch = researchDocWatchPaths(project.rootPath, phase.id);
-      const beforeStats = snapshotFileStats(researchWatch);
-      const output = await runAgent(
-        this.ctx.agents.researchAgent,
-        retryPrompt,
-        project.id,
-        `${phase.id}-research-quality-retry-${legRetries}`,
-        planningAgentRunOpts(16),
-      );
-      log(project, run, output);
-      const resolved = resolveResearchFromAgentTurn({
-        projectRoot: project.rootPath,
-        phaseId: phase.id,
-        agentOutput: output,
-        beforeStats,
-      });
-      if (resolved.source !== "none" && resolved.doc.trim()) {
-        writeResearch(project.rootPath, phase.id, resolved.doc);
-      }
-      input = { ...input, judgeFeedback: undefined };
+        const researchWatch = researchDocWatchPaths(project.rootPath, phase.id);
+        const beforeStats = snapshotFileStats(researchWatch);
+        const output = await runAgent(
+          this.ctx.agents.researchAgent,
+          retryPrompt,
+          project.id,
+          `${phase.id}-research-quality-retry-${legRetry}`,
+          planningAgentRunOpts(16),
+        );
+        log(project, run, output);
+        const resolved = resolveResearchFromAgentTurn({
+          projectRoot: project.rootPath,
+          phaseId: phase.id,
+          agentOutput: output,
+          beforeStats,
+        });
+        if (resolved.source !== "none" && resolved.doc.trim()) {
+          writeResearch(project.rootPath, phase.id, resolved.doc);
+        }
+        judgeFeedbackOverride = undefined;
+      },
+    });
+    if (outcome.kind === "passed") return { ok: true };
+    if (outcome.kind === "judge-error") {
+      return {
+        ok: false,
+        judgeInfraFailed: true,
+        gaps: [planningJudgeErrorDetail(outcome.error)],
+      };
     }
+    if (outcome.kind === "infra-failed") {
+      return { ok: false, judgeInfraFailed: true, gaps: outcome.gaps };
+    }
+    if (outcome.kind === "repair-error") throw outcome.error;
+    return { ok: false, gaps: outcome.verdict.gaps };
   }
 
   /** Re-run research leg during planning self-heal (after intent/phase fault). */
@@ -7949,7 +7956,6 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
       : null;
 
     let phaseDocForQuality = phaseDoc;
-    let phaseQualityLegRetries = 0;
     // Convergence memory: gaps the QUALITY judge already raised — seeded from
     // the persisted phase-quality diagnosis (never structural/shell findings,
     // which the quality judge never judged) and only while RESEARCH.md has not
@@ -7987,166 +7993,89 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
         }
       }
     }
-    while (true) {
-      // Deterministic: which repo paths the Automated Checks target, and
-      // whether they exist. Lets the judge distinguish a real missing file
-      // from a target RESEARCH simply never mentioned.
-      const checkTargetsBlock = formatCheckTargetsPromptBlock(
-        verifyCheckTargets(project.rootPath, phaseDocForQuality),
-      );
-      const grepTokenMismatchesBlock = formatGrepTokenMismatchesBlock(
-        verifyGrepTokens(project.rootPath, phaseDocForQuality),
-      );
-      let phaseQuality: PhaseDocQualityVerdict;
-      let phaseJudgeInfra: boolean;
-      try {
-        ({ result: phaseQuality, judgeInfraFailed: phaseJudgeInfra } =
-          await callPlanningJudgeWithInfraRetry(
-            () =>
-              phaseQualityJudge({
-                intentBlock,
-                phaseDescription: phase.description,
-                researchExcerpt: clipSharedDoc(
-                  "RESEARCH.md",
-                  research,
-                  `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
-                ),
-                phaseDocExcerpt: clipSharedDoc(
-                  "PHASE.md",
-                  phaseDocForQuality,
-                  `.slopcontrol/phases/${phase.id}/PHASE.md`,
-                ),
-                checkTargetsBlock,
-                grepTokenMismatchesBlock,
-                priorGaps: priorQualityGaps,
-              }),
-            (v) => v.gaps,
-            undefined,
-            {
-              fallbackCall: fallbackPhaseQualityJudge
-                ? () =>
-                    fallbackPhaseQualityJudge({
-                      intentBlock,
-                      phaseDescription: phase.description,
-                      researchExcerpt: clipSharedDoc(
-                        "RESEARCH.md",
-                        research,
-                        `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
-                      ),
-                      phaseDocExcerpt: clipSharedDoc(
-                        "PHASE.md",
-                        phaseDocForQuality,
-                        `.slopcontrol/phases/${phase.id}/PHASE.md`,
-                      ),
-                      checkTargetsBlock,
-                      grepTokenMismatchesBlock,
-                      priorGaps: priorQualityGaps,
-                    })
-                : undefined,
-            },
-          ));
-      } catch (err) {
-        return recoverableDraftFail(
-          `PHASE quality could not be verified (${planningJudgeErrorDetail(err)})`,
+    // Bounded critic loop (shared primitive): judge with convergence ledger →
+    // repair leg → re-judge, until pass / fault-routing escalation / exhausted
+    // leg retries. Infra-phrased gaps never enter the accumulated ledger.
+    const qualityOutcome = await runBoundedCriticLoop<PhaseDocQualityVerdict>({
+      initialPriorGaps: priorQualityGaps,
+      maxLegRetries: MAX_PLANNING_LEG_RETRIES,
+      filterAccumulatedGaps: (gaps) =>
+        gaps.filter((g) => !isPlanningJudgeInfraIssue(g)),
+      judge: (judgePriorGaps) => {
+        // Deterministic: which repo paths the Automated Checks target, and
+        // whether they exist. Lets the judge distinguish a real missing file
+        // from a target RESEARCH simply never mentioned.
+        const checkTargetsBlock = formatCheckTargetsPromptBlock(
+          verifyCheckTargets(project.rootPath, phaseDocForQuality),
+        );
+        const grepTokenMismatchesBlock = formatGrepTokenMismatchesBlock(
+          verifyGrepTokens(project.rootPath, phaseDocForQuality),
+        );
+        const judgeInput = {
+          intentBlock,
+          phaseDescription: phase.description,
+          researchExcerpt: clipSharedDoc(
+            "RESEARCH.md",
+            research,
+            `.slopcontrol/phases/${phase.id}/RESEARCH.md`,
+          ),
+          phaseDocExcerpt: clipSharedDoc(
+            "PHASE.md",
+            phaseDocForQuality,
+            `.slopcontrol/phases/${phase.id}/PHASE.md`,
+          ),
+          checkTargetsBlock,
+          grepTokenMismatchesBlock,
+          priorGaps: judgePriorGaps,
+        };
+        return callPlanningJudgeWithInfraRetry(
+          () => phaseQualityJudge(judgeInput),
+          (v) => v.gaps,
+          undefined,
           {
-            title: "Draft rejected: phase quality judge infra",
-            kind: "phase-quality-infra",
-            faultLeg: "draft",
-            judgeInfraFailed: true,
+            fallbackCall: fallbackPhaseQualityJudge
+              ? () => fallbackPhaseQualityJudge(judgeInput)
+              : undefined,
           },
         );
-      }
-      if (phaseJudgeInfra) {
-        const infraGaps = phaseQuality!.gaps;
-        return recoverableDraftFail(
-          infraGaps.join("; ") ||
-            "PHASE quality could not be verified (LLM judge failed)",
-          {
-            title: "Draft rejected: phase quality judge infra",
-            kind: "phase-quality-infra",
-            faultLeg: "draft",
-            judgeInfraFailed: true,
-            issues: infraGaps,
-          },
-        );
-      }
-      if (phaseQuality.ok) break;
-
-      // Accumulate the running convergence set: union the prior seed with this
-      // verdict's gaps, dedupe, then subtract gaps the judge verified resolved.
-      // Replacing (rather than accumulating) would forget a gap raised in an
-      // earlier judgement that this verdict neither re-raised nor resolved —
-      // the phase-201 pattern within a single drafting session.
-      const seenGaps = new Set<string>();
-      const accumulatedGaps: string[] = [];
-      for (const g of [...priorQualityGaps, ...phaseQuality.gaps]) {
-        const key = normalizeGap(g);
-        if (!seenGaps.has(key)) {
-          seenGaps.add(key);
-          accumulatedGaps.push(g);
-        }
-      }
-      priorQualityGaps = priorGapsAfterResolution(
-        accumulatedGaps,
-        phaseQuality.resolvedGaps,
-      );
-      if (phaseQuality.resolvedGaps.length > 0) {
+      },
+      shouldEscalate: (verdict) => {
+        const leg = faultLegFromPhaseQualityVerdict(verdict);
+        return leg === "research" || leg === "both" ? leg : null;
+      },
+      onResolvedGaps: (resolvedGaps) =>
         log(
           project,
           run,
-          `--- Phase quality judge resolved prior gaps ---\n${phaseQuality.resolvedGaps
+          `--- Phase quality judge resolved prior gaps ---\n${resolvedGaps
             .map((gap) => `- ${gap}`)
             .join("\n")}`,
-        );
-      }
-      const qualityFaultLeg = faultLegFromPhaseQualityVerdict(phaseQuality);
-      if (
-        qualityFaultLeg === "research" ||
-        qualityFaultLeg === "both" ||
-        phaseQualityLegRetries >= MAX_PLANNING_LEG_RETRIES
-      ) {
+        ),
+      repair: async (verdict, legRetry) => {
         log(
           project,
           run,
-          `PHASE.md failed quality judge (faultLeg=${qualityFaultLeg}):\n${phaseQuality.gaps.join("\n")}`,
+          `--- Phase quality judge failed (draft leg retry ${legRetry}/${MAX_PLANNING_LEG_RETRIES}) ---`,
         );
-        return recoverableDraftFail(phaseQuality.gaps.join("; "), {
-          title: "Draft rejected: phase quality judge",
-          kind: "phase-quality",
-          faultLeg: qualityFaultLeg,
-          issues: phaseQuality.gaps,
-          resolvedGaps: phaseQuality.resolvedGaps,
-          researchFaults: phaseQuality.researchFaults,
-          draftFaults: phaseQuality.draftFaults,
+        const feedback = formatJudgeFeedbackBlock({
+          title: "Phase quality judge rejected PHASE.md",
+          gaps: verdict.gaps,
+          suggestedFixes: verdict.suggestedFixes,
         });
-      }
-
-      phaseQualityLegRetries++;
-      log(
-        project,
-        run,
-        `--- Phase quality judge failed (draft leg retry ${phaseQualityLegRetries}/${MAX_PLANNING_LEG_RETRIES}) ---`,
-      );
-      const feedback = formatJudgeFeedbackBlock({
-        title: "Phase quality judge rejected PHASE.md",
-        gaps: phaseQuality.gaps,
-        suggestedFixes: phaseQuality.suggestedFixes,
-      });
-      const retryPrompt = phaseQualityRetryPrompt({
-        canonicalPath,
-        intentBlock,
-        description: clipPromptSection("change-request", phase.description, 4_000),
-        research: clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
-        judgeFeedback: feedback,
-        checkRules: automatedChecksRules,
-      });
-      try {
+        const retryPrompt = phaseQualityRetryPrompt({
+          canonicalPath,
+          intentBlock,
+          description: clipPromptSection("change-request", phase.description, 4_000),
+          research: clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`),
+          judgeFeedback: feedback,
+          checkRules: automatedChecksRules,
+        });
         beforeStats = snapshotFileStats(watch);
         const retried = await runAgent(
           this.ctx.agents.phasePlannerAgent,
           retryPrompt,
           project.id,
-          `${run.id}-phase-quality-retry-${phaseQualityLegRetries}`,
+          `${run.id}-phase-quality-retry-${legRetry}`,
           planningAgentRunOpts(16),
         );
         log(project, run, retried);
@@ -8173,14 +8102,58 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
             },
           );
         }
-      } catch (retryError) {
-        const retryDetail = formatLlmErrorForLog(retryError);
-        return recoverableDraftFail(retryDetail, {
-          title: "Draft rejected: phase quality retry failed",
-          kind: "phase-quality",
-          faultLeg: qualityFaultLeg,
-        });
-      }
+      },
+    });
+    if (qualityOutcome.kind === "judge-error") {
+      return recoverableDraftFail(
+        `PHASE quality could not be verified (${planningJudgeErrorDetail(qualityOutcome.error)})`,
+        {
+          title: "Draft rejected: phase quality judge infra",
+          kind: "phase-quality-infra",
+          faultLeg: "draft",
+          judgeInfraFailed: true,
+        },
+      );
+    }
+    if (qualityOutcome.kind === "infra-failed") {
+      const infraGaps = qualityOutcome.gaps;
+      return recoverableDraftFail(
+        infraGaps.join("; ") ||
+          "PHASE quality could not be verified (LLM judge failed)",
+        {
+          title: "Draft rejected: phase quality judge infra",
+          kind: "phase-quality-infra",
+          faultLeg: "draft",
+          judgeInfraFailed: true,
+          issues: infraGaps,
+        },
+      );
+    }
+    if (qualityOutcome.kind === "repair-error") {
+      const retryDetail = formatLlmErrorForLog(qualityOutcome.error);
+      return recoverableDraftFail(retryDetail, {
+        title: "Draft rejected: phase quality retry failed",
+        kind: "phase-quality",
+        faultLeg: faultLegFromPhaseQualityVerdict(qualityOutcome.verdict),
+      });
+    }
+    if (qualityOutcome.kind === "escalated") {
+      const phaseQuality = qualityOutcome.verdict;
+      const qualityFaultLeg = faultLegFromPhaseQualityVerdict(phaseQuality);
+      log(
+        project,
+        run,
+        `PHASE.md failed quality judge (faultLeg=${qualityFaultLeg}):\n${phaseQuality.gaps.join("\n")}`,
+      );
+      return recoverableDraftFail(phaseQuality.gaps.join("; "), {
+        title: "Draft rejected: phase quality judge",
+        kind: "phase-quality",
+        faultLeg: qualityFaultLeg,
+        issues: phaseQuality.gaps,
+        resolvedGaps: phaseQuality.resolvedGaps,
+        researchFaults: phaseQuality.researchFaults,
+        draftFaults: phaseQuality.draftFaults,
+      });
     }
 
     const intentAlign = await refineIntentAlignmentIssues(

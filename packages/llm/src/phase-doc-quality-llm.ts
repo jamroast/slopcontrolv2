@@ -169,19 +169,27 @@ export function parsePhaseDocQualityVerdictPayload(
  * Convergence block for re-judgement: the judge must verify its prior gaps
  * and may only raise NEW issues that are objectively fatal — a judge that
  * can always find one more hypothetical issue prevents the loop from ever
- * passing (phase-197 pattern).
+ * passing (phase-197 pattern). `docLabel` names the judged artifact so the
+ * same pressure applies to the research and phase-doc judges.
  */
-export function formatPriorGapsConvergenceBlock(priorGaps: string[]): string {
+export function formatPriorGapsConvergenceBlock(
+  priorGaps: string[],
+  docLabel: string = "PHASE.md",
+): string {
   const gaps = priorGaps.filter((g) => g.trim().length > 0).slice(0, 12);
   if (gaps.length === 0) return "";
+  const fatalExample =
+    docLabel === "PHASE.md"
+      ? "the phase cannot pass as written — a check targets a MISSING path, a check fails under a reasonable correct implementation, a required section is missing or placeholder, or the draft contradicts RESEARCH.md / the Change Intent"
+      : "the research cannot support drafting as written — a required section is missing or placeholder, a claimed repo path/fact is fabricated, or the doc contradicts the Change Intent";
   return [
     "Prior review context (convergence rules apply):",
-    "You already rejected an earlier draft of this PHASE.md with these gaps:",
+    `You already rejected an earlier draft of this ${docLabel} with these gaps:`,
     ...gaps.map((g, i) => `${i + 1}. ${g}`),
     "The draft was rewritten to address them. Convergence rules:",
     "- First verify each prior gap against the new draft: if it is still present, report it again in gaps[] (same or sharper wording).",
     "- If a prior gap is fixed, list it VERBATIM in resolvedGaps[]. Never re-report a resolved gap, and never carry it forward.",
-    "- Report a NEW gap (one you did not raise before) only when it is objectively fatal: the phase cannot pass as written — a check targets a MISSING path, a check fails under a reasonable correct implementation, a required section is missing or placeholder, or the draft contradicts RESEARCH.md / the Change Intent.",
+    `- Report a NEW gap (one you did not raise before) only when it is objectively fatal: ${fatalExample}.`,
     "- Do NOT report new gaps for hypothetical or hostile implementations (\u201can implementer could write X and evade this check\u201d) when a reasonable implementation passes.",
     "- Robustness hardening and stronger-than-needed invariants are not gaps; omit them.",
   ].join("\n");

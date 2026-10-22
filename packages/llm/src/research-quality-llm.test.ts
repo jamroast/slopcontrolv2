@@ -119,6 +119,65 @@ describe("research-quality-llm", () => {
       assert.equal(verdict.ok, false);
       assert.deepEqual(verdict.gaps, ["name the files"]);
       assert.deepEqual(verdict.suggestedFixes, []);
+      assert.deepEqual(verdict.resolvedGaps, []);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("embeds a convergence block when priorGaps are supplied", async () => {
+    let user = "";
+    const fetchMock = mock.method(globalThis, "fetch", async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        messages?: Array<{ role: string; content: string }>;
+      };
+      user = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"ok":true,"gaps":[],"suggestedFixes":[],"resolvedGaps":["missing scope coverage"]}' } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    try {
+      const verdict = await judgeResearchQualityViaLlm({
+        endpoint,
+        intentBlock: "intent",
+        phaseDescription: "phase",
+        researchExcerpt: "research",
+        priorGaps: ["missing scope coverage"],
+      });
+      assert.match(user, /convergence rules apply/);
+      assert.match(user, /earlier draft of this RESEARCH\.md/);
+      assert.match(user, /missing scope coverage/);
+      assert.deepEqual(verdict.resolvedGaps, ["missing scope coverage"]);
+    } finally {
+      fetchMock.mock.restore();
+    }
+  });
+
+  it("omits the convergence block when there are no priorGaps", async () => {
+    let user = "";
+    const fetchMock = mock.method(globalThis, "fetch", async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        messages?: Array<{ role: string; content: string }>;
+      };
+      user = body.messages?.find((m) => m.role === "user")?.content ?? "";
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: '{"ok":true,"gaps":[],"suggestedFixes":[]}' } }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    try {
+      await judgeResearchQualityViaLlm({
+        endpoint,
+        intentBlock: "intent",
+        phaseDescription: "phase",
+        researchExcerpt: "research",
+      });
+      assert.doesNotMatch(user, /convergence rules apply/);
     } finally {
       fetchMock.mock.restore();
     }
