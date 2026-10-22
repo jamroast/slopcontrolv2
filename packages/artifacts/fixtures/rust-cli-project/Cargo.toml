@@ -1,0 +1,8 @@
+[package]
+name = "packetd"
+version = "0.1.0"
+edition = "2021"
+description = "Fixture: tiny packet-parsing CLI used to pilot SlopControl's generic verification loops against a non-node toolchain."
+license = "MIT"
+
+[dependencies]

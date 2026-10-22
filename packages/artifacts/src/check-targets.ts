@@ -108,6 +108,12 @@ export type VerifiedGrepToken = {
  *
  * Only single literal tokens are checked (no regex metacharacters or `|`
  * alternation, which need a real engine to evaluate) — this stays structural.
+ *
+ * Files the phase declares in ## File Changes are exempt from mismatch
+ * reporting: a grep asserting post-edit content legitimately does not match
+ * the pre-development file yet. Mismatches stay reported for files the phase
+ * does NOT touch — a token absent there is a speculative string the check
+ * can never satisfy.
  */
 export function verifyGrepTokens(
   projectRoot: string,
@@ -119,6 +125,14 @@ export function verifyGrepTokens(
     if (results.length >= max) return;
     results.push({ token, path, found });
   };
+  // Declared paths (EDIT/NEW) — same prose/table section verifyCheckTargets
+  // uses. A missing token in one of these is expected post-edit content.
+  const fileChanges =
+    (extractSection(phaseDoc, /^##\s+File Changes\s*$/im) ?? "").split(
+      "```",
+    )[0] ?? "";
+  const isDeclared = (path: string): boolean =>
+    path.length > 0 && fileChanges.includes(path);
   for (const fence of phaseDoc.matchAll(SHELL_FENCE_RE)) {
     const body = fence[1] ?? "";
     // grep -q / grep -rq with a quoted pattern and a target path. Single- and
@@ -149,6 +163,11 @@ export function verifyGrepTokens(
         // Unreadable path — skip rather than report a false mismatch.
         continue;
       }
+      // A missing token in a file this phase declares (EDIT/NEW) is expected
+      // post-edit content, not a speculative string — the check runs after
+      // the edit lands. Skip the mismatch; a PRESENT token still reports
+      // found=true (positive grounding).
+      if (!found && isDeclared(path)) continue;
       push(pattern, path, found);
     }
   }

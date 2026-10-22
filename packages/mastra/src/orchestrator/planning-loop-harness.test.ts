@@ -314,6 +314,119 @@ function writeFixture(root: string): void {
   writeFileSync(join(root, "docs", "llms-full.txt"), "status widget\n");
 }
 
+/* ------------------------------------------------------------------ */
+/* Rust pilot: cargo project through the same planning loop.           */
+/* ------------------------------------------------------------------ */
+
+const RUST_DESCRIPTION =
+  "Add a replay module that counts re-sent packets and prove it with a targeted cargo test.";
+
+const RUST_RESEARCH_MD = `# RESEARCH — Phase 01: replay counter
+
+Date: 2026-10-22
+
+## Summary
+
+The parser API lives in \`src/lib.rs\`. A replay counter belongs in a new
+\`src/replay.rs\` module re-exported from the crate root.
+
+## Check targets (verified)
+
+- exists: src/lib.rs
+- exists: Cargo.toml
+
+RESEARCH_COMPLETE
+`;
+
+const RUST_PHASE_MD = `# Phase 01 — Replay counter
+
+## Scope
+
+Add \`src/replay.rs\` with \`replay_count(&[Packet]) -> usize\` and re-export it from \`src/lib.rs\`.
+
+## File Changes
+
+| Path | Action |
+| --- | --- |
+| src/lib.rs | EDIT |
+| src/replay.rs | NEW |
+
+## Build Order
+
+1. Create \`src/replay.rs\`.
+2. Wire \`pub mod replay;\` in \`src/lib.rs\`.
+
+## Success Criteria
+
+- \`replay_count\` counts exact duplicate packets.
+- A targeted cargo test proves the counter.
+
+## Automated Checks
+
+\`\`\`bash
+set -euo pipefail
+grep -q 'pub fn parse_packet' src/lib.rs || exit 1
+grep -q 'pub mod replay' src/lib.rs || exit 1
+grep -q 'pub fn replay_count' src/replay.rs || exit 1
+cargo check || exit 1
+cargo test replay_counter_counts -- --exact || exit 1
+\`\`\`
+
+## Blueprint Deltas
+
+- **BD-01-1 — Feature logic lives in its own module**, re-exported from the crate root.
+
+PHASE_COMPLETE
+`;
+
+function writeRustFixture(root: string): void {
+  const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+  mkdirSync(join(phaseDir, "plan"), { recursive: true });
+  mkdirSync(join(root, ".slopcontrol", "runs", "run-1"), { recursive: true });
+  writeFileSync(
+    join(root, ".slopcontrol", "BLUEPRINT.md"),
+    "# Blueprint\n\nSingle-crate Rust library; modules re-exported from src/lib.rs.\n",
+  );
+  writeFileSync(
+    join(phaseDir, "INTENT.json"),
+    `${JSON.stringify(
+      {
+        title: "Replay counter",
+        goal: RUST_DESCRIPTION,
+        uiMount: "n/a",
+        changeKind: "backend",
+        refinementOf: [],
+        supersedes: [],
+        mustNot: [],
+        rawDescription: RUST_DESCRIPTION,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(join(phaseDir, "RESEARCH.md"), RUST_RESEARCH_MD);
+  writeFileSync(
+    join(phaseDir, "status.json"),
+    `${JSON.stringify({ status: "draft" })}\n`,
+  );
+  // Cargo project shape — toolchain detection keys off Cargo.toml (no
+  // configured toolchain in config.json: the default-spec path).
+  writeFileSync(
+    join(root, "Cargo.toml"),
+    '[package]\nname = "packetd"\nversion = "0.1.0"\nedition = "2021"\n',
+  );
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(
+    join(root, "src", "lib.rs"),
+    "pub fn parse_packet(input: &str) -> Result<String, String> {\n    Ok(input.to_string())\n}\n",
+  );
+  // Declared conventions as onboarding would have extracted them.
+  writeFileSync(
+    join(root, ".slopcontrol", "CONVENTIONS.md"),
+    "# Project verification conventions (declared)\n\n## AGENTS.md (verbatim)\n\nVerify changes with `cargo test <test_name> -- --exact`.\n",
+  );
+}
+
 const originalFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -942,6 +1055,79 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
         !reJudgement.includes(gapResearch),
         "research gap must be dropped once RESEARCH was regenerated",
       );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rust pilot: drafter and judge both receive cargo vocabulary, converges to in_review", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-rust-"));
+    const judgeCalls: Captured[] = [];
+    const restore = installFetchStub({
+      judgeCalls,
+      judge: () => ({
+        ok: true,
+        gaps: [],
+        suggestedFixes: [],
+        researchFaults: [],
+        draftFaults: [],
+      }),
+    });
+
+    const plannerCalls: string[] = [];
+    try {
+      writeRustFixture(root);
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          researchAgent: stubAgent(() => RUST_RESEARCH_MD, []),
+          phasePlannerAgent: stubAgent(
+            () => RUST_PHASE_MD,
+            plannerCalls,
+            join(phaseDir, "PHASE.md"),
+          ),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const stage = await orchestrator.draftPhase({ project, phase, run });
+      assert.equal(stage, "in_review", `rust draft must pass the loop`);
+
+      // Drafter prompt: cargo vocabulary from the detected toolchain, no
+      // node-estate commands, and the project's declared conventions cited.
+      const draftPrompt = plannerCalls[0] ?? "";
+      assert.match(draftPrompt, /cargo test <test_name>/);
+      assert.match(draftPrompt, /cargo check/);
+      assert.match(draftPrompt, /The project's declared conventions/);
+      assert.doesNotMatch(draftPrompt, /npx vitest run/);
+
+      // Judge: the toolchain-aware §4 (judges against the embedded rules
+      // block) and the rendered cargo rules embedded in the user message.
+      assert.ok(judgeCalls.length >= 1, "phase-quality judge must run");
+      const judgeSystem = judgeCalls[0]!.system;
+      const judgeUser = judgeCalls[0]!.user;
+      assert.match(judgeSystem, /project's check-authoring rules/);
+      assert.doesNotMatch(judgeSystem, /grep\/build\/vitest one-shot/);
+      assert.match(judgeUser, /cargo test <test_name>/);
+      assert.doesNotMatch(judgeUser, /npx vitest run/);
+      // Deterministic targets block is ecosystem-agnostic: exists + NEW.
+      assert.match(judgeUser, /- exists: src\/lib\.rs/);
+      assert.match(judgeUser, /- NEW: src\/replay\.rs/);
+      // No test-services and no compose file → self-contained probe rule,
+      // not the managed-infra ban.
+      assert.match(judgeUser, /self-contained/);
+      assert.doesNotMatch(judgeUser, /verify already brings up test-services/);
+
+      // The draft on disk passed the structural gate.
+      const written = readPhaseDoc(root, PHASE_ID) ?? "";
+      const gate = validatePhaseDocForDev(written, { projectRoot: root });
+      assert.equal(gate.ok, true, gate.issues.join("; "));
     } finally {
       restore();
       globalThis.fetch = originalFetch;
