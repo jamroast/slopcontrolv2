@@ -103,6 +103,39 @@ describe("writeDiagnosisWithLedger", () => {
     assert.equal(persisted.researchReruns, 2);
   });
 
+  it("merges a planning diagnosis even when surfaced to the operator audience", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-ledger-operator-"));
+    writeDiagnosisWithLedger(
+      root,
+      "run-1",
+      planningDiag({
+        phaseId: "p1",
+        openIssues: ["bare npm test"],
+        draftIssues: ["bare npm test"],
+      }),
+      "p1",
+    );
+    // Operator-audience planning failure (e.g. "Research budget exhausted")
+    // must still merge, not fall onto the re-stamp path.
+    writeDiagnosisWithLedger(
+      root,
+      "run-2",
+      planningDiag({
+        phaseId: "p1",
+        audience: "operator",
+        title: "Research budget exhausted",
+        openIssues: ["fresh budget gap"],
+        draftIssues: ["fresh budget gap"],
+      }),
+      "p1",
+    );
+    const persisted = readLatestDiagnosisForPhase(root, "p1")!;
+    assert.deepEqual([...(persisted.openIssues ?? [])].sort(), [
+      "bare npm test",
+      "fresh budget gap",
+    ]);
+  });
+
   it("drops the ledger on a complete stub (phase finished)", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-ledger-complete-"));
     writeDiagnosisWithLedger(

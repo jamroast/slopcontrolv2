@@ -1576,10 +1576,12 @@ export function writeDiagnosisWithLedger(
   const prior = readLatestDiagnosisForPhase(projectRoot, phaseId);
   // Never ride the ledger onto a complete/clear stub.
   const isCompleteStub = diagnosis.fingerprint === "complete";
+  // Planning signal: tag OR fingerprint prefix (audience is NOT part of the
+  // match — a planning failure surfaced to the operator, e.g. "Research budget
+  // exhausted", still merges its ledger instead of taking the re-stamp path).
   const isPlanning =
-    diagnosis.audience === "coding" &&
-    ((diagnosis.tags ?? []).includes("planning") ||
-      /^planning[-:]/.test(diagnosis.fingerprint ?? ""));
+    (diagnosis.tags ?? []).includes("planning") ||
+    /^planning[-:]/.test(diagnosis.fingerprint ?? "");
   let merged = diagnosis;
   if (!isCompleteStub && prior) {
     const ledgerFields = {
