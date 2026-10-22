@@ -361,9 +361,6 @@ import {
   formatJudgeFeedbackBlock,
   isPlanningJudgeInfraIssue,
   MAX_PLANNING_JUDGE_RETRIES,
-  MAX_PLANNING_LEG_RETRIES,
-  MAX_PLANNING_RESEARCH_RERUNS,
-  MAX_PLANNING_SELF_HEAL_ROUNDS,
   mergeFaultLegs,
   phaseQualityRetryPrompt,
   planningAgentRunOpts,
@@ -380,6 +377,9 @@ import {
   shouldReclassifyIntentForPlanningSelfHeal,
   brokenOutputReason,
   runBoundedCriticLoop,
+  resolvePlanningBudget,
+  planningBudgetExhaustedDetail,
+  type PlanningBudget,
 } from "./planning-pipeline.js";
 import {
   clipDraftResearch,
@@ -5954,8 +5954,18 @@ ${message.trim()}`;
     intentBlock: string;
     allowLegRetry?: boolean;
     judgeFeedback?: string;
-  }): Promise<{ ok: boolean; judgeInfraFailed?: boolean; gaps?: string[] }> {
+    /** Per-phase planning budget (defaults: env-resolved). */
+    planningBudget?: PlanningBudget;
+    /** Wall-clock deadline shared with the enclosing planning loop. */
+    planningDeadlineMs?: number;
+  }): Promise<{
+    ok: boolean;
+    judgeInfraFailed?: boolean;
+    budgetExhausted?: boolean;
+    gaps?: string[];
+  }> {
     const { project, phase, run, description, intentBlock } = input;
+    const planningBudget = input.planningBudget ?? resolvePlanningBudget();
     const primaryResolved = resolvePlanningJudgeEndpoint(this.ctx.registry);
     const judge = tryBindResearchQualityJudge(this.ctx.registry, primaryResolved ?? undefined);
     if (!judge) {
@@ -5986,7 +5996,8 @@ ${message.trim()}`;
     // never persisted.
     const outcome = await runBoundedCriticLoop<ResearchQualityVerdict>({
       initialPriorGaps: [],
-      maxLegRetries: MAX_PLANNING_LEG_RETRIES,
+      maxLegRetries: planningBudget.legRetries,
+      deadlineMs: input.planningDeadlineMs,
       filterAccumulatedGaps: (gaps) =>
         gaps.filter((g) => !isPlanningJudgeInfraIssue(g)),
       judge: (judgePriorGaps) => {
@@ -6033,7 +6044,7 @@ ${message.trim()}`;
         log(
           project,
           run,
-          `--- Research quality judge failed (leg retry ${legRetry}/${MAX_PLANNING_LEG_RETRIES}) ---\n${verdict.gaps.map((g) => `- ${g}`).join("\n")}`,
+          `--- Research quality judge failed (leg retry ${legRetry}/${planningBudget.legRetries}) ---\n${verdict.gaps.map((g) => `- ${g}`).join("\n")}`,
         );
         const retryPrompt = researchQualityRetryPrompt({
           intentBlock,
@@ -6075,6 +6086,20 @@ ${message.trim()}`;
     if (outcome.kind === "infra-failed") {
       return { ok: false, judgeInfraFailed: true, gaps: outcome.gaps };
     }
+    if (outcome.kind === "budget-exhausted") {
+      return {
+        ok: false,
+        budgetExhausted: true,
+        gaps: [
+          planningBudgetExhaustedDetail({
+            knob: "wall-clock",
+            budget: planningBudget,
+            phaseId: phase.id,
+          }),
+          ...outcome.priorGaps,
+        ],
+      };
+    }
     if (outcome.kind === "repair-error") throw outcome.error;
     return { ok: false, gaps: outcome.verdict.gaps };
   }
@@ -6086,6 +6111,10 @@ ${message.trim()}`;
     run: Run;
     description: string;
     feedback: string;
+    /** Per-phase planning budget (defaults: env-resolved). */
+    planningBudget?: PlanningBudget;
+    /** Wall-clock deadline shared with the enclosing self-heal loop. */
+    planningDeadlineMs?: number;
   }): Promise<boolean> {
     const intent = await ensureChangeIntentAsync(
       input.project.rootPath,
@@ -6167,6 +6196,8 @@ Phase id: ${input.phase.id}`;
       description: input.description,
       intentBlock,
       allowLegRetry: true,
+      planningBudget: input.planningBudget,
+      planningDeadlineMs: input.planningDeadlineMs,
     });
     if (!gate.ok) {
       this.persistDiagnosis(
@@ -6174,16 +6205,20 @@ Phase id: ${input.phase.id}`;
         input.run,
         buildPlanningFailureDiagnosis({
           stage: "research",
-          title: gate.judgeInfraFailed
-            ? "Research failed: quality judge infra"
-            : "Research failed: quality judge",
+          title: gate.budgetExhausted
+            ? "Research failed: planning budget (wall-clock)"
+            : gate.judgeInfraFailed
+              ? "Research failed: quality judge infra"
+              : "Research failed: quality judge",
           detail: (gate.gaps ?? []).join("; "),
           issues: gate.gaps ?? [],
           phaseId: input.phase.id,
           runId: input.run.id,
-          kind: gate.judgeInfraFailed
-            ? "research-judge-infra"
-            : "research-quality",
+          kind: gate.budgetExhausted
+            ? "planning-budget"
+            : gate.judgeInfraFailed
+              ? "research-judge-infra"
+              : "research-quality",
           faultLeg: "research",
         }),
         input.phase.id,
@@ -6205,6 +6240,10 @@ Phase id: ${input.phase.id}`;
     listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
   }): Promise<RunStage> {
     const { project, phase, run, onStage, listProjects } = input;
+    const planningBudget = resolvePlanningBudget();
+    // Wall-clock budget for the whole phase loop, checked at round tops and
+    // threaded into the quality critic loops (checked at their boundaries).
+    const planningDeadlineMs = Date.now() + planningBudget.wallClockMs;
     let faultLeg: PlanningFaultLeg = "none";
     let priorGateFingerprints: string[] = [];
     let intentReclassified = false;
@@ -6214,12 +6253,41 @@ Phase id: ${input.phase.id}`;
       readLatestDiagnosisForPhase(project.rootPath, phase.id)?.researchReruns ??
       0;
 
-    for (let round = 0; round < MAX_PLANNING_SELF_HEAL_ROUNDS; round++) {
+    for (let round = 0; round < planningBudget.selfHealRounds; round++) {
+      if (Date.now() >= planningDeadlineMs) {
+        // Wall-clock exhausted — same unified shape as the research budget:
+        // carry the accumulated ledger so the operator sees WHAT was
+        // unresolved, not just that time ran out.
+        const budgetOpenIssues = this.planningGateOutcome.openIssues ?? [];
+        const budgetIssues = this.planningGateOutcome.issues ?? [];
+        this.persistDiagnosis(
+          project,
+          run,
+          buildPlanningFailureDiagnosis({
+            stage: "draft",
+            title: "Planning budget exhausted (wall-clock)",
+            detail: planningBudgetExhaustedDetail({
+              knob: "wall-clock",
+              budget: planningBudget,
+              phaseId: phase.id,
+            }),
+            phaseId: phase.id,
+            runId: run.id,
+            kind: "planning-budget",
+            ...(budgetIssues.length ? { issues: budgetIssues } : {}),
+            ...(budgetOpenIssues.length
+              ? { openIssues: budgetOpenIssues }
+              : {}),
+          }),
+          phase.id,
+        );
+        return "failed";
+      }
       if (round > 0) {
         log(
           project,
           run,
-          `--- Planning self-heal round ${round + 1}/${MAX_PLANNING_SELF_HEAL_ROUNDS} (faultLeg=${faultLeg}) ---`,
+          `--- Planning self-heal round ${round + 1}/${planningBudget.selfHealRounds} (faultLeg=${faultLeg}) ---`,
         );
         deleteRunDiagnosis(project.rootPath, run.id, phase.id);
 
@@ -6229,7 +6297,7 @@ Phase id: ${input.phase.id}`;
         ];
 
         if (faultLeg === "research" || faultLeg === "both") {
-          if (researchReruns >= MAX_PLANNING_RESEARCH_RERUNS) {
+          if (researchReruns >= planningBudget.researchReruns) {
             // Carry the accumulated ledger + this round's gaps so the operator
             // sees WHAT was unresolved, not just that the budget ran out.
             const budgetOpenIssues = this.planningGateOutcome.openIssues ?? [];
@@ -6240,7 +6308,11 @@ Phase id: ${input.phase.id}`;
               buildPlanningFailureDiagnosis({
                 stage: "research",
                 title: "Research budget exhausted",
-                detail: `Phase ${phase.id} exceeded ${MAX_PLANNING_RESEARCH_RERUNS} research re-runs without producing a judge-passing draft. The research leg keeps being rejected — surface the unresolved gaps to the operator rather than looping.`,
+                detail: planningBudgetExhaustedDetail({
+                  knob: "research-reruns",
+                  budget: planningBudget,
+                  phaseId: phase.id,
+                }),
                 phaseId: phase.id,
                 runId: run.id,
                 kind: "research-budget",
@@ -6267,6 +6339,8 @@ Phase id: ${input.phase.id}`;
             run,
             description: input.description,
             feedback,
+            planningBudget,
+            planningDeadlineMs,
           });
           if (!researchOk) return "failed";
           const researchDoc = readResearch(project.rootPath, phase.id);
@@ -6303,11 +6377,13 @@ Phase id: ${input.phase.id}`;
         run,
         onStage,
         listProjects,
-        deferFailureDiagnosis: round < MAX_PLANNING_SELF_HEAL_ROUNDS - 1,
+        deferFailureDiagnosis: round < planningBudget.selfHealRounds - 1,
         selfHealRound: round,
         priorJudgeIssues,
         priorQualityGapsSeed,
         researchReruns,
+        planningBudget,
+        planningDeadlineMs,
       });
 
       if (stage === "in_review") return "in_review";
@@ -6353,7 +6429,7 @@ Phase id: ${input.phase.id}`;
           faultLeg: outcome.faultLeg,
           judgeInfraFailed: outcome.judgeInfraFailed,
           round,
-          maxRounds: MAX_PLANNING_SELF_HEAL_ROUNDS,
+          maxRounds: planningBudget.selfHealRounds,
         })
       ) {
         faultLeg = outcome.faultLeg;
@@ -6506,15 +6582,19 @@ Phase id: ${input.phase.id}`;
           run,
           buildPlanningFailureDiagnosis({
             stage: "research",
-            title: gate.judgeInfraFailed
-              ? "Research failed: quality judge infra"
-              : "Research failed: quality judge",
+            title: gate.budgetExhausted
+              ? "Research failed: planning budget (wall-clock)"
+              : gate.judgeInfraFailed
+                ? "Research failed: quality judge infra"
+                : "Research failed: quality judge",
             detail: (gate.gaps ?? []).join("; "),
             phaseId: phase.id,
             runId: run.id,
-            kind: gate.judgeInfraFailed
-              ? "research-judge-infra"
-              : "research-quality",
+            kind: gate.budgetExhausted
+              ? "planning-budget"
+              : gate.judgeInfraFailed
+                ? "research-judge-infra"
+                : "research-quality",
             faultLeg: "research",
           }),
           phase.id,
@@ -6920,16 +7000,20 @@ Phase id: ${phase.id}`;
         run,
         buildPlanningFailureDiagnosis({
           stage: "research",
-          title: gate.judgeInfraFailed
-            ? "Research failed: quality judge infra"
-            : "Research failed: quality judge",
+          title: gate.budgetExhausted
+            ? "Research failed: planning budget (wall-clock)"
+            : gate.judgeInfraFailed
+              ? "Research failed: quality judge infra"
+              : "Research failed: quality judge",
           detail: (gate.gaps ?? []).join("; "),
           issues: gate.gaps ?? [],
           phaseId: phase.id,
           runId: run.id,
-          kind: gate.judgeInfraFailed
-            ? "research-judge-infra"
-            : "research-quality",
+          kind: gate.budgetExhausted
+            ? "planning-budget"
+            : gate.judgeInfraFailed
+              ? "research-judge-infra"
+              : "research-quality",
           faultLeg: "research",
         }),
         phase.id,
@@ -6962,6 +7046,10 @@ Phase id: ${phase.id}`;
     priorQualityGapsSeed?: string[];
     /** Research re-runs already consumed for this phase (carried across rounds). */
     researchReruns?: number;
+    /** Per-phase planning budget (defaults: env-resolved). */
+    planningBudget?: PlanningBudget;
+    /** Wall-clock deadline shared with the enclosing self-heal loop. */
+    planningDeadlineMs?: number;
   }): Promise<RunStage> {
     const {
       project,
@@ -6973,6 +7061,9 @@ Phase id: ${phase.id}`;
       priorQualityGapsSeed,
       researchReruns,
     } = input;
+    const planningBudget = input.planningBudget ?? resolvePlanningBudget();
+    const planningDeadlineMs =
+      input.planningDeadlineMs ?? Date.now() + planningBudget.wallClockMs;
     onStage?.("drafting");
     log(project, run, "--- Drafting PHASE.md ---");
 
@@ -7998,7 +8089,8 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
     // leg retries. Infra-phrased gaps never enter the accumulated ledger.
     const qualityOutcome = await runBoundedCriticLoop<PhaseDocQualityVerdict>({
       initialPriorGaps: priorQualityGaps,
-      maxLegRetries: MAX_PLANNING_LEG_RETRIES,
+      maxLegRetries: planningBudget.legRetries,
+      deadlineMs: planningDeadlineMs,
       filterAccumulatedGaps: (gaps) =>
         gaps.filter((g) => !isPlanningJudgeInfraIssue(g)),
       judge: (judgePriorGaps) => {
@@ -8055,7 +8147,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
         log(
           project,
           run,
-          `--- Phase quality judge failed (draft leg retry ${legRetry}/${MAX_PLANNING_LEG_RETRIES}) ---`,
+          `--- Phase quality judge failed (draft leg retry ${legRetry}/${planningBudget.legRetries}) ---`,
         );
         const feedback = formatJudgeFeedbackBlock({
           title: "Phase quality judge rejected PHASE.md",
@@ -8104,6 +8196,21 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
         }
       },
     });
+    if (qualityOutcome.kind === "budget-exhausted") {
+      return recoverableDraftFail(
+        planningBudgetExhaustedDetail({
+          knob: "wall-clock",
+          budget: planningBudget,
+          phaseId: phase.id,
+        }),
+        {
+          title: "Planning budget exhausted (wall-clock)",
+          kind: "planning-budget",
+          faultLeg: "draft",
+          issues: qualityOutcome.priorGaps,
+        },
+      );
+    }
     if (qualityOutcome.kind === "judge-error") {
       return recoverableDraftFail(
         `PHASE quality could not be verified (${planningJudgeErrorDetail(qualityOutcome.error)})`,

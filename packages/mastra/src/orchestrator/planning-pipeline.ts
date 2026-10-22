@@ -26,14 +26,94 @@ export function brokenOutputReason(text: string | null): string | null {
   return null;
 }
 
-/** Max outer self-heal rounds (research → draft → intent gate). */
-export const MAX_PLANNING_SELF_HEAL_ROUNDS = 3;
+/**
+ * Per-phase planning-loop budget, resolved once per phase and consulted at
+ * every loop boundary. One record instead of scattered constants so an
+ * operator can tune the whole envelope (and so the exhausted-budget
+ * diagnosis can carry the full policy, not one magic number).
+ */
+export interface PlanningBudget {
+  /** Max repair legs per quality-gate critic loop. */
+  legRetries: number;
+  /** Max outer self-heal rounds (research → draft → intent gate). */
+  selfHealRounds: number;
+  /** Max research re-runs for a phase before failing closed. */
+  researchReruns: number;
+  /**
+   * Wall-clock budget for one phase's whole planning loop, checked at loop
+   * boundaries (self-heal round tops, critic-loop judgement boundaries).
+   */
+  wallClockMs: number;
+}
 
-/** Max retries per leg when that leg's quality judge rejects. */
-export const MAX_PLANNING_LEG_RETRIES = 2;
+export const DEFAULT_PLANNING_BUDGET: PlanningBudget = {
+  legRetries: 2,
+  selfHealRounds: 3,
+  researchReruns: 2,
+  // Generous default: a planning round runs several multi-minute agent turns.
+  wallClockMs: 60 * 60 * 1000,
+};
 
-/** Max research re-runs for a phase before failing closed (stale-research guard). */
-export const MAX_PLANNING_RESEARCH_RERUNS = 2;
+const budgetEnvInt = (raw: string | undefined, fallback: number): number => {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
+};
+
+/** Resolve the planning budget with per-knob env overrides (fail to defaults). */
+export function resolvePlanningBudget(
+  env: NodeJS.ProcessEnv = process.env,
+): PlanningBudget {
+  return {
+    legRetries: budgetEnvInt(
+      env.SLOPCONTROL_PLANNING_LEG_RETRIES,
+      DEFAULT_PLANNING_BUDGET.legRetries,
+    ),
+    selfHealRounds: budgetEnvInt(
+      env.SLOPCONTROL_PLANNING_SELF_HEAL_ROUNDS,
+      DEFAULT_PLANNING_BUDGET.selfHealRounds,
+    ),
+    researchReruns: budgetEnvInt(
+      env.SLOPCONTROL_PLANNING_RESEARCH_RERUNS,
+      DEFAULT_PLANNING_BUDGET.researchReruns,
+    ),
+    wallClockMs: budgetEnvInt(
+      env.SLOPCONTROL_PLANNING_WALL_CLOCK_MS,
+      DEFAULT_PLANNING_BUDGET.wallClockMs,
+    ),
+  };
+}
+
+/** Back-compat aliases (existing call sites / tests) — prefer PlanningBudget. */
+export const MAX_PLANNING_SELF_HEAL_ROUNDS = DEFAULT_PLANNING_BUDGET.selfHealRounds;
+export const MAX_PLANNING_LEG_RETRIES = DEFAULT_PLANNING_BUDGET.legRetries;
+export const MAX_PLANNING_RESEARCH_RERUNS = DEFAULT_PLANNING_BUDGET.researchReruns;
+
+/** Which budget knob ran out — the unified exhausted-budget diagnosis axis. */
+export type PlanningBudgetKnob =
+  | "leg-retries"
+  | "self-heal-rounds"
+  | "research-reruns"
+  | "wall-clock";
+
+/** One exhausted-budget detail message per knob (same shape everywhere). */
+export function planningBudgetExhaustedDetail(opts: {
+  knob: PlanningBudgetKnob;
+  budget: PlanningBudget;
+  phaseId: string;
+}): string {
+  const { knob, budget, phaseId } = opts;
+  switch (knob) {
+    case "research-reruns":
+      return `Phase ${phaseId} exceeded ${budget.researchReruns} research re-runs without producing a judge-passing draft. The research leg keeps being rejected — surface the unresolved gaps to the operator rather than looping.`;
+    case "wall-clock":
+      return `Phase ${phaseId} planning exceeded its wall-clock budget of ${Math.round(budget.wallClockMs / 60_000)}m without producing a judge-passing draft. Surface the unresolved gaps to the operator rather than looping.`;
+    case "self-heal-rounds":
+      return `Phase ${phaseId} exhausted ${budget.selfHealRounds} planning self-heal rounds without producing a judge-passing draft. Surface the unresolved gaps to the operator rather than looping.`;
+    case "leg-retries":
+      return `Phase ${phaseId} exhausted ${budget.legRetries} leg-repair retries in a planning quality loop. Surface the unresolved gaps to the operator rather than looping.`;
+  }
+}
 
 /** Max JSON judge retries on infra/parse failure before fail-closed. */
 export const MAX_PLANNING_JUDGE_RETRIES = 3;
@@ -539,7 +619,13 @@ export type CriticLoopOutcome<V extends CriticLoopVerdict> =
       verdict: V;
       priorGaps: string[];
       legRetries: number;
-    };
+    }
+  /**
+   * Wall-clock deadline hit at a loop boundary (before the next judgement).
+   * Carries the accumulated ledger so the caller's budget diagnosis shows
+   * WHAT was unresolved, not just that time ran out.
+   */
+  | { kind: "budget-exhausted"; priorGaps: string[]; legRetries: number };
 
 /**
  * One bounded critic-loop primitive shared by the planning quality gates
@@ -578,10 +664,18 @@ export async function runBoundedCriticLoop<V extends CriticLoopVerdict>(opts: {
   filterAccumulatedGaps?: (gaps: string[]) => string[];
   /** Called when the judge verified prior gaps as fixed. */
   onResolvedGaps?: (resolvedGaps: string[]) => void;
+  /**
+   * Wall-clock deadline (Date.now() ms). Checked at every loop boundary —
+   * when hit, the loop exits with "budget-exhausted" carrying the ledger.
+   */
+  deadlineMs?: number;
 }): Promise<CriticLoopOutcome<V>> {
   let priorGaps = [...opts.initialPriorGaps];
   let legRetries = 0;
   while (true) {
+    if (opts.deadlineMs !== undefined && Date.now() >= opts.deadlineMs) {
+      return { kind: "budget-exhausted", priorGaps, legRetries };
+    }
     let judged: { result: V; judgeInfraFailed: boolean };
     try {
       judged = await opts.judge(priorGaps);

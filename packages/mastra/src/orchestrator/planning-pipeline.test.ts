@@ -19,6 +19,11 @@ import {
   phaseQualityRetryPrompt,
   brokenOutputReason,
   runBoundedCriticLoop,
+  resolvePlanningBudget,
+  planningBudgetExhaustedDetail,
+  DEFAULT_PLANNING_BUDGET,
+  MAX_PLANNING_LEG_RETRIES,
+  MAX_PLANNING_RESEARCH_RERUNS,
 } from "./planning-pipeline.js";
 
 describe("planning-pipeline", () => {
@@ -747,5 +752,107 @@ describe("runBoundedCriticLoop", () => {
     if (outcome.kind === "infra-failed") {
       assert.deepEqual(outcome.gaps, ["LLM judge failed (timeout)"]);
     }
+  });
+
+  it("exits with budget-exhausted at a loop boundary when the deadline passes", async () => {
+    let judgements = 0;
+    const outcome = await runBoundedCriticLoop<V>({
+      initialPriorGaps: ["unresolved gap"],
+      maxLegRetries: 5,
+      deadlineMs: Date.now() - 1, // already past
+      judge: async () => {
+        judgements++;
+        return { result: verdict(true, []), judgeInfraFailed: false };
+      },
+      repair: async () => {},
+    });
+    assert.equal(outcome.kind, "budget-exhausted");
+    if (outcome.kind === "budget-exhausted") {
+      assert.deepEqual(outcome.priorGaps, ["unresolved gap"]);
+    }
+    assert.equal(judgements, 0, "deadline checked before the next judgement");
+  });
+
+  it("deadline fires after a repair leg, carrying the accumulated ledger", async () => {
+    let now = 1_000;
+    const realNow = Date.now;
+    Date.now = () => now;
+    try {
+      const outcome = await runBoundedCriticLoop<V>({
+        initialPriorGaps: [],
+        maxLegRetries: 5,
+        deadlineMs: 2_000,
+        judge: async () => ({
+          result: verdict(false, ["gap A"]),
+          judgeInfraFailed: false,
+        }),
+        repair: async () => {
+          now = 5_000; // repair leg burns past the deadline
+        },
+      });
+      assert.equal(outcome.kind, "budget-exhausted");
+      if (outcome.kind === "budget-exhausted") {
+        assert.deepEqual(outcome.priorGaps, ["gap A"]);
+        assert.equal(outcome.legRetries, 1);
+      }
+    } finally {
+      Date.now = realNow;
+    }
+  });
+});
+
+describe("PlanningBudget", () => {
+  it("defaults match the legacy MAX_* constants", () => {
+    assert.equal(DEFAULT_PLANNING_BUDGET.legRetries, MAX_PLANNING_LEG_RETRIES);
+    assert.equal(
+      DEFAULT_PLANNING_BUDGET.selfHealRounds,
+      MAX_PLANNING_SELF_HEAL_ROUNDS,
+    );
+    assert.equal(
+      DEFAULT_PLANNING_BUDGET.researchReruns,
+      MAX_PLANNING_RESEARCH_RERUNS,
+    );
+    assert.equal(DEFAULT_PLANNING_BUDGET.wallClockMs, 60 * 60 * 1000);
+  });
+
+  it("env overrides each knob; garbage falls back to defaults", () => {
+    const budget = resolvePlanningBudget({
+      SLOPCONTROL_PLANNING_LEG_RETRIES: "5",
+      SLOPCONTROL_PLANNING_SELF_HEAL_ROUNDS: "7",
+      SLOPCONTROL_PLANNING_RESEARCH_RERUNS: "0",
+      SLOPCONTROL_PLANNING_WALL_CLOCK_MS: "900000",
+    } as NodeJS.ProcessEnv);
+    assert.deepEqual(budget, {
+      legRetries: 5,
+      selfHealRounds: 7,
+      researchReruns: 0,
+      wallClockMs: 900_000,
+    });
+    const garbage = resolvePlanningBudget({
+      SLOPCONTROL_PLANNING_LEG_RETRIES: "soon",
+      SLOPCONTROL_PLANNING_WALL_CLOCK_MS: "-4",
+    } as NodeJS.ProcessEnv);
+    assert.equal(garbage.legRetries, DEFAULT_PLANNING_BUDGET.legRetries);
+    assert.equal(garbage.wallClockMs, DEFAULT_PLANNING_BUDGET.wallClockMs);
+  });
+
+  it("one exhausted-budget detail shape per knob, carrying the policy numbers", () => {
+    const budget = resolvePlanningBudget({} as NodeJS.ProcessEnv);
+    assert.match(
+      planningBudgetExhaustedDetail({ knob: "research-reruns", budget, phaseId: "01-x" }),
+      /exceeded 2 research re-runs/,
+    );
+    assert.match(
+      planningBudgetExhaustedDetail({ knob: "wall-clock", budget, phaseId: "01-x" }),
+      /wall-clock budget of 60m/,
+    );
+    assert.match(
+      planningBudgetExhaustedDetail({ knob: "self-heal-rounds", budget, phaseId: "01-x" }),
+      /exhausted 3 planning self-heal rounds/,
+    );
+    assert.match(
+      planningBudgetExhaustedDetail({ knob: "leg-retries", budget, phaseId: "01-x" }),
+      /exhausted 2 leg-repair retries/,
+    );
   });
 });
