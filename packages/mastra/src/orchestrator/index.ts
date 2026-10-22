@@ -7298,7 +7298,12 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
             }
           : null,
         {
-          gaps: opts?.issues ?? [],
+          // Only judge verdicts may write into the ledger. Non-judge failures
+          // (structural shell-validator findings, judge-infra transport text)
+          // must carry the prior ledger forward untouched — folding them into
+          // draftIssues would reopen the phase-197 anchoring vector (no
+          // isPlanningJudgeInfraIssue filter on the consuming paths).
+          gaps: isJudgeVerdict ? (opts?.issues ?? []) : [],
           resolvedGaps: isJudgeVerdict ? (opts?.resolvedGaps ?? []) : [],
           researchFaults: isJudgeVerdict ? (opts?.researchFaults ?? []) : [],
           draftFaults: isJudgeVerdict ? (opts?.draftFaults ?? []) : [],
@@ -7330,11 +7335,12 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
           runId: run.id,
           kind,
           ...(opts?.issues?.length ? { issues: opts.issues } : {}),
-          ...(ledger.openIssues.length ? { openIssues: ledger.openIssues } : {}),
-          ...(ledger.researchIssues.length
-            ? { researchIssues: ledger.researchIssues }
-            : {}),
-          ...(ledger.draftIssues.length ? { draftIssues: ledger.draftIssues } : {}),
+          // Always persist the ledger arrays (even empty) so the funnel treats
+          // this diagnosis as authoritative — an empty openIssues means the
+          // judge resolved everything, NOT "carry the prior ledger forward".
+          openIssues: ledger.openIssues,
+          researchIssues: ledger.researchIssues,
+          draftIssues: ledger.draftIssues,
           ...(typeof researchReruns === "number" ||
           typeof prevDiagnosis?.researchReruns === "number"
             ? { researchReruns: researchReruns ?? prevDiagnosis?.researchReruns ?? 0 }

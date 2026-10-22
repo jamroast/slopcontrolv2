@@ -701,6 +701,107 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
     }
   });
 
+  it("a judge-resolved gap is NOT resurrected by the next write", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-ledger-resurrection-"));
+    const judgeCalls: Captured[] = [];
+    const gapA = "File Changes never declares the Verdict line";
+    const gapB = "The mount sentinel cannot prove count-exact mounting";
+
+    const restore = installFetchStub({
+      judgeCalls,
+      judge: ({ user }) => {
+        const seenA = user.includes(gapA);
+        return seenA
+          ? { ok: false, gaps: [gapB], researchFaults: [], draftFaults: [gapB], resolvedGaps: [gapA] }
+          : { ok: false, gaps: [gapA], researchFaults: [], draftFaults: [gapA], resolvedGaps: [] };
+      },
+    });
+
+    try {
+      writeFixture(root);
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          phasePlannerAgent: stubAgent(() => PHASE_MD, [], join(phaseDir, "PHASE.md")),
+        } as unknown as OrchestratorAgents,
+      });
+
+      await orchestrator.draftPhase({ project, phase, run });
+      await orchestrator.draftPhase({ project, phase, run });
+
+      const persisted = readLatestDiagnosisForPhase(root, PHASE_ID);
+      assert.ok(persisted, "phase diagnosis must persist");
+      assert.ok(
+        persisted!.openIssues?.includes(gapB),
+        "the unresolved second gap must persist",
+      );
+      assert.ok(
+        !persisted!.openIssues?.includes(gapA),
+        "the judge-resolved gap must NOT be resurrected by write-time union",
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("infra-text never enters the ledger (phase-197 anchoring stays closed)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-ledger-infra-"));
+    const judgeCalls: Captured[] = [];
+    const gapContent = "Check 7 uses bare npm test without a path";
+
+    const restore = installFetchStub({
+      judgeCalls,
+      judge: ({ user }) =>
+        user.includes("already rejected an earlier draft")
+          ? { ok: false, gaps: [gapContent], researchFaults: [], draftFaults: [gapContent], resolvedGaps: [] }
+          : {
+              ok: false,
+              gaps: ["expected object, received array"],
+              researchFaults: [],
+              draftFaults: [],
+              resolvedGaps: [],
+            },
+    });
+
+    try {
+      writeFixture(root);
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          phasePlannerAgent: stubAgent(() => PHASE_MD, [], join(phaseDir, "PHASE.md")),
+        } as unknown as OrchestratorAgents,
+      });
+
+      await orchestrator.draftPhase({ project, phase, run });
+      const persisted = readLatestDiagnosisForPhase(root, PHASE_ID);
+      assert.ok(persisted, "phase diagnosis must persist");
+      assert.ok(
+        !(persisted!.draftIssues ?? []).some((g) => g.includes("expected object")),
+        "transport-shaped text must not enter the draft ledger",
+      );
+      assert.ok(
+        !(persisted!.openIssues ?? []).some((g) => g.includes("expected object")),
+        "transport-shaped text must not enter the open-issue ledger",
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("retry_draft after budget exhaustion resets researchReruns but keeps the ledger", async () => {
     const root = mkdtempSync(join(tmpdir(), "planning-budget-reset-"));
     const restore = installFetchStub({

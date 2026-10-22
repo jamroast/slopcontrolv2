@@ -1592,20 +1592,21 @@ export function writeDiagnosisWithLedger(
       researchHash: prior.researchHash,
     };
     if (isPlanning) {
+      // Ledger-aware writers (recoverableDraftFail) pass the ALREADY-merged,
+      // post-resolution arrays — unioning with prior disk state here would
+      // resurrect what the judge just resolved. An absent field means the
+      // writer knows nothing of ledgers: carry the prior forward untouched.
       merged = {
         ...diagnosis,
-        openIssues: dedupeStrings([
-          ...ledgerFields.openIssues,
-          ...(diagnosis.openIssues ?? []),
-        ]),
-        researchIssues: dedupeStrings([
-          ...ledgerFields.researchIssues,
-          ...(diagnosis.researchIssues ?? []),
-        ]),
-        draftIssues: dedupeStrings([
-          ...ledgerFields.draftIssues,
-          ...(diagnosis.draftIssues ?? []),
-        ]),
+        openIssues: Array.isArray(diagnosis.openIssues)
+          ? diagnosis.openIssues
+          : ledgerFields.openIssues,
+        researchIssues: Array.isArray(diagnosis.researchIssues)
+          ? diagnosis.researchIssues
+          : ledgerFields.researchIssues,
+        draftIssues: Array.isArray(diagnosis.draftIssues)
+          ? diagnosis.draftIssues
+          : ledgerFields.draftIssues,
         researchReruns:
           diagnosis.researchReruns ?? ledgerFields.researchReruns,
         researchHash: diagnosis.researchHash ?? ledgerFields.researchHash,
@@ -1633,19 +1634,6 @@ export function writeDiagnosisWithLedger(
     }
   }
   return writeDiagnosis(projectRoot, runId, merged, phaseId);
-}
-
-function dedupeStrings(items: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const item of items) {
-    const key = normalizeGap(item);
-    const trimmed = item.trim();
-    if (!trimmed || seen.has(key)) continue;
-    seen.add(key);
-    out.push(trimmed);
-  }
-  return out;
 }
 
 /**
@@ -1754,13 +1742,13 @@ export function buildPlanningFailureDiagnosis(opts: {
             .slice(0, 40),
         }
       : {}),
-    ...(opts.openIssues?.length
+    ...(Array.isArray(opts.openIssues)
       ? { openIssues: opts.openIssues.map((g) => g.trim()).filter(Boolean) }
       : {}),
-    ...(opts.researchIssues?.length
+    ...(Array.isArray(opts.researchIssues)
       ? { researchIssues: opts.researchIssues.map((g) => g.trim()).filter(Boolean) }
       : {}),
-    ...(opts.draftIssues?.length
+    ...(Array.isArray(opts.draftIssues)
       ? { draftIssues: opts.draftIssues.map((g) => g.trim()).filter(Boolean) }
       : {}),
     ...(typeof opts.researchReruns === "number"

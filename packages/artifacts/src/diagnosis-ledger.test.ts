@@ -37,7 +37,7 @@ describe("writeDiagnosisWithLedger", () => {
     ...over,
   });
 
-  it("merges the prior ledger on a planning diagnosis", () => {
+  it("treats a ledger-aware planning writer's arrays as authoritative", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-ledger-write-"));
     writeDiagnosisWithLedger(
       root,
@@ -51,6 +51,10 @@ describe("writeDiagnosisWithLedger", () => {
       }),
       "p1",
     );
+    // recoverableDraftFail already merged against prior and subtracted
+    // resolvedGaps — the incoming arrays are the post-subtraction ledger. The
+    // funnel must NOT re-union with prior disk state (that would resurrect
+    // what the verdict just dropped).
     writeDiagnosisWithLedger(
       root,
       "run-2",
@@ -62,13 +66,40 @@ describe("writeDiagnosisWithLedger", () => {
       "p1",
     );
     const persisted = readLatestDiagnosisForPhase(root, "p1")!;
-    assert.deepEqual([...(persisted.openIssues ?? [])].sort(), [
-      "bare npm test",
-      "missing verdict token",
-    ]);
+    assert.deepEqual(persisted.openIssues, ["missing verdict token"]);
+    assert.deepEqual(persisted.draftIssues, ["missing verdict token"]);
     // researchReruns / researchHash carry forward when the new write omits them.
     assert.equal(persisted.researchReruns, 1);
     assert.equal(persisted.researchHash, sha256Hex("research v1"));
+  });
+
+  it("does not resurrect a fully-resolved ledger (empty arrays are authoritative)", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-ledger-resolved-"));
+    writeDiagnosisWithLedger(
+      root,
+      "run-1",
+      planningDiag({
+        phaseId: "p1",
+        openIssues: ["gap G", "gap H"],
+        draftIssues: ["gap G", "gap H"],
+      }),
+      "p1",
+    );
+    // The judge resolved every gap — recoverableDraftFail persisted EMPTY
+    // arrays. Absence means "carry forward"; [] means "the ledger is empty".
+    writeDiagnosisWithLedger(
+      root,
+      "run-2",
+      planningDiag({
+        phaseId: "p1",
+        openIssues: [],
+        draftIssues: [],
+      }),
+      "p1",
+    );
+    const persisted = readLatestDiagnosisForPhase(root, "p1")!;
+    assert.deepEqual(persisted.openIssues, []);
+    assert.deepEqual(persisted.draftIssues, []);
   });
 
   it("re-stamps the prior ledger on a verify (non-planning) diagnosis", () => {
@@ -116,7 +147,7 @@ describe("writeDiagnosisWithLedger", () => {
       "p1",
     );
     // Operator-audience planning failure (e.g. "Research budget exhausted")
-    // must still merge, not fall onto the re-stamp path.
+    // must still take the authoritative-writer path, not the re-stamp path.
     writeDiagnosisWithLedger(
       root,
       "run-2",
@@ -130,10 +161,7 @@ describe("writeDiagnosisWithLedger", () => {
       "p1",
     );
     const persisted = readLatestDiagnosisForPhase(root, "p1")!;
-    assert.deepEqual([...(persisted.openIssues ?? [])].sort(), [
-      "bare npm test",
-      "fresh budget gap",
-    ]);
+    assert.deepEqual(persisted.openIssues, ["fresh budget gap"]);
   });
 
   it("drops the ledger on a complete stub (phase finished)", () => {
