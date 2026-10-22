@@ -133,15 +133,19 @@ export function verifyGrepTokens(
       if (path.startsWith("/") || path.startsWith("~") || path.includes("://")) {
         continue;
       }
-      if (!path.includes("/")) continue;
+      // Existence verdicts belong to verifyCheckTargets (which marks NEW vs
+      // MISSING). A grep against a not-yet-created file (declared in File
+      // Changes) is a legitimate check pattern — do NOT emit a false
+      // "token absent" mismatch for it. Only verify tokens against files that
+      // already exist on disk.
       let found = false;
       try {
         const abs = join(projectRoot, path);
-        if (existsSync(abs)) {
-          found = readFileSync(abs, "utf8").includes(pattern);
-        }
+        if (!existsSync(abs)) continue;
+        found = readFileSync(abs, "utf8").includes(pattern);
       } catch {
-        found = false;
+        // Unreadable path — skip rather than report a false mismatch.
+        continue;
       }
       push(pattern, path, found);
     }

@@ -6187,6 +6187,10 @@ Phase id: ${input.phase.id}`;
 
         if (faultLeg === "research" || faultLeg === "both") {
           if (researchReruns >= MAX_PLANNING_RESEARCH_RERUNS) {
+            // Carry the accumulated ledger + this round's gaps so the operator
+            // sees WHAT was unresolved, not just that the budget ran out.
+            const budgetOpenIssues = this.planningGateOutcome.openIssues ?? [];
+            const budgetIssues = this.planningGateOutcome.issues ?? [];
             this.persistDiagnosis(
               project,
               run,
@@ -6199,6 +6203,10 @@ Phase id: ${input.phase.id}`;
                 kind: "research-budget",
                 faultLeg: "research",
                 researchReruns,
+                ...(budgetIssues.length ? { issues: budgetIssues } : {}),
+                ...(budgetOpenIssues.length
+                  ? { openIssues: budgetOpenIssues }
+                  : {}),
               }),
               phase.id,
             );
@@ -7994,10 +8002,22 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
       }
       if (phaseQuality.ok) break;
 
-      // Feed this verdict's unresolved gaps to the next judgement as prior
-      // context; gaps it verified as fixed are dropped deterministically.
+      // Accumulate the running convergence set: union the prior seed with this
+      // verdict's gaps, dedupe, then subtract gaps the judge verified resolved.
+      // Replacing (rather than accumulating) would forget a gap raised in an
+      // earlier judgement that this verdict neither re-raised nor resolved —
+      // the phase-201 pattern within a single drafting session.
+      const seenGaps = new Set<string>();
+      const accumulatedGaps: string[] = [];
+      for (const g of [...priorQualityGaps, ...phaseQuality.gaps]) {
+        const key = normalizeGap(g);
+        if (!seenGaps.has(key)) {
+          seenGaps.add(key);
+          accumulatedGaps.push(g);
+        }
+      }
       priorQualityGaps = priorGapsAfterResolution(
-        phaseQuality.gaps,
+        accumulatedGaps,
         phaseQuality.resolvedGaps,
       );
       if (phaseQuality.resolvedGaps.length > 0) {

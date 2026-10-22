@@ -549,6 +549,100 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
     }
   });
 
+  it("accumulates a silently-dropped gap across the within-leg retry loop", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-loop-accumulate-"));
+    const judgeCalls: Captured[] = [];
+    const gapA = "File Changes never declares the Verdict line";
+    const gapB = "The mount sentinel cannot prove count-exact mounting";
+
+    const v2 = PHASE_MD.replace(
+      "Mount a status widget in the dashboard shell.\n",
+      "Mount a status widget in the dashboard shell. Widget state is read-only in v1.\n",
+    );
+    const v3 = v2.replace(
+      "Widget state is read-only in v1.\n",
+      "Widget state is read-only in v1. Sentinels are count-exact.\n",
+    );
+
+    // Judgement 2 raises a NEW gap B WITHOUT resolving or re-raising gap A —
+    // the within-leg loop must accumulate A + B, not forget A.
+    const restore = installFetchStub({
+      judgeCalls,
+      judge: ({ user }) => {
+        if (user.includes("Sentinels are count-exact")) {
+          return {
+            ok: true,
+            gaps: [],
+            suggestedFixes: [],
+            resolvedGaps: [gapA, gapB],
+            researchFaults: [],
+            draftFaults: [],
+          };
+        }
+        if (user.includes("Widget state is read-only")) {
+          return {
+            ok: false,
+            gaps: [gapB],
+            suggestedFixes: ["Assert exact count"],
+            resolvedGaps: [],
+            researchFaults: [],
+            draftFaults: [gapB],
+          };
+        }
+        return {
+          ok: false,
+          gaps: [gapA],
+          suggestedFixes: ["Declare the Verdict line"],
+          resolvedGaps: [],
+          researchFaults: [],
+          draftFaults: [gapA],
+        };
+      },
+    });
+
+    const plannerCalls: string[] = [];
+    try {
+      writeFixture(root);
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      const variants = [PHASE_MD, v2, v3];
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          phasePlannerAgent: stubAgent(
+            () => variants[Math.min(plannerCalls.length - 1, variants.length - 1)]!,
+            plannerCalls,
+            join(phaseDir, "PHASE.md"),
+          ),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const stage = await orchestrator.draftPhase({ project, phase, run });
+      assert.equal(stage, "in_review", "the leg must converge");
+
+      const judgedV3 = judgeCalls.find((c) =>
+        c.user.includes("Sentinels are count-exact"),
+      );
+      assert.ok(judgedV3, "the final re-draft must be judged");
+      // gapA was never resolved nor re-raised — it must still be prior context.
+      assert.ok(
+        judgedV3!.user.includes(gapA),
+        "a silently-dropped gap must survive to the next judgement",
+      );
+      assert.ok(
+        judgedV3!.user.includes(gapB),
+        "the latest gap must also be prior context",
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("carries a draft-mechanics gap across a research re-run via the open-issue ledger", async () => {
     const root = mkdtempSync(join(tmpdir(), "planning-ledger-"));
     const judgeCalls: Captured[] = [];

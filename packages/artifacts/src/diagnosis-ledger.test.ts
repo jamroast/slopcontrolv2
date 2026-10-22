@@ -62,4 +62,16 @@ describe("mergePlanningIssueLedger", () => {
     assert.deepEqual(ledger.researchIssues, ["Brittle grep"]);
     assert.deepEqual(ledger.openIssues, ["Brittle grep"]);
   });
+
+  it("defaults un-attributed gaps to draftIssues (mirroring faultLeg)", () => {
+    const ledger = mergePlanningIssueLedger(null, {
+      gaps: ["un-attributed rejection gap"],
+      resolvedGaps: [],
+      researchFaults: [],
+      draftFaults: [],
+    });
+    assert.deepEqual(ledger.researchIssues, []);
+    assert.deepEqual(ledger.draftIssues, ["un-attributed rejection gap"]);
+    assert.deepEqual(ledger.openIssues, ["un-attributed rejection gap"]);
+  });
 });

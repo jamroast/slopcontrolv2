@@ -142,4 +142,27 @@ describe("verifyGrepTokens + mismatch block", () => {
       "",
     );
   });
+
+  it("skips not-yet-created files and verifies root-level targets", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-newfile-"));
+    writeFileSync(join(root, "package.json"), '{"name": "demo"}\n');
+    mkdirSync(join(root, "src"), { recursive: true });
+
+    const doc = "```bash\n" +
+      "grep -qF 'export const Foo' src/new.ts || exit 1\n" +
+      "grep -qF 'name' package.json || exit 1\n" +
+      "```\n";
+
+    const tokens = verifyGrepTokens(root, doc);
+    // src/new.ts is declared-NEW and absent on disk → not a token mismatch.
+    assert.ok(
+      !tokens.some((t) => t.path === "src/new.ts"),
+      "not-yet-created files must not emit a token mismatch",
+    );
+    // package.json is a root-level target and must be verified.
+    const pkg = tokens.find((t) => t.path === "package.json");
+    assert.ok(pkg, "root-level targets must be verified");
+    assert.equal(pkg!.found, true);
+    assert.equal(formatGrepTokenMismatchesBlock(tokens), "");
+  });
 });

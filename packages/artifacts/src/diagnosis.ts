@@ -97,6 +97,15 @@ export function mergePlanningIssueLedger(
   },
 ): PlanningIssueLedger {
   const resolved = new Set((verdict.resolvedGaps ?? []).map(normalizeGap));
+  // Un-attributed gaps: the judge rejected but filled neither attribution list.
+  // faultLegFromPhaseQualityVerdict defaults that case to draft; mirror it by
+  // folding the raw gaps into draftIssues. When an attribution IS present we
+  // trust it — the judge may word `gaps` differently than the split, so matching
+  // gaps→attribution by text would double-count a reworded gap.
+  const hasAttribution =
+    (verdict.researchFaults?.length ?? 0) > 0 ||
+    (verdict.draftFaults?.length ?? 0) > 0;
+  const unAttributed = hasAttribution ? [] : (verdict.gaps ?? []);
   const researchIssues = mergeGapSet(
     prev?.researchIssues ?? [],
     verdict.researchFaults ?? [],
@@ -104,7 +113,7 @@ export function mergePlanningIssueLedger(
   );
   const draftIssues = mergeGapSet(
     prev?.draftIssues ?? [],
-    verdict.draftFaults ?? [],
+    [...(verdict.draftFaults ?? []), ...unAttributed],
     resolved,
   );
   // openIssues is the union of the two attribution buckets — deriving it from
