@@ -20,6 +20,7 @@ import {
   resolveProjectToolchain,
   writeBuildProcessEvidence,
   writeProjectConfig,
+  writeProjectConventions,
   writeProjectRegistryEnv,
   type AppliedChange,
   type BuildProcessEvidence,
@@ -114,6 +115,17 @@ export async function configureProjectBuildProcess(opts: {
   const audit = await auditProjectBuildProcess(opts);
   const { result } = audit;
   const now = new Date().toISOString();
+
+  // Project policy discovery: (re)extract the project's own declared
+  // verification conventions (AGENTS.md / CONTRIBUTING / CI run commands)
+  // into .slopcontrol/CONVENTIONS.md so planning prompts can cite them
+  // generically. Runs even on the audit-only path (declared conventions
+  // exist regardless of toolchain confidence). Best-effort, never fails.
+  try {
+    writeProjectConventions(opts.projectRoot);
+  } catch {
+    /* conventions extraction is best-effort */
+  }
 
   if (result.confidence === "low") {
     return {
@@ -237,6 +249,14 @@ export async function configureProjectBuildProcess(opts: {
       detail: r.detail,
     })),
   });
+
+  // Refresh conventions after workflows settle so quoted CI commands are
+  // current (the configurator may have written/amended workflows above).
+  try {
+    writeProjectConventions(opts.projectRoot);
+  } catch {
+    /* conventions extraction is best-effort */
+  }
 
   return {
     result,

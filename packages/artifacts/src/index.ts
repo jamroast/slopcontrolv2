@@ -98,6 +98,7 @@ export * from "./npm-registry-mirror.js";
 export * from "./build-toolchain.js";
 export * from "./css-tokens.js";
 export * from "./test-services.js";
+export * from "./project-conventions.js";
 export * from "./build-process-config.js";
 export * from "./verify-recovery-execute.js";
 export * from "./verify-recovery-evidence.js";

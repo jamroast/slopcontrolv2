@@ -284,6 +284,7 @@ import {
   verifyGrepTokens,
   findComposeFile,
   renderAutomatedChecksRules,
+  readProjectConventionsPromptBlock,
 } from "@slopcontrol/artifacts";
 import { attemptDevelopPhaseChecksSelfHeal } from "./develop-phase-self-heal.js";
 import {
@@ -6770,6 +6771,9 @@ ${themeResearchNote}${elementsResearchNote}${crossDepResearchPack ? `\n${crossDe
         : crossDepResearchPack
           ? `\n${crossDepResearchPack}\n`
           : "";
+    // The project's declared conventions (its own AGENTS.md / CI config),
+    // cited generically — empty when the project declares none.
+    const conventionsBlock = readProjectConventionsPromptBlock(project.rootPath);
     const prompt = `${priorPlanningFeedback ? `PRIOR PLANNING GATE FEEDBACK (the last draft/judge rejected these; resolve each with code evidence in RESEARCH.md and do not repeat them):\n${priorPlanningFeedback}\n\n` : ""}Change request:
 ${clipPromptSection("change-request", description, 4_000)}
 
@@ -6783,7 +6787,7 @@ Roadmap (excerpt — full file at .slopcontrol/ROADMAP.md):
 ${clipPromptSection("ROADMAP.md", roadmap || "", 2_000)}
 ${learningsBlock ? `\n${learningsBlock}` : ""}${knowledgeBlock ? `\n${knowledgeBlock}` : ""}
 Research the project at ${project.rootPath}.
-Use tools sparingly, then write RESEARCH.md via write_file to ${researchPath} AND return the same markdown in your final response (start with #).
+${conventionsBlock ? `${conventionsBlock}\n` : ""}Use tools sparingly, then write RESEARCH.md via write_file to ${researchPath} AND return the same markdown in your final response (start with #).
 End with RESEARCH_COMPLETE.
 If the blueprint is still thin, include ## Proposed Blueprint and ## Proposed Roadmap.
 Do NOT only chat about investigating — the response body / written file must be the RESEARCH.md document.
@@ -7080,6 +7084,9 @@ Phase id: ${phase.id}`;
     // both sides apply one toolchain-appropriate contract.
     const { rules: automatedChecksRules, hasTestServices } =
       this.planningCheckRules(project.rootPath, config);
+    // The project's declared conventions (its own AGENTS.md / CI config),
+    // cited generically — empty when the project declares none.
+    const conventionsBlock = readProjectConventionsPromptBlock(project.rootPath);
     const canonicalPath = `.slopcontrol/phases/${phase.id}/PHASE.md`;
     const cleared = clearMisalignedPhaseDoc({
       projectRoot: project.rootPath,
@@ -7285,7 +7292,7 @@ Description:
 ${clipPromptSection("change-request", phase.description, 4_000)}
 
 ${intentBlock}
-${priorFeedbackBlock}${draftAcceptanceNote}${designRoutingNote}${specRoutingNote}${infraSmokeNote}${draftAntiAuditThemeNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
+${conventionsBlock ? `${conventionsBlock}\n` : ""}${priorFeedbackBlock}${draftAcceptanceNote}${designRoutingNote}${specRoutingNote}${infraSmokeNote}${draftAntiAuditThemeNote}${pack}CRITICAL: Scope and File Changes must implement THIS phase's RESEARCH.md below.
 Do NOT reuse or retitle a prior phase plan (e.g. host.docker.internal / extra_hosts)
 unless RESEARCH explicitly asks for that work. If RESEARCH is about model naming /
 :cloud passthrough / model-resolver, the PHASE must plan that — not networking.
