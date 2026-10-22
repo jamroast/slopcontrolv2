@@ -121,11 +121,13 @@ export function verifyGrepTokens(
   };
   for (const fence of phaseDoc.matchAll(SHELL_FENCE_RE)) {
     const body = fence[1] ?? "";
-    // grep -q / grep -rq with a quoted pattern and a target path.
-    const re = /\bgrep\s+(?:-[A-Za-z]+\s+)*(['"])([^'"]+)\1\s+([^\s;&|]+)/g;
+    // grep -q / grep -rq with a quoted pattern and a target path. Single- and
+    // double-quoted patterns are matched separately so a single-quoted pattern
+    // may contain inner double quotes (e.g. grep -qF '"version": 2' file).
+    const re = /\bgrep\s+(?:-[A-Za-z]+\s+)*(?:'([^']*)'|"([^"]*)")\s+([^\s;&|]+)/g;
     let match: RegExpExecArray | null;
     while ((match = re.exec(body)) !== null) {
-      const pattern = match[2] ?? "";
+      const pattern = match[1] ?? match[2] ?? "";
       const path = (match[3] ?? "").replace(/^\.\//, "");
       if (!pattern || !path) continue;
       // Only literal tokens — skip regex metacharacters and alternation.

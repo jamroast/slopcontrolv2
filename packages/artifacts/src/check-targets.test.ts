@@ -165,4 +165,28 @@ describe("verifyGrepTokens + mismatch block", () => {
     assert.equal(pkg!.found, true);
     assert.equal(formatGrepTokenMismatchesBlock(tokens), "");
   });
+
+  it("captures single-quoted patterns containing inner double quotes", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-quoted-"));
+    writeFileSync(join(root, "ACCEPTANCE.json"), '{"version": 2}\n');
+
+    // The phase-201 "unquoted JSON token" shape: the pattern is a JSON token
+    // with inner double quotes, wrapped in shell single quotes.
+    const doc = "```bash\n" +
+      "grep -qF '\"version\": 2' ACCEPTANCE.json || exit 1\n" +
+      "grep -qF '\"version\": 3' ACCEPTANCE.json || exit 1\n" +
+      "```\n";
+
+    const tokens = verifyGrepTokens(root, doc);
+    const present = tokens.find((t) => t.token === '"version": 2');
+    const absent = tokens.find((t) => t.token === '"version": 3');
+    assert.ok(present, "inner-quoted pattern must be extracted");
+    assert.equal(present!.found, true);
+    assert.ok(absent, "absent inner-quoted pattern must be extracted");
+    assert.equal(absent!.found, false);
+
+    const block = formatGrepTokenMismatchesBlock(tokens);
+    assert.match(block, /"version": 3/);
+    assert.doesNotMatch(block, /"version": 2/);
+  });
 });
