@@ -38,6 +38,9 @@ const NODE_PNPM_SPEC: BuildToolchainSpec = BuildToolchainSpecSchema.parse({
     "--no-git-checks",
   ],
   consumeUpdateCmd: ["pnpm", "add", "{dep}"],
+  testCmd: ["pnpm", "test"],
+  targetedTestCmd: ["pnpm", "exec", "vitest", "run", "{ref}"],
+  typecheckCmd: ["pnpm", "exec", "tsc", "--noEmit"],
   lockfiles: ["pnpm-lock.yaml"],
   registryEnvKeys: [...REGISTRY_ENV_KEYS],
 });
@@ -50,13 +53,59 @@ const NODE_NPM_SPEC: BuildToolchainSpec = BuildToolchainSpecSchema.parse({
   bumpVersionCmd: ["npm", "version", "{bump}", "--no-git-tag-version"],
   publishCmd: ["npm", "publish", "--registry", "{registryUrl}"],
   consumeUpdateCmd: ["npm", "install", "{dep}"],
+  testCmd: ["npm", "test"],
+  targetedTestCmd: ["npx", "vitest", "run", "{ref}"],
+  typecheckCmd: ["npx", "tsc", "--noEmit"],
   lockfiles: ["package-lock.json"],
   registryEnvKeys: [...REGISTRY_ENV_KEYS],
+});
+
+/**
+ * Rust: `{ref}` is a test-name filter (cargo compiles tests into binaries —
+ * it cannot take a file path). `cargo check` is the cheap total gate.
+ */
+const RUST_CARGO_SPEC: BuildToolchainSpec = BuildToolchainSpecSchema.parse({
+  kind: "rust-cargo",
+  buildCmd: ["cargo", "build"],
+  installCmd: ["cargo", "fetch"],
+  frozenInstallCmd: ["cargo", "fetch", "--locked"],
+  testCmd: ["cargo", "test"],
+  targetedTestCmd: ["cargo", "test", "{ref}"],
+  typecheckCmd: ["cargo", "check"],
+  lintCmd: ["cargo", "clippy"],
+  lockfiles: ["Cargo.lock"],
+  registryEnvKeys: [],
+});
+
+/** Go: vet doubles as the static gate; `{ref}` is a -run regex. */
+const GO_SPEC: BuildToolchainSpec = BuildToolchainSpecSchema.parse({
+  kind: "go",
+  buildCmd: ["go", "build", "./..."],
+  installCmd: ["go", "mod", "download"],
+  testCmd: ["go", "test", "./..."],
+  targetedTestCmd: ["go", "test", "./...", "-run", "{ref}"],
+  typecheckCmd: ["go", "vet", "./..."],
+  lockfiles: ["go.sum"],
+  registryEnvKeys: [],
+});
+
+/** Python (pytest): `{ref}` is a pytest node id (file[::class][::test]). */
+const PYTHON_SPEC: BuildToolchainSpec = BuildToolchainSpecSchema.parse({
+  kind: "python",
+  buildCmd: ["python", "-m", "compileall", "."],
+  installCmd: ["pip", "install", "-e", "."],
+  testCmd: ["python", "-m", "pytest"],
+  targetedTestCmd: ["python", "-m", "pytest", "{ref}"],
+  lockfiles: [],
+  registryEnvKeys: [],
 });
 
 const DEFAULT_SPECS: Record<string, BuildToolchainSpec> = {
   "node-pnpm": NODE_PNPM_SPEC,
   "node-npm": NODE_NPM_SPEC,
+  "rust-cargo": RUST_CARGO_SPEC,
+  go: GO_SPEC,
+  python: PYTHON_SPEC,
 };
 
 /** Default command spec for a known ecosystem kind, else null. */
@@ -155,6 +204,35 @@ export function toolchainConsumeUpdateCmd(
 ): string[] | null {
   if (!spec.consumeUpdateCmd) return null;
   return substituteCommandArgs(spec.consumeUpdateCmd, { dep });
+}
+
+/** Whole-suite test command (final acceptance gate), when declared. */
+export function toolchainTestCmd(spec: BuildToolchainSpec): string[] | null {
+  return spec.testCmd ?? null;
+}
+
+/**
+ * Targeted test command for one ref (test file path / name filter / node
+ * id — ecosystem-specific). Null when the toolchain declares no template.
+ */
+export function toolchainTargetedTestCmd(
+  spec: BuildToolchainSpec,
+  ref: string,
+): string[] | null {
+  if (!spec.targetedTestCmd) return null;
+  return substituteCommandArgs(spec.targetedTestCmd, { ref });
+}
+
+/** Fast static proof (typecheck/compile check), when declared. */
+export function toolchainTypecheckCmd(
+  spec: BuildToolchainSpec,
+): string[] | null {
+  return spec.typecheckCmd ?? null;
+}
+
+/** Lint one-shot, when declared. */
+export function toolchainLintCmd(spec: BuildToolchainSpec): string[] | null {
+  return spec.lintCmd ?? null;
 }
 
 /**

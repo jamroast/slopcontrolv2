@@ -14,7 +14,11 @@ import {
   toolchainBumpVersionCmd,
   toolchainConsumeUpdateCmd,
   toolchainInstallCmd,
+  toolchainLintCmd,
   toolchainPublishCmd,
+  toolchainTargetedTestCmd,
+  toolchainTestCmd,
+  toolchainTypecheckCmd,
 } from "./build-toolchain.js";
 import { BuildToolchainSpecSchema } from "@slopcontrol/types";
 
@@ -70,7 +74,38 @@ describe("build-toolchain defaults + detect", () => {
     const npm = defaultToolchainSpec("node-npm");
     assert.ok(npm);
     assert.deepEqual(npm.frozenInstallCmd, ["npm", "ci"]);
-    assert.equal(defaultToolchainSpec("rust-cargo"), null);
+    assert.equal(defaultToolchainSpec("haskell-cabal"), null);
+  });
+
+  it("default verification commands exist for cargo, go and python", () => {
+    const cargo = defaultToolchainSpec("rust-cargo");
+    assert.ok(cargo);
+    assert.deepEqual(cargo.targetedTestCmd, ["cargo", "test", "{ref}"]);
+    assert.deepEqual(cargo.typecheckCmd, ["cargo", "check"]);
+    assert.deepEqual(cargo.lintCmd, ["cargo", "clippy"]);
+
+    const go = defaultToolchainSpec("go");
+    assert.ok(go);
+    assert.deepEqual(go.testCmd, ["go", "test", "./..."]);
+    assert.deepEqual(go.targetedTestCmd, ["go", "test", "./...", "-run", "{ref}"]);
+
+    const python = defaultToolchainSpec("python");
+    assert.ok(python);
+    assert.deepEqual(python.targetedTestCmd, ["python", "-m", "pytest", "{ref}"]);
+  });
+
+  it("node defaults gain verification commands (vitest targeted, tsc static)", () => {
+    const pnpm = defaultToolchainSpec("node-pnpm");
+    assert.ok(pnpm);
+    assert.deepEqual(pnpm.testCmd, ["pnpm", "test"]);
+    assert.deepEqual(pnpm.targetedTestCmd, [
+      "pnpm",
+      "exec",
+      "vitest",
+      "run",
+      "{ref}",
+    ]);
+    assert.deepEqual(pnpm.typecheckCmd, ["pnpm", "exec", "tsc", "--noEmit"]);
   });
 
   it("detectBuildToolchain prefers pnpm when both lockfiles exist", () => {
@@ -89,13 +124,13 @@ describe("build-toolchain defaults + detect", () => {
     }
   });
 
-  it("detectBuildToolchain flags non-node ecosystems without defaults", () => {
+  it("detectBuildToolchain flags non-node ecosystems with defaults", () => {
     const root = tmp("rust");
     try {
       writeFileSync(join(root, "Cargo.toml"), "[package]\n", "utf-8");
       const hint = detectBuildToolchain(root);
       assert.equal(hint.kind, "rust-cargo");
-      assert.equal(hint.hasDefaultSpec, false);
+      assert.equal(hint.hasDefaultSpec, true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -174,10 +209,14 @@ describe("build-toolchain defaults + detect", () => {
   it("resolveProjectToolchain: config wins, then default, then none", () => {
     const root = tmp("resolve");
     try {
-      writeFileSync(join(root, "Cargo.toml"), "[package]\n", "utf-8");
       const none = resolveProjectToolchain({ projectRoot: root });
       assert.equal(none.source, "none");
       assert.equal(none.spec, null);
+
+      writeFileSync(join(root, "Cargo.toml"), "[package]\n", "utf-8");
+      const cargoDefault = resolveProjectToolchain({ projectRoot: root });
+      assert.equal(cargoDefault.source, "default");
+      assert.equal(cargoDefault.spec?.kind, "rust-cargo");
 
       const custom = BuildToolchainSpecSchema.parse({
         kind: "rust-cargo",
@@ -256,6 +295,40 @@ describe("build-toolchain command templating", () => {
     const spec = BuildToolchainSpecSchema.parse({ kind: "python", lockfiles: [] });
     assert.equal(toolchainPublishCmd(spec, "http://x/"), null);
     assert.equal(toolchainBumpVersionCmd(spec, "patch"), null);
+  });
+
+  it("builds verification commands from spec (targeted ref substitution)", () => {
+    const cargo = defaultToolchainSpec("rust-cargo");
+    assert.ok(cargo);
+    assert.deepEqual(toolchainTargetedTestCmd(cargo, "tests::resolve_route"), [
+      "cargo",
+      "test",
+      "tests::resolve_route",
+    ]);
+    assert.deepEqual(toolchainTestCmd(cargo), ["cargo", "test"]);
+    assert.deepEqual(toolchainTypecheckCmd(cargo), ["cargo", "check"]);
+    assert.deepEqual(toolchainLintCmd(cargo), ["cargo", "clippy"]);
+
+    const pnpm = defaultToolchainSpec("node-pnpm");
+    assert.ok(pnpm);
+    assert.deepEqual(toolchainTargetedTestCmd(pnpm, "src/routes.test.ts"), [
+      "pnpm",
+      "exec",
+      "vitest",
+      "run",
+      "src/routes.test.ts",
+    ]);
+  });
+
+  it("verification accessors return null when the spec declares none", () => {
+    const spec = BuildToolchainSpecSchema.parse({
+      kind: "haskell-cabal",
+      lockfiles: [],
+    });
+    assert.equal(toolchainTestCmd(spec), null);
+    assert.equal(toolchainTargetedTestCmd(spec, "Spec.hs"), null);
+    assert.equal(toolchainTypecheckCmd(spec), null);
+    assert.equal(toolchainLintCmd(spec), null);
   });
 });
 

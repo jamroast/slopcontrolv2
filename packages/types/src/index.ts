@@ -612,6 +612,26 @@ export const BuildToolchainSpecSchema = z.object({
    * this post-merge when env templates changed and via POST env/sync.
    */
   envSyncCmd: z.array(z.string().min(1)).optional(),
+  /**
+   * Whole-suite test command (verify leg / "did the phase break the world").
+   * Phase Automated Checks should prefer targetedTestCmd — never the bare
+   * suite — but the suite command is the final acceptance gate.
+   */
+  testCmd: z.array(z.string().min(1)).optional(),
+  /**
+   * Targeted test template: proves one phase change without running the
+   * whole suite. `{ref}` placeholder → test file path or test name,
+   * ecosystem-specific (vitest file path, cargo test name filter,
+   * pytest node id, go -run regex).
+   */
+  targetedTestCmd: z.array(z.string().min(1)).optional(),
+  /**
+   * Fast static proof (typecheck/compile check) — the cheap total gate for
+   * compiled ecosystems (cargo check, go vet, tsc --noEmit).
+   */
+  typecheckCmd: z.array(z.string().min(1)).optional(),
+  /** Lint one-shot (print findings, exit non-zero on failure). */
+  lintCmd: z.array(z.string().min(1)).optional(),
   lockfiles: z.array(z.string().min(1)).default([]),
   registryEnvKeys: z.array(z.string().min(1)).default([]),
 });
