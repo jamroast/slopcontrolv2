@@ -70,6 +70,25 @@ function fileChangesProse(phaseDoc: string): string {
     .join("\n");
 }
 
+/**
+ * True when ## File Changes declares product/code paths (anything outside
+ * `.slopcontrol/` planning artifacts). A phase that declares code changes
+ * but ships zero Automated Check cells verifies green while proving
+ * nothing — the "green suite that checks nothing" defect. Structural prose
+ * extraction only; declaration content stays judged by the LLM gates.
+ */
+export function fileChangesDeclaresProductCode(phaseDoc: string): boolean {
+  return fileChangesProse(phaseDoc)
+    .split("\n")
+    .map((l) => l.trim())
+    .some(
+      (l) =>
+        /\b[A-Za-z0-9_][\w.-]*\/[\w./-]+\.\w{1,5}\b/.test(l) &&
+        !l.includes(".slopcontrol") &&
+        !l.includes("://"),
+    );
+}
+
 /** Extract + stat each target relative to the project root. */
 export function verifyCheckTargets(
   projectRoot: string,

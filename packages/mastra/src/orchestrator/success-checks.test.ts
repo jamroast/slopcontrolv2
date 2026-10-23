@@ -735,3 +735,94 @@ awk '/x/,/y/' file.ts | grep -q 'a.*b.*c' || exit 1`);
     }
   });
 });
+
+describe("empty automated-checks gate", () => {
+  it("fails when File Changes declares code but no check cells exist (skip-validation path)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-empty-suite-"));
+    try {
+      mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+      writeConfig(root, {
+        buildCommand: "echo build-ok",
+        testCommand: "echo tests-ok",
+      });
+
+      const phaseDoc = `# Phase
+
+## Scope
+
+Add the auth-events audit table.
+
+## File Changes
+
+- src/lib/db/schema.ts — EDIT (add authEvents table)
+- src/lib/admin/routes.ts — NEW
+
+## Success Criteria
+
+- The audit table exists.
+
+## Automated Checks
+
+No automated checks required (manual review only).
+`;
+
+      const calls: string[] = [];
+      const result = await runSuccessChecks(fakeProject(root), phaseDoc, root, {
+        skipPhaseDocValidation: true,
+        runner: async (command) => {
+          calls.push(command);
+          return { output: "ok\n", exitCode: 0 };
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.ok(result.firstFailure);
+      assert.equal(result.firstFailure?.name, "automatedCheck-empty-suite");
+      assert.match(result.firstFailure?.output ?? "", /zero runnable cells/);
+      assert.match(result.output, /EMPTY-SUITE REJECTED/);
+      assert.ok(
+        !calls.some((c) => checkScriptBody(c)),
+        "no check cell should ever run for an empty suite",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not fire for doc-only phases (planning artifacts in File Changes)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-doconly-"));
+    try {
+      mkdirSync(join(root, ".slopcontrol"), { recursive: true });
+      writeConfig(root, {
+        buildCommand: "echo build-ok",
+        testCommand: "echo tests-ok",
+      });
+
+      const phaseDoc = `# Phase
+
+## Scope
+
+Doc-only research consolidation.
+
+## File Changes
+
+- .slopcontrol/phases/01-x/RESEARCH.md — EDIT
+
+## Success Criteria
+
+- Research consolidated.
+
+## Automated Checks
+
+No automated checks.
+`;
+
+      const result = await runSuccessChecks(fakeProject(root), phaseDoc, root, {
+        skipPhaseDocValidation: true,
+        runner: async () => ({ output: "ok\n", exitCode: 0 }),
+      });
+      assert.equal(result.ok, true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

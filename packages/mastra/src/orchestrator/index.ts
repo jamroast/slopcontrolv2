@@ -29,6 +29,7 @@ import {
   ensureDesignDir,
   evaluatePlanProgress,
   extractCheckCells,
+  fileChangesDeclaresProductCode,
   createDefaultCheckRegistry,
   checkCellLabel,
   extractMarkdownDocument,
@@ -2178,6 +2179,21 @@ export async function runSuccessChecks(
 
   if (runTestStep && !opts?.confirmatory) {
     const cells = extractCheckCells(phaseDoc);
+    // Guard: zero check cells for a phase that declares product code = a
+    // green verify that proves nothing (deliverables can ship unchecked).
+    if (cells.length === 0 && fileChangesDeclaresProductCode(phaseDoc)) {
+      const emptySuite: SuccessCheckStep = {
+        name: "automatedCheck-empty-suite",
+        command: "<none>",
+        exitCode: 1,
+        output:
+          "Phase declares file changes in ## File Changes but ## Automated Checks has zero runnable cells — passing is vacuous. Add at least one finite automated check covering the declared change (per the phase check-authoring rules), or the revision must declare the phase code-free in ## File Changes.",
+      };
+      parts.push(
+        "Automated Checks EMPTY-SUITE REJECTED: zero check cells with declared product changes.",
+      );
+      return failResult(parts, steps, emptySuite);
+    }
     const checkRegistry = createDefaultCheckRegistry(runner);
     const checkEnv = {
       ...(Object.keys(llmOverlay).length > 0
@@ -8456,6 +8472,10 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
         "accepted",
         phase.dependsOn ?? [],
       );
+      // Approval supersedes any prior failure diagnosis — keep the run's
+      // failure_summary truthful (stale "draft rejected" text must not
+      // survive a successful approve).
+      deleteRunDiagnosis(project.rootPath, run.id, phase.id);
       log(project, run, "--- Phase approved; ready for development ---");
       return { stage: "accepted" };
     }
@@ -8616,6 +8636,32 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         judge,
       });
       if (!verdict.ok) {
+        // Unfulfillable feedback (needs dev-stage capabilities) is never
+        // winnable at plan-review — skip the auto-retry so the run surfaces
+        // a routable verdict instead of looping on "missing feedback".
+        if (verdict.unfulfillable?.length) {
+          log(
+            project,
+            run,
+            `--- RESEARCH revision: ${verdict.unfulfillable.length} feedback bullet(s) require the development stage — not retried at plan review ---`,
+          );
+          revisionState.research = buildRevisionArtifactOutcome({
+            artifact: "research",
+            attempted: true,
+            before: research,
+            after: researchAfter,
+            harvested: true,
+            verdict,
+          });
+          if (targets === "both") {
+            revisionState.phase = buildRevisionArtifactOutcome({
+              artifact: "phase",
+              attempted: false,
+              skipReason: "research feedback unfulfillable at plan review",
+            });
+          }
+          return await finish();
+        }
         log(
           project,
           run,
@@ -8725,6 +8771,24 @@ Design routing (theme toggle / data-theme wiring — not a brand identity pass):
         judge,
       });
       if (!verdict.ok) {
+        // See research path: unfulfillable feedback is never retried here —
+        // re-drafting cannot satisfy dev-stage demands from a plan document.
+        if (verdict.unfulfillable?.length) {
+          log(
+            project,
+            run,
+            `--- PHASE revision: ${verdict.unfulfillable.length} feedback bullet(s) require the development stage — not retried at plan review ---`,
+          );
+          revisionState.phase = buildRevisionArtifactOutcome({
+            artifact: "phase",
+            attempted: true,
+            before: phaseDoc,
+            after: phaseAfter,
+            harvested: true,
+            verdict,
+          });
+          return await finish();
+        }
         log(
           project,
           run,

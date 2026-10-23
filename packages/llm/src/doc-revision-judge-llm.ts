@@ -9,6 +9,15 @@ import {
 export const DocRevisionJudgeSchema = z.object({
   applied: z.array(z.string()),
   missing: z.array(z.string()),
+  /**
+   * Bullets the plan-revision stage CANNOT satisfy even in spirit — the
+   * feedback requires capabilities reserved for the development stage
+   * (writing/editing product source or dependencies, executing commands).
+   * Never also list these in `missing`.
+   */
+  unfulfillable: z
+    .array(z.object({ bullet: z.string(), reason: z.string().default("") }))
+    .default([]),
 });
 
 export type DocRevisionJudgeResult = z.infer<typeof DocRevisionJudgeSchema>;
@@ -19,13 +28,15 @@ Output ONLY a single JSON object. No prose, no markdown fences.
 
 Schema:
 - applied: array of strings — the feedback bullets that ARE reflected in the revised document.
-- missing: array of strings — the feedback bullets that are NOT reflected (substantive, not cosmetic).
+- missing: array of strings — the feedback bullets that are NOT reflected (substantive, not cosmetic) but COULD have been applied by revising this document.
+- unfulfillable: array of {bullet, reason} — feedback bullets this stage cannot satisfy even in spirit, because they require work outside the plan-revision stage: writing or editing product source code, adding dependencies, creating test files, executing commands, or touching any file other than the planning documents (PHASE.md / RESEARCH.md / INTENT.json). A bullet the revision agent applies honestly by explaining the constraint is STILL unfulfillable, not applied.
 
 Meaning:
 - Break the feedback into its substantive bullets first.
 - A bullet is "applied" if the revised document reflects it (even partially, in spirit).
-- A bullet is "missing" only if it is substantive and genuinely absent.
-- If the document is byte-identical to the original, a bullet is "applied" only if the original ALREADY satisfied it (e.g. "confirm env keys are present" when they already are). Otherwise it is "missing".
+- A bullet is "missing" only if it is substantive, genuinely absent, AND satisfiable by editing the planning document.
+- A bullet whose satisfaction requires producing artifacts outside the planning documents (source code in src/, package.json dependencies, running tests) is "unfulfillable" — NEVER "missing". Marking those "missing" creates an unwinnable loop: no document revision can ever satisfy them.
+- If the document is byte-identical to the original, a bullet is "applied" only if the original ALREADY satisfied it (e.g. "confirm env keys are present" when they already are). Otherwise it is "missing" (or "unfulfillable" when it needs non-document work).
 - Ignore trivial wording differences; judge intent, not exact phrasing.
 - When the document is INTENT.json, only goal, rawDescription, and mustNot are in scope. A bullet about automated checks, file edits, or research evidence is applied when those intent fields do not need to change. A bullet that changes what the phase delivers, or retracts a prohibition, is missing if rawDescription or mustNot still states the old contract.`;
 
@@ -68,7 +79,7 @@ export async function judgeDocRevisionViaLlm(
       temperature: 0,
       schema: DocRevisionJudgeSchema,
       schemaHint:
-        'Return ONE object: {"applied":string[],"missing":string[]} — never an array',
+        'Return ONE object: {"applied":string[],"missing":string[],"unfulfillable":Array<{bullet:string,reason:string}>} — never an array',
     });
     return DocRevisionJudgeSchema.parse(parsed);
   };

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   extractCheckTargetPaths,
+  fileChangesDeclaresProductCode,
   formatCheckTargetsPromptBlock,
   formatGrepTokenMismatchesBlock,
   formatResearchMandatedTokensBlock,
@@ -421,5 +422,67 @@ describe("research-mandated partition", () => {
     const mismatches = formatGrepTokenMismatchesBlock(tokens, research);
     assert.match(mismatches, /mysteryToken/);
     assert.doesNotMatch(mismatches, /pgTable/);
+  });
+});
+
+describe("fileChangesDeclaresProductCode", () => {
+  it("true when File Changes declares code paths", () => {
+    const doc = `# Phase
+
+## File Changes
+
+| Path | Action |
+| --- | --- |
+| src/lib/db/schema.ts | EDIT |
+| tests/embedding-constraint.test.ts | NEW |
+
+## Success Criteria
+`;
+    assert.equal(fileChangesDeclaresProductCode(doc), true);
+  });
+
+  it("true for declarations after a fenced snippet (the phase-202 truncation)", () => {
+    const doc = `# Phase
+
+## File Changes
+
+\`\`\`ts
+// mandated implementation snippet (NOT a declaration)
+import { pgTable } from "drizzle-orm";
+\`\`\`
+
+Then: EDIT src/lib/oidc/embed.ts with the narrowed cookie relay.
+Also: EDIT package.json (add @playwright/test devDependency).
+
+## Success Criteria
+`;
+    assert.equal(fileChangesDeclaresProductCode(doc), true);
+  });
+
+  it("false when only planning artifacts are declared", () => {
+    const doc = `# Phase
+
+## File Changes
+
+| Path | Action |
+| --- | --- |
+| .slopcontrol/phases/01-x/PHASE.md | EDIT |
+| .slopcontrol/RESEARCH.md | NEW |
+
+## Success Criteria
+`;
+    assert.equal(fileChangesDeclaresProductCode(doc), false);
+  });
+
+  it("false for an empty File Changes section", () => {
+    const doc = `# Phase
+
+## File Changes
+
+None.
+
+## Success Criteria
+`;
+    assert.equal(fileChangesDeclaresProductCode(doc), false);
   });
 });

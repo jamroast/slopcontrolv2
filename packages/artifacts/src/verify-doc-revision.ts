@@ -16,13 +16,23 @@ export interface DocRevisionJudgeInput {
 
 export type DocRevisionJudge = (
   input: DocRevisionJudgeInput,
-) => Promise<{ applied: string[]; missing: string[] }>;
+) => Promise<{
+  applied: string[];
+  missing: string[];
+  unfulfillable?: Array<string | { bullet: string; reason?: string }>;
+}>;
 
 export interface DocRevisionVerdict {
   ok: boolean;
   changed: boolean;
   missing: string[];
   reason: string;
+  /**
+   * Feedback bullets the LLM judge classified as unsatisfiable at this
+   * stage (needs the development stage's capabilities) — distinct from
+   * `missing`: routing, never retried as a document-revision failure.
+   */
+  unfulfillable?: string[];
   /** Judge call failed (outage/unparseable output) — verdict fell back to bytes. */
   judgeError?: string;
 }
@@ -70,7 +80,11 @@ export async function verifyDocRevisionApplied(opts: {
     };
   }
 
-  let verdict: { applied: string[]; missing: string[] };
+  let verdict: {
+    applied: string[];
+    missing: string[];
+    unfulfillable?: Array<string | { bullet: string; reason?: string }>;
+  };
   try {
     verdict = await opts.judge({
       feedback: opts.feedback,
@@ -104,6 +118,22 @@ export async function verifyDocRevisionApplied(opts: {
       changed,
       missing,
       reason: `missing feedback: ${missing.join("; ")}`,
+    };
+  }
+  const unfulfillable = (verdict.unfulfillable ?? [])
+    .map((u) =>
+      typeof u === "string"
+        ? u
+        : `${u.bullet}${u.reason?.trim() ? ` — ${u.reason.trim()}` : ""}`,
+    )
+    .filter((u) => u.trim());
+  if (unfulfillable.length > 0) {
+    return {
+      ok: false,
+      changed,
+      missing: [],
+      unfulfillable,
+      reason: `feedback requires the development stage (not satisfiable by a plan-document revision): ${unfulfillable.join("; ")}`,
     };
   }
   return {

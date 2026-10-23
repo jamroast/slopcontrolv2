@@ -20,6 +20,8 @@ export const RevisionArtifactOutcomeSchema = z.object({
   ok: z.boolean(),
   reason: z.string(),
   missing: z.array(z.string()).optional(),
+  /** Feedback bullets the judge classified as development-stage work. */
+  unfulfillable: z.array(z.string()).optional(),
 });
 
 export type RevisionArtifactOutcome = z.infer<
@@ -139,12 +141,15 @@ export function buildPlanningRevisionFailureDiagnosis(opts: {
     opts.outcome.intent,
   ].filter((row) => row?.attempted && !row.ok);
   const first = failed[0];
+  const hasUnfulfillable = failed.some((r) => r?.unfulfillable?.length);
   const kind =
     first?.harvested === false
       ? "revision-harvest-failed"
-      : first?.missing?.length
-        ? "revision-feedback-missing"
-        : "revision-rejected";
+      : hasUnfulfillable
+        ? "revision-feedback-unfulfillable"
+        : first?.missing?.length
+          ? "revision-feedback-missing"
+          : "revision-rejected";
   const detailParts = failed.map(
     (row) =>
       `${row!.artifact}: ${row!.reason}${row!.missing?.length ? ` — missing: ${row!.missing.join("; ")}` : ""}`,
@@ -157,14 +162,24 @@ export function buildPlanningRevisionFailureDiagnosis(opts: {
     .update(`review-revision:${kind}:${detail.slice(0, 400)}`)
     .digest("hex")
     .slice(0, 16);
-  const operatorActions = [
-    "Re-submit submit_review(request_changes) with explicit, bullet-point feedback for the failed artifact(s).",
-    "Do NOT call retry_draft — in_review runs must use submit_review(request_changes) to revise PHASE.md/RESEARCH.md/INTENT.json.",
+  const operatorActions: string[] = [];
+  if (hasUnfulfillable) {
+    operatorActions.push(
+      "These feedback items require work beyond the plan-review stage (writing/editing product source, dependencies, or command execution): approve the current plan (submit_review(approve)), then start_development — the coding stage makes those edits in its worktree.",
+      "Do NOT resubmit the same code-write feedback at in_review — the plan-revision stage cannot apply it, and the run will loop without converging.",
+    );
+  } else {
+    operatorActions.push(
+      "Re-submit submit_review(request_changes) with explicit, bullet-point feedback for the failed artifact(s).",
+      "Do NOT call retry_draft — in_review runs must use submit_review(request_changes) to revise PHASE.md/RESEARCH.md/INTENT.json.",
+    );
+  }
+  operatorActions.push(
     "Call get_run and inspect revision_outcome plus diagnosis — do not judge readiness from RESEARCH.md alone; read PHASE.md too.",
     failed.some((r) => r?.artifact === "research")
       ? "If research revision failed structurally at failed/interrupted stage, use rerun_research then retry_draft — not while in_review."
       : "Research revision succeeded — re-read RESEARCH.md and PHASE.md before approving.",
-  ];
+  );
   return {
     audience: "operator",
     operatorActions,
@@ -178,8 +193,9 @@ export function buildPlanningRevisionFailureDiagnosis(opts: {
     ]
       .filter(Boolean)
       .join("\n\n"),
-    nextActions:
-      "Fix the revision failure (see revision_outcome), then submit_review(request_changes) again or approve when both docs satisfy the feedback.",
+    nextActions: hasUnfulfillable
+      ? "Approve the current plan (submit_review(approve)) and start_development to perform the code-write items, or resubmit feedback scoped to plan-document edits."
+      : "Fix the revision failure (see revision_outcome), then submit_review(request_changes) again or approve when both docs satisfy the feedback.",
     fingerprint: `planning-review-${kind}-${fingerprint}`,
     codingAgentShouldFix: false,
     tags: ["planning", "review-revision", kind],
@@ -295,7 +311,13 @@ export function buildRevisionArtifactOutcome(opts: {
   before?: string;
   after?: string;
   harvested?: boolean;
-  verdict?: { ok: boolean; changed: boolean; reason: string; missing: string[] };
+  verdict?: {
+    ok: boolean;
+    changed: boolean;
+    reason: string;
+    missing: string[];
+    unfulfillable?: string[];
+  };
   skipReason?: string;
   failReason?: string;
 }): RevisionArtifactOutcome {
@@ -330,6 +352,9 @@ export function buildRevisionArtifactOutcome(opts: {
       ok: opts.verdict.ok,
       reason: opts.verdict.reason,
       missing: opts.verdict.missing.length ? opts.verdict.missing : undefined,
+      unfulfillable: opts.verdict.unfulfillable?.length
+        ? opts.verdict.unfulfillable
+        : undefined,
     };
   }
   return {

@@ -76,6 +76,61 @@ describe("verifyDocRevisionApplied", () => {
     assert.equal(v.ok, false);
     assert.deepEqual(v.missing, ["add the issuer config"]);
   });
+
+  it("routes development-stage feedback as unfulfillable, never missing", async () => {
+    const v = await verifyDocRevisionApplied({
+      before: "old",
+      after: "new",
+      feedback: "CREATE src/lib/db/auth-events-schema.test.ts on disk",
+      judge: async () => ({
+        applied: [],
+        missing: [],
+        unfulfillable: [
+          {
+            bullet: "CREATE src/lib/db/auth-events-schema.test.ts on disk",
+            reason: "plan-revision stage writes planning docs only",
+          },
+        ],
+      }),
+    });
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.missing, []);
+    assert.deepEqual(v.unfulfillable, [
+      "CREATE src/lib/db/auth-events-schema.test.ts on disk — plan-revision stage writes planning docs only",
+    ]);
+    assert.match(v.reason, /development stage/);
+  });
+
+  it("missing still wins over unfulfillable when both are reported", async () => {
+    const v = await verifyDocRevisionApplied({
+      before: "old",
+      after: "old",
+      feedback: "fix the check and write the test file",
+      judge: async () => ({
+        applied: [],
+        missing: ["fix the check"],
+        unfulfillable: [{ bullet: "write the test file", reason: "" }],
+      }),
+    });
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.missing, ["fix the check"]);
+    assert.equal(v.unfulfillable, undefined);
+  });
+
+  it("tolerates string-shaped unfulfillable entries", async () => {
+    const v = await verifyDocRevisionApplied({
+      before: "old",
+      after: "new",
+      feedback: "add dependency to package.json",
+      judge: async () => ({
+        applied: [],
+        missing: [],
+        unfulfillable: ["add dependency to package.json"],
+      }),
+    });
+    assert.equal(v.ok, false);
+    assert.deepEqual(v.unfulfillable, ["add dependency to package.json"]);
+  });
 });
 
 

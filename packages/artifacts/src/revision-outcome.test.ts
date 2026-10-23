@@ -113,3 +113,61 @@ describe("revision outcome", () => {
     assert.match(text, /Automated Checks/i);
   });
 });
+
+describe("revision feedback unfulfillable", () => {
+  function verdictOutcome(unfulfillable: string[]) {
+    return {
+      targets: "phase" as const,
+      ok: false,
+      updatedAt: new Date().toISOString(),
+      phase: buildRevisionArtifactOutcome({
+        artifact: "phase",
+        attempted: true,
+        harvested: true,
+        verdict: {
+          ok: false,
+          changed: false,
+          reason: "feedback requires the development stage",
+          missing: [],
+          unfulfillable,
+        },
+      }),
+    };
+  }
+
+  it("outcome rows carry unfulfillable bullets", () => {
+    const o = buildRevisionArtifactOutcome({
+      artifact: "phase",
+      attempted: true,
+      harvested: true,
+      verdict: {
+        ok: false,
+        changed: false,
+        reason: "feedback requires the development stage",
+        missing: [],
+        unfulfillable: ["CREATE src/lib/x.test.ts on disk"],
+      },
+    });
+    assert.deepEqual(o.unfulfillable, ["CREATE src/lib/x.test.ts on disk"]);
+  });
+
+  it("diagnosis routes the operator to approve→develop instead of resubmission", () => {
+    const d = buildPlanningRevisionFailureDiagnosis({
+      feedback: "write the code",
+      phaseId: "p202",
+      runId: "r1",
+      outcome: verdictOutcome(["CREATE src/lib/x.test.ts on disk"]),
+    });
+    assert.ok(d.tags?.includes("revision-feedback-unfulfillable"));
+    const actions = d.operatorActions ?? [];
+    assert.ok(
+      actions.some((a) =>/submit_review\(approve\)/.test(a) && /start_development/.test(a)),
+      `expected approve→develop routing, got: ${actions.join(" | ")}`,
+    );
+    assert.ok(
+      actions.some((a) => /Do NOT resubmit the same code-write feedback/.test(a)),
+    );
+    assert.match(d.nextActions ?? "", /submit_review\(approve\)/);
+    assert.match(d.nextActions ?? "", /start_development/);
+  });
+});
