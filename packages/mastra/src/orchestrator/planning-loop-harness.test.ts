@@ -672,6 +672,160 @@ PHASE_COMPLETE
     }
   });
 
+  it("grounds research-quoted new-content tokens instead of failing them as unverifiable", async () => {
+    // Phase-202 jamauth loop: the draft grepped exactly the literals
+    // RESEARCH mandated for content the phase creates (a new table in an
+    // existing file). Absent on disk by definition, they landed in the
+    // "Unverifiable grep tokens" block — "these are real defects" — so no
+    // draft could ever pass. The research-mandated partition must ground
+    // them in one draft leg; negated greps and post-edit tokens in declared
+    // files must never reach the mismatch block.
+    const root = mkdtempSync(join(tmpdir(), "planning-loop-mandated-"));
+    const judgeCalls: Captured[] = [];
+    const restore = installFetchStub({
+      judgeCalls,
+      // Content-based verdict (harness contract: transport retries resend
+      // the prompt and must get the same verdict). Pass only when the
+      // research-mandated block carries the undeclared-file token AND no
+      // Unverifiable residual remains (declared post-edit tokens and the
+      // negated grep must be gone from the mismatch path entirely).
+      judge: ({ user }) =>
+        user.includes("## Research-mandated new-content tokens") &&
+        user.includes("FEATURE_FLAG_WIDGETS") &&
+        !user.includes("## Unverifiable grep tokens")
+          ? { ok: true, gaps: [], suggestedFixes: [], researchFaults: [], draftFaults: [] }
+          : {
+              ok: false,
+              gaps: [
+                "Automated Checks grep unverified new-content tokens absent on disk",
+              ],
+              suggestedFixes: ["Ground the tokens"],
+              researchFaults: [
+                "Automated Checks grep unverified new-content tokens absent on disk",
+              ],
+              draftFaults: [],
+            },
+    });
+
+    // jamauth shape: File Changes item 1 carries a mandated-implementation
+    // fence; src/schema.ts is declared in item 2, AFTER that fence.
+    const SCHEMA_PHASE_MD = `# Phase 01 — Status widget
+
+## Scope
+
+Declare the widgets table and mount a status widget.
+
+## File Changes
+
+1. **\`src/dashboard.tsx\`** — mount the widget.
+   \`\`\`ts
+   const mandated = render(<StatusWidget />);
+   \`\`\`
+2. **\`src/schema.ts\`** — add the \`widgets\` table (schema declaration only).
+
+## Success Criteria
+
+- The widgets table is declared with the mandated shape and no forbidden columns.
+
+## Automated Checks
+
+\`\`\`bash
+set -euo pipefail
+grep -q 'export const existing' src/schema.ts || exit 1
+grep -q "pgTable('widgets'" src/schema.ts || exit 1
+! grep -q "text('token')" src/schema.ts || exit 1
+grep -q 'FEATURE_FLAG_WIDGETS' src/extra.ts || exit 1
+\`\`\`
+
+## Blueprint Deltas
+
+- **BD-01-1 — Schema only.** The migration is a later approval stop.
+
+PHASE_COMPLETE
+`;
+
+    const researchCalls: string[] = [];
+    const plannerCalls: string[] = [];
+    try {
+      writeFixture(root);
+      // Pre-development schema file: the mandated token is absent by design.
+      writeFileSync(
+        join(root, "src", "schema.ts"),
+        "export const existing = 1;\n",
+      );
+      // An existing file the draft forgot to declare in File Changes: its
+      // research-quoted post-edit token lands in the mandated block (the
+      // partition class the declared-file exemption does not cover).
+      writeFileSync(
+        join(root, "src", "extra.ts"),
+        "export const flags = {};\n",
+      );
+      // RESEARCH quotes the to-be-created literals (its §5 check targets).
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      writeFileSync(
+        join(phaseDir, "RESEARCH.md"),
+        RESEARCH_MD.replace(
+          "- exists: docs/llms-full.txt",
+          "- exists: docs/llms-full.txt\n" +
+            "- to-be-created in `src/schema.ts`: `pgTable('widgets'` with `text('event_type')`\n" +
+            "- to-be-created in `src/extra.ts`: `FEATURE_FLAG_WIDGETS`",
+        ),
+      );
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          researchAgent: stubAgent(
+            () => RESEARCH_V2_MD,
+            researchCalls,
+            join(phaseDir, "RESEARCH.md"),
+          ),
+          phasePlannerAgent: stubAgent(
+            () => SCHEMA_PHASE_MD,
+            plannerCalls,
+            join(phaseDir, "PHASE.md"),
+          ),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const result = await orchestrator.draftPhase({ project, phase, run });
+      assert.equal(
+        result,
+        "in_review",
+        "research-mandated tokens must ground in the first draft leg — no research-fault escalation",
+      );
+      assert.equal(
+        researchCalls.length,
+        0,
+        "no research rerun may be triggered by research-mandated tokens",
+      );
+      assert.ok(judgeCalls.length >= 1, "judge must see the draft");
+      const firstJudge = judgeCalls[0]!;
+      assert.match(firstJudge.user, /## Research-mandated new-content tokens/);
+      assert.match(firstJudge.user, /FEATURE_FLAG_WIDGETS/);
+      // The declared-file exemption (fence-stripped) and the negated-grep
+      // skip leave no residual: no Unverifiable block at all.
+      assert.ok(
+        !firstJudge.user.includes("## Unverifiable grep tokens"),
+        "declared post-edit tokens and negated greps must not reach the mismatch block",
+      );
+      // The verified-on-disk block still grounds the pre-existing token.
+      assert.match(firstJudge.user, /## Verified grep tokens/);
+      assert.match(firstJudge.user, /export const existing/);
+      assert.match(
+        firstJudge.system,
+        /Research-mandated new-content tokens.*absence on disk is expected/s,
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("research self-heal regen prompt carries the verbatim-quote instruction", async () => {
     // When the judge flags "check greps a string RESEARCH never quoted", the
     // regen leg must be told to quote that exact string and to preserve the

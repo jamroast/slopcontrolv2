@@ -54,17 +54,28 @@ export function extractCheckTargetPaths(
   return [...seen].sort();
 }
 
+/**
+ * Prose/table text of ## File Changes with fenced contents stripped — fence
+ * commands and mandated implementation snippets are not declarations — while
+ * keeping the prose BETWEEN fences: items declared after the section's first
+ * fence still count (truncating at the first fence silently undeclared them,
+ * the phase-202 jamauth loop). extractSection bounds the section at the next
+ * `##` heading.
+ */
+function fileChangesProse(phaseDoc: string): string {
+  const section = extractSection(phaseDoc, /^##\s+File Changes\s*$/im) ?? "";
+  return section
+    .split("```")
+    .filter((_, i) => i % 2 === 0)
+    .join("\n");
+}
+
 /** Extract + stat each target relative to the project root. */
 export function verifyCheckTargets(
   projectRoot: string,
   phaseDoc: string,
 ): VerifiedCheckTarget[] {
-  // Only the prose/table part of ## File Changes — a fenced block after the
-  // section (unlikely, but possible in a compact doc) is not a declaration.
-  const fileChanges =
-    (extractSection(phaseDoc, /^##\s+File Changes\s*$/im) ?? "").split(
-      "```",
-    )[0] ?? "";
+  const fileChanges = fileChangesProse(phaseDoc);
   return extractCheckTargetPaths(phaseDoc).map((path) => ({
     path,
     exists: existsSync(join(projectRoot, path)),
@@ -154,12 +165,9 @@ export function verifyGrepTokens(
     if (results.length >= max) return;
     results.push({ token, path, found });
   };
-  // Declared paths (EDIT/NEW) — same prose/table section verifyCheckTargets
+  // Declared paths (EDIT/NEW) — same fence-stripped prose verifyCheckTargets
   // uses. A missing token in one of these is expected post-edit content.
-  const fileChanges =
-    (extractSection(phaseDoc, /^##\s+File Changes\s*$/im) ?? "").split(
-      "```",
-    )[0] ?? "";
+  const fileChanges = fileChangesProse(phaseDoc);
   const isDeclared = (path: string): boolean =>
     path.length > 0 && fileChanges.includes(path);
   for (const fence of phaseDoc.matchAll(SHELL_FENCE_RE)) {
@@ -176,6 +184,11 @@ export function verifyGrepTokens(
       const pattern = match[2] ?? match[3] ?? "";
       const path = (match[4] ?? "").replace(/^\.\//, "");
       if (!pattern || !path) continue;
+      // Negated assertions (`! grep -q 'forbidden' file`) assert ABSENCE —
+      // token existence is not their grounding question. Skip them entirely:
+      // an absent token is the check's success condition, never a mismatch,
+      // and a present one is for the check to catch at verify time.
+      if (/![\s]*$/.test(body.slice(0, match.index))) continue;
       const mode = flags.includes("F")
         ? "fixed"
         : flags.includes("E")
@@ -241,22 +254,58 @@ export function formatVerifiedGrepTokensBlock(
 }
 
 /**
+ * Judge-facing block for grep tokens that are absent from their target file
+ * but quoted verbatim in RESEARCH.md — new content the phase is mandated to
+ * create (a new table/route/column/test string in an existing file). Absence
+ * on disk is EXPECTED for these: the check runs after the edit lands. This is
+ * the token-level analogue of the `NEW` path carve-out — without it the
+ * judge fails exactly the tokens RESEARCH told the drafter to grep, and no
+ * draft can ever pass (the phase-202 jamauth loop). Empty when researchText
+ * is unavailable or no absent token is research-quoted.
+ */
+export function formatResearchMandatedTokensBlock(
+  tokens: VerifiedGrepToken[],
+  researchText: string,
+  max = 40,
+): string {
+  if (!researchText) return "";
+  const mandated = tokens
+    .filter((t) => !t.found && researchText.includes(t.token))
+    .slice(0, max);
+  if (mandated.length === 0) return "";
+  const lines = mandated.map((t) => `- \`${t.token}\` — ${t.path}`);
+  return [
+    "## Research-mandated new-content tokens (quoted in RESEARCH.md; absent on disk because the phase creates them)",
+    ...lines,
+    "",
+    "RESEARCH.md quotes these exact literals as content this phase adds — absence on disk is expected (the check runs after the edit lands). Treat them as grounded: do NOT fail them as unverified, and do NOT demand a token that already exists in their place — that would make the check unable to prove the new content. If the target file is missing from ## File Changes, flag THAT as the gap, not the token.",
+  ].join("\n");
+}
+
+/**
  * Judge-facing block for grep tokens that do NOT appear in their target file
- * (no-op guards / speculative doc strings). Empty when every literal token is
- * grounded.
+ * and are NOT quoted in RESEARCH.md (when supplied) — the residual class
+ * after disk-verified and research-mandated tokens are partitioned out.
+ * Empty when every literal token is grounded. These keep the gate
+ * fail-closed: a speculative string in a file the phase does not touch, or a
+ * new-content token missing its grounding (RESEARCH quote / File Changes
+ * declaration).
  */
 export function formatGrepTokenMismatchesBlock(
   tokens: VerifiedGrepToken[],
+  researchText = "",
 ): string {
-  const mismatches = tokens.filter((t) => !t.found);
+  const mismatches = tokens.filter(
+    (t) => !t.found && !(researchText && researchText.includes(t.token)),
+  );
   if (mismatches.length === 0) return "";
   const lines = mismatches.map(
     (t) => `- \`grep -q '${t.token}' ${t.path}\` — token not present on disk`,
   );
   return [
-    "## Unverifiable grep tokens (token absent from its target file)",
+    "## Unverifiable grep tokens (absent from the target file; not quoted in RESEARCH.md)",
     ...lines,
     "",
-    "These are real defects — a no-op guard or a speculative doc string the check can never satisfy. Flag them as gaps and require a concrete token that actually exists in the file.",
+    "These tokens are neither on disk nor quoted in RESEARCH.md. Judge them on the evidence: a token that should already exist in a file this phase does not touch is a real defect (a no-op guard or speculative string the check can never satisfy). A token the phase intends to ADD is missing its grounding instead — RESEARCH.md must quote the exact literal and ## File Changes must declare the file. Flag the gap with the missing grounding; never ask the drafter to re-assert the flagged token unchanged, and never demand an on-disk token for content the phase creates.",
   ].join("\n");
 }

@@ -281,6 +281,7 @@ import {
   formatCheckTargetsPromptBlock,
   verifyCheckTargets,
   formatGrepTokenMismatchesBlock,
+  formatResearchMandatedTokensBlock,
   formatVerifiedGrepTokensBlock,
   verifyGrepTokens,
   findComposeFile,
@@ -2695,6 +2696,7 @@ function tryBindPhaseDocQualityJudge(
   checkTargetsBlock?: string;
   grepTokenMismatchesBlock?: string;
   verifiedGrepTokensBlock?: string;
+  researchMandatedTokensBlock?: string;
   priorGaps?: string[];
 }) => ReturnType<typeof judgePhaseDocQualityViaLlm>) | null {
   const ep = resolved ?? resolvePlanningJudgeEndpoint(registry);
@@ -2710,6 +2712,7 @@ function tryBindPhaseDocQualityJudge(
       checkTargetsBlock: input.checkTargetsBlock,
       grepTokenMismatchesBlock: input.grepTokenMismatchesBlock,
       verifiedGrepTokensBlock: input.verifiedGrepTokensBlock,
+      researchMandatedTokensBlock: input.researchMandatedTokensBlock,
       checkRulesBlock: opts?.checkRulesBlock,
       hasTestServices: opts?.hasTestServices,
       priorGaps: input.priorGaps,
@@ -8112,15 +8115,23 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
         const checkTargetsBlock = formatCheckTargetsPromptBlock(
           verifyCheckTargets(project.rootPath, phaseDocForQuality),
         );
-        // One deterministic token pass feeds both judge blocks: mismatches
-        // (real defects) and verified-on-disk tokens (positive grounding, so
-        // the judge stops failing disk-real tokens RESEARCH never quoted —
-        // the phase-29 grounding loop).
+        // One deterministic token pass feeds three judge blocks, partitioning
+        // every grep token by grounding: verified-on-disk (positive grounding,
+        // so the judge stops failing disk-real tokens RESEARCH never quoted —
+        // the phase-29 loop), research-mandated (RESEARCH-quoted new content,
+        // absent on disk because the phase creates it — the phase-202 loop),
+        // and the unverifiable residual (real defects / missing grounding).
         const grepTokens = verifyGrepTokens(project.rootPath, phaseDocForQuality);
-        const grepTokenMismatchesBlock =
-          formatGrepTokenMismatchesBlock(grepTokens);
+        const grepTokenMismatchesBlock = formatGrepTokenMismatchesBlock(
+          grepTokens,
+          research,
+        );
         const verifiedGrepTokensBlock =
           formatVerifiedGrepTokensBlock(grepTokens);
+        const researchMandatedTokensBlock = formatResearchMandatedTokensBlock(
+          grepTokens,
+          research,
+        );
         const judgeInput = {
           intentBlock,
           phaseDescription: phase.description,
@@ -8137,6 +8148,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
           checkTargetsBlock,
           grepTokenMismatchesBlock,
           verifiedGrepTokensBlock,
+          researchMandatedTokensBlock,
           priorGaps: judgePriorGaps,
         };
         return callPlanningJudgeWithInfraRetry(

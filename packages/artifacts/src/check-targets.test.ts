@@ -7,6 +7,7 @@ import {
   extractCheckTargetPaths,
   formatCheckTargetsPromptBlock,
   formatGrepTokenMismatchesBlock,
+  formatResearchMandatedTokensBlock,
   formatVerifiedGrepTokensBlock,
   verifyCheckTargets,
   verifyGrepTokens,
@@ -283,5 +284,142 @@ describe("formatVerifiedGrepTokensBlock", () => {
     const block = formatVerifiedGrepTokensBlock(tokens);
     assert.match(block, /token39/);
     assert.doesNotMatch(block, /token40/);
+  });
+});
+
+describe("File Changes fence handling", () => {
+  // jamauth phase-202 shape: File Changes item 1 carries a mandated
+  // implementation fence; every item after that fence is still a declaration.
+  const fencedDoc =
+    "## File Changes\n\n" +
+    "1. **`src/first.ts`** — edit the relay.\n" +
+    "   ```ts\n" +
+    "   const mandated = snippet();\n" +
+    "   ```\n" +
+    "2. **`src/schema.ts`** — add the `widgets` table.\n\n" +
+    "## Automated Checks\n\n" +
+    "```bash\n" +
+    "grep -q \"pgTable('widgets'\" src/schema.ts || exit 1\n" +
+    "```\n";
+
+  it("keeps the declared-file exemption for items after the first fence", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-fence-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "schema.ts"), "export const existing = 1;\n");
+
+    const tokens = verifyGrepTokens(root, fencedDoc);
+    // Post-edit token in a file declared AFTER the first File Changes fence:
+    // expected post-edit content, not a mismatch.
+    assert.ok(!tokens.some((t) => t.token === "pgTable('widgets'"));
+    assert.equal(formatGrepTokenMismatchesBlock(tokens), "");
+  });
+
+  it("classifies paths declared after the first fence as declared", () => {
+    const declared = verifyCheckTargets("/nonexistent-root", fencedDoc);
+    const schema = declared.find((t) => t.path === "src/schema.ts");
+    assert.ok(schema, "src/schema.ts should be extracted as a target");
+    assert.equal(schema!.declared, true);
+    assert.equal(schema!.exists, false);
+  });
+});
+
+describe("negated grep assertions", () => {
+  it("never reports absence assertions as token mismatches", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-neg-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "schema.ts"), "export const t = 1;\n");
+
+    const doc =
+      "```bash\n" +
+      "grep -q 'export const t' src/schema.ts || exit 1\n" +
+      "! grep -q \"text('token')\" src/schema.ts || exit 1\n" +
+      "if ! grep -q 'forbiddenColumn' src/schema.ts; then\n" +
+      "  exit 1\n" +
+      "fi\n" +
+      "```\n";
+
+    const tokens = verifyGrepTokens(root, doc);
+    // Negated greps assert ABSENCE — token existence is not their grounding
+    // question; they must never appear in verification results at all.
+    assert.ok(!tokens.some((t) => t.token === "text('token')"));
+    assert.ok(!tokens.some((t) => t.token === "forbiddenColumn"));
+    // The positive assertion is still verified.
+    assert.equal(tokens.find((t) => t.token === "export const t")?.found, true);
+    assert.equal(formatGrepTokenMismatchesBlock(tokens), "");
+  });
+});
+
+describe("research-mandated partition", () => {
+  it("routes absent research-quoted tokens to the mandated block, not mismatches", () => {
+    const tokens = [
+      {
+        token: "pgTable('auth_events'",
+        path: "src/lib/db/schema.ts",
+        found: false,
+      },
+      { token: "speculativeToken", path: "src/lib/oidc/embed.ts", found: false },
+      { token: "onDisk", path: "src/a.ts", found: true },
+    ];
+    const research =
+      "## 5. Check targets (verified)\n\n" +
+      "| 5 | `src/lib/db/schema.ts` (new table) | to-be-created | `pgTable('auth_events'` with `text('event_type')` |\n";
+
+    const mandated = formatResearchMandatedTokensBlock(tokens, research);
+    assert.match(mandated, /Research-mandated new-content tokens/);
+    assert.match(mandated, /pgTable\('auth_events'/);
+    assert.match(mandated, /absence on disk is expected/);
+    assert.match(mandated, /do NOT fail them as unverified/);
+    assert.doesNotMatch(mandated, /speculativeToken/);
+    assert.doesNotMatch(mandated, /onDisk/);
+
+    const mismatches = formatGrepTokenMismatchesBlock(tokens, research);
+    assert.match(mismatches, /speculativeToken/);
+    assert.doesNotMatch(mismatches, /pgTable/);
+    // Residual wording: judge on evidence; never re-assert unchanged, never
+    // demand an on-disk token for content the phase creates.
+    assert.match(mismatches, /never ask the drafter to re-assert/);
+    assert.match(mismatches, /never demand an on-disk token/);
+  });
+
+  it("stays backward-compatible without research text", () => {
+    const tokens = [
+      { token: "absent", path: "src/a.ts", found: false },
+    ];
+    const legacy = formatGrepTokenMismatchesBlock(tokens);
+    assert.match(legacy, /absent/);
+    assert.equal(formatResearchMandatedTokensBlock(tokens, ""), "");
+  });
+
+  it("grounds research-quoted post-edit tokens even in undeclared files", () => {
+    // Drafter greps post-edit content in an existing file it failed to
+    // declare; RESEARCH quoted the exact literal → mandated block, not a
+    // mismatch. The unquoted token stays in the fail-closed residual.
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-mandated-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "schema.ts"), "export const existing = 1;\n");
+
+    const doc =
+      "```bash\n" +
+      "grep -q \"pgTable('widgets'\" src/schema.ts || exit 1\n" +
+      "grep -q 'mysteryToken' src/schema.ts || exit 1\n" +
+      "```\n";
+    const research =
+      "## Check targets (verified)\n\n" +
+      "- `pgTable('widgets'` — to-be-created in `src/schema.ts`\n";
+
+    const tokens = verifyGrepTokens(root, doc);
+    assert.equal(
+      tokens.find((t) => t.token === "pgTable('widgets'")?.found,
+      false,
+    );
+    assert.equal(tokens.find((t) => t.token === "mysteryToken")?.found, false);
+
+    const mandated = formatResearchMandatedTokensBlock(tokens, research);
+    assert.match(mandated, /pgTable\('widgets'/);
+    assert.doesNotMatch(mandated, /mysteryToken/);
+
+    const mismatches = formatGrepTokenMismatchesBlock(tokens, research);
+    assert.match(mismatches, /mysteryToken/);
+    assert.doesNotMatch(mismatches, /pgTable/);
   });
 });

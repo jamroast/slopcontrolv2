@@ -57,12 +57,27 @@ describe("phase-doc-quality-llm", () => {
       PHASE_DOC_QUALITY_SYSTEM_PROMPT,
       /neither RESEARCH quoted nor the deterministic verification blocks/,
     );
+    // Research-mandated new-content tokens: RESEARCH-quoted literals the
+    // phase creates — absence on disk is expected, never fail them or demand
+    // an already-existing token (the phase-202 jamauth loop).
+    assert.match(
+      PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+      /Research-mandated new-content tokens.*absence on disk is expected.*do NOT fail them as unverified/s,
+    );
+    assert.match(
+      PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+      /Research-mandated new-content tokens.*confirmed/s,
+    );
     const rendered = renderPhaseDocQualitySystemPrompt({
       checkRulesBlock: "## Automated Checks rules\n- rule",
     });
     assert.match(
       rendered,
       /Verified grep tokens.*confirmed verbatim on disk.*do NOT fail them as unverified/s,
+    );
+    assert.match(
+      rendered,
+      /Research-mandated new-content tokens.*absence on disk is expected/s,
     );
   });
 
@@ -117,6 +132,8 @@ describe("phase-doc-quality-llm", () => {
           "## Automated Check targets (verified by SlopControl against the repo)\n- exists: tests/a.test.ts\n- MISSING: scripts/nope.mjs",
         verifiedGrepTokensBlock:
           "## Verified grep tokens (confirmed verbatim on disk by SlopControl)\n- `isReadyMessage(event.data)` — src/island.tsx",
+        researchMandatedTokensBlock:
+          "## Research-mandated new-content tokens (quoted in RESEARCH.md; absent on disk because the phase creates them)\n- `pgTable('auth_events'` — src/lib/db/schema.ts",
       });
       assert.equal(verdict.ok, true);
       assert.match(userContent, /Automated Check targets \(verified/);
@@ -124,6 +141,8 @@ describe("phase-doc-quality-llm", () => {
       assert.match(userContent, /- MISSING: scripts\/nope\.mjs/);
       assert.match(userContent, /## Verified grep tokens/);
       assert.match(userContent, /isReadyMessage\(event\.data\)/);
+      assert.match(userContent, /## Research-mandated new-content tokens/);
+      assert.match(userContent, /pgTable\('auth_events'/);
     } finally {
       fetchMock.mock.restore();
     }
