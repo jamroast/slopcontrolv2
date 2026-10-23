@@ -554,6 +554,200 @@ describe("planning loop harness: research ⇄ draft ⇄ judge", () => {
     }
   });
 
+  it("grounds disk-real grep tokens deterministically instead of escalating to research", async () => {
+    // Phase-29 grounding loop: the judge failed BRE-paren/dot tokens
+    // (`isReadyMessage(event.data)`) as "never quoted in RESEARCH.md", each
+    // miss routing to a full research rerun until the budget died. The
+    // verified-tokens block must let the judge pass them in one draft leg.
+    const root = mkdtempSync(join(tmpdir(), "planning-loop-grounded-"));
+    const judgeCalls: Captured[] = [];
+    const restore = installFetchStub({
+      judgeCalls,
+      judge: ({ user }) =>
+        user.includes("## Verified grep tokens") &&
+        user.includes("isReadyMessage(event.data)")
+          ? { ok: true, gaps: [], suggestedFixes: [], researchFaults: [], draftFaults: [] }
+          : {
+              ok: false,
+              gaps: [
+                "RESEARCH.md never quotes the listener strings the checks grep for",
+              ],
+              suggestedFixes: ["Quote the exact strings in RESEARCH.md"],
+              researchFaults: [
+                "RESEARCH.md never quotes the listener strings the checks grep for",
+              ],
+              draftFaults: [],
+            },
+    });
+
+    const ISLAND_PHASE_MD = `# Phase 01 — Consent-mandatory navigation
+
+## Scope
+
+Remove the silent timer redirect from the sign-in island.
+
+## File Changes
+
+| Path | Action |
+| --- | --- |
+| src/island.tsx | EDIT |
+
+## Success Criteria
+
+- Navigation only happens on an explicit click.
+
+## Automated Checks
+
+\`\`\`bash
+set -euo pipefail
+grep -q 'isReadyMessage(event.data)' src/island.tsx || exit 1
+grep -q 'window.addEventListener("message", onMessage)' src/island.tsx || exit 1
+\`\`\`
+
+## Blueprint Deltas
+
+- **BD-01-1 — Detection stays.** The ready-listener is untouched.
+
+PHASE_COMPLETE
+`;
+
+    const researchCalls: string[] = [];
+    const plannerCalls: string[] = [];
+    try {
+      writeFixture(root);
+      // The island file exists with the exact strings, but RESEARCH.md (from
+      // writeFixture) never quotes them.
+      writeFileSync(
+        join(root, "src", "island.tsx"),
+        "const onMessage = (event: MessageEvent) => {\n" +
+          "  if (!isReadyMessage(event.data)) return;\n" +
+          "};\n" +
+          'window.addEventListener("message", onMessage);\n',
+      );
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          researchAgent: stubAgent(
+            () => RESEARCH_V2_MD,
+            researchCalls,
+            join(phaseDir, "RESEARCH.md"),
+          ),
+          phasePlannerAgent: stubAgent(
+            () => ISLAND_PHASE_MD,
+            plannerCalls,
+            join(phaseDir, "PHASE.md"),
+          ),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const result = await orchestrator.draftPhase({ project, phase, run });
+      assert.equal(
+        result,
+        "in_review",
+        "disk-real tokens must ground in the first draft leg — no research-fault escalation",
+      );
+      assert.equal(
+        researchCalls.length,
+        0,
+        "no research rerun may be triggered by disk-verified tokens",
+      );
+      assert.ok(judgeCalls.length >= 1, "judge must see the draft");
+      const firstJudge = judgeCalls[0]!;
+      assert.match(firstJudge.user, /## Verified grep tokens/);
+      assert.match(firstJudge.user, /isReadyMessage\(event\.data\)/);
+      assert.match(firstJudge.user, /window\.addEventListener/);
+      assert.match(
+        firstJudge.system,
+        /Verified grep tokens.*confirmed verbatim on disk/s,
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("research self-heal regen prompt carries the verbatim-quote instruction", async () => {
+    // When the judge flags "check greps a string RESEARCH never quoted", the
+    // regen leg must be told to quote that exact string and to preserve the
+    // prior doc's other quotes — otherwise each round fixes one gap and drops
+    // or misses the next (the phase-29 loop shape).
+    const root = mkdtempSync(join(tmpdir(), "planning-loop-regen-"));
+    const judgeCalls: Captured[] = [];
+    // Content-based verdict (harness contract: transport retries resend the
+    // prompt and must get the same verdict): fail while the judged draft
+    // lacks the v2 marker, pass once the re-draft carries it.
+    const restore = installFetchStub({
+      judgeCalls,
+      judge: ({ user }) =>
+        user.includes("Widget state is read-only")
+          ? { ok: true, gaps: [], suggestedFixes: [], researchFaults: [], draftFaults: [], resolvedGaps: [] }
+          : {
+              ok: false,
+              gaps: ["RESEARCH never quotes the listener string a check greps"],
+              suggestedFixes: ["Quote the exact string in RESEARCH.md"],
+              researchFaults: [
+                "RESEARCH never quotes the listener string a check greps",
+              ],
+              draftFaults: [],
+              resolvedGaps: [],
+            },
+    });
+
+    const researchCalls: string[] = [];
+    const plannerCalls: string[] = [];
+    try {
+      writeFixture(root);
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          researchAgent: stubAgent(
+            () => RESEARCH_MD,
+            researchCalls,
+            join(phaseDir, "RESEARCH.md"),
+          ),
+          phasePlannerAgent: stubAgent(
+            () => (plannerCalls.length <= 1 ? PHASE_MD : PHASE_MD_V2),
+            plannerCalls,
+            join(phaseDir, "PHASE.md"),
+          ),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const result = await orchestrator.startResearch({
+        project,
+        phase,
+        run,
+        description: DESCRIPTION,
+        force: true,
+      });
+      assert.equal(result, "in_review", "one regen round must converge");
+
+      const regenPrompt = researchCalls.find((p) =>
+        p.includes("Regenerate the FULL RESEARCH.md from scratch"),
+      );
+      assert.ok(regenPrompt, "research-fault verdict must trigger a regen leg");
+      assert.match(regenPrompt!, /RESEARCH never quotes the listener string/);
+      assert.match(regenPrompt!, /verbatim-quote that exact string/);
+      assert.match(regenPrompt!, /## Check targets \(verified\)/);
+      assert.match(regenPrompt!, /Preserve every other quoted string/);
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("drops gaps the judge resolved and carries only the unresolved ones", async () => {
     const root = mkdtempSync(join(tmpdir(), "planning-converge-"));
     const judgeCalls: Captured[] = [];

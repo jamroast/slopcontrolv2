@@ -5,6 +5,7 @@ import {
   PHASE_DOC_QUALITY_SYSTEM_PROMPT,
   judgePhaseDocQualityViaLlm,
   parsePhaseDocQualityVerdictPayload,
+  renderPhaseDocQualitySystemPrompt,
 } from "./phase-doc-quality-llm.js";
 
 const endpoint: LlmEndpoint = {
@@ -41,6 +42,27 @@ describe("phase-doc-quality-llm", () => {
     assert.match(
       PHASE_DOC_QUALITY_SYSTEM_PROMPT,
       /A re-research cannot fix check mechanics/,
+    );
+  });
+
+  it("system prompt treats deterministically verified grep tokens as grounded", () => {
+    // Grounding-loop fix: disk-real tokens the drafter verified must not be
+    // failed for absence from the (possibly clipped) RESEARCH excerpt — that
+    // false researchFault forced a full re-research leg per token.
+    assert.match(
+      PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+      /Verified grep tokens.*confirmed verbatim on disk.*do NOT fail them as unverified/s,
+    );
+    assert.match(
+      PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+      /neither RESEARCH quoted nor the deterministic verification blocks/,
+    );
+    const rendered = renderPhaseDocQualitySystemPrompt({
+      checkRulesBlock: "## Automated Checks rules\n- rule",
+    });
+    assert.match(
+      rendered,
+      /Verified grep tokens.*confirmed verbatim on disk.*do NOT fail them as unverified/s,
     );
   });
 
@@ -93,11 +115,15 @@ describe("phase-doc-quality-llm", () => {
         phaseDocExcerpt: "phase doc",
         checkTargetsBlock:
           "## Automated Check targets (verified by SlopControl against the repo)\n- exists: tests/a.test.ts\n- MISSING: scripts/nope.mjs",
+        verifiedGrepTokensBlock:
+          "## Verified grep tokens (confirmed verbatim on disk by SlopControl)\n- `isReadyMessage(event.data)` — src/island.tsx",
       });
       assert.equal(verdict.ok, true);
       assert.match(userContent, /Automated Check targets \(verified/);
       assert.match(userContent, /- exists: tests\/a\.test\.ts/);
       assert.match(userContent, /- MISSING: scripts\/nope\.mjs/);
+      assert.match(userContent, /## Verified grep tokens/);
+      assert.match(userContent, /isReadyMessage\(event\.data\)/);
     } finally {
       fetchMock.mock.restore();
     }
@@ -163,6 +189,10 @@ describe("phase-doc-quality-llm", () => {
       assert.match(userContent, /1\. The Verdict: line format is undeclared/);
       assert.match(userContent, /objectively fatal/);
       assert.match(userContent, /hypothetical or hostile implementations/);
+      // Ungrounded-token audits must be exhaustive per pass — drip-feeding
+      // one token per round was the phase-29 loop shape.
+      assert.match(userContent, /audit EVERY grep token/);
+      assert.match(userContent, /never drip-feed them one per round/);
     } finally {
       fetchMock.mock.restore();
     }

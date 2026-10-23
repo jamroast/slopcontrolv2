@@ -92,6 +92,9 @@ export function renderAutomatedChecksRules(opts?: {
     "- Exact JSON token: grep the exact quoted token that exists on disk (e.g. `grep -q '\"version\": 2'`), never an unquoted approximation RESEARCH only loosely names.",
   );
   lines.push(
+    "- Ground every grep token: prefer RESEARCH's `## Check targets (verified)` quotes; any other exact string MUST be verified verbatim against the target file with read_file before you write the check. If a judge gap flags a token as ungrounded, re-scope the check to a quoted/verified token — never re-assert the flagged token unchanged.",
+  );
+  lines.push(
     `- Never pipe ${runnerName} to \`grep -q\` to match "Tests N passed" — use \`${isNode ? "npx vitest run …" : (targeted ?? "<targeted test command>")} || exit 1\` and trust the runner exit code.`,
   );
   if (typecheck) {

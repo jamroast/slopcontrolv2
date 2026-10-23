@@ -101,13 +101,42 @@ export type VerifiedGrepToken = {
 };
 
 /**
+ * Pattern shape per grep mode, from a soundness standpoint (plain substring
+ * checks must never produce a wrong verdict):
+ * - `literal` — the pattern is a pure fixed string in this mode, so
+ *   `includes` is exact in both directions (found AND absent).
+ * - `dot-only` — the only metacharacter is `.`, which self-matches at a
+ *   verbatim occurrence: a found verdict is sound (the pattern matches the
+ *   literal occurrence), but an absent verdict is not (the dot could match a
+ *   different char) — verify found-only.
+ * - `engine` — structural metacharacters (classes, anchors, quantifiers,
+ *   groups, alternation, escapes) need a real regex engine — skip.
+ *
+ * BRE (plain `grep -q`) treats `(){}+?|` as literal, so
+ * `grep -q 'isReadyMessage(event.data)'` is verifiable; ERE (`-E`) and
+ * escaped forms stay skipped. `-F` is always literal.
+ */
+type GrepPatternShape = "literal" | "dot-only" | "engine";
+
+function grepPatternShape(
+  pattern: string,
+  mode: "fixed" | "bre" | "ere",
+): GrepPatternShape {
+  if (mode === "fixed") return "literal";
+  const structural =
+    mode === "ere" ? /[|^$*+?(){}[\]\\]/ : /[*[\]^$\\]/;
+  if (structural.test(pattern)) return "engine";
+  return pattern.includes(".") ? "dot-only" : "literal";
+}
+
+/**
  * Deterministic grep-token verification: for each `grep -q '<literal>' <path>`
  * (or `grep -rq`) in a shell fence, check that the literal token actually
  * appears in the on-disk file. A token that does not is a no-op guard or a
  * speculative doc string — the check would fail at verify time.
  *
- * Only single literal tokens are checked (no regex metacharacters or `|`
- * alternation, which need a real engine to evaluate) — this stays structural.
+ * Only patterns whose shape a substring check can evaluate soundly are
+ * verified (see grepPatternShape) — this stays structural.
  *
  * Files the phase declares in ## File Changes are exempt from mismatch
  * reporting: a grep asserting post-edit content legitimately does not match
@@ -138,14 +167,23 @@ export function verifyGrepTokens(
     // grep -q / grep -rq with a quoted pattern and a target path. Single- and
     // double-quoted patterns are matched separately so a single-quoted pattern
     // may contain inner double quotes (e.g. grep -qF '"version": 2' file).
-    const re = /\bgrep\s+(?:-[A-Za-z]+\s+)*(?:'([^']*)'|"([^"]*)")\s+([^\s;&|]+)/g;
+    // Flags are captured so pattern shape is judged per grep mode (BRE/ERE/-F).
+    const re =
+      /\bgrep\s+((?:-[A-Za-z]+\s+)*)(?:'([^']*)'|"([^"]*)")\s+([^\s;&|]+)/g;
     let match: RegExpExecArray | null;
     while ((match = re.exec(body)) !== null) {
-      const pattern = match[1] ?? match[2] ?? "";
-      const path = (match[3] ?? "").replace(/^\.\//, "");
+      const flags = match[1] ?? "";
+      const pattern = match[2] ?? match[3] ?? "";
+      const path = (match[4] ?? "").replace(/^\.\//, "");
       if (!pattern || !path) continue;
-      // Only literal tokens — skip regex metacharacters and alternation.
-      if (/[|.^$*+?(){}[\]\\]/.test(pattern)) continue;
+      const mode = flags.includes("F")
+        ? "fixed"
+        : flags.includes("E")
+          ? "ere"
+          : "bre";
+      const shape = grepPatternShape(pattern, mode);
+      // Needs a real regex engine — skip rather than risk a wrong verdict.
+      if (shape === "engine") continue;
       if (path.startsWith("/") || path.startsWith("~") || path.includes("://")) {
         continue;
       }
@@ -163,6 +201,9 @@ export function verifyGrepTokens(
         // Unreadable path — skip rather than report a false mismatch.
         continue;
       }
+      // Dot-only patterns: an absent verdict is unsound (the dot could match
+      // a different char) — only positive grounding is reported for them.
+      if (!found && shape === "dot-only") continue;
       // A missing token in a file this phase declares (EDIT/NEW) is expected
       // post-edit content, not a speculative string — the check runs after
       // the edit lands. Skip the mismatch; a PRESENT token still reports
@@ -172,6 +213,31 @@ export function verifyGrepTokens(
     }
   }
   return results;
+}
+
+/**
+ * Judge-facing block for grep tokens that DO appear verbatim in their target
+ * file — the positive complement of the mismatch block. The judge only sees a
+ * (possibly clipped) RESEARCH excerpt, so a disk-real token RESEARCH never
+ * quoted looks "unverified" to it; this block grounds those tokens
+ * deterministically, the token-level analogue of the `exists` path carve-out
+ * in formatCheckTargetsPromptBlock. Empty when no token verified on disk —
+ * unlisted tokens (NEW-file content, post-edit strings) stay fully within
+ * the judge's discretion, keeping the gate fail-closed.
+ */
+export function formatVerifiedGrepTokensBlock(
+  tokens: VerifiedGrepToken[],
+  max = 40,
+): string {
+  const verified = tokens.filter((t) => t.found).slice(0, max);
+  if (verified.length === 0) return "";
+  const lines = verified.map((t) => `- \`${t.token}\` — ${t.path}`);
+  return [
+    "## Verified grep tokens (confirmed verbatim on disk by SlopControl)",
+    ...lines,
+    "",
+    "These tokens are verified verbatim against the target repo file — treat them as grounded even when the RESEARCH excerpt does not quote them; do NOT fail them as unverified. Tokens not listed here were not verifiable on disk (e.g. NEW-file or post-edit content) — judge those on the remaining evidence.",
+  ].join("\n");
 }
 
 /**

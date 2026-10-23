@@ -167,6 +167,10 @@ describe("ask / agent chat tool split", () => {
       assert.match(plannerInstr, /Grep-for-alias|insufficient/i);
       assert.match(researchInstr, /Mounted ≠ visible|@source/i);
       assert.match(plannerInstr, /style visibility|Mounted ≠ visible/i);
+      // Grounding contract: the planner verifies tokens with read_file and
+      // re-scopes flagged tokens rather than re-asserting them.
+      assert.match(plannerInstr, /read_file/);
+      assert.match(plannerInstr, /never re-assert|re-scope/i);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

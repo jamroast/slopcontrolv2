@@ -112,6 +112,21 @@ describe("renderAutomatedChecksRules toolchain rendering", () => {
     assert.match(rules, /Shared shell regression guard/);
   });
 
+  it("every render carries the grep-token grounding contract", () => {
+    // The drafter must ground tokens itself (RESEARCH quotes or read_file
+    // verification) and re-scope rather than re-assert flagged tokens — the
+    // judge enforces grounding, so the drafter's contract must state it.
+    for (const kind of ["node-pnpm", "rust-cargo", "go", "python"] as const) {
+      const rules = renderAutomatedChecksRules({
+        toolchain: defaultToolchainSpec(kind),
+        hasTestServices: true,
+      });
+      assert.match(rules, /Ground every grep token/, `${kind} render`);
+      assert.match(rules, /## Check targets \(verified\)/, `${kind} render`);
+      assert.match(rules, /never re-assert the flagged token/, `${kind} render`);
+    }
+  });
+
   it("rust-cargo renders cargo vocabulary and no node-estate commands", () => {
     const rules = renderAutomatedChecksRules({
       toolchain: defaultToolchainSpec("rust-cargo"),

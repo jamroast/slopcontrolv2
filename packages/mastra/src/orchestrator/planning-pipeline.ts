@@ -740,5 +740,5 @@ export function formatPriorDraftFeedbackBlock(issues: string[]): string {
   return `${formatJudgeFeedbackBlock({
     title: PRIOR_DRAFT_FEEDBACK_TITLE,
     gaps: issues,
-  })}\n`;
+  })}\nHow to address them: fix the cause, not the wording. For an ungrounded-token gap (a check greps a string RESEARCH never quoted), re-scope the check to tokens quoted in RESEARCH's \`## Check targets (verified)\`, or verify the exact string against the target file with read_file before asserting it — never re-assert the flagged token unchanged.\n`;
 }

@@ -281,6 +281,7 @@ import {
   formatCheckTargetsPromptBlock,
   verifyCheckTargets,
   formatGrepTokenMismatchesBlock,
+  formatVerifiedGrepTokensBlock,
   verifyGrepTokens,
   findComposeFile,
   renderAutomatedChecksRules,
@@ -2693,6 +2694,7 @@ function tryBindPhaseDocQualityJudge(
   phaseDocExcerpt: string;
   checkTargetsBlock?: string;
   grepTokenMismatchesBlock?: string;
+  verifiedGrepTokensBlock?: string;
   priorGaps?: string[];
 }) => ReturnType<typeof judgePhaseDocQualityViaLlm>) | null {
   const ep = resolved ?? resolvePlanningJudgeEndpoint(registry);
@@ -2707,6 +2709,7 @@ function tryBindPhaseDocQualityJudge(
       phaseDocExcerpt: input.phaseDocExcerpt,
       checkTargetsBlock: input.checkTargetsBlock,
       grepTokenMismatchesBlock: input.grepTokenMismatchesBlock,
+      verifiedGrepTokensBlock: input.verifiedGrepTokensBlock,
       checkRulesBlock: opts?.checkRulesBlock,
       hasTestServices: opts?.hasTestServices,
       priorGaps: input.priorGaps,
@@ -6144,6 +6147,8 @@ ${message.trim()}`;
     const retryPrompt = `Regenerate the FULL RESEARCH.md from scratch — do not merely patch the prior doc. Fix these gaps:
 ${input.feedback}
 
+When a gap says a check greps a string RESEARCH never quoted, verbatim-quote that exact string (with its file path) under \`## Check targets (verified)\` — that is the evidence the judge needs. Preserve every other quoted string and check-target entry from the prior doc while fixing the gaps; do not drop previously verified evidence.
+
 ${intentBlock}
 
 Existing blueprint (excerpt — full file at .slopcontrol/BLUEPRINT.md; prefer Live decisions):
@@ -8107,9 +8112,15 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
         const checkTargetsBlock = formatCheckTargetsPromptBlock(
           verifyCheckTargets(project.rootPath, phaseDocForQuality),
         );
-        const grepTokenMismatchesBlock = formatGrepTokenMismatchesBlock(
-          verifyGrepTokens(project.rootPath, phaseDocForQuality),
-        );
+        // One deterministic token pass feeds both judge blocks: mismatches
+        // (real defects) and verified-on-disk tokens (positive grounding, so
+        // the judge stops failing disk-real tokens RESEARCH never quoted —
+        // the phase-29 grounding loop).
+        const grepTokens = verifyGrepTokens(project.rootPath, phaseDocForQuality);
+        const grepTokenMismatchesBlock =
+          formatGrepTokenMismatchesBlock(grepTokens);
+        const verifiedGrepTokensBlock =
+          formatVerifiedGrepTokensBlock(grepTokens);
         const judgeInput = {
           intentBlock,
           phaseDescription: phase.description,
@@ -8125,6 +8136,7 @@ ${clipSharedDoc("RESEARCH.md", research, `.slopcontrol/phases/${phase.id}/RESEAR
           ),
           checkTargetsBlock,
           grepTokenMismatchesBlock,
+          verifiedGrepTokensBlock,
           priorGaps: judgePriorGaps,
         };
         return callPlanningJudgeWithInfraRetry(

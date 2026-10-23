@@ -7,6 +7,7 @@ import {
   extractCheckTargetPaths,
   formatCheckTargetsPromptBlock,
   formatGrepTokenMismatchesBlock,
+  formatVerifiedGrepTokensBlock,
   verifyCheckTargets,
   verifyGrepTokens,
 } from "./check-targets.js";
@@ -188,5 +189,99 @@ describe("verifyGrepTokens + mismatch block", () => {
     const block = formatGrepTokenMismatchesBlock(tokens);
     assert.match(block, /"version": 3/);
     assert.doesNotMatch(block, /"version": 2/);
+  });
+});
+
+describe("formatVerifiedGrepTokensBlock", () => {
+  it("lists found tokens as grounded and omits mismatches", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-verified-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(
+      join(root, "src", "island.tsx"),
+      'const onMessage = (event: MessageEvent) => {\n' +
+        "  if (!isReadyMessage(event.data)) return;\n" +
+        "};\n" +
+        'window.addEventListener("message", onMessage);\n',
+    );
+
+    // The shapes that actually looped in practice: plain `grep -q` (BRE)
+    // patterns containing parens/dots — literal in BRE, dot self-matches.
+    const doc = "```bash\n" +
+      "grep -q 'isReadyMessage(event.data)' src/island.tsx || exit 1\n" +
+      "grep -q 'window.addEventListener(\"message\", onMessage)' src/island.tsx || exit 1\n" +
+      "grep -qF 'speculativeToken' src/island.tsx || exit 1\n" +
+      "```\n";
+    const tokens = verifyGrepTokens(root, doc);
+
+    const block = formatVerifiedGrepTokensBlock(tokens);
+    assert.match(block, /## Verified grep tokens/);
+    assert.match(block, /isReadyMessage\(event\.data\)/);
+    assert.match(block, /window\.addEventListener/);
+    assert.match(block, /src\/island\.tsx/);
+    assert.match(block, /treat them as grounded/);
+    assert.doesNotMatch(block, /speculativeToken/);
+    // The same tokens still feed the mismatch block independently.
+    assert.match(formatGrepTokenMismatchesBlock(tokens), /speculativeToken/);
+  });
+
+  it("verifies BRE-literal parens in both directions and keeps ERE groups skipped", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-bre-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "timer.ts"), "void signIn(\"jamauth\");\n");
+
+    const doc = "```bash\n" +
+      "grep -q 'signIn(' src/timer.ts || exit 1\n" +
+      "grep -q 'removedCall(' src/timer.ts || exit 1\n" +
+      "grep -qE 'create(App|Widget)' src/timer.ts || exit 1\n" +
+      "```\n";
+    const tokens = verifyGrepTokens(root, doc);
+    // BRE-literal paren, no dot: both directions are sound.
+    assert.equal(
+      tokens.find((t) => t.token === "signIn(")?.found,
+      true,
+    );
+    assert.equal(
+      tokens.find((t) => t.token === "removedCall(")?.found,
+      false,
+    );
+    // ERE groups still need a real engine — never extracted.
+    assert.ok(!tokens.some((t) => t.token.includes("create(App")));
+  });
+
+  it("verifies dot-bearing BRE patterns found-only (absent verdict unsound)", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-dotonly-"));
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "event.data\n");
+
+    const doc = "```bash\n" +
+      "grep -q 'event.data' src/a.ts || exit 1\n" +
+      "grep -q 'missing.token' src/a.ts || exit 1\n" +
+      "```\n";
+    const tokens = verifyGrepTokens(root, doc);
+    assert.equal(tokens.find((t) => t.token === "event.data")?.found, true);
+    // Absent dot-only pattern is skipped, never a false mismatch.
+    assert.ok(!tokens.some((t) => t.token === "missing.token"));
+    assert.equal(formatGrepTokenMismatchesBlock(tokens), "");
+  });
+
+  it("returns an empty block when nothing verified on disk", () => {
+    assert.equal(formatVerifiedGrepTokensBlock([]), "");
+    assert.equal(
+      formatVerifiedGrepTokensBlock([
+        { token: "x", path: "src/a.ts", found: false },
+      ]),
+      "",
+    );
+  });
+
+  it("caps the rendered list", () => {
+    const tokens = Array.from({ length: 50 }, (_, i) => ({
+      token: `token${i}`,
+      path: "src/a.ts",
+      found: true,
+    }));
+    const block = formatVerifiedGrepTokensBlock(tokens);
+    assert.match(block, /token39/);
+    assert.doesNotMatch(block, /token40/);
   });
 });

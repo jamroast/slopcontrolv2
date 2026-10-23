@@ -67,6 +67,10 @@ describe("planning feedback harness: judge gaps reach the next draft", () => {
       for (const gap of GAPS) {
         assert.ok(block.includes(gap), `draft block missing gap: ${gap.slice(0, 60)}`);
       }
+      // Standing guidance: the drafter must re-scope ungrounded tokens rather
+      // than re-assert them (the phase-29 retry loop shape).
+      assert.match(block, /fix the cause, not the wording/);
+      assert.match(block, /never re-assert the flagged token unchanged/);
       assert.equal(issues.length, GAPS.length);
       assert.ok(issues[0]?.includes("wrong reason"));
     } finally {
