@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { allocatePhaseId, descriptionContentLine, ensurePhaseDir, renumberPhaseTitle, stripPhaseNumberPrefix } from "@slopcontrol/artifacts";
+import { isBusyRunStage, recordStageTransition } from "@slopcontrol/types";
 import type {
   AgentMessage,
   AgentSession,
@@ -13,6 +14,7 @@ import type {
   Phase,
   Project,
   Run,
+  RunStage,
 } from "@slopcontrol/types";
 
 /** Single-line title for asks (pasted errors often contain newlines). */
@@ -236,6 +238,47 @@ export class SlopStore {
       this.data.runs[index] = run;
       this.save();
     }
+  }
+
+  /**
+   * Crash-resume reconciliation: mark runs left in a *busy* stage (researching /
+   * drafting / designing / developing) as `interrupted`. A busy stage is only held
+   * while an in-process orchestration loop is running (tracked by the server's
+   * in-memory `activeRuns` set, which is rebuilt empty on boot), so a busy run that
+   * survives a restart is an orphan whose work is gone — but its store row still says
+   * busy, which gates `retry_draft` / `rerun_research` / `retry_development` on
+   * failed/interrupted. Closing these orphans to `interrupted` (a terminal stage)
+   * makes the operator-facing resume actions legal again.
+   *
+   * Returns the reconciled runs (already mutated to `interrupted`) for boot logging.
+   */
+  reconcileInterruptedRuns(
+    at: Date = new Date(),
+  ): Array<{
+    runId: string;
+    projectId: string;
+    phaseId: string;
+    previousStage: RunStage;
+  }> {
+    const reconciled: Array<{
+      runId: string;
+      projectId: string;
+      phaseId: string;
+      previousStage: RunStage;
+    }> = [];
+    for (const run of this.data.runs) {
+      if (run.archived || !isBusyRunStage(run.stage)) continue;
+      const previousStage = run.stage;
+      recordStageTransition(run, "interrupted", at);
+      reconciled.push({
+        runId: run.id,
+        projectId: run.projectId,
+        phaseId: run.phaseId,
+        previousStage,
+      });
+    }
+    if (reconciled.length > 0) this.save();
+    return reconciled;
   }
 
   deleteRun(id: string): void {

@@ -9419,6 +9419,28 @@ app.listen(PORT, () => {
     });
   }
   startLiveTurnWatcher();
+  // Crash-resume reconciliation: any run that died mid-flight in a busy stage
+  // is orphaned (its in-memory loop is gone, `activeRuns` is empty). Close it
+  // to `interrupted` before anything else observes the stale busy stage, so the
+  // operator can retry_draft / rerun_research / retry_development.
+  try {
+    const reconciled = store.reconcileInterruptedRuns();
+    if (reconciled.length > 0) {
+      log.warn("run", "crash-resume reconciliation: busy runs marked interrupted", {
+        count: reconciled.length,
+        runs: reconciled.map((r) => ({
+          runId: r.runId,
+          projectId: r.projectId,
+          phaseId: r.phaseId,
+          previousStage: r.previousStage,
+        })),
+      });
+    }
+  } catch (err) {
+    log.warn("run", "crash-resume reconciliation failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
   startRunCompactionWatcher({
     store,
     isRunActive: (runId) => activeRuns.has(runId),
