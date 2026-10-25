@@ -1593,6 +1593,8 @@ export function writeDiagnosisWithLedger(
       openIssues: prior.openIssues ?? [],
       researchIssues: prior.researchIssues ?? [],
       draftIssues: prior.draftIssues ?? [],
+      latestResearchIssues: prior.latestResearchIssues ?? [],
+      latestDraftIssues: prior.latestDraftIssues ?? [],
       researchReruns: prior.researchReruns,
       researchHash: prior.researchHash,
     };
@@ -1612,6 +1614,12 @@ export function writeDiagnosisWithLedger(
         draftIssues: Array.isArray(diagnosis.draftIssues)
           ? diagnosis.draftIssues
           : ledgerFields.draftIssues,
+        latestResearchIssues: Array.isArray(diagnosis.latestResearchIssues)
+          ? diagnosis.latestResearchIssues
+          : ledgerFields.latestResearchIssues,
+        latestDraftIssues: Array.isArray(diagnosis.latestDraftIssues)
+          ? diagnosis.latestDraftIssues
+          : ledgerFields.latestDraftIssues,
         researchReruns:
           diagnosis.researchReruns ?? ledgerFields.researchReruns,
         researchHash: diagnosis.researchHash ?? ledgerFields.researchHash,
@@ -1628,6 +1636,12 @@ export function writeDiagnosisWithLedger(
           : {}),
         ...(ledgerFields.draftIssues.length
           ? { draftIssues: ledgerFields.draftIssues }
+          : {}),
+        ...(ledgerFields.latestResearchIssues.length
+          ? { latestResearchIssues: ledgerFields.latestResearchIssues }
+          : {}),
+        ...(ledgerFields.latestDraftIssues.length
+          ? { latestDraftIssues: ledgerFields.latestDraftIssues }
           : {}),
         ...(typeof ledgerFields.researchReruns === "number"
           ? { researchReruns: ledgerFields.researchReruns }
@@ -1698,6 +1712,9 @@ export function buildPlanningFailureDiagnosis(opts: {
   openIssues?: string[];
   researchIssues?: string[];
   draftIssues?: string[];
+  /** This verdict's attribution split (not cumulative) — see PersistedDiagnosis. */
+  latestResearchIssues?: string[];
+  latestDraftIssues?: string[];
   researchReruns?: number;
   /** SHA-256 hex of the RESEARCH.md body at diagnosis time. */
   researchHash?: string;
@@ -1710,14 +1727,26 @@ export function buildPlanningFailureDiagnosis(opts: {
     .update(`planning:${opts.stage}:${kind}:${detail.slice(0, 400)}`)
     .digest("hex")
     .slice(0, 16);
+  // When research-attributed gaps are open, a draft-only retry cannot converge
+  // (the judge re-raises the research gap against an unchanged RESEARCH.md) —
+  // the operator guidance must say retry_draft will re-run the research leg,
+  // not "research intact".
+  const hasOpenResearchGaps = (opts.researchIssues ?? []).length > 0;
   const defaultActions =
     opts.stage === "draft"
-      ? [
-          "Call retry_draft only when the run stage is failed or interrupted (research intact) — not in_review.",
-          "At in_review use submit_review(request_changes) to fix PHASE.md validation or content, then approve.",
-          "Retry draft after fixing PHASE.md Success Criteria / Automated Checks to match Change Intent (form contracts need fill+submit proof; click-to-navigate needs click / onClick / href / router.push; chat mounts (composer/bubble) with a form contract also need live AI SDK static tool parts: type: tool-<name> / parseToolResult / extractActiveForm — not only tool-invocation fixtures). Runtime proofs on dockerized apps must be finite: docker compose up -d <svc> + trap 'docker compose down' EXIT, then probe.",
-          "Inspect get_run.dev_output / diagnosis.evidence for the exact gate issues.",
-        ]
+      ? hasOpenResearchGaps
+        ? [
+            "Call retry_draft only when the run stage is failed or interrupted — not in_review. It re-runs the research leg for the open research-attributed gaps first (bounded by the research-rerun budget), then re-drafts.",
+            "At in_review use submit_review(request_changes) to fix PHASE.md validation or content, then approve.",
+            "The open research-attributed gaps cannot be closed by re-drafting — do not hand-edit PHASE.md to work around them; let the research leg answer or explicitly record them as unverifiable.",
+            "Inspect get_run.dev_output / diagnosis.evidence for the exact gate issues.",
+          ]
+        : [
+            "Call retry_draft only when the run stage is failed or interrupted (research intact) — not in_review.",
+            "At in_review use submit_review(request_changes) to fix PHASE.md validation or content, then approve.",
+            "Retry draft after fixing PHASE.md Success Criteria / Automated Checks to match Change Intent (form contracts need fill+submit proof; click-to-navigate needs click / onClick / href / router.push; chat mounts (composer/bubble) with a form contract also need live AI SDK static tool parts: type: tool-<name> / parseToolResult / extractActiveForm — not only tool-invocation fixtures). Runtime proofs on dockerized apps must be finite: docker compose up -d <svc> + trap 'docker compose down' EXIT, then probe.",
+            "Inspect get_run.dev_output / diagnosis.evidence for the exact gate issues.",
+          ]
       : [
           "Retry research with a clearer change description / intent, or open_project with a non-empty intent if BLUEPRINT is missing.",
           "Inspect get_run.dev_output / diagnosis.evidence for the research failure detail.",
@@ -1737,7 +1766,9 @@ export function buildPlanningFailureDiagnosis(opts: {
     evidence: detail.slice(0, 12_000),
     nextActions:
       opts.stage === "draft"
-        ? "Retry draft (research intact)."
+        ? hasOpenResearchGaps
+          ? "Retry draft (re-runs the research leg for the open research gaps first)."
+          : "Retry draft (research intact)."
         : "Retry research or fix bootstrap intent.",
     ...(opts.issues?.length
       ? {
@@ -1755,6 +1786,22 @@ export function buildPlanningFailureDiagnosis(opts: {
       : {}),
     ...(Array.isArray(opts.draftIssues)
       ? { draftIssues: opts.draftIssues.map((g) => g.trim()).filter(Boolean) }
+      : {}),
+    ...(Array.isArray(opts.latestResearchIssues)
+      ? {
+          latestResearchIssues: opts.latestResearchIssues
+            .map((g) => g.trim())
+            .filter(Boolean)
+            .slice(0, 40),
+        }
+      : {}),
+    ...(Array.isArray(opts.latestDraftIssues)
+      ? {
+          latestDraftIssues: opts.latestDraftIssues
+            .map((g) => g.trim())
+            .filter(Boolean)
+            .slice(0, 40),
+        }
       : {}),
     ...(typeof opts.researchReruns === "number"
       ? { researchReruns: opts.researchReruns }

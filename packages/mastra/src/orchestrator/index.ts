@@ -2828,6 +2828,9 @@ export class ChangeOrchestrator {
     openIssues?: string[];
     researchIssues?: string[];
     draftIssues?: string[];
+    /** This verdict's attribution split (not cumulative) — drafter feedback. */
+    latestResearchIssues?: string[];
+    latestDraftIssues?: string[];
   } = { faultLeg: "none", issues: [] };
 
   private resetPlanningGateOutcome(): void {
@@ -6177,6 +6180,7 @@ ${message.trim()}`;
 ${input.feedback}
 
 When a gap says a check greps a string RESEARCH never quoted, verbatim-quote that exact string (with its file path) under \`## Check targets (verified)\` — that is the evidence the judge needs. Preserve every other quoted string and check-target entry from the prior doc while fixing the gaps; do not drop previously verified evidence.
+When a gap asks you to verify something this repository cannot answer (behaviour of a third-party package whose source is not in the repo, an external service contract, operator-only environment), do NOT leave the gap unaddressed and do NOT assert it unverified: record an explicit negative finding in RESEARCH.md — what you checked, why it cannot be verified from this repo, and what the plan must do instead (e.g. prove the surface statically / with unit tests and mark the live end-to-end proof as an operator-run check outside the fenced Automated Checks). A documented negative finding closes the gap lawfully; silence re-opens it every round.
 
 ${intentBlock}
 
@@ -6273,13 +6277,28 @@ Phase id: ${input.phase.id}`;
     description: string;
     onStage?: (stage: RunStage) => void;
     listProjects?: () => Array<{ id: string; name: string; rootPath: string }>;
+    /**
+     * Operator retry resuming from a persisted planning diagnosis (retry_draft
+     * with open research-attributed gaps). The loop starts at the fault-routing
+     * branch — a research leg re-run first — instead of a blind re-draft that
+     * the unchanged RESEARCH.md would doom to an identical rejection.
+     */
+    resume?: {
+      faultLeg: PlanningFaultLeg;
+      issues: string[];
+      openIssues: string[];
+      researchIssues: string[];
+      draftIssues: string[];
+      latestResearchIssues?: string[];
+      latestDraftIssues?: string[];
+    };
   }): Promise<RunStage> {
     const { project, phase, run, onStage, listProjects } = input;
     const planningBudget = resolvePlanningBudget();
     // Wall-clock budget for the whole phase loop, checked at round tops and
     // threaded into the quality critic loops (checked at their boundaries).
     const planningDeadlineMs = Date.now() + planningBudget.wallClockMs;
-    let faultLeg: PlanningFaultLeg = "none";
+    let faultLeg: PlanningFaultLeg = input.resume?.faultLeg ?? "none";
     let priorGateFingerprints: string[] = [];
     let intentReclassified = false;
     let priorJudgeIssues: string[] = [];
@@ -6287,6 +6306,29 @@ Phase id: ${input.phase.id}`;
     let researchReruns =
       readLatestDiagnosisForPhase(project.rootPath, phase.id)?.researchReruns ??
       0;
+    // Resume: seed the gate outcome from the persisted diagnosis so the round-0
+    // routing branch acts on it exactly as if the prior run's last round had
+    // just failed in-loop.
+    let resumeRouting = false;
+    if (
+      input.resume &&
+      (input.resume.faultLeg === "research" || input.resume.faultLeg === "both")
+    ) {
+      this.planningGateOutcome = {
+        faultLeg: input.resume.faultLeg,
+        issues: [...input.resume.issues],
+        openIssues: [...input.resume.openIssues],
+        researchIssues: [...input.resume.researchIssues],
+        draftIssues: [...input.resume.draftIssues],
+        ...(input.resume.latestResearchIssues
+          ? { latestResearchIssues: [...input.resume.latestResearchIssues] }
+          : {}),
+        ...(input.resume.latestDraftIssues
+          ? { latestDraftIssues: [...input.resume.latestDraftIssues] }
+          : {}),
+      };
+      resumeRouting = true;
+    }
 
     for (let round = 0; round < planningBudget.selfHealRounds; round++) {
       if (Date.now() >= planningDeadlineMs) {
@@ -6313,20 +6355,41 @@ Phase id: ${input.phase.id}`;
             ...(budgetOpenIssues.length
               ? { openIssues: budgetOpenIssues }
               : {}),
+            researchIssues: this.planningGateOutcome.researchIssues ?? [],
+            draftIssues: this.planningGateOutcome.draftIssues ?? [],
+            ...(this.planningGateOutcome.latestResearchIssues
+              ? {
+                  latestResearchIssues:
+                    this.planningGateOutcome.latestResearchIssues,
+                }
+              : {}),
+            ...(this.planningGateOutcome.latestDraftIssues
+              ? { latestDraftIssues: this.planningGateOutcome.latestDraftIssues }
+              : {}),
           }),
           phase.id,
         );
         return "failed";
       }
-      if (round > 0) {
+      if (round > 0 || resumeRouting) {
         log(
           project,
           run,
-          `--- Planning self-heal round ${round + 1}/${planningBudget.selfHealRounds} (faultLeg=${faultLeg}) ---`,
+          resumeRouting
+            ? `--- Planning self-heal: resuming from persisted diagnosis (faultLeg=${faultLeg}) ---`
+            : `--- Planning self-heal round ${round + 1}/${planningBudget.selfHealRounds} (faultLeg=${faultLeg}) ---`,
         );
+        resumeRouting = false;
         deleteRunDiagnosis(project.rootPath, run.id, phase.id);
 
-        priorJudgeIssues = [...this.planningGateOutcome.issues];
+        // Drafter feedback: THIS verdict's draft-attributed faults when the
+        // judge returned a split (an empty split means the judge blamed
+        // research alone — the next draft learns from the new RESEARCH, not
+        // from stale faults). Fall back to the raw verdict issues for
+        // unattributed/structural failures.
+        priorJudgeIssues = this.planningGateOutcome.latestDraftIssues
+          ? [...this.planningGateOutcome.latestDraftIssues]
+          : [...this.planningGateOutcome.issues];
         priorQualityGapsSeed = [
           ...(this.planningGateOutcome.openIssues ?? []),
         ];
@@ -6334,9 +6397,16 @@ Phase id: ${input.phase.id}`;
         if (faultLeg === "research" || faultLeg === "both") {
           if (researchReruns >= planningBudget.researchReruns) {
             // Carry the accumulated ledger + this round's gaps so the operator
-            // sees WHAT was unresolved, not just that the budget ran out.
+            // sees WHAT was unresolved, not just that the budget ran out. The
+            // routing branch already deleted the phase diagnosis, so the
+            // attribution split must be passed explicitly — an escalated
+            // diagnosis without researchIssues could not route the next
+            // retry through the research leg.
             const budgetOpenIssues = this.planningGateOutcome.openIssues ?? [];
             const budgetIssues = this.planningGateOutcome.issues ?? [];
+            const budgetResearchIssues =
+              this.planningGateOutcome.researchIssues ?? [];
+            const budgetDraftIssues = this.planningGateOutcome.draftIssues ?? [];
             this.persistDiagnosis(
               project,
               run,
@@ -6356,6 +6426,20 @@ Phase id: ${input.phase.id}`;
                 ...(budgetIssues.length ? { issues: budgetIssues } : {}),
                 ...(budgetOpenIssues.length
                   ? { openIssues: budgetOpenIssues }
+                  : {}),
+                researchIssues: budgetResearchIssues,
+                draftIssues: budgetDraftIssues,
+                ...(this.planningGateOutcome.latestResearchIssues
+                  ? {
+                      latestResearchIssues:
+                        this.planningGateOutcome.latestResearchIssues,
+                    }
+                  : {}),
+                ...(this.planningGateOutcome.latestDraftIssues
+                  ? {
+                      latestDraftIssues:
+                        this.planningGateOutcome.latestDraftIssues,
+                    }
                   : {}),
               }),
               phase.id,
@@ -7459,6 +7543,17 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
         Array.isArray(opts?.resolvedGaps) ||
         Array.isArray(opts?.researchFaults) ||
         Array.isArray(opts?.draftFaults);
+      // This verdict's attribution split — the actionable drafter feedback.
+      // Persisted only when the judge returned an attribution (mirrors
+      // mergePlanningIssueLedger's hasAttribution); an empty list then means
+      // "the judge blamed the other leg entirely this verdict".
+      const hasAttribution =
+        (opts?.researchFaults?.length ?? 0) > 0 ||
+        (opts?.draftFaults?.length ?? 0) > 0;
+      const latestResearchIssues =
+        isJudgeVerdict && hasAttribution ? (opts?.researchFaults ?? []) : undefined;
+      const latestDraftIssues =
+        isJudgeVerdict && hasAttribution ? (opts?.draftFaults ?? []) : undefined;
       const ledger = mergePlanningIssueLedger(
         prevDiagnosis
           ? {
@@ -7487,6 +7582,8 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
           openIssues: ledger.openIssues,
           researchIssues: ledger.researchIssues,
           draftIssues: ledger.draftIssues,
+          ...(latestResearchIssues ? { latestResearchIssues } : {}),
+          ...(latestDraftIssues ? { latestDraftIssues } : {}),
         };
         return "failed";
       }
@@ -7511,6 +7608,8 @@ ${clipDraftResearch(research, `.slopcontrol/phases/${phase.id}/RESEARCH.md`, sli
           openIssues: ledger.openIssues,
           researchIssues: ledger.researchIssues,
           draftIssues: ledger.draftIssues,
+          ...(latestResearchIssues ? { latestResearchIssues } : {}),
+          ...(latestDraftIssues ? { latestDraftIssues } : {}),
           ...(typeof researchReruns === "number" ||
           typeof prevDiagnosis?.researchReruns === "number"
             ? { researchReruns: researchReruns ?? prevDiagnosis?.researchReruns ?? 0 }
@@ -12591,7 +12690,13 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
   }
 
   /**
-   * Re-run draft only when RESEARCH.md is solid (no research agent).
+   * Retry the failing planning leg(s) for a solid-RESEARCH phase. When the
+   * persisted diagnosis carries open research-attributed gaps, a draft-only
+   * retry cannot converge (the judge re-raises the research gap against an
+   * unchanged RESEARCH.md — the phase-30 identical-failure loop), so the
+   * retry resumes the planning self-heal loop: research leg first, bounded by
+   * the research-rerun budget, then draft. With no open research gaps it
+   * re-runs the draft only.
    */
   async retryDraft(input: {
     project: Project;
@@ -12607,16 +12712,57 @@ Append/update \`## Operator handoff\` in APPENDIX, then print DEV_COMPLETE only 
         "retry_draft requires solid RESEARCH.md (RESEARCH_COMPLETE or substantial # heading)",
       );
     }
-    log(project, run, "--- retry_draft: re-running PHASE.md draft (research intact) ---");
-    // Operator-driven retry: reset the research-rerun budget so a wedged
-    // phase (research-budget diagnosis) is unblocked without hand-deleting
-    // the persisted diagnosis.
-    resetPhaseResearchReruns(project.rootPath, phase.id);
-    // Carry the last draft-gate judge gaps into this attempt. Without this the
-    // retry regenerates the same check defects the judge already rejected.
     const priorDiagnosis =
       readDiagnosis(project.rootPath, run.id) ??
       readLatestDiagnosisForPhase(project.rootPath, phase.id);
+    // The research-rerun budget is the cross-run circuit breaker ("surface
+    // the unresolved gaps to the operator rather than looping"). Resetting it
+    // on every operator retry defeats the breaker — a fault-leg-both phase
+    // then loops forever with identical failures. Reset only when the
+    // operator is retrying a phase that already escalated with a
+    // research-budget diagnosis (an informed retry, not a blind one).
+    const wedgedBudget = (priorDiagnosis?.tags ?? []).includes("research-budget");
+    if (wedgedBudget) {
+      resetPhaseResearchReruns(project.rootPath, phase.id);
+    }
+    const openResearchGaps = (priorDiagnosis?.researchIssues ?? [])
+      .map((gap) => gap.trim())
+      .filter(Boolean);
+
+    if (openResearchGaps.length > 0) {
+      log(
+        project,
+        run,
+        `--- retry_draft: ${openResearchGaps.length} research-attributed gap(s) open — resuming the planning loop (research leg first, budget-gated) ---`,
+      );
+      deleteRunDiagnosis(project.rootPath, run.id);
+      return this.runPlanningSelfHealLoop({
+        project,
+        phase,
+        run,
+        description: phase.description,
+        onStage,
+        listProjects: input.listProjects,
+        resume: {
+          faultLeg:
+            (priorDiagnosis?.draftIssues?.length ?? 0) > 0 ? "both" : "research",
+          issues: priorDiagnosis?.issues ?? [],
+          openIssues: priorDiagnosis?.openIssues ?? [],
+          researchIssues: openResearchGaps,
+          draftIssues: priorDiagnosis?.draftIssues ?? [],
+          ...(priorDiagnosis?.latestResearchIssues
+            ? { latestResearchIssues: priorDiagnosis.latestResearchIssues }
+            : {}),
+          ...(priorDiagnosis?.latestDraftIssues
+            ? { latestDraftIssues: priorDiagnosis.latestDraftIssues }
+            : {}),
+        },
+      });
+    }
+
+    log(project, run, "--- retry_draft: re-running PHASE.md draft (research intact) ---");
+    // Carry the last draft-gate judge gaps into this attempt. Without this the
+    // retry regenerates the same check defects the judge already rejected.
     const priorJudgeIssues = priorDraftJudgeIssuesFromDiagnosis(priorDiagnosis);
     if (priorJudgeIssues.length > 0) {
       log(

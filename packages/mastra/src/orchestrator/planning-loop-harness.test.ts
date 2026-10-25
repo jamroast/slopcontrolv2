@@ -1265,6 +1265,288 @@ PHASE_COMPLETE
     }
   });
 
+  /* ------------------------------------------------------------------ */
+  /* Phase-30 identical-failure loop (10 drafting attempts, 9 identical  */
+  /* fault-leg-both rejections). Gap texts genericized from the real     */
+  /* persisted run diagnosis.                                            */
+  /* ------------------------------------------------------------------ */
+
+  const P30_RESEARCH_GAP =
+    "RESEARCH.md does not verify how the embedded iframe authority is configured (env var/prop) or that `AUTH_IDP_ISSUER`/`AUTH_IDP_ID` control the `AuthProvider`/`<SignIn>` iframe src; the fenced e2e depends on this unverified wiring.";
+  const P30_LIVE_E2E_GAP =
+    "Automated Checks still includes a live Playwright run (`npx playwright test tests/e2e/embedded-signin.spec.ts`) as a runtime app proof against a booted app server (Playwright `webServer`), violating the Automated Checks rule 'app-runtime proofs use build/typecheck or a short Node one-shot'.";
+  const P30_WIRING_GAP =
+    "File Changes omits wiring `embedded-sign-in.tsx`/`page.tsx` to point the iframe to the local stub, so the fenced e2e cannot load the stub iframe.";
+  const P30_STALE_E2E_VARIANT =
+    "Automated Checks still includes a live Playwright run (`npx playwright test tests/e2e/embedded-signin.spec.ts || exit 1`) gated on operator-provisioned `E2E_BASE_URL`/`E2E_IDP_EMAIL`/`E2E_IDP_PASSWORD` — the operator-provisioned env is gone but the runtime app proof remains.";
+
+  const seedPhase30Diagnosis = (
+    root: string,
+    over: Record<string, unknown>,
+  ): void => {
+    const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+    writeFileSync(
+      join(phaseDir, "diagnosis.json"),
+      `${JSON.stringify({
+        audience: "coding",
+        operatorActions: [],
+        class: "process",
+        confidence: "high",
+        title: "Draft rejected: phase quality judge",
+        rootCause: "x",
+        evidence: "x",
+        nextActions: "Retry draft.",
+        fingerprint: "planning-draft-failed-p30",
+        codingAgentShouldFix: true,
+        tags: ["planning", "draft", "phase-quality", "fault-leg-both"],
+        issues: [P30_RESEARCH_GAP, P30_LIVE_E2E_GAP, P30_WIRING_GAP],
+        openIssues: [
+          P30_RESEARCH_GAP,
+          P30_STALE_E2E_VARIANT,
+          P30_LIVE_E2E_GAP,
+          P30_WIRING_GAP,
+        ],
+        researchIssues: [P30_RESEARCH_GAP],
+        draftIssues: [P30_STALE_E2E_VARIANT, P30_LIVE_E2E_GAP, P30_WIRING_GAP],
+        latestResearchIssues: [P30_RESEARCH_GAP],
+        latestDraftIssues: [P30_LIVE_E2E_GAP, P30_WIRING_GAP],
+        researchReruns: 1,
+        phaseId: PHASE_ID,
+        runId: "run-0",
+        updatedAt: "2026-10-25T13:45:04.000Z",
+        ...over,
+      })}\n`,
+    );
+  };
+
+  it("retry_draft routes open research-attributed gaps through the research leg first", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-retry-routes-research-"));
+    const events: string[] = [];
+    const researchCalls: string[] = [];
+    const plannerCalls: string[] = [];
+    const restore = installFetchStub({
+      judgeCalls: [],
+      judge: () => ({
+        ok: true,
+        gaps: [],
+        researchFaults: [],
+        draftFaults: [],
+        resolvedGaps: [],
+      }),
+    });
+    try {
+      writeFixture(root);
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      writeFileSync(
+        join(phaseDir, "RESEARCH.md"),
+        `${RESEARCH_MD}\n${"evidence note\n".repeat(4)}`,
+      );
+      seedPhase30Diagnosis(root, {});
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          researchAgent: stubAgent(
+            () => {
+              events.push("research");
+              return RESEARCH_V2_MD;
+            },
+            researchCalls,
+          ),
+          phasePlannerAgent: stubAgent(
+            () => {
+              events.push("draft");
+              return PHASE_MD;
+            },
+            plannerCalls,
+            join(phaseDir, "PHASE.md"),
+          ),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const stage = await orchestrator.retryDraft({ project, phase, run });
+      assert.equal(stage, "in_review");
+      assert.equal(
+        researchCalls.length,
+        1,
+        "the research leg must re-run exactly once for the open research gap",
+      );
+      assert.equal(
+        events[0],
+        "research",
+        "research must re-run BEFORE the next draft — a draft-only retry re-fails identically",
+      );
+      assert.ok(events.includes("draft"), "a draft follows the research leg");
+      const researchPrompt = researchCalls[0] ?? "";
+      assert.ok(
+        researchPrompt.includes(P30_RESEARCH_GAP),
+        "the research re-run is seeded with the open research-attributed gap",
+      );
+      assert.match(
+        researchPrompt,
+        /explicit negative finding/i,
+        "the research re-run offers the lawful exit for repo-unverifiable gaps",
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("research-rerun budget survives operator retries; exhaustion escalates, an informed retry unwedges", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-retry-budget-"));
+    const researchCalls: string[] = [];
+    const failingVerdict = {
+      ok: false,
+      gaps: [P30_RESEARCH_GAP, P30_LIVE_E2E_GAP],
+      researchFaults: [P30_RESEARCH_GAP],
+      draftFaults: [P30_LIVE_E2E_GAP],
+      resolvedGaps: [] as string[],
+    };
+    let judgeImpl = (): JudgeVerdict & { resolvedGaps?: string[] } =>
+      failingVerdict;
+    const restore = installFetchStub({
+      judgeCalls: [],
+      judge: () => judgeImpl(),
+    });
+    try {
+      writeFixture(root);
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      writeFileSync(
+        join(phaseDir, "RESEARCH.md"),
+        `${RESEARCH_MD}\n${"evidence note\n".repeat(4)}`,
+      );
+      // At the budget ceiling: the next retry must escalate, not loop.
+      seedPhase30Diagnosis(root, { researchReruns: 2 });
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          researchAgent: stubAgent(() => RESEARCH_V2_MD, researchCalls),
+          phasePlannerAgent: stubAgent(
+            () => PHASE_MD,
+            [],
+            join(phaseDir, "PHASE.md"),
+          ),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const first = await orchestrator.retryDraft({ project, phase, run });
+      assert.equal(first, "failed");
+      assert.equal(
+        researchCalls.length,
+        0,
+        "budget exhausted — no blind research re-run (the phase-30 loop burned 9)",
+      );
+      const escalated = readLatestDiagnosisForPhase(root, PHASE_ID);
+      assert.ok(escalated, "escalation diagnosis must persist");
+      assert.equal(escalated!.title, "Research budget exhausted");
+      assert.ok(
+        (escalated!.tags ?? []).includes("research-budget"),
+        "escalation is tagged so a later retry is treated as informed",
+      );
+      assert.deepEqual(
+        escalated!.researchIssues,
+        [P30_RESEARCH_GAP],
+        "the escalation keeps the unresolved research gap actionable",
+      );
+      assert.equal(escalated!.researchReruns, 2, "the budget is NOT reset by the retry");
+
+      // The operator reads the escalation and retries anyway (informed): the
+      // wedge is unwound and the research leg gets exactly one more chance.
+      judgeImpl = () => ({
+        ok: true,
+        gaps: [],
+        researchFaults: [],
+        draftFaults: [],
+        resolvedGaps: [],
+      });
+      const second = await orchestrator.retryDraft({ project, phase, run });
+      assert.equal(second, "in_review");
+      assert.equal(
+        researchCalls.length,
+        1,
+        "an informed retry resets the wedge and re-runs research once",
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retry_draft feeds the drafter the latest verdict's draft faults, not the cumulative ledger", async () => {
+    const root = mkdtempSync(join(tmpdir(), "planning-retry-latest-split-"));
+    const plannerCalls: string[] = [];
+    const restore = installFetchStub({
+      judgeCalls: [],
+      judge: () => ({
+        ok: true,
+        gaps: [],
+        researchFaults: [],
+        draftFaults: [],
+        resolvedGaps: [],
+      }),
+    });
+    try {
+      writeFixture(root);
+      const phaseDir = join(root, ".slopcontrol", "phases", PHASE_ID);
+      writeFileSync(
+        join(phaseDir, "RESEARCH.md"),
+        `${RESEARCH_MD}\n${"evidence note\n".repeat(4)}`,
+      );
+      // No open research gaps → draft-only retry. The ledger carries a stale
+      // reworded variant (operator-env era) that the CURRENT verdict dropped.
+      seedPhase30Diagnosis(root, {
+        researchIssues: [],
+        latestResearchIssues: [],
+        issues: [P30_LIVE_E2E_GAP, P30_WIRING_GAP],
+        tags: ["planning", "draft", "phase-quality", "fault-leg-draft"],
+      });
+      const project = makeProject(root);
+      const phase = makePhase();
+      const run = makeRun();
+      const orchestrator = new ChangeOrchestrator({
+        dataDir: root,
+        registry: fakeRegistry(root),
+        agents: {
+          phasePlannerAgent: stubAgent(
+            () => PHASE_MD,
+            plannerCalls,
+            join(phaseDir, "PHASE.md"),
+          ),
+        } as unknown as OrchestratorAgents,
+      });
+
+      const stage = await orchestrator.retryDraft({ project, phase, run });
+      assert.equal(stage, "in_review");
+      const draftPrompt = plannerCalls[0] ?? "";
+      assert.ok(
+        draftPrompt.includes(P30_LIVE_E2E_GAP),
+        "the current verdict's draft fault reaches the drafter",
+      );
+      assert.ok(
+        draftPrompt.includes(P30_WIRING_GAP),
+        "the current verdict's wiring fault reaches the drafter",
+      );
+      assert.ok(
+        !draftPrompt.includes("operator-provisioned"),
+        "stale ledger variants must NOT reach the drafter (18-entry contradictory pile-up)",
+      );
+    } finally {
+      restore();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("retry_draft after budget exhaustion resets researchReruns but keeps the ledger", async () => {
     const root = mkdtempSync(join(tmpdir(), "planning-budget-reset-"));
     const restore = installFetchStub({

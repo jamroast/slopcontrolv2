@@ -438,6 +438,7 @@ export function priorDraftJudgeIssuesFromDiagnosis(
     tags?: string[];
     issues?: string[];
     draftIssues?: string[];
+    latestDraftIssues?: string[];
   } | null,
 ): string[] {
   if (!diagnosis) return [];
@@ -446,10 +447,20 @@ export function priorDraftJudgeIssuesFromDiagnosis(
     tags.includes("draft") || /^draft rejected/i.test(diagnosis.title ?? "");
   if (!isDraftGate) return [];
   // Structured gaps are authoritative (a gap may itself contain "; ").
-  // Prefer the draft-attributed ledger when present, so a research re-run no
-  // longer re-feeds research-only gaps to the drafter.
+  // Prefer THIS verdict's draft-attributed split: the cumulative draftIssues
+  // ledger accretes the judge's rewordings of the same underlying fault round
+  // over round (phase-30: 18 entries, several mutually contradictory), so
+  // feeding it forward paralyses the drafter — it cannot tell which faults
+  // the CURRENT verdict actually demands fixed. The latest split is the
+  // actionable verdict; the ledger remains as judge convergence memory.
+  // Fall back to the draft-attributed ledger (and then raw issues) for
+  // diagnoses written before the latest-split existed.
   const structured = (
-    diagnosis.draftIssues?.length ? diagnosis.draftIssues : (diagnosis.issues ?? [])
+    diagnosis.latestDraftIssues?.length
+      ? diagnosis.latestDraftIssues
+      : diagnosis.draftIssues?.length
+        ? diagnosis.draftIssues
+        : (diagnosis.issues ?? [])
   )
     .map((issue) => issue.trim())
     .filter(Boolean);

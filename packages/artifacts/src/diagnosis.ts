@@ -36,6 +36,15 @@ export type PersistedDiagnosis = {
   researchIssues?: string[];
   /** Cumulative draft-attributed gaps (survive research regen). */
   draftIssues?: string[];
+  /**
+   * THIS verdict's research-attributed gaps (not cumulative). The cumulative
+   * ledger accretes judge rewordings of the same underlying fault across
+   * rounds; the latest split is what the next leg must act on. Persisted only
+   * when the judge returned an attribution split.
+   */
+  latestResearchIssues?: string[];
+  /** THIS verdict's draft-attributed gaps (not cumulative) — see above. */
+  latestDraftIssues?: string[];
   /** Research re-runs that did not unblock the phase (budget for A3). */
   researchReruns?: number;
   /**

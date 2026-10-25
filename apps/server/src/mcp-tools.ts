@@ -1318,7 +1318,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "retry_draft",
       description:
-        "Re-run PHASE.md draft only when RESEARCH.md is solid (no research agent). Allowed when run stage is failed or interrupted. Prefer this over rerun_research when research succeeded but draft failed.",
+        "Retry the failing planning leg(s) when RESEARCH.md is solid. If the persisted diagnosis has open research-attributed gaps (faultLeg research/both), the research leg re-runs first (budget-gated, seeded with those gaps), then the draft; otherwise it re-runs the PHASE.md draft only. Allowed when run stage is failed or interrupted. Prefer this over rerun_research when research succeeded but draft failed.",
       inputSchema: {
         type: "object",
         properties: {

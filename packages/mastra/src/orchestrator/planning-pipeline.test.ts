@@ -381,6 +381,40 @@ describe("priorDraftJudgeIssuesFromDiagnosis", () => {
   it("returns [] without a diagnosis", () => {
     assert.deepEqual(priorDraftJudgeIssuesFromDiagnosis(null), []);
   });
+
+  it("prefers the latest verdict's draft split over the cumulative ledger", () => {
+    // Phase-30 loop shape: the cumulative draftIssues ledger accreted 18
+    // reworded variants (several contradictory) across 9 retries — feeding it
+    // to the drafter paralysed it. The latest split is the actionable verdict.
+    const staleLedgerVariant =
+      "Automated Checks still includes a live Playwright run (`npx playwright test tests/e2e/embedded-signin.spec.ts || exit 1`) gated on operator-provisioned `E2E_BASE_URL`/`E2E_IDP_EMAIL`/`E2E_IDP_PASSWORD`. This is a runtime app proof against a deployed base URL, violating the Automated Checks rule 'app-runtime proofs use build/typecheck or a short Node one-shot' and requiring env not available in the fenced verify environment.";
+    const currentVerdictGap =
+      "Automated Checks still includes a live Playwright run (`npx playwright test tests/e2e/embedded-signin.spec.ts`) as a runtime app proof against a booted app server (Playwright `webServer`), violating the Automated Checks rule 'app-runtime proofs use build/typecheck or a short Node one-shot'.";
+    const wiringGap =
+      "File Changes omits wiring `embedded-sign-in.tsx`/`page.tsx` to point the iframe to the local stub, so the fenced e2e cannot load the stub iframe.";
+    const issues = priorDraftJudgeIssuesFromDiagnosis({
+      title: "Draft rejected: phase quality judge",
+      tags: ["planning", "draft", "phase-quality", "fault-leg-both"],
+      issues: [currentVerdictGap, wiringGap],
+      draftIssues: [staleLedgerVariant, currentVerdictGap, wiringGap],
+      latestDraftIssues: [currentVerdictGap, wiringGap],
+    });
+    assert.deepEqual(issues, [currentVerdictGap, wiringGap]);
+    assert.ok(
+      !issues.includes(staleLedgerVariant),
+      "stale ledger variants must not reach the drafter",
+    );
+  });
+
+  it("falls back to the cumulative draft ledger for pre-split diagnoses", () => {
+    const issues = priorDraftJudgeIssuesFromDiagnosis({
+      title: "Draft rejected: phase quality judge",
+      tags: ["planning", "draft", "phase-quality"],
+      issues: ["raw issue"],
+      draftIssues: ["ledger gap one", "ledger gap two"],
+    });
+    assert.deepEqual(issues, ["ledger gap one", "ledger gap two"]);
+  });
 });
 
 describe("quality-judge convergence memory", () => {

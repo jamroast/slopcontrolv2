@@ -66,6 +66,63 @@ describe("planning failure diagnosis", () => {
     assert.equal(isPlannerRefusalOutput(""), false);
   });
 
+  it("persists the latest verdict split and fault-aware actions when research gaps are open", () => {
+    // Verbatim gaps from the phase-30 identical-failure loop: the judge blamed
+    // both legs, but operatorActions kept saying "research intact" — openclaw
+    // followed that guidance into 9 draft-only retries that could never close
+    // the research gap.
+    const researchGap =
+      "RESEARCH.md does not verify how the embedded iframe authority is configured (env var/prop) or that `AUTH_IDP_ISSUER`/`AUTH_IDP_ID` control the `AuthProvider`/`<SignIn>` iframe src; the fenced e2e depends on this unverified wiring.";
+    const draftGap =
+      "Automated Checks still includes a live Playwright run (`npx playwright test tests/e2e/embedded-signin.spec.ts`) as a runtime app proof against a booted app server (Playwright `webServer`), violating the Automated Checks rule 'app-runtime proofs use build/typecheck or a short Node one-shot'.";
+    const d = buildPlanningFailureDiagnosis({
+      stage: "draft",
+      title: "Draft rejected: phase quality judge",
+      detail: `${researchGap}; ${draftGap}`,
+      phaseId: "30-iframe",
+      runId: "run-1",
+      kind: "draft-failed",
+      faultLeg: "both",
+      issues: [researchGap, draftGap],
+      openIssues: [researchGap, draftGap],
+      researchIssues: [researchGap],
+      draftIssues: [draftGap],
+      latestResearchIssues: [researchGap],
+      latestDraftIssues: [draftGap],
+    });
+    assert.deepEqual(d.latestResearchIssues, [researchGap]);
+    assert.deepEqual(d.latestDraftIssues, [draftGap]);
+    assert.ok(
+      d.operatorActions.some((a) => /re-runs the research leg/i.test(a)),
+      "open research gaps must steer the operator to the research-leg retry",
+    );
+    assert.ok(
+      !d.operatorActions.some((a) => /research intact/i.test(a)),
+      "misleading 'research intact' wording must not appear while research gaps are open",
+    );
+    assert.match(d.nextActions, /research leg/i);
+  });
+
+  it("keeps draft-only guidance when no research gaps are open", () => {
+    const d = buildPlanningFailureDiagnosis({
+      stage: "draft",
+      title: "Draft rejected: phase quality judge",
+      detail: "Check 7 uses bare npm test without a path",
+      phaseId: "01-x",
+      runId: "run-1",
+      kind: "draft-failed",
+      faultLeg: "draft",
+      issues: ["Check 7 uses bare npm test without a path"],
+      draftIssues: ["Check 7 uses bare npm test without a path"],
+      latestDraftIssues: ["Check 7 uses bare npm test without a path"],
+    });
+    assert.ok(
+      d.operatorActions.some((a) => /research intact/i.test(a)),
+      "draft-only guidance stays when the fault is draft-attributed",
+    );
+    assert.match(d.nextActions, /research intact/i);
+  });
+
   it("writeDiagnosis persists run + phase diagnosis for planning failures", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-plan-diag-"));
     roots.push(root);

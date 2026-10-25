@@ -73,6 +73,49 @@ describe("writeDiagnosisWithLedger", () => {
     assert.equal(persisted.researchHash, sha256Hex("research v1"));
   });
 
+  it("carries the latest verdict split forward like the ledger", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-ledger-latest-"));
+    writeDiagnosisWithLedger(
+      root,
+      "run-1",
+      planningDiag({
+        phaseId: "p1",
+        openIssues: ["iframe wiring unverified", "live playwright run"],
+        researchIssues: ["iframe wiring unverified"],
+        draftIssues: ["live playwright run"],
+        latestResearchIssues: ["iframe wiring unverified"],
+        latestDraftIssues: ["live playwright run"],
+      }),
+      "p1",
+    );
+    // A planning write that knows nothing of the latest split (e.g. a
+    // structural shell-validator failure) must not wipe the last verdict's
+    // actionable feedback.
+    writeDiagnosisWithLedger(
+      root,
+      "run-2",
+      planningDiag({ phaseId: "p1" }),
+      "p1",
+    );
+    const carried = readLatestDiagnosisForPhase(root, "p1")!;
+    assert.deepEqual(carried.latestResearchIssues, ["iframe wiring unverified"]);
+    assert.deepEqual(carried.latestDraftIssues, ["live playwright run"]);
+    // A verdict with an attribution split writes it authoritatively — an
+    // empty latestDraftIssues means the judge blamed research alone.
+    writeDiagnosisWithLedger(
+      root,
+      "run-3",
+      planningDiag({
+        phaseId: "p1",
+        latestResearchIssues: ["iframe wiring unverified"],
+        latestDraftIssues: [],
+      }),
+      "p1",
+    );
+    const overwritten = readLatestDiagnosisForPhase(root, "p1")!;
+    assert.deepEqual(overwritten.latestDraftIssues, []);
+  });
+
   it("does not resurrect a fully-resolved ledger (empty arrays are authoritative)", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-ledger-resolved-"));
     writeDiagnosisWithLedger(
