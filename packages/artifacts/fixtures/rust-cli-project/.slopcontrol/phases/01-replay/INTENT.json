@@ -1,0 +1,9 @@
+{
+  "title": "Replay counter",
+  "goal": "Add a replay module that counts how many packets a stream re-sends, exposed as replay_count(&[Packet]).",
+  "uiMount": "n/a",
+  "refinementOf": [],
+  "supersedes": [],
+  "mustNot": ["do not pull in an external crate for counting"],
+  "rawDescription": "Add a replay module that counts re-sent packets. Prove it with a targeted cargo test, not the whole suite."
+}

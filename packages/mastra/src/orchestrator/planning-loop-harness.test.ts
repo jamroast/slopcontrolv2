@@ -1104,7 +1104,7 @@ PHASE_COMPLETE
     }
   });
 
-  it("re-seeds research gaps on same content (mtime churn must not false-drop)", async () => {
+  it("does not seed research gaps into the draft loop (draft gaps still re-seed)", async () => {
     const root = mkdtempSync(join(tmpdir(), "planning-ledger-reseed-"));
     const judgeCalls: Captured[] = [];
     const gapDraft = "Check 7 uses bare npm test without a path";
@@ -1148,13 +1148,15 @@ PHASE_COMPLETE
       const second = await orchestrator.draftPhase({ project, phase, run });
       assert.equal(second, "failed");
 
-      // Same content → research gap is RE-SEEDED (not false-dropped).
+      // Same content → the draft gap is re-seeded; the research-attributed gap
+      // is never seeded into the draft loop (the drafter cannot fix it, and
+      // re-asserting it every leg was the non-convergence loop).
       const reJudgement = judgeCalls[judgeCalls.length - 1]?.user ?? "";
-      assert.ok(
-        reJudgement.includes(gapResearch),
-        "same-content research gap must be re-seeded",
-      );
       assert.ok(reJudgement.includes(gapDraft), "draft gap must be re-seeded");
+      assert.ok(
+        !reJudgement.includes(gapResearch),
+        "research-attributed gap must not seed the draft loop",
+      );
     } finally {
       restore();
       globalThis.fetch = originalFetch;

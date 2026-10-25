@@ -16,6 +16,8 @@ import {
   nextSelfHealDraftIssues,
   planningGateIssueFingerprint,
   priorDraftJudgeIssuesFromDiagnosis,
+  runBoundedCriticLoop,
+  seedPriorQualityGaps,
   shouldContinuePlanningSelfHeal,
 } from "./planning-pipeline.js";
 import { planningGateFeedbackFromLatestDiagnosis } from "./index.js";
@@ -179,6 +181,63 @@ describe("planning feedback harness: judge gaps reach the next draft", () => {
       }),
       false,
     );
+  });
+});
+
+describe("bounded critic loop converges after one named-rule rejection", () => {
+  it("rejects once naming the violated check rule, then accepts the corrected draft", async () => {
+    // Regression for the retry loop: the seed must carry only draft-attributed
+    // gaps, so a research gap cannot be re-asserted every leg and push
+    // faultLeg back to "both".
+    const splitDiagnosis = {
+      title: "Draft rejected: phase quality judge",
+      tags: ["planning", "draft", "phase-quality"],
+      updatedAt: "2026-10-20T10:00:00.000Z",
+      researchHash: "hash-v1",
+      openIssues: ["draft: bare npm test", "research: stale file claim"],
+      researchIssues: ["research: stale file claim"],
+      draftIssues: ["draft: bare npm test"],
+    };
+    const initialPriorGaps = seedPriorQualityGaps({
+      diagnosis: splitDiagnosis,
+      researchHash: "hash-v1",
+    });
+    assert.deepEqual(initialPriorGaps, ["draft: bare npm test"]);
+    assert.ok(
+      !initialPriorGaps.includes("research: stale file claim"),
+      "research-attributed gaps must never seed the draft loop",
+    );
+
+    type V = { ok: boolean; gaps: string[] };
+    const namedGap =
+      "Automated Checks violate `No live-server runtime proofs`: the check boots a Playwright `webServer` instead of a finite proof.";
+    const verdicts: V[] = [
+      { ok: false, gaps: [namedGap] },
+      { ok: true, gaps: [] },
+    ];
+    let judged = 0;
+    let repairs = 0;
+    const outcome = await runBoundedCriticLoop<V>({
+      initialPriorGaps,
+      maxLegRetries: 2,
+      judge: async () => {
+        const result = verdicts[Math.min(judged, verdicts.length - 1)]!;
+        judged++;
+        return { result, judgeInfraFailed: false };
+      },
+      repair: async () => {
+        repairs++;
+      },
+    });
+
+    assert.equal(outcome.kind, "passed");
+    assert.equal(judged, 2, "one rejection then acceptance");
+    assert.equal(repairs, 1, "exactly one repair leg ran");
+    const rejections = verdicts.filter((v) => !v.ok);
+    assert.equal(rejections.length, 1);
+    assert.match(rejections[0]!.gaps[0]!, /No live-server runtime proofs/);
+    assert.ok(outcome.priorGaps.includes(namedGap));
+    assert.ok(!outcome.priorGaps.includes("research: stale file claim"));
   });
 });
 
