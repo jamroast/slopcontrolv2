@@ -9,7 +9,7 @@
     "dev:web": "pnpm --filter @slopcontrol/web dev",
     "dev:opencode": "OPENCODE_ENABLE_EXA=${OPENCODE_ENABLE_EXA:-1} pnpm --filter @slopcontrol/coding-tools exec opencode serve --port ${OPENCODE_PORT:-4096} --hostname 127.0.0.1",
     "slopcontrol": "pnpm --filter @slopcontrol/cli exec -- tsx src/index.ts",
-    "test": "pnpm -r run test",
+    "test": "pnpm -r --parallel run test",
     "typecheck": "pnpm -r run typecheck",
     "mcp:stdio": "pnpm --filter @slopcontrol/server mcp:stdio"
   },

@@ -6,10 +6,38 @@ import { describe, it } from "node:test";
 import { writeProjectConfig } from "@slopcontrol/artifacts";
 import { ProjectConfigSchema, type Project } from "@slopcontrol/types";
 import {
+  DEFAULT_CHECK_TIMEOUT_MS,
+  resolveCheckTimeoutMs,
   runCommandWithTimeout,
   runSuccessChecks,
   type CommandRunner,
 } from "./index.js";
+
+describe("resolveCheckTimeoutMs", () => {
+  it("gives a real workspace testCommand room to finish (no 60s kill)", () => {
+    // The repo's own `npm test` runs ~65s: a 60s ceiling killed a passing
+    // suite with exit 124, which the failure classifier misread as a missing
+    // `timeout` host utility. Keep the default comfortably above that.
+    assert.ok(
+      DEFAULT_CHECK_TIMEOUT_MS >= 180_000,
+      `default check budget too small: ${DEFAULT_CHECK_TIMEOUT_MS}ms`,
+    );
+    const saved = process.env.SLOPCONTROL_CHECK_MS;
+    try {
+      delete process.env.SLOPCONTROL_CHECK_MS;
+      assert.equal(resolveCheckTimeoutMs(), DEFAULT_CHECK_TIMEOUT_MS);
+      process.env.SLOPCONTROL_CHECK_MS = "12345";
+      assert.equal(resolveCheckTimeoutMs(), 12_345);
+      process.env.SLOPCONTROL_CHECK_MS = "0";
+      assert.equal(resolveCheckTimeoutMs(), DEFAULT_CHECK_TIMEOUT_MS);
+      process.env.SLOPCONTROL_CHECK_MS = "not-a-number";
+      assert.equal(resolveCheckTimeoutMs(), DEFAULT_CHECK_TIMEOUT_MS);
+    } finally {
+      if (saved === undefined) delete process.env.SLOPCONTROL_CHECK_MS;
+      else process.env.SLOPCONTROL_CHECK_MS = saved;
+    }
+  });
+});
 
 /** Read body of a temp check script invoked as `bash '/path/check.sh'`. */
 function checkScriptBody(command: string): string | null {

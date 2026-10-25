@@ -1502,10 +1502,20 @@ export type CommandRunner = (
   env?: NodeJS.ProcessEnv,
 ) => Promise<{ output: string; exitCode: number }>;
 
-/** Default wall-clock budget for verify/check commands (ms). */
+/**
+ * Default wall-clock budget for verify/check commands (ms).
+ *
+ * A real workspace `testCommand` (this repo's own full suite) runs ~65s on a
+ * warm machine, so the old 60s ceiling killed a passing suite with exit 124
+ * (CHECK_TIMEOUT) and got misread as a hung check. 300s keeps checks bounded
+ * while leaving headroom for cold caches/slow CI. Override per host with
+ * `SLOPCONTROL_CHECK_MS`.
+ */
+export const DEFAULT_CHECK_TIMEOUT_MS = 300_000;
+
 export function resolveCheckTimeoutMs(): number {
-  const n = Number(process.env.SLOPCONTROL_CHECK_MS ?? 60_000);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 60_000;
+  const n = Number(process.env.SLOPCONTROL_CHECK_MS ?? DEFAULT_CHECK_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_CHECK_TIMEOUT_MS;
 }
 
 export function resolveAskTurnTimeoutMs(): number {
