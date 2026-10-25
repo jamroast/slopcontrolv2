@@ -702,6 +702,21 @@ awk '/x/,/y/' file.ts | grep -q 'a.*b.*c' || exit 1`);
 
   it("verify mode skips cloud smoke by default (llmSmokeMode=off)", async () => {
     const root = mkdtempSync(join(tmpdir(), "slop-smoke-off-"));
+    // Host shells / pipeline env set SLOPCONTROL_LLM_PROFILE + OLLAMA_* overrides
+    // deliberately (operator escape hatch). Isolate them so the config-declared
+    // fixture profile is what this case actually exercises.
+    const overlayKeys = [
+      "SLOPCONTROL_LLM_PROFILE",
+      "OLLAMA_BASE_URL",
+      "OLLAMA_API_KEY",
+      "AI_CHAT_MODEL",
+      "AI_CODE_MODEL",
+    ] as const;
+    const savedEnv = new Map<string, string | undefined>();
+    for (const key of overlayKeys) {
+      savedEnv.set(key, process.env[key]);
+      delete process.env[key];
+    }
     try {
       mkdirSync(join(root, ".slopcontrol"), { recursive: true });
       writeFileSync(
@@ -727,6 +742,10 @@ awk '/x/,/y/' file.ts | grep -q 'a.*b.*c' || exit 1`);
       assert.match(result.output, /llmSmokeMode=off/);
       assert.match(result.output, /LLM test profile: fixture/);
     } finally {
+      for (const [key, value] of savedEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       rmSync(root, { recursive: true, force: true });
     }
   });
