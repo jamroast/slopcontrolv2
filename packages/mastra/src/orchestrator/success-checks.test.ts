@@ -6,10 +6,38 @@ import { describe, it } from "node:test";
 import { writeProjectConfig } from "@slopcontrol/artifacts";
 import { ProjectConfigSchema, type Project } from "@slopcontrol/types";
 import {
+  DEFAULT_CHECK_TIMEOUT_MS,
+  resolveCheckTimeoutMs,
   runCommandWithTimeout,
   runSuccessChecks,
   type CommandRunner,
 } from "./index.js";
+
+describe("resolveCheckTimeoutMs", () => {
+  it("gives a real workspace testCommand room to finish (no 60s kill)", () => {
+    // The repo's own `npm test` runs ~65s: a 60s ceiling killed a passing
+    // suite with exit 124, which the failure classifier misread as a missing
+    // `timeout` host utility. Keep the default comfortably above that.
+    assert.ok(
+      DEFAULT_CHECK_TIMEOUT_MS >= 180_000,
+      `default check budget too small: ${DEFAULT_CHECK_TIMEOUT_MS}ms`,
+    );
+    const saved = process.env.SLOPCONTROL_CHECK_MS;
+    try {
+      delete process.env.SLOPCONTROL_CHECK_MS;
+      assert.equal(resolveCheckTimeoutMs(), DEFAULT_CHECK_TIMEOUT_MS);
+      process.env.SLOPCONTROL_CHECK_MS = "12345";
+      assert.equal(resolveCheckTimeoutMs(), 12_345);
+      process.env.SLOPCONTROL_CHECK_MS = "0";
+      assert.equal(resolveCheckTimeoutMs(), DEFAULT_CHECK_TIMEOUT_MS);
+      process.env.SLOPCONTROL_CHECK_MS = "not-a-number";
+      assert.equal(resolveCheckTimeoutMs(), DEFAULT_CHECK_TIMEOUT_MS);
+    } finally {
+      if (saved === undefined) delete process.env.SLOPCONTROL_CHECK_MS;
+      else process.env.SLOPCONTROL_CHECK_MS = saved;
+    }
+  });
+});
 
 /** Read body of a temp check script invoked as `bash '/path/check.sh'`. */
 function checkScriptBody(command: string): string | null {
@@ -674,6 +702,21 @@ awk '/x/,/y/' file.ts | grep -q 'a.*b.*c' || exit 1`);
 
   it("verify mode skips cloud smoke by default (llmSmokeMode=off)", async () => {
     const root = mkdtempSync(join(tmpdir(), "slop-smoke-off-"));
+    // Host shells / pipeline env set SLOPCONTROL_LLM_PROFILE + OLLAMA_* overrides
+    // deliberately (operator escape hatch). Isolate them so the config-declared
+    // fixture profile is what this case actually exercises.
+    const overlayKeys = [
+      "SLOPCONTROL_LLM_PROFILE",
+      "OLLAMA_BASE_URL",
+      "OLLAMA_API_KEY",
+      "AI_CHAT_MODEL",
+      "AI_CODE_MODEL",
+    ] as const;
+    const savedEnv = new Map<string, string | undefined>();
+    for (const key of overlayKeys) {
+      savedEnv.set(key, process.env[key]);
+      delete process.env[key];
+    }
     try {
       mkdirSync(join(root, ".slopcontrol"), { recursive: true });
       writeFileSync(
@@ -699,6 +742,10 @@ awk '/x/,/y/' file.ts | grep -q 'a.*b.*c' || exit 1`);
       assert.match(result.output, /llmSmokeMode=off/);
       assert.match(result.output, /LLM test profile: fixture/);
     } finally {
+      for (const [key, value] of savedEnv) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       rmSync(root, { recursive: true, force: true });
     }
   });

@@ -544,6 +544,26 @@ export function seedPriorQualityGaps(opts: {
   if (!diagnosis) return [];
   const gaps = priorQualityJudgeGapsFromDiagnosis(diagnosis);
   if (gaps.length === 0) return [];
+  // With the split ledger we know each gap's attribution. A research-attributed
+  // gap can only be closed by a re-research leg, so it must NEVER seed the draft
+  // loop — the drafter cannot fix it, the phase-quality judge re-asserts it every
+  // leg and faultLeg escalates to "both" forever (re-running research that
+  // changed nothing). Drop research gaps unconditionally for split diagnoses,
+  // whether or not RESEARCH was regenerated since the verdict. Genuine research
+  // faults still surface through the research-reruns budget (the persisted
+  // openIssues/researchIssues ledger is untouched here).
+  const hasSplit =
+    Array.isArray(diagnosis.researchIssues) ||
+    Array.isArray(diagnosis.draftIssues);
+  if (hasSplit) {
+    const research = new Set(
+      (diagnosis.researchIssues ?? []).map((g) => normalizeGap(g)),
+    );
+    return gaps.filter((g) => !research.has(normalizeGap(g)));
+  }
+  // Legacy diagnosis without the split: we cannot distinguish attribution.
+  // Preserve the old fail-safe — drop everything only when RESEARCH was
+  // regenerated after the verdict; otherwise keep the gaps.
   let researchRegen = false;
   if (opts.researchHash && diagnosis.researchHash) {
     // Content hash: rewrite-same-content does NOT invalidate (no false drop),
@@ -557,18 +577,7 @@ export function seedPriorQualityGaps(opts: {
       typeof opts.researchMtimeMs === "number" &&
       opts.researchMtimeMs > diagnosedAt;
   }
-  if (!researchRegen) return gaps;
-  // Research regenerated. With the ledger split we keep draft-attributed gaps
-  // and drop only research ones; without it (legacy diagnosis) we cannot
-  // distinguish, so we preserve the old fail-safe: drop everything.
-  const hasSplit =
-    Array.isArray(diagnosis.researchIssues) ||
-    Array.isArray(diagnosis.draftIssues);
-  if (!hasSplit) return [];
-  const research = new Set(
-    (diagnosis.researchIssues ?? []).map((g) => normalizeGap(g)),
-  );
-  return gaps.filter((g) => !research.has(normalizeGap(g)));
+  return researchRegen ? [] : gaps;
 }
 
 /**

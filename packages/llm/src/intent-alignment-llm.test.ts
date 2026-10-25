@@ -13,8 +13,19 @@ describe("intent-alignment-llm", () => {
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /NO interaction block/);
   });
 
-  it("system prompt judges semantics, not keywords, and fails closed", () => {
-    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /SEMANTICS/);
+  it("system prompt sanctions a non-live-server fill/submit proof for node", () => {
+    // The intent judge used to name playwright as canonical proof evidence,
+    // which let it recommend a `webServer` harness the Automated Checks rules
+    // forbid — the two gates then fought forever.
+    assert.doesNotMatch(INTENT_ALIGNMENT_SYSTEM_PROMPT, /grep\/playwright\/vitest commands/);
+    assert.doesNotMatch(INTENT_ALIGNMENT_SYSTEM_PROMPT, /grep\/playwright/);
+    assert.match(
+      INTENT_ALIGNMENT_SYSTEM_PROMPT,
+      /build\/typecheck or a short Node one-shot/,
+    );
+  });
+
+  it("system prompt judges semantics, not keywords, and fails closed", () => {    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /SEMANTICS/);
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /fail closed/i);
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /aligned=true/);
     assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /aligned=false/);

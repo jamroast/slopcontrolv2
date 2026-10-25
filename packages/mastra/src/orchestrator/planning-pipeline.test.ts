@@ -504,13 +504,15 @@ describe("quality-judge convergence memory", () => {
       }),
       ["draft: bare npm test"],
     );
-    // Research older than the verdict → keep everything.
+    // Research older than the verdict → both gaps still in the persisted
+    // ledger, but split-ledger seeding always excludes research-attributed
+    // gaps from the draft loop (the drafter cannot fix them).
     assert.deepEqual(
       seedPriorQualityGaps({
         diagnosis: ledgerDiagnosis,
         researchMtimeMs: diagnosedAt - 60_000,
       }),
-      ["draft: bare npm test", "research: stale file claim"],
+      ["draft: bare npm test"],
     );
     // Legacy diagnosis without the split → old fail-safe (drop all on regen).
     assert.deepEqual(
@@ -520,6 +522,35 @@ describe("quality-judge convergence memory", () => {
       }),
       [],
     );
+  });
+
+  it("never seeds research-attributed gaps into the draft loop (split ledger)", () => {
+    // Regression: a research gap seeded into the draft loop is unfixable by
+    // the drafter, so the phase-quality judge re-asserted it every leg and
+    // faultLeg re-escalated to "both" forever (an endless research re-run).
+    const splitDiagnosis = {
+      ...qualityDiagnosis,
+      researchHash: "hash-v1",
+      openIssues: ["draft: bare npm test", "research: stale file claim"],
+      researchIssues: ["research: stale file claim"],
+      draftIssues: ["draft: bare npm test"],
+    };
+    assert.deepEqual(
+      seedPriorQualityGaps({
+        diagnosis: splitDiagnosis,
+        researchHash: "hash-v1",
+      }),
+      ["draft: bare npm test"],
+    );
+    // The persisted ledger is untouched — genuine research faults still
+    // surface via the research-reruns budget, not the draft seed.
+    assert.deepEqual(splitDiagnosis.researchIssues, [
+      "research: stale file claim",
+    ]);
+    assert.deepEqual(splitDiagnosis.openIssues, [
+      "draft: bare npm test",
+      "research: stale file claim",
+    ]);
   });
 
   it("dropping resolved gaps is whitespace/case tolerant but otherwise verbatim", () => {
@@ -540,14 +571,16 @@ describe("quality-judge convergence memory", () => {
       draftIssues: ["draft: bare npm test"],
       openIssues: ["draft: bare npm test", "research: stale file claim"],
     };
-    // Same content (hash matches) → research gap kept even when mtime is newer.
+    // Same content (hash matches) → research gap still dropped from the draft
+    // loop; a split-ledger research gap never seeds the draft leg, so the
+    // judge cannot re-assert it and faultLeg cannot re-escalate to "both".
     assert.deepEqual(
       seedPriorQualityGaps({
         diagnosis: diagnosedWithHash,
         researchHash: "hash-v1",
         researchMtimeMs: Date.parse(qualityDiagnosis.updatedAt) + 999_999,
       }),
-      ["draft: bare npm test", "research: stale file claim"],
+      ["draft: bare npm test"],
     );
     // Changed content (hash differs) → research gap dropped, draft gap kept.
     assert.deepEqual(

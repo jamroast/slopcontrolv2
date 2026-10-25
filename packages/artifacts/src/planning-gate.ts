@@ -81,6 +81,10 @@ export function renderAutomatedChecksRules(opts?: {
   );
   if (isNode) {
     lines.push(
+      "- No live-server runtime proofs: no Playwright `webServer`, no booted-server run, and no dev-server start inside a check. A check must never boot or leave a live server; app-runtime proofs are finite (build/typecheck or a short Node one-shot).",
+      "- Fill/submit proof for node projects is sanctioned as build/typecheck or a short Node one-shot (no booted/live server) — never a Playwright `webServer` harness or a running app instance.",
+    );
+    lines.push(
       "- No bare `npm test` / `pnpm test` without a targeted path — prove the phase's change with `npx vitest run <file> || exit 1` or `npm test -- <path>`, not the whole suite.",
     );
   } else if (suiteCmd || targeted) {
@@ -90,6 +94,8 @@ export function renderAutomatedChecksRules(opts?: {
   }
   lines.push(
     "- Exact JSON token: grep the exact quoted token that exists on disk (e.g. `grep -q '\"version\": 2'`), never an unquoted approximation RESEARCH only loosely names.",
+    "- JSON keys must be quoted: when a check asserts a JSON key, the pattern MUST quote the key (`grep -q '\"scripts\"'`), never a bare `scripts:` approximation — an unquoted key matches prose and false-passes.",
+    "- No operator-env-gated checks: never gate a check on operator-only env (free-tier/cloud/paid API keys, production secrets, operator credentials). Checks must pass on a clean checkout using the project's own test env.",
   );
   lines.push(
     "- Ground every grep token: prefer RESEARCH's `## Check targets (verified)` quotes; any other exact string MUST be verified verbatim against the target file with read_file before you write the check. If a judge gap flags a token as ungrounded, re-scope the check to a quoted/verified token — never re-assert the flagged token unchanged.",

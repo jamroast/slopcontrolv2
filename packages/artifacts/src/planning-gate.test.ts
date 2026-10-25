@@ -167,6 +167,20 @@ describe("renderAutomatedChecksRules toolchain rendering", () => {
     assert.doesNotMatch(rules, /cargo/);
   });
 
+  it("names the four hard-won check invariants individually", () => {
+    // The phase-quality judge can only reject a violation with a SPECIFIC
+    // named rule, so each invariant must appear as its own named line.
+    const rules = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("node-pnpm"),
+      hasTestServices: true,
+    });
+    assert.match(rules, /No live-server runtime proofs/);
+    assert.match(rules, /Playwright `webServer`/);
+    assert.match(rules, /JSON keys must be quoted/);
+    assert.match(rules, /No operator-env-gated checks/);
+    assert.match(rules, /build\/typecheck or a short Node one-shot/);
+  });
+
   it("hasTestServices=false switches to self-contained probe guidance", () => {
     const rules = renderAutomatedChecksRules({
       toolchain: defaultToolchainSpec("node-pnpm"),
