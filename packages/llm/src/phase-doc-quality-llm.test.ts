@@ -27,6 +27,24 @@ describe("phase-doc-quality-llm", () => {
     );
   });
 
+  it("system prompt names the executing fill+submit envelope it shares with the intent judge", () => {
+    // Phase-30: the quality judge forbade live-server runs while the intent
+    // judge demanded an executing fill+submit proof and recommended the
+    // banned `webServer` harness — the draft ping-ponged until budget. Both
+    // prompts must name the same lawful overlap (component/handler-level
+    // execution, no live server) and accept the operator-run e2e handoff.
+    assert.match(PHASE_DOC_QUALITY_SYSTEM_PROMPT, /EXECUTING check/);
+    assert.match(PHASE_DOC_QUALITY_SYSTEM_PROMPT, /jsdom/);
+    assert.match(
+      PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+      /Static greps alone are NOT an executing fill\+submit proof/,
+    );
+    assert.match(
+      PHASE_DOC_QUALITY_SYSTEM_PROMPT,
+      /operator-run e2e handoff PLUS the executing component\/handler-level proof satisfies the gate/,
+    );
+  });
+
   it("system prompt routes check-mechanics critiques to draftFaults", () => {
     // Phase-197 loop: check-design critiques were attributed to
     // researchFaults, forcing full re-research legs that cannot fix how a

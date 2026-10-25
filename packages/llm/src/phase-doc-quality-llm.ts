@@ -59,7 +59,7 @@ Change Intent precedence:
 
 Interaction contract rules:
 - When Change Intent has NO interaction block, do NOT require Playwright fill/submit or form engagement proofs — grep/route/href proofs suffice for page mounts.
-- When interaction primaryAction is submit form, Success Criteria + Automated Checks must prove fill+submit at the locked mount.
+- When interaction primaryAction is submit form, Success Criteria + Automated Checks must prove fill+submit at the locked mount with an EXECUTING check. Static greps alone are NOT an executing fill+submit proof. Accept as that proof a short Node one-shot that executes the submit path without a live server (the locked form component mounted in jsdom, or its submit handler invoked with filled values — asserting bridge/handler calls and navigation/session against mocks). A live browser run (Playwright \`webServer\`, booted app, deployed base URL) remains forbidden in fenced checks: a documented operator-run e2e handoff PLUS the executing component/handler-level proof satisfies the gate — do not fail the doc for keeping the live run out of the fenced checks.
 
 Fault routing (researchFaults vs draftFaults) — getting this right matters because researchFaults forces a costly full re-research leg:
 - researchFaults is ONLY for evidence missing from RESEARCH.md itself: a repo path the checks rely on that RESEARCH never verified, a doc string a check greps for that neither RESEARCH quoted nor the deterministic verification blocks ("Automated Check targets" / "Verified grep tokens" / "Research-mandated new-content tokens") confirmed, a wrong/contradicted fact, a missing required section — things only fresh investigation in the repo can supply.

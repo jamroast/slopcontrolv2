@@ -19,7 +19,21 @@ describe("intent-alignment-llm", () => {
     // forbid — the two gates then fought forever.
     assert.doesNotMatch(INTENT_ALIGNMENT_SYSTEM_PROMPT, /grep\/playwright\/vitest commands/);
     assert.doesNotMatch(INTENT_ALIGNMENT_SYSTEM_PROMPT, /grep\/playwright/);
-    assert.match(
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /short Node one-shot/);
+  });
+
+  it("system prompt names the executing fill+submit envelope (no judge-vs-judge gap)", () => {
+    // Phase-30 terminal contradiction: the judge rejected static-only proofs
+    // as not executing AND recommended the banned `webServer` harness as the
+    // fix. The prompt must name the lawful overlap — component/handler-level
+    // execution without a live server — and must not present build/typecheck
+    // alone as a fill+submit proof.
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /EXECUTING check/);
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /jsdom/);
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /invokes its submit handler with filled values/);
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /do NOT fill and submit/);
+    assert.match(INTENT_ALIGNMENT_SYSTEM_PROMPT, /operator-run artifact outside the fenced checks/);
+    assert.doesNotMatch(
       INTENT_ALIGNMENT_SYSTEM_PROMPT,
       /build\/typecheck or a short Node one-shot/,
     );

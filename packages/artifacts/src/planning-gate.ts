@@ -82,7 +82,8 @@ export function renderAutomatedChecksRules(opts?: {
   if (isNode) {
     lines.push(
       "- No live-server runtime proofs: no Playwright `webServer`, no booted-server run, and no dev-server start inside a check. A check must never boot or leave a live server; app-runtime proofs are finite (build/typecheck or a short Node one-shot).",
-      "- Fill/submit proof for node projects is sanctioned as build/typecheck or a short Node one-shot (no booted/live server) — never a Playwright `webServer` harness or a running app instance.",
+      "- Fill/submit proof for node projects is an EXECUTING short Node one-shot (no booted/live server) — never a Playwright `webServer` harness or a running app instance; build/typecheck proves compilation, not fill+submit.",
+      "- Executing fill+submit without a live server: when Change Intent demands a fill+submit proof, write a short Node one-shot that mounts the locked form component in jsdom (or invokes its submit handler with filled values) and asserts the submit path executes — bridge/handler called with the filled values, navigation/session asserted against mocks. Static greps alone are NOT an executing fill+submit proof. A live browser e2e belongs in an operator-run artifact outside the fenced Automated Checks (documented as a handoff, never executed by a check).",
     );
     lines.push(
       "- No bare `npm test` / `pnpm test` without a targeted path — prove the phase's change with `npx vitest run <file> || exit 1` or `npm test -- <path>`, not the whole suite.",

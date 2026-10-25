@@ -181,6 +181,23 @@ describe("renderAutomatedChecksRules toolchain rendering", () => {
     assert.match(rules, /build\/typecheck or a short Node one-shot/);
   });
 
+  it("names the executing fill+submit envelope (component/handler-level, no live server)", () => {
+    // The phase-30 terminal contradiction: the intent judge demands an
+    // EXECUTING fill+submit proof, the quality judge forbids live servers,
+    // and neither prompt named the lawful overlap — so the drafter
+    // ping-ponged between banned Playwright and rejected static-only drafts.
+    const rules = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("node-pnpm"),
+      hasTestServices: true,
+    });
+    assert.match(rules, /Executing fill\+submit without a live server/);
+    assert.match(rules, /jsdom/);
+    assert.match(rules, /invokes its submit handler with filled values/);
+    assert.match(rules, /Static greps alone are NOT an executing fill\+submit proof/);
+    assert.match(rules, /operator-run artifact outside the fenced Automated Checks/);
+    assert.match(rules, /build\/typecheck proves compilation, not fill\+submit/);
+  });
+
   it("hasTestServices=false switches to self-contained probe guidance", () => {
     const rules = renderAutomatedChecksRules({
       toolchain: defaultToolchainSpec("node-pnpm"),
