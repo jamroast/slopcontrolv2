@@ -187,6 +187,7 @@ import {
   listCodingTools,
 } from "@slopcontrol/coding-tools";
 import {
+  classifyBlockingOpenQuestionsViaLlm,
   classifyDependencyIntentViaLlm,
   loadEndpointsConfig,
   loadProvidersConfig,
@@ -3203,7 +3204,7 @@ app.post("/projects/:id/plan-loops/:loopId/continue", async (req, res) => {
   if (!message) {
     res.status(400).json({
       error: "message is required",
-      hint: "Pass operator revision feedback, or append user messages to the plan loop CHAT.json first.",
+      hint: "No operator feedback to revise from — pass the operator's decision/feedback in message (or append user messages to the plan loop CHAT.json first). The plan is never regenerated from the already-incorporated brief.",
     });
     return;
   }
@@ -3562,6 +3563,49 @@ app.post("/projects/:id/plan-loops/:loopId/promote", async (req, res) => {
     ? req.body.dependsOn.map(String).filter(Boolean)
     : undefined;
   const pack = readPlanLoopPack(project.rootPath, meta.id);
+  // Promote gate: a plan whose open questions need an OPERATOR DECISION
+  // (not repo research) must not become a phase — research would guess an
+  // answer and the contradiction surfaces at review hours later. Fail
+  // closed on classifier/registry failure; `force: true` is the explicit
+  // operator override.
+  if (pack && pack.openQuestions.length > 0 && req.body?.force !== true) {
+    const gateHint =
+      "Answer each blocking question with plan_loop_continue (pass the decision in message), re-accept, then promote — or pass force: true to promote anyway.";
+    try {
+      const { registry } = getRuntime(project.rootPath);
+      if (!registry) {
+        throw new Error("no LLM registry available for the promote gate");
+      }
+      const { endpoint, modelId } =
+        registry.resolveEndpointForRole("classification");
+      const gate = await classifyBlockingOpenQuestionsViaLlm({
+        endpoint,
+        modelId,
+        goal: pack.goal,
+        openQuestions: pack.openQuestions,
+      });
+      if (gate.blocking.length > 0) {
+        res.status(409).json({
+          error:
+            "Plan has open questions that need an operator decision before development can start",
+          blockingOpenQuestions: gate.blocking,
+          loop: meta,
+          loopId: meta.id,
+          hint: gateHint,
+        });
+        return;
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      res.status(409).json({
+        error: `Promote gate could not verify the plan's open questions: ${errMsg}`,
+        loop: meta,
+        loopId: meta.id,
+        hint: gateHint,
+      });
+      return;
+    }
+  }
   const description = pack
     ? phaseDescriptionFromPlanPack(pack)
     : meta.brief;

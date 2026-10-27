@@ -213,6 +213,9 @@ export function loopChatUserFeedbackSinceVersion(
 
 /**
  * Build plan_loop_continue feedback from loop CHAT.json when message omitted.
+ * Returns "" when there is no operator message AND no fresh loop-chat
+ * feedback since the current version — the caller must fail the continue
+ * (400) rather than regenerate the plan from the already-incorporated brief.
  */
 export function synthesizePlanContinueFeedback(opts: {
   projectRoot: string;
@@ -238,18 +241,12 @@ export function synthesizePlanContinueFeedback(opts: {
   }
   const composed = parts.join("\n\n").trim();
   if (composed) return composed.slice(0, 8_000);
-  const allUsers = messages
-    .filter((m) => m.role === "user")
-    .map((m) => m.content.trim())
-    .filter(Boolean);
-  const tail = allUsers.slice(-3);
-  if (tail.length > 0) {
-    return `Revise the plan from operator requirements:\n${tail.join("\n\n---\n\n")}`.slice(
-      0,
-      8_000,
-    );
-  }
-  return operator;
+  // No operator message and no fresh loop-chat feedback since the current
+  // version: there is NOTHING new to revise from. Falling back to the
+  // already-incorporated brief silently regenerates the same plan while the
+  // caller believes their (never-delivered) decision was folded in — fail
+  // closed instead so the caller must supply the feedback explicitly.
+  return "";
 }
 
 export function formatLoopWorkingStub(

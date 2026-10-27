@@ -198,6 +198,42 @@ describe("renderAutomatedChecksRules toolchain rendering", () => {
     assert.match(rules, /build\/typecheck proves compilation, not fill\+submit/);
   });
 
+  it("names the count-sentinel ban and the flagged-construct re-assert rule", () => {
+    // A drafter re-asserted a `grep -c` count-exact sentinel through four
+    // judge rejections — the gap was fed back each round, but no NAMED rule
+    // banned the construct, so the drafter kept cosmetic-fixing it.
+    for (const kind of ["node-pnpm", "rust-cargo", "go", "python"] as const) {
+      const rules = renderAutomatedChecksRules({
+        toolchain: defaultToolchainSpec(kind),
+        hasTestServices: true,
+      });
+      assert.match(rules, /No count-based sentinels/, `${kind} render`);
+      assert.match(rules, /grep -c/, `${kind} render`);
+      assert.match(
+        rules,
+        /flagged check CONSTRUCT/,
+        `${kind} render`,
+      );
+      assert.match(
+        rules,
+        /replace it with the sanctioned form/,
+        `${kind} render`,
+      );
+    }
+  });
+
+  it("states the repo-root-relative path contract (and cd-cell semantics)", () => {
+    // The env-scoped-gates follow-up loop: checks wrote `cd <pkg> && grep …
+    // src/x.ts` and root-relative target resolution marked real files
+    // MISSING. The drafter's contract must state how paths resolve.
+    const rules = renderAutomatedChecksRules({
+      toolchain: defaultToolchainSpec("node-pnpm"),
+      hasTestServices: true,
+    });
+    assert.match(rules, /repo-root-relative paths/);
+    assert.match(rules, /cd <dir>.*whole fenced cell/);
+  });
+
   it("hasTestServices=false switches to self-contained probe guidance", () => {
     const rules = renderAutomatedChecksRules({
       toolchain: defaultToolchainSpec("node-pnpm"),

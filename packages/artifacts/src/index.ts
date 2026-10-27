@@ -116,6 +116,7 @@ export * from "./marketing-loop.js";
 export * from "./marketing-design-basis.js";
 export * from "./plan-pack.js";
 export * from "./plan-continue-intent.js";
+export * from "./plan-promote-gate.js";
 export * from "./loop-chat.js";
 export { loadDotEnvFile } from "./dotenv.js";
 

@@ -194,6 +194,93 @@ describe("verifyGrepTokens + mismatch block", () => {
   });
 });
 
+describe("cd-aware check-target resolution", () => {
+  it("resolves paths after `cd <dir> &&` against that dir, not the repo root", () => {
+    // The phase-208 loop shape: greps written relative to a package dir —
+    // root-relative resolution marked real files MISSING and regen-looped.
+    const root = mkdtempSync(join(tmpdir(), "slop-check-cd-"));
+    mkdirSync(join(root, "packages/web/src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages/web/src/bridge.ts"),
+      "export function isTrustedBridgeMessage() {}\n",
+    );
+
+    const doc = "```bash\n" +
+      "cd packages/web && grep -q 'isTrustedBridgeMessage' src/bridge.ts || exit 1\n" +
+      "cd packages/web && npx vitest run src/__tests__/bridge.test.tsx || exit 1\n" +
+      "```\n";
+
+    const paths = extractCheckTargetPaths(doc);
+    assert.ok(paths.includes("packages/web/src/bridge.ts"));
+    assert.ok(paths.includes("packages/web/src/__tests__/bridge.test.tsx"));
+    assert.ok(!paths.includes("src/bridge.ts"));
+
+    const targets = verifyCheckTargets(root, doc);
+    const byPath = new Map(targets.map((t) => [t.path, t.exists]));
+    assert.equal(byPath.get("packages/web/src/bridge.ts"), true);
+    assert.equal(byPath.get("packages/web/src/__tests__/bridge.test.tsx"), false);
+  });
+
+  it("honors a leading `cd` line for every following command in the cell", () => {
+    const doc = "```bash\n" +
+      "cd packages/web\n" +
+      "grep -q 'token' src/bridge.ts || exit 1\n" +
+      "npx vitest run src/__tests__/bridge.test.tsx || exit 1\n" +
+      "```\n";
+    const paths = extractCheckTargetPaths(doc);
+    assert.deepEqual(paths.sort(), [
+      "packages/web/src/__tests__/bridge.test.tsx",
+      "packages/web/src/bridge.ts",
+    ]);
+  });
+
+  it("does not double-prefix a path that already starts with the cd dir", () => {
+    const doc = "```bash\n" +
+      "cd packages/web && npx vitest run packages/web/src/a.test.ts || exit 1\n" +
+      "```\n";
+    assert.deepEqual(extractCheckTargetPaths(doc), [
+      "packages/web/src/a.test.ts",
+    ]);
+  });
+
+  it("resets to repo-root resolution after an opaque cd target", () => {
+    const doc = "```bash\n" +
+      'cd "$PKG_DIR" && grep -q token src/relative.ts || exit 1\n' +
+      "grep -q token src/rooted.ts || exit 1\n" +
+      "```\n";
+    const paths = extractCheckTargetPaths(doc);
+    assert.ok(paths.includes("src/relative.ts"));
+    assert.ok(paths.includes("src/rooted.ts"));
+  });
+
+  it("verifies grep tokens against the cd-resolved path", () => {
+    const root = mkdtempSync(join(tmpdir(), "slop-grep-cd-"));
+    mkdirSync(join(root, "packages/web/src"), { recursive: true });
+    writeFileSync(
+      join(root, "packages/web/src/bridge.ts"),
+      "export function isTrustedBridgeMessage() {}\n",
+    );
+
+    const doc = "```bash\n" +
+      "cd packages/web && grep -q 'isTrustedBridgeMessage' src/bridge.ts || exit 1\n" +
+      "cd packages/web && grep -q 'speculativeToken' src/bridge.ts || exit 1\n" +
+      "```\n";
+    const tokens = verifyGrepTokens(root, doc);
+    const present = tokens.find((t) => t.token === "isTrustedBridgeMessage");
+    const absent = tokens.find((t) => t.token === "speculativeToken");
+    assert.ok(present, "token after cd must be extracted");
+    assert.equal(present!.path, "packages/web/src/bridge.ts");
+    assert.equal(present!.found, true);
+    assert.ok(absent);
+    assert.equal(absent!.found, false);
+
+    const mismatches = formatGrepTokenMismatchesBlock(tokens);
+    assert.match(mismatches, /speculativeToken/);
+    assert.match(mismatches, /packages\/web\/src\/bridge\.ts/);
+    assert.doesNotMatch(mismatches, /isTrustedBridgeMessage/);
+  });
+});
+
 describe("formatVerifiedGrepTokensBlock", () => {
   it("lists found tokens as grounded and omits mismatches", () => {
     const root = mkdtempSync(join(tmpdir(), "slop-grep-verified-"));

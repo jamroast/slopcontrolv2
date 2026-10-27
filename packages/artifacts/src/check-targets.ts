@@ -30,6 +30,59 @@ const PATH_TOKEN_RE =
 const SKIP_PREFIXES = ["node_modules/", ".git/", "http", "https"];
 const MAX_TARGETS = 40;
 
+/**
+ * `cd <dir>` tracking inside a fenced cell. Checks are written as scripts —
+ * `cd packages/web && grep -q 'token' src/app.ts`, or a leading `cd` line
+ * followed by commands — and every relative path after the `cd` resolves
+ * against that dir, not the repo root. Resolving against the root marked
+ * those real files MISSING and sent draft/judge into a regen loop (the
+ * env-scoped-gates follow-up failure). Only plain relative dirs (no `..`,
+ * no absolute/variable targets) are tracked; any other `cd` form resets
+ * resolution to the repo root. Structural shell parsing, not a judgment.
+ */
+type CwdSegment = { from: number; dir: string };
+
+const CD_STATEMENT_RE =
+  /(?:^|\n|;|&&|\|\|)\s*cd\s+(?:'([^']+)'|"([^"]+)"|([^\s;&|]+))/g;
+
+function cwdSegments(body: string): CwdSegment[] {
+  const segs: CwdSegment[] = [{ from: 0, dir: "" }];
+  for (const m of body.matchAll(CD_STATEMENT_RE)) {
+    const dir = (m[1] ?? m[2] ?? m[3] ?? "").replace(/\/+$/, "");
+    const from = m.index + m[0].length;
+    if (
+      !dir ||
+      dir.startsWith("/") ||
+      dir.startsWith("~") ||
+      dir.includes("..") ||
+      dir.includes("$")
+    ) {
+      // Opaque target — fall back to repo-root resolution from here on.
+      segs.push({ from, dir: "" });
+    } else {
+      segs.push({ from, dir });
+    }
+  }
+  return segs;
+}
+
+function cwdAt(segs: CwdSegment[], pos: number): string {
+  let dir = "";
+  for (const s of segs) {
+    if (s.from <= pos) dir = s.dir;
+    else break;
+  }
+  return dir;
+}
+
+/** Resolve a fence-relative token against the tracked `cd` dir. */
+function resolveAgainstCwd(token: string, cwd: string): string {
+  if (!cwd) return token;
+  if (token.startsWith("/") || token.startsWith("~")) return token;
+  if (token === cwd || token.startsWith(`${cwd}/`)) return token;
+  return `${cwd}/${token}`;
+}
+
 /** Unique repo-relative paths referenced inside bash/sh/shell fences. */
 export function extractCheckTargetPaths(
   phaseDoc: string,
@@ -38,6 +91,7 @@ export function extractCheckTargetPaths(
   const seen = new Set<string>();
   for (const fence of phaseDoc.matchAll(SHELL_FENCE_RE)) {
     const body = fence[1] ?? "";
+    const segs = cwdSegments(body);
     for (const m of body.matchAll(PATH_TOKEN_RE)) {
       let token = (m[1] ?? "").trim();
       if (!token) continue;
@@ -47,6 +101,7 @@ export function extractCheckTargetPaths(
       if (SKIP_PREFIXES.some((p) => token.startsWith(p))) continue;
       if (token.includes("://")) continue;
       if (!token.includes("/")) continue;
+      token = resolveAgainstCwd(token, cwdAt(segs, m.index));
       seen.add(token);
       if (seen.size >= max) return [...seen].sort();
     }
@@ -191,6 +246,7 @@ export function verifyGrepTokens(
     path.length > 0 && fileChanges.includes(path);
   for (const fence of phaseDoc.matchAll(SHELL_FENCE_RE)) {
     const body = fence[1] ?? "";
+    const segs = cwdSegments(body);
     // grep -q / grep -rq with a quoted pattern and a target path. Single- and
     // double-quoted patterns are matched separately so a single-quoted pattern
     // may contain inner double quotes (e.g. grep -qF '"version": 2' file).
@@ -201,7 +257,10 @@ export function verifyGrepTokens(
     while ((match = re.exec(body)) !== null) {
       const flags = match[1] ?? "";
       const pattern = match[2] ?? match[3] ?? "";
-      const path = (match[4] ?? "").replace(/^\.\//, "");
+      const path = resolveAgainstCwd(
+        (match[4] ?? "").replace(/^\.\//, ""),
+        cwdAt(segs, match.index),
+      );
       if (!pattern || !path) continue;
       // Negated assertions (`! grep -q 'forbidden' file`) assert ABSENCE —
       // token existence is not their grounding question. Skip them entirely:

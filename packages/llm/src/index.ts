@@ -464,6 +464,7 @@ export * from "./chat-confirm-llm.js";
 export * from "./ask-resume-llm.js";
 export * from "./ask-investigate-engine-llm.js";
 export * from "./plan-continue-intent-llm.js";
+export * from "./plan-promote-gate-llm.js";
 export * from "./plan-start-intent-llm.js";
 export * from "./plan-turn-intent-llm.js";
 export * from "./design-turn-intent-llm.js";

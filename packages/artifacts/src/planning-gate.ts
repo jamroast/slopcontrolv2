@@ -77,6 +77,7 @@ export function renderAutomatedChecksRules(opts?: {
   }
   lines.push(
     "- Static proofs use `grep -q` per token joined by `&&` — never same-line `.*` chains.",
+    "- No count-based sentinels: never assert with `grep -c` plus a numeric comparison (`[ \"$(grep -c 'token' f)\" -ge N ]`) — a call that moves between branches keeps the count and false-passes. Assert presence with one `grep -q` per token joined by `&&`.",
     "- Fixed-token grep: when the token is a fixed substring, use plain `grep -q 'fixed-substring'` (not `grep -qE` with a regex group/alternation like `export (function|const) resolveRoute`). Reserved regex (alternation) is only for genuinely-variant tokens.",
   );
   if (isNode) {
@@ -99,7 +100,10 @@ export function renderAutomatedChecksRules(opts?: {
     "- No operator-env-gated checks: never gate a check on operator-only env (free-tier/cloud/paid API keys, production secrets, operator credentials). Checks must pass on a clean checkout using the project's own test env.",
   );
   lines.push(
-    "- Ground every grep token: prefer RESEARCH's `## Check targets (verified)` quotes; any other exact string MUST be verified verbatim against the target file with read_file before you write the check. If a judge gap flags a token as ungrounded, re-scope the check to a quoted/verified token — never re-assert the flagged token unchanged.",
+    "- Ground every grep token: prefer RESEARCH's `## Check targets (verified)` quotes; any other exact string MUST be verified verbatim against the target file with read_file before you write the check. If a judge gap flags a token as ungrounded, re-scope the check to a quoted/verified token — never re-assert the flagged token unchanged. The same holds for a flagged check CONSTRUCT (a count sentinel, a same-line `.*` chain, an env-gated check): when a judge gap rejects the construct, replace it with the sanctioned form — do not re-assert the same construct with cosmetic edits.",
+  );
+  lines.push(
+    "- Use repo-root-relative paths in every check — SlopControl verifies check targets against the repo root. A leading `cd <dir>` applies to the whole fenced cell (paths after it resolve against that dir); never repeat the dir prefix inside the cell after a `cd`.",
   );
   lines.push(
     `- Never pipe ${runnerName} to \`grep -q\` to match "Tests N passed" — use \`${isNode ? "npx vitest run …" : (targeted ?? "<targeted test command>")} || exit 1\` and trust the runner exit code.`,

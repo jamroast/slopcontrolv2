@@ -2220,7 +2220,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "plan_loop_continue",
       description:
-        "Revise a plan-loop PLAN.md from operator feedback (new version). Reopens accepted/promoted loops. message optional when plan loop CHAT.json has user feedback since the current version — server auto-composes. Pass baseVersion to fork from a specific earlier version (default: tip) — essential when the tip is truncated/regressed: pass the last intact version. Use this (not plan_loop_get) when the operator wants the plan updated.",
+        "Revise a plan-loop PLAN.md from operator feedback (new version). Reopens accepted/promoted loops. message optional when plan loop CHAT.json has user feedback since the current version — server auto-composes; the call 400s when there is no new feedback to revise from (it never regenerates from the stale brief). Use this (not plan_loop_get) when the operator wants the plan updated. Pass baseVersion to fork from a specific earlier version (default: tip) — essential when the tip is truncated/regressed: pass the last intact version.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2431,7 +2431,7 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
     {
       name: "plan_loop_promote",
       description:
-        "Bind accepted PLAN.md + PLAN_PACK to a new phase and start research (default). Rejects usedScaffold / failure-scaffold plans — call plan_loop_retry first. Research receives the plan contract as authoritative operator intent. Product code still only changes in start_development.",
+        "Bind accepted PLAN.md + PLAN_PACK to a new phase and start research (default). Rejects usedScaffold / failure-scaffold plans — call plan_loop_retry first. Also rejects (409) plans whose open questions need an OPERATOR DECISION — answer each with plan_loop_continue (decision in message), re-accept, then promote; pass force: true only when the operator explicitly overrides. Research receives the plan contract as authoritative operator intent. Product code still only changes in start_development.",
       inputSchema: {
         type: "object",
         properties: {
@@ -2444,6 +2444,11 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
           dependsOn: {
             type: "array",
             items: { type: "string" },
+          },
+          force: {
+            type: "boolean",
+            description:
+              "Override the operator-decision open-questions gate (default false).",
           },
         },
         required: ["projectId", "loopId"],
