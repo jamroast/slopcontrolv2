@@ -1,4 +1,4 @@
-# Phase 01-fix-the-slopcontrol-planning-pipeline-so
+# Phase 02-add-an-empty-args-list-projects-entry-to
 
-See `.slopcontrol/phases/01-fix-the-slopcontrol-planning-pipeline-so/PHASE.md` for the canonical phase plan.
+See `.slopcontrol/phases/02-add-an-empty-args-list-projects-entry-to/PHASE.md` for the canonical phase plan.
 Do not treat this root PHASE.md as the phase document.

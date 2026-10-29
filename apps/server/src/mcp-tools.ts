@@ -959,6 +959,15 @@ export const SLOPCONTROL_MCP_TOOLS: Tool[] = [
       },
     },
     {
+      name: "list_projects",
+      description:
+        "List all registered projects (no arguments). Returns { projects: [...] } with id, name, rootPath, buildProcessConfigured, codingToolId and askInvestigateTool. Use it to discover projectId values before calling any project-scoped tool (list_runs, list_phases, start_change, ask, ...).",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+    },
+    {
       name: "list_runs",
       description: "List runs for a single project (required projectId)",
       inputSchema: {
@@ -3722,6 +3731,17 @@ export async function dispatchSlopcontrolTool(
             dependsOn: args.dependsOn,
           }),
         });
+        const body = await res.text();
+        return {
+          content: [{ type: "text", text: body }],
+          isError: !res.ok,
+        };
+      });
+    }
+
+    if (name === "list_projects") {
+      return wrap(async () => {
+        const res = await fetch(`${SERVER_URL}/projects`);
         const body = await res.text();
         return {
           content: [{ type: "text", text: body }],
