@@ -119,6 +119,111 @@ describe("test-services", () => {
     assert.match(res.detail, /already running/);
   });
 
+  it("reuses a running container whose pinned container_name differs from the service name", async () => {
+    // Regression: a stack started from a checkout that was later renamed —
+    // the compose project label no longer matches the directory, and the
+    // fixed container_name shares nothing with the service name, so both
+    // the project view and service-name matching miss it. Reuse must win
+    // over a bring-up that would die on a container-name conflict.
+    const root = tmp();
+    writeFileSync(join(root, "docker-compose.yml"), "services: {}");
+    const calls: string[][] = [];
+    const runner = async (opts: { cmd: string[] }): Promise<RunCommandResult> => {
+      calls.push(opts.cmd);
+      if (opts.cmd.includes("--services")) {
+        return { code: 0, stdout: "db\napp\n", stderr: "", durationMs: 1, timedOut: false };
+      }
+      if (opts.cmd.includes("config") && opts.cmd.includes("json")) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            services: { db: { container_name: "platform-postgres" }, app: {} },
+          }),
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        };
+      }
+      if (opts.cmd.includes("ps") && opts.cmd.includes("compose")) {
+        // compose project view: orphaned by the rename — nothing found
+        return { code: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false };
+      }
+      if (opts.cmd.includes("ps")) {
+        return {
+          code: 0,
+          stdout: 'platform-postgres\told-checkout-name\nunrelated\t\n',
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        };
+      }
+      return { code: 0, stdout: "should-not-be-called", stderr: "", durationMs: 1, timedOut: false };
+    };
+    const res = await ensureTestServices({ projectRoot: root, runner });
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, true);
+    assert.match(res.detail, /already running/);
+    assert.ok(!calls.some((c) => c.includes("up")), "must not re-up a pinned container already running");
+  });
+
+  it("detects a running service via the compose-service label after a project rename", async () => {
+    const root = tmp();
+    writeFileSync(join(root, "docker-compose.yml"), "services: {}");
+    const calls: string[][] = [];
+    const runner = async (opts: { cmd: string[] }): Promise<RunCommandResult> => {
+      calls.push(opts.cmd);
+      if (opts.cmd.includes("--services")) {
+        return { code: 0, stdout: "db\n", stderr: "", durationMs: 1, timedOut: false };
+      }
+      if (opts.cmd.includes("config") && opts.cmd.includes("json")) {
+        return { code: 0, stdout: JSON.stringify({ services: { db: {} } }), stderr: "", durationMs: 1, timedOut: false };
+      }
+      if (opts.cmd.includes("ps") && opts.cmd.includes("compose")) {
+        return { code: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false };
+      }
+      if (opts.cmd.includes("ps")) {
+        // Replica suffix (-db-2) does not match the -db-1 naming pattern;
+        // only the compose-service label identifies it.
+        return { code: 0, stdout: 'old-project-db-2\tdb\n', stderr: "", durationMs: 1, timedOut: false };
+      }
+      return { code: 0, stdout: "should-not-be-called", stderr: "", durationMs: 1, timedOut: false };
+    };
+    const res = await ensureTestServices({ projectRoot: root, runner });
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, true);
+    assert.match(res.detail, /already running/);
+    assert.ok(!calls.some((c) => c.includes("up")));
+  });
+
+  it("still brings up when the pinned container_name is resolved but not running", async () => {
+    const root = tmp();
+    writeFileSync(join(root, "docker-compose.yml"), "services: {}");
+    const calls: string[][] = [];
+    const runner = async (opts: { cmd: string[] }): Promise<RunCommandResult> => {
+      calls.push(opts.cmd);
+      if (opts.cmd.includes("--services")) {
+        return { code: 0, stdout: "db\n", stderr: "", durationMs: 1, timedOut: false };
+      }
+      if (opts.cmd.includes("config") && opts.cmd.includes("json")) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ services: { db: { container_name: "platform-postgres" } } }),
+          stderr: "",
+          durationMs: 1,
+          timedOut: false,
+        };
+      }
+      if (opts.cmd.includes("ps")) {
+        return { code: 0, stdout: "", stderr: "", durationMs: 1, timedOut: false };
+      }
+      return { code: 0, stdout: "started", stderr: "", durationMs: 1, timedOut: false };
+    };
+    const res = await ensureTestServices({ projectRoot: root, runner });
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, true);
+    assert.ok(calls.some((c) => c.includes("up")), "pinned container not running — bring-up must proceed");
+  });
+
   it("configured services win over auto-detect", async () => {
     const root = tmp();
     writeFileSync(join(root, "docker-compose.yml"), "services: {}");

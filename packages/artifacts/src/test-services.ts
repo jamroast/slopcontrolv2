@@ -46,9 +46,45 @@ export function isInfraServiceName(name: string): boolean {
 }
 
 /**
+ * Resolve each target service's pinned `container_name` (when set) via
+ * `docker compose config --format json`. A fixed name that differs from the
+ * service name is invisible to service-name-based docker ps matching, so
+ * reuse detection must look it up explicitly. Best-effort: any failure
+ * (older compose without --format json, parse error) degrades to an empty
+ * map, preserving the previous behaviour.
+ */
+async function pinnedContainerNames(
+  projectRoot: string,
+  services: string[],
+  runner: typeof runToolchainCommand,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const cfg = await runner({
+    cmd: ["docker", "compose", "config", "--format", "json"],
+    cwd: projectRoot,
+    timeoutMs: 30_000,
+  });
+  if (cfg.code !== 0) return out;
+  try {
+    const parsed = JSON.parse(cfg.stdout) as {
+      services?: Record<string, { container_name?: unknown }>;
+    };
+    for (const svc of services) {
+      const name = parsed.services?.[svc]?.container_name;
+      if (typeof name === "string" && name.trim()) out.set(svc, name.trim());
+    }
+  } catch {
+    // not JSON — degrade to service-name matching only
+  }
+  return out;
+}
+
+/**
  * True when ALL target services are already running. Checks the compose
- * project first, then falls back to docker ps by name to catch fixed
- * `container_name` entries started from another project/worktree.
+ * project first, then falls back to docker ps to catch containers owned by
+ * another compose project (main tree / worktree, or a checkout renamed
+ * after the stack started — the compose project label no longer matches
+ * the directory) or started outside compose under a fixed `container_name`.
  */
 export async function servicesRunning(
   projectRoot: string,
@@ -69,29 +105,40 @@ export async function servicesRunning(
     );
     if (services.every((s) => up.has(s))) return true;
   }
-  // Fixed container_name fallback: `docker ps --filter name=<svc>` catches
-  // containers owned by another compose project (e.g. main tree).
+  // Fallback: match running containers by pinned container_name (resolved
+  // from compose config — a fixed name may be unrelated to the service
+  // name), by exact/generated service name, or by the compose-service label
+  // (survives a project-directory rename that orphans the project label).
+  const pinned = await pinnedContainerNames(projectRoot, services, runner);
   const dockerPs = await runner({
     cmd: [
       "docker",
       "ps",
       "--format",
-      "{{.Names}}",
-      ...services.flatMap((s) => ["--filter", `name=${s}`]),
+      '{{.Names}}\t{{.Label "com.docker.compose.service"}}',
     ],
     cwd: projectRoot,
     timeoutMs: 30_000,
   });
   if (dockerPs.code !== 0) return false;
-  const names = new Set(
-    dockerPs.stdout
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
-  return services.every(
-    (s) => names.has(s) || [...names].some((n) => n.endsWith(`-${s}-1`) || n.endsWith(`_${s}_1`)),
-  );
+  const names = new Set<string>();
+  const labelledServices = new Set<string>();
+  for (const line of dockerPs.stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const [name, label] = trimmed.split("\t");
+    if (name?.trim()) names.add(name.trim());
+    if (label?.trim()) labelledServices.add(label.trim());
+  }
+  return services.every((s) => {
+    const fixed = pinned.get(s);
+    return (
+      (fixed !== undefined && names.has(fixed)) ||
+      names.has(s) ||
+      labelledServices.has(s) ||
+      [...names].some((n) => n.endsWith(`-${s}-1`) || n.endsWith(`_${s}_1`))
+    );
+  });
 }
 
 /**
