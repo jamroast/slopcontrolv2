@@ -10,3 +10,4 @@ coverage/
 .mastra/
 .slopcontrol/
 *.tsbuildinfo
+.env.slopcontrol
