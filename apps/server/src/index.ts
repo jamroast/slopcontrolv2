@@ -227,6 +227,10 @@ import { shouldNotifyRunStageChange } from "./run-settled.js";
 import { DevelopLock } from "./develop-lock.js";
 import { NO_ENV_SYNC_HINT, runProjectEnvSync } from "./env-sync.js";
 import { compactProjectRuns, compactRuns, planCompaction } from "./run-compaction.js";
+import {
+  buildRunPayload as buildRunPayloadWithDeps,
+  safeReadResearch,
+} from "./run-payload.js";
 import { startRunCompactionWatcher } from "./run-compaction-watcher.js";
 import { startChatConversationWatcher } from "./chat-conversation-watcher.js";
 import { dispatchSlopcontrolTool } from "./mcp-tools.js";
@@ -1205,198 +1209,10 @@ function isNpmRegistryEnvOff(): boolean {
   return v === "0" || v === "false" || v === "off" || v === "no";
 }
 
-/**
- * Read the last N lines of a file efficiently — reads from the end in chunks
- * without loading the entire file into memory.
- */
-function readTailLines(filePath: string, maxLines: number): string {
-  try {
-    const stat = statSync(filePath);
-    if (stat.size === 0) return "";
-    const CHUNK = 8192;
-    const fd = openSync(filePath, "r");
-    try {
-      const buf = Buffer.alloc(CHUNK);
-      let pos = stat.size;
-      let lines: string[] = [];
-      let leftover = "";
-
-      while (pos > 0 && lines.length < maxLines) {
-        const readSize = Math.min(CHUNK, pos);
-        pos -= readSize;
-        readSync(fd, buf, 0, readSize, pos);
-        const chunk = buf.toString("utf-8", 0, readSize) + leftover;
-        const parts = chunk.split("\n");
-        leftover = parts.shift() ?? "";
-        lines = [...parts, ...lines];
-      }
-      if (leftover && lines.length < maxLines) {
-        lines = [leftover, ...lines];
-      }
-      // Return only the last maxLines
-      return lines.slice(-maxLines).join("\n");
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return "";
-  }
-}
-
 // ===== Runs list (for dashboard) =====
 
-function buildRunPayload(run: Run) {
-  const project = store.getProject(run.projectId);
-  const phase = store.getPhase(run.phaseId);
-  if (!project) return null;
-
-  // Tombstone row: merged into an archive run — no fs reads, cheap listing.
-  if (run.archived && run.archivedInto) {
-    return {
-      id: run.id,
-      archived: true,
-      archived_into: run.archivedInto,
-      project_id: run.projectId,
-      phase_id: run.phaseId,
-      stage: run.stage,
-      created_at: run.createdAt,
-      updated_at: run.updatedAt,
-      researchRunning: false,
-      devRunning: false,
-    };
-  }
-
-  // Synthetic archive run: surface the compaction manifest.
-  let archiveManifest: unknown = null;
-  if (run.archived && run.mergedRunIds) {
-    const archiveRoot = join(project.rootPath, ".slopcontrol", "archive");
-    try {
-      for (const dir of readdirSync(archiveRoot)) {
-        if (!dir.startsWith("runs-compact-")) continue;
-        const manifestPath = join(archiveRoot, dir, "ARCHIVE.json");
-        if (!existsSync(manifestPath)) continue;
-        const parsed = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
-          archiveRunId?: string;
-        };
-        if (parsed.archiveRunId === run.id) {
-          archiveManifest = parsed;
-          break;
-        }
-      }
-    } catch {
-      /* archive dir missing or unreadable — payload still works */
-    }
-  }
-
-  let devOutput = "";
-  const logPath = join(project.rootPath, ".slopcontrol", "runs", run.id, "log.txt");
-  if (existsSync(logPath)) {
-    devOutput = readTailLines(logPath, 500);
-  }
-
-  // Also read phase doc for review stage
-  let phaseDoc = "";
-  if (phase) {
-    phaseDoc = readPhaseDoc(project.rootPath, phase.id);
-  }
-
-  const diagnosisRaw =
-    readDiagnosis(project.rootPath, run.id) ??
-    (phase ? readLatestDiagnosisForPhase(project.rootPath, phase.id) : null);
-  const diagnosis = diagnosisForRunStage(diagnosisRaw, run.stage);
-  const handoff =
-    readRunHandoff(project.rootPath, run.id) ??
-    (phase ? readLatestHandoffForPhase(project.rootPath, phase.id) : null);
-  const verifySteps = readVerifyStepsReport(project.rootPath, run.id);
-  const researchConclusion =
-    phase && (run.stage === "in_review" || run.stage === "accepted")
-      ? readResearchConclusionForPhase(project.rootPath, phase.id)
-      : "";
-  const revisionOutcome = readRevisionOutcome(project.rootPath, run.id);
-  const phaseValidation =
-    phase && phaseDoc && run.stage === "in_review"
-      ? validatePhaseDocForDev(phaseDoc, {
-          projectRoot: project.rootPath,
-          phaseId: phase.id,
-        })
-      : null;
-  const suggestedRevisionFeedback =
-    run.stage === "in_review"
-      ? composeReviewRevisionFeedback({
-          diagnosis,
-          revisionOutcome,
-          phaseValidationIssues: phaseValidation?.issues,
-        })
-      : null;
-
-  return {
-    id: run.id,
-    idea: run.archiveTitle ?? phase?.description ?? "",
-    project_dir: project.rootPath,
-    stage: run.stage,
-    archived: run.archived === true ? true : undefined,
-    merged_run_ids: run.mergedRunIds,
-    archive: archiveManifest,
-    research_output: phase ? safeReadResearch(project.rootPath, phase.id) : "",
-    research_conclusion: researchConclusion || null,
-    dev_output: devOutput,
-    phase_doc: phaseDoc,
-    phase_id: phase?.id ?? null,
-    phase_depends_on: phase?.dependsOn ?? [],
-    phase_deps_unmet: phase
-      ? unmetPhaseDependencies(phase, store.listPhases(run.projectId))
-      : [],
-    project_id: run.projectId,
-    iteration_count: run.iterationCount,
-    created_at: run.createdAt,
-    updated_at: run.updatedAt,
-    started_at: run.startedAt ?? null,
-    finished_at: run.finishedAt ?? null,
-    total_duration_ms: run.totalDurationMs ?? null,
-    total_duration: formatDurationMs(run.totalDurationMs),
-    stage_timings: (run.stageTimings ?? []).map((t) => ({
-      stage: t.stage,
-      started_at: t.startedAt,
-      ended_at: t.endedAt ?? null,
-      duration_ms: t.durationMs ?? null,
-      duration: formatDurationMs(t.durationMs),
-    })),
-    researchRunning: activeRuns.has(run.id),
-    devRunning: activeRuns.has(run.id),
-    diagnosis,
-    failure_summary: diagnosis
-      ? `${diagnosis.title}${diagnosis.rootCause ? `: ${diagnosis.rootCause.slice(0, 240)}` : ""}`
-      : null,
-    handoff: handoffSummary(handoff),
-    operator_suggestions: diagnosis
-      ? {
-          audience: diagnosis.audience,
-          actions: diagnosis.operatorActions,
-          class: diagnosis.class,
-          title: diagnosis.title,
-          codingAgentShouldFix: diagnosis.codingAgentShouldFix,
-        }
-      : null,
-    verify_steps: verifySteps?.steps ?? null,
-    verify_first_failure: verifySteps?.firstFailure
-      ? {
-          id: verifySteps.firstFailure.id,
-          name: verifySteps.firstFailure.name,
-          exitCode: verifySteps.firstFailure.exitCode,
-          command: verifySteps.firstFailure.command,
-        }
-      : null,
-    verify_ok: verifySteps ? verifySteps.ok : null,
-    revision_outcome: revisionOutcome,
-    phase_validation_issues: phaseValidation?.issues?.length
-      ? phaseValidation.issues
-      : null,
-    suggested_revision_feedback: suggestedRevisionFeedback || null,
-  };
-}
-
-function safeReadResearch(projectRoot: string, phaseId: string): string {
-  try { return readResearch(projectRoot, phaseId); } catch { return ""; }
+function buildRunPayload(run: Run, opts?: { includeHeavy?: boolean }) {
+  return buildRunPayloadWithDeps({ store, activeRuns }, run, opts);
 }
 
 app.get("/runs", (req, res) => {
@@ -1412,7 +1228,11 @@ app.get("/runs", (req, res) => {
     return;
   }
   const runs = store.listRuns(projectId);
-  const payloads = runs.map(buildRunPayload).filter(Boolean);
+  // Slim list payloads: skip heavy per-run reads (log tails, full
+  // RESEARCH/PHASE docs, in_review validation). GET /runs/:id serves those.
+  const payloads = runs
+    .map((run) => buildRunPayload(run, { includeHeavy: false }))
+    .filter(Boolean);
   res.json({ runs: payloads });
 });
 
@@ -1423,7 +1243,11 @@ app.get("/projects/:id/runs", (req, res) => {
     return;
   }
   const runs = store.listRuns(project.id);
-  const payloads = runs.map(buildRunPayload).filter(Boolean);
+  // Slim list payloads: skip heavy per-run reads (log tails, full
+  // RESEARCH/PHASE docs, in_review validation). GET /runs/:id serves those.
+  const payloads = runs
+    .map((run) => buildRunPayload(run, { includeHeavy: false }))
+    .filter(Boolean);
   res.json({ runs: payloads });
 });
 
